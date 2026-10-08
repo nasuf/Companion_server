@@ -19,9 +19,16 @@ async def transport(monkeypatch):
             return self.rows.get(key)
 
         async def set(self, key, value, **kwargs):
+            if kwargs.get("nx") and key in self.rows:
+                return False
             self.rows[key] = value
+            return True
 
         async def eval(self, *args):
+            if len(args) == 4:
+                _, _, key, token = args
+                if self.rows.get(key) == token:
+                    self.rows.pop(key, None)
             return 1
 
     cache = Cache()

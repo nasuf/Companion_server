@@ -33,6 +33,7 @@ from app.services.offline.discovery_facts import (
     validate_event,
 )
 from app.services.offline.providers import cleversee
+from app.services.offline.providers.search import SearchResult
 from app.services.offline.chat_emit import build_activity_component_card
 from app.services.offline.geocode import wgs84_to_gcj02
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP
@@ -128,11 +129,16 @@ async def native(journey, monkeypatch, tmp_path):  # noqa: F811 — imported pyt
         async def set(self, key, value, **kwargs):
             return await j.redis.set("native:" + j.user + ":" + key, value, **kwargs)
 
-        async def eval(self, script, count, key):
-            return await j.redis.eval(script, count, "native:" + j.user + ":" + key)
+        async def eval(self, script, count, key, *args):
+            return await j.redis.eval(
+                script, count, "native:" + j.user + ":" + key, *args
+            )
 
     cache = PublicCache()
     monkeypatch.setattr(cleversee, "get_redis", AsyncMock(return_value=cache))
+    monkeypatch.setattr(
+        "app.services.offline.public_cache.get_redis", AsyncMock(return_value=cache)
+    )
     monkeypatch.setattr(cleversee, "_slots", asyncio.Semaphore(2))
     monkeypatch.setattr(images.storage, "_MEDIA_DIR", tmp_path)
     monkeypatch.setattr(images, "_public_url", AsyncMock(return_value=True))
@@ -190,6 +196,7 @@ async def native(journey, monkeypatch, tmp_path):  # noqa: F811 — imported pyt
     j.source_text = ""
     j.pages = []
     j.selection = None
+    j.sdk_calls = []
 
     async def transport(request):
         j.calls.append((request.method, request.url.path))
@@ -226,6 +233,7 @@ async def native(journey, monkeypatch, tmp_path):  # noqa: F811 — imported pyt
     monkeypatch.setattr(httpx, "AsyncClient", client)
 
     async def sdk(body):
+        j.sdk_calls.append(body)
         assert body["searchModel"] == "normal" and 1 <= body["limit"] <= 25
         return {
             "data": [
@@ -278,6 +286,129 @@ async def native(journey, monkeypatch, tmp_path):  # noqa: F811 — imported pyt
         AsyncMock(side_effect=AssertionError("Tavily must be off")),
     )
     return j
+
+
+async def test_same_region_reuses_public_candidates_and_gallery_without_user_history_leak(
+    native, monkeypatch
+):
+    j = native
+    calls = AsyncMock(wraps=generation.invoke_text)
+    monkeypatch.setattr(generation, "invoke_text", calls)
+    from app.services.offline.activity_discovery import ACTIVITY_PLACE_CATEGORIES
+
+    cafe = next(c for c in ACTIVITY_PLACE_CATEGORIES if c.name == "咖啡与茶饮")
+    monkeypatch.setattr(discovery, "ordered_categories", lambda *args: [cafe])
+    monkeypatch.setattr(discovery, "_events", AsyncMock(return_value=[]))
+    before = await discovery.discover(
+        city="镇江市",
+        search_anchor="镇江市润州区",
+        tags=["咖啡"],
+        recent=[],
+        center=(32.2111, 119.4311),
+    )
+    assert len(before) == 1 and len(j.sdk_calls) == 1
+    # Small GPS movement in the same regional cell reuses raw facts, yet this
+    # user's recent place is removed after retrieving those shared facts.
+    repeat = await discovery.discover(
+        city="镇江市",
+        search_anchor="镇江市润州区",
+        tags=["咖啡"],
+        recent=[{"location_name": j.raw["name"]}],
+        center=(32.2119, 119.4319),
+    )
+    assert repeat == [] and len(j.sdk_calls) == 1
+    other = await discovery.discover(
+        city="镇江市",
+        search_anchor="镇江市润州区",
+        tags=["咖啡"],
+        recent=[],
+        center=(32.2119, 119.4319),
+    )
+    assert len(other) == 1 and len(j.sdk_calls) == 1
+    first = await generation._native_card(
+        before,
+        user_id=j.user,
+        city="镇江市",
+        search_anchor="镇江市润州区",
+        tags=["咖啡"],
+        memory="用户甲喜欢安静",
+        recent=[],
+    )
+    assert len(first["image_urls"]) == 3
+    assert "用户甲喜欢安静" in calls.call_args_list[0].args[1]
+    calls.reset_mock()
+    paid_calls = len(j.calls)
+    second = await generation._native_card(
+        other,
+        user_id="another-user",
+        city="镇江市",
+        search_anchor="镇江市润州区",
+        tags=["咖啡"],
+        memory="用户乙喜欢阅读",
+        recent=[],
+    )
+    assert first["image_urls"] == second["image_urls"]
+    assert "用户乙喜欢阅读" in calls.call_args_list[0].args[1]
+    assert "用户甲喜欢安静" not in calls.call_args_list[0].args[1]
+    assert len(j.calls) == paid_calls and len(j.sdk_calls) == 1
+    # Cache and selector mutation cannot contaminate the public POI payload.
+    before[0]["title"] = "用户甲临时修改"
+    assert other[0]["title"] == j.raw["name"]
+
+
+@pytest.mark.parametrize("photo_count", [0, 1, 3])
+async def test_native_album_cooldown_avoids_repeat_enrichment_and_repairs_missing_files(
+    native, monkeypatch, photo_count
+):
+    j = native
+    raw = {**j.raw, "images": j.raw["images"][-photo_count:] if photo_count else []}
+    card = native_place(raw, "镇江市", center=(32.21, 119.43))
+    # An eligible page is supplied even when the native gallery is sufficient.
+    source = SearchResult(
+        title=j.raw["name"],
+        url="https://source.fixture.test/cafe",
+        content="镇江市伯先路12号 " + j.raw["name"],
+        images=[
+            {**i, "poi_id": card["native_poi_id"], "evidence": "native_poi"}
+            for i in card["native_images"]
+        ],
+    )
+    supplement = SearchResult(
+        title=j.raw["name"],
+        url="https://source.fixture.test/inside",
+        content="镇江市伯先路12号 " + j.raw["name"],
+    )
+    page = AsyncMock(return_value={})
+    monkeypatch.setattr(images, "page_image_evidence", page)
+    first = await images.persist_activity_images(
+        user_id=j.user, card=card, city="镇江市", search_results=[source, supplement]
+    )
+    assert len(first) == photo_count
+    if photo_count == 3:
+        page.assert_not_awaited()
+        assert not any(path == "/search/multimodal" for _, path in j.calls)
+    calls = len(j.calls)
+    second_card = native_place(raw, "镇江市", center=(32.21, 119.43))
+    second = await images.persist_activity_images(
+        user_id="other-user",
+        card=second_card,
+        city="镇江市",
+        search_results=[source, supplement],
+    )
+    assert second == first and len(j.calls) == calls
+    if first:
+        images.storage.storage_path(card["image_provenance"][0]["storage_key"]).unlink()
+        repaired = await images.persist_activity_images(
+            user_id="third-user",
+            card=second_card,
+            city="镇江市",
+            search_results=[source, supplement],
+        )
+        assert len(repaired) == photo_count and len(j.calls) > calls
+        assert all(
+            images.storage.storage_path(i["storage_key"]).is_file()
+            for i in second_card["image_provenance"]
+        )
 
 
 async def test_generate_native_gallery_arrive_archive_reuses_all_facts(native):

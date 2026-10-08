@@ -22,6 +22,7 @@ from app.services.offline import activity_media_storage as storage, place_catalo
 from app.services.offline.content import canonical_url, photo_source_matches, normalized, place_name_in_text
 from app.services.offline.image_evidence import page_image_evidence, indexed_image_evidence, query_image_evidence, native_image_evidence
 from app.services.offline.providers.search import SearchResult, tavily_place_images
+from app.services.offline.public_cache import public_cached
 
 logger = logging.getLogger(__name__)
 _MAX_BYTES = 8 * 1024 * 1024
@@ -56,6 +57,49 @@ def _source_images(card: dict, sources: list[SearchResult]) -> list[dict]:
 
 async def persist_activity_images(*, user_id: str, card: dict, city: str,
                                   search_results: list[SearchResult], limit: int = 3) -> list[str]:
+    if not card.get('native_poi_id'):
+        return await _persist_activity_images(user_id=user_id, card=card, city=city, search_results=search_results, limit=limit)
+
+    def valid(value):
+        if (not isinstance(value, dict) or not isinstance(value.get('images'), list)
+                or len(value['images']) > limit):
+            return False
+        return all(isinstance(item, dict) and item.get('poi_id') == card['native_poi_id']
+                   and str(item.get('storage_key') or '').startswith('place_')
+                   and storage.storage_path(item['storage_key']).is_file()
+                   for item in value['images'])
+
+    async def load():
+        public_card = {**card, 'city': card.get('city') or city}
+        await _persist_activity_images(user_id=user_id, card=public_card, city=city,
+                                       search_results=search_results, limit=limit)
+        return {'images': public_card.get('image_provenance', [])}
+
+    try:
+        result = await public_cached(
+            'native-gallery', [card['native_poi_id'], city, card.get('address'), limit],
+            load, valid=valid, ttl=lambda value: 900 if value['images'] else 60, timeout=45,
+        )
+        card['image_provenance'] = result['images']
+        return [storage.media_url(item['storage_key']) for item in result['images']]
+    except TimeoutError:
+        # A caller waiting on another process still has its existing public
+        # album; never erase verified photos because the refill is unavailable.
+        return await cached_activity_images(card)
+
+
+async def cached_activity_images(card: dict) -> list[str]:
+    cached = await place_catalog.load_place(card)
+    accepted = [item for item in (cached or {}).get('images', [])
+                if item.get('poi_id') == card.get('native_poi_id')
+                and str(item.get('storage_key') or '').startswith('place_')
+                and storage.storage_path(item['storage_key']).is_file()][:3]
+    card['image_provenance'] = accepted
+    return [storage.media_url(item['storage_key']) for item in accepted]
+
+
+async def _persist_activity_images(*, user_id: str, card: dict, city: str,
+                                   search_results: list[SearchResult], limit: int = 3) -> list[str]:
     # Personal media and LLM-proposed URLs never enter this public cache.
     card = card if card.get('city') else {**card, 'city': city}
     cached = await place_catalog.load_place(card)
@@ -100,12 +144,12 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                     return [dict(url=url, source_url=source.url, source_title=source.title, evidence=kind)
                             for url, kind in evidence.items() if not _is_bad_image_url(url)]
 
-                async def collect(sources: list[SearchResult]) -> None:
+                async def collect(sources: list[SearchResult], *, native_only=False) -> None:
                     # Apply the window after binding the chosen destination.
                     # A diverse discovery pool can put this place after page 8.
                     bound = [source for source in sources if photo_source_matches(
                         card, source.title, source.content + source.raw_content, source.url)]
-                    groups = await asyncio.gather(*(candidates(source) for source in bound[:8]))
+                    groups = [] if native_only else list(await asyncio.gather(*(candidates(source) for source in bound[:8])))
                     native = [{**item, 'source_url': source.url, 'source_title': source.title}
                               for source in sources for item in source.images
                               if native_image_evidence(card, item) and not _is_bad_image_url(str(item.get('url') or ''))]
@@ -126,7 +170,7 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                         address = normalized(card.get('address'))
                         return bool(len(address) >= 4 and address in normalized(text)
                                     and photo_source_matches(card, item.get('source_title', ''), text, url))
-                    for source in sources:
+                    for source in ([] if native_only else sources):
                         for item in source.query_images[:8]:
                             if item['url'] in query_candidates:
                                 continue
@@ -139,7 +183,7 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                                 query_candidates[item['url']] = {**item, 'evidence': 'image_search_document',
                                     **({'poi_id': card['native_poi_id']} if card.get('native_poi_id') else {})}
                     groups.append(list(query_candidates.values()))
-                    stats['bound_pages'] += len(bound)
+                    stats['bound_pages'] += 0 if native_only else len(bound)
                     stats['eligible_candidates'] += sum(len(group) for group in groups)
                     attempts = 0
                     # Alternate sources so a blocked image CDN cannot monopolize the budget.
@@ -203,7 +247,9 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                                 if not task.done():
                                     task.cancel()
                             await asyncio.gather(*tasks, return_exceptions=True)
-                await collect(search_results)
+                await collect(search_results, native_only=True)
+                if len(accepted) < limit:
+                    await collect(search_results)
                 for query in _image_queries(card, city):
                     if len(accepted) >= limit:
                         break

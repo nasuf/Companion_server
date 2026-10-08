@@ -7,8 +7,6 @@ text, credentials never enter logs, and every request has a bounded deadline.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
 import time
 from email.utils import formatdate
@@ -18,6 +16,7 @@ import httpx
 
 from app.config import settings
 from app.redis_client import get_redis
+from app.services.offline.public_cache import public_cached
 from app.services.offline.providers.search import SearchResult
 
 logger = logging.getLogger(__name__)
@@ -43,37 +42,52 @@ async def _rate_slot() -> None:
 async def _cached(
     kind: str, body: dict, call, *, ttl: int = 900, fresh: bool = False
 ) -> dict:
-    key = (
-        "offline:cleversee:v1:"
-        + kind
-        + ":"
-        + hashlib.sha256(
-            json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
-        ).hexdigest()
-    )
-    try:
-        cached = await (await get_redis()).get(key)
-        if cached and not fresh:
-            return json.loads(cached)
-    except Exception:
-        pass
-    try:
-        async with asyncio.timeout(18), _slots:
+    async def load():
+        async with _slots:
             await _rate_slot()
-            data = await call()
+            return await call()
+
+    def valid(data):
+        if not isinstance(data, dict):
+            return False
+        if kind == "read":
+            return (
+                isinstance(data.get("data"), dict)
+                and data["data"].get("statusCode") == 200
+            )
+        field = {
+            "poi": "data",
+            "qa-poi": "cards",
+            "web": "pageItems",
+            "images": "imageItems",
+        }[kind]
+        return isinstance(data.get(field), list)
+
+    def lifetime(data):
+        field = {
+            "poi": "data",
+            "qa-poi": "cards",
+            "web": "pageItems",
+            "images": "imageItems",
+            "read": "data",
+        }[kind]
+        return ttl if data.get(field) else min(ttl, 45)
+
+    try:
+        data = await public_cached(
+            "cleversee-" + kind,
+            body,
+            load,
+            valid=valid,
+            ttl=lifetime,
+            fresh=fresh,
+            redis_factory=get_redis,
+        )
     except Exception as exc:
         # Provider exception messages can include request authentication details.
         logger.warning("[cleversee] %s failed (%s)", kind, type(exc).__name__)
         return {}
-    if isinstance(data, dict) and data:
-        try:
-            await (await get_redis()).set(
-                key, json.dumps(data, ensure_ascii=False), ex=ttl
-            )
-        except Exception:
-            pass
-        return data
-    return {}
+    return data if valid(data) else {}
 
 
 async def _sdk_query(body: dict) -> dict:
@@ -119,7 +133,7 @@ async def places(query: str, *, limit: int = 12) -> list[dict]:
         return []
     # No forced scene: bookshops/libraries otherwise become entertainment POIs.
     body = dict(query=query[:500], limit=max(1, min(limit, 25)), searchModel="normal")
-    data = await _cached("poi", body, lambda: _sdk_query(body))
+    data = await _cached("poi", body, lambda: _sdk_query(body), ttl=1800)
     return [p for p in data.get("data", []) if isinstance(p, dict)]
 
 

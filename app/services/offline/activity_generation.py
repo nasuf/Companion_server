@@ -795,7 +795,9 @@ async def _native_card(
     recent: list[dict],
 ) -> dict:
     # Model output selects an ID and supplies copy, never place/session facts.
-    facts = [{k: v for k, v in c.items() if k != "native_images"} for c in candidates]
+    facts = [{**{k: v for k, v in c.items() if k != "native_images"},
+              "source_photo_count": min(3, len(c.get("native_images") or []))}
+             for c in candidates]
     prompt = (await get_prompt_text("offline.activity_card")).format(
         city=city,
         search_anchor=search_anchor,

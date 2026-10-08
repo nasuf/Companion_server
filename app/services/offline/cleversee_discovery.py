@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import hashlib
+import math
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
@@ -17,6 +19,8 @@ from app.services.offline.discovery_facts import (
     validate_event,
 )
 from app.services.offline.providers import cleversee
+from app.services.offline.public_cache import public_cached
+from app.config import settings
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
@@ -31,12 +35,34 @@ async def extract_events(
     allow_inactive: bool = False,
 ) -> list[dict]:
     current = now or datetime.now(UTC)
-    prompt = (await get_prompt_text("offline.event_extract")).format(
+    template = await get_prompt_text("offline.event_extract")
+    prompt = template.format(
         city=city, now=current.isoformat(), source_url=url, source_text=text[:18000]
     )
     try:
-        async with asyncio.timeout(16):
-            result = await invoke_json(get_chat_model(), prompt)
+
+        async def load():
+            return await invoke_json(get_chat_model(), prompt)
+
+        # Public source extraction is reusable; its time/venue validation is not.
+        # A fresh announcement or Web prompt version produces a different key.
+        result = await public_cached(
+            "event-extraction",
+            [
+                city,
+                url,
+                hashlib.sha256(text[:18000].encode()).hexdigest(),
+                hashlib.sha256(str(template).encode()).hexdigest(),
+                current.date().isoformat(),
+                allow_inactive,
+            ],
+            load,
+            valid=lambda value: (
+                isinstance(value, dict) and isinstance(value.get("events"), list)
+            ),
+            ttl=lambda value: 180 if value["events"] else 30,
+            timeout=16,
+        )
         rows = result.get("events", []) if isinstance(result, dict) else []
         return [
             event
@@ -166,6 +192,21 @@ async def _events(city: str, center, *, on_event=None) -> list[dict]:
     return output
 
 
+def regional_query(
+    city: str, search_anchor: str, category, center=None
+) -> tuple[str, tuple | None]:
+    """Stable public regional query, followed by exact per-user radius checks."""
+    query = f"{normalized(search_anchor) or normalized(city)} {category.query_hint}"
+    if not center:
+        return query, None
+    # Include the cell's margin in search; final distance checks still use the
+    # actual device position rather than this shared query center.
+    lat, lng = (math.floor(float(value) * 100) / 100 + 0.005 for value in center)
+    radius_km = math.ceil(settings.offline_discovery_radius_m / 1000) + 1
+    query += f" 距离坐标纬度{lat:.3f}经度{lng:.3f}{radius_km}公里以内"
+    return query, (lat, lng)
+
+
 async def discover(
     *, city: str, search_anchor: str, tags: list[str], recent: list[dict], center=None
 ) -> list[dict]:
@@ -175,9 +216,7 @@ async def discover(
     output = []
 
     async def category_places(category):
-        query = f"{search_anchor} {category.query_hint}"
-        if center:
-            query += f" 距离坐标纬度{center[0]:.4f}经度{center[1]:.4f}十五公里以内"
+        query, query_center = regional_query(city, search_anchor, category, center)
         rows = await cleversee.places(query)
         candidates = [
             p
@@ -194,8 +233,8 @@ async def discover(
         if not candidates and category.family == "文化":
             rows = await cleversee.qa_places(
                 f"{search_anchor}附近的{category.query_hint}，返回具体地点卡片",
-                lat=center[0] if center else None,
-                lng=center[1] if center else None,
+                lat=query_center[0] if query_center else None,
+                lng=query_center[1] if query_center else None,
             )
             candidates = [
                 p
