@@ -49,6 +49,21 @@ def worker_probe(name, code):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def wait_postgres_database(name, database, timeout=40):
+    # The official image's temporary bootstrap server accepts Unix-socket
+    # connections before POSTGRES_DB exists. Require a query against the target
+    # database over TCP, which is opened only by the final server.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        probe = run('exec', '-e', 'PGPASSWORD=synthetic', name, 'psql',
+                    '-h', '127.0.0.1', '-U', 'postgres', '-d', database,
+                    '-Atqc', 'SELECT 1', check=False, timeout=5)
+        if probe.returncode == 0 and probe.stdout.strip() == '1':
+            return
+        time.sleep(1)
+    raise AssertionError('Owned PostgreSQL target database failed to start')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--image', required=True)
@@ -77,13 +92,7 @@ def main():
             '-e','POSTGRES_PASSWORD=synthetic','-e','POSTGRES_DB=companion_role_e2e',
             'pgvector/pgvector:0.8.0-pg16')
         run('run','-d','--name',redis,'--network',network,'--memory','128m','redis:7-alpine')
-        deadline=time.monotonic()+40
-        while time.monotonic()<deadline:
-            if run('exec',pg,'pg_isready','-U','postgres',check=False).returncode==0:
-                break
-            time.sleep(1)
-        else:
-            raise AssertionError('Owned PostgreSQL failed to start')
+        wait_postgres_database(pg, 'companion_role_e2e')
         run('exec',pg,'psql','-U','postgres','-d','companion_role_e2e','-c',
             'CREATE SCHEMA extensions; CREATE EXTENSION vector WITH SCHEMA extensions;')
         migration=run('run','--rm','--network',network,*environment,'--entrypoint','prisma',

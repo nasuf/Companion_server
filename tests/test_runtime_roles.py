@@ -14,6 +14,30 @@ from app.services.runtime.role_health import RoleHealth, probe_dependencies, can
 from app.services.runtime.sql_job_contracts import WorkerStopRequired
 
 
+def test_role_e2e_database_readiness_waits_for_target_tcp_query(monkeypatch):
+    from scripts import test_runtime_roles_e2e as wire
+    operation = MagicMock(side_effect=[
+        SimpleNamespace(returncode=2, stdout='', stderr='database does not exist'),
+        SimpleNamespace(returncode=0, stdout='1\n', stderr=''),
+    ])
+    monkeypatch.setattr(wire, 'run', operation)
+    monkeypatch.setattr(wire, 'time', SimpleNamespace(monotonic=time.monotonic, sleep=lambda _: None))
+    wire.wait_postgres_database('owned-pg', 'owned-target')
+    assert operation.call_count == 2
+    args = operation.call_args.args
+    assert args[args.index('-h') + 1] == '127.0.0.1'
+    assert args[args.index('-d') + 1] == 'owned-target'
+
+
+def test_role_e2e_missing_database_readiness_is_bounded(monkeypatch):
+    from scripts import test_runtime_roles_e2e as wire
+    monkeypatch.setattr(wire, 'run', MagicMock(return_value=SimpleNamespace(returncode=2, stdout='')))
+    ticks = iter([0, 0, 41])
+    monkeypatch.setattr(wire, 'time', SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _: None))
+    with pytest.raises(AssertionError, match='target database'):
+        wire.wait_postgres_database('owned-pg', 'owned-target')
+
+
 @pytest.mark.parametrize('name,api,scheduler,consumer', [
     ('integrated', True, True, True), ('api', True, False, False),
     ('scheduler', False, True, False), ('background', False, False, True),
