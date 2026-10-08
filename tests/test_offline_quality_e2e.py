@@ -5,6 +5,7 @@ production users or messages are used. See offline-quality-verification.md.
 """
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -65,8 +66,7 @@ async def test_gps_validation_arrival_only_no_invented_memory(journey, monkeypat
     j=journey; a=await j.create()
     for payload, reason in [({},'location_required'),({'lat':23.01,'lng':113.75},'low_accuracy'),
             ({'lat':24,'lng':113.75,'accuracy_m':10},'too_far'),
-            ({'lat':23.01,'lng':113.75,'accuracy_m':500},'low_accuracy'),
-            ({'manual_confirmation':True},'location_required')]:
+            ({'lat':23.01,'lng':113.75,'accuracy_m':500},'low_accuracy')]:
         r=await post(j,a,'arrive',payload)
         assert r.status_code==422 and r.json()['detail']['reason']==reason
         assert not (await repo.get_activity(a['id'],j.user))['reached']
@@ -198,6 +198,124 @@ async def test_explicit_manual_arrival_is_not_gps_verified(journey):
     assert service.emit_assistant.await_args.kwargs['message'] == '到了呀，慢慢逛'
 
 
+@pytest.mark.parametrize('reason', [
+    'too_far', 'location_required', 'low_accuracy', 'stale_location', 'no_geocode',
+])
+async def test_location_rejection_can_be_explicitly_confirmed(journey, monkeypatch, reason):
+    j = journey
+    a = await j.create()
+    # The geocode policy cannot block an explicit user statement of arrival.
+    monkeypatch.setattr(service.settings, 'offline_arrival_require_geocode', True)
+    payload = {'lat': 23.01, 'lng': 113.75, 'accuracy_m': 10}
+    if reason == 'too_far':
+        payload['lat'] = 24
+    elif reason == 'location_required':
+        payload = {}
+    elif reason == 'low_accuracy':
+        payload['accuracy_m'] = 500
+    elif reason == 'stale_location':
+        payload['observed_at'] = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+    else:
+        await j.db.execute_raw(
+            'UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',
+            a['id'],
+        )
+    rejected = await post(j, a, 'arrive', payload)
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()['detail']['reason'] == reason
+    assert not (await repo.get_activity(a['id'], j.user))['reached']
+    service.insert_user_activity_card.assert_not_awaited()
+    # Ignore even supplied, rejected GPS data on a self-confirmed arrival.
+    confirmed = await post(j, a, 'arrive', {**payload, 'manual_confirmation': True})
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()['reached'] and not confirmed.json()['arrival_verified']
+    row = await j.db.query_raw(
+        'SELECT arrival_lat,arrival_lng FROM offline_activity_recommendations WHERE id=$1', a['id']
+    )
+    assert row[0] == {'arrival_lat': None, 'arrival_lng': None}
+    repeated = await post(j, a, 'arrive', {'manual_confirmation': True})
+    assert repeated.status_code == 200 and repeated.json() == confirmed.json()
+    service.insert_user_activity_card.assert_awaited_once()
+    service.emit_assistant.assert_awaited_once()
+    archived = await post(j, a, 'archive')
+    assert archived.status_code == 200
+    review = (await j.client.get('/offline/activities/' + a['id'] + '/review')).json()
+    assert not review['can_generate_memory_note'] and not review['has_memory_note']
+    assert '还没有留下' in review['story']
+
+
+@pytest.mark.parametrize('status', ['suggested', 'ignored', 'cancelled', 'completed'])
+async def test_confirmation_cannot_override_activity_state(journey, status):
+    j = journey
+    a = await j.create()
+    await j.db.execute_raw('UPDATE offline_activity_recommendations SET status=$2 WHERE id=$1', a['id'], status)
+    rejected = await post(j, a, 'arrive', {'manual_confirmation': True})
+    assert rejected.status_code == 409
+    assert not (await repo.get_activity(a['id'], j.user))['reached']
+    service.insert_user_activity_card.assert_not_awaited()
+
+
+async def test_confirmation_keeps_ownership_and_single_active_journey(journey):
+    j = journey
+    a, b = await j.create(), await j.create()
+    forbidden = await j.client.post('/offline/activities/' + a['id'] + '/arrive',
+        json={'manual_confirmation': True},
+        headers={'Authorization': 'Bearer ' + create_jwt('other-user', role='user')})
+    assert forbidden.status_code == 404
+    results = await asyncio.gather(*(post(j, row, 'arrive', {'manual_confirmation': True}) for row in (a, b)))
+    assert sorted(r.status_code for r in results) == [200, 409]
+    rows = [await repo.get_activity(row['id'], j.user) for row in (a, b)]
+    assert sum(bool(row['reached']) for row in rows) == 1
+    assert all(not row['arrival_verified'] for row in rows)
+    service.insert_user_activity_card.assert_awaited_once()
+
+
+async def test_concurrent_confirmation_is_idempotent(journey):
+    j = journey
+    a = await j.create()
+    results = await asyncio.gather(*(post(j, a, 'arrive', {'manual_confirmation': True}) for _ in range(3)))
+    assert all(r.status_code == 200 and r.json()['reached'] for r in results)
+    service.insert_user_activity_card.assert_awaited_once()
+    service.emit_assistant.assert_awaited_once()
+
+
+@pytest.mark.parametrize('payload', [{'lat': 91}, {'lng': 181}, {'accuracy_m': -1}])
+async def test_confirmation_preserves_request_validation(journey, payload):
+    j = journey
+    a = await j.create()
+    rejected = await post(j, a, 'arrive', {**payload, 'manual_confirmation': True})
+    assert rejected.status_code == 422
+    assert not (await repo.get_activity(a['id'], j.user))['reached']
+    service.insert_user_activity_card.assert_not_awaited()
+
+
+@pytest.mark.parametrize('problem', ['cancelled', 'expired', 'not_started', 'refresh_failed', 'newly_cancelled'])
+async def test_confirmation_cannot_override_event_guard(journey, monkeypatch, problem):
+    from app.services.offline import cleversee_discovery
+    j = journey
+    now = datetime.now(UTC)
+    metadata = {'kind': 'event', 'event': {'status': 'scheduled'}}
+    start, end = now - timedelta(minutes=30), now + timedelta(hours=2)
+    if problem == 'cancelled':
+        metadata['event']['status'] = 'cancelled'
+    elif problem == 'expired':
+        start, end = now - timedelta(hours=2), now - timedelta(hours=1)
+    elif problem == 'not_started':
+        start, end = now + timedelta(hours=2), now + timedelta(hours=3)
+    refreshed = None if problem == 'refresh_failed' else {
+        **metadata, 'event': {'status': 'cancelled' if problem == 'newly_cancelled' else 'scheduled'},
+    }
+    refresh = AsyncMock(return_value=refreshed)
+    monkeypatch.setattr(cleversee_discovery, 'refresh_event', refresh)
+    a = await j.create(starts_at=start.isoformat(), ends_at=end.isoformat(),
+        expires_at=end.isoformat(), discovery_metadata=metadata)
+    rejected = await post(j, a, 'arrive', {'manual_confirmation': True})
+    assert rejected.status_code == (503 if problem == 'refresh_failed' else 409), rejected.text
+    assert not (await repo.get_activity(a['id'], j.user))['reached']
+    service.insert_user_activity_card.assert_not_awaited()
+    service.emit_assistant.assert_not_awaited()
+
+
 async def test_public_place_cache_contains_no_personal_copy(journey):
     card={'city':'东莞','location_name':'莲湖公园','address':'桥头镇莲湖路','official_url':'https://example.com/place','summary':'个人偏好和秘密'}
     await place_catalog.save_place(card,[{'url':'https://example.com/a.jpg','source_url':card['official_url']}])
@@ -258,6 +376,7 @@ async def test_flutter_real_http_client(journey, monkeypatch):
     monkeypatch.setattr(service, 'generate_activity_card', AsyncMock(return_value=None))
     a=await j.create(image_urls=[f'/offline/media/place_fixture_{i}.jpg' for i in range(3)])
     b=await j.create()
+    confirmation_activity=await j.create()
     await j.db.execute_raw('UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',a['id'])
     sock=socket.socket();sock.bind(('127.0.0.1',0))
     port=sock.getsockname()[1]
@@ -271,7 +390,8 @@ async def test_flutter_real_http_client(journey, monkeypatch):
         assert server.started
         env={**os.environ,'OFFLINE_E2E_API':f'http://127.0.0.1:{port}',
              'OFFLINE_E2E_TOKEN':create_jwt(j.user,role='user'),
-             'OFFLINE_E2E_ACTIVITY':a['id'],'OFFLINE_E2E_DELETE':b['id']}
+             'OFFLINE_E2E_ACTIVITY':a['id'],'OFFLINE_E2E_DELETE':b['id'],
+             'OFFLINE_E2E_CONFIRM':confirmation_activity['id']}
         process=await asyncio.create_subprocess_exec('flutter','test','--no-pub','test/offline_api_e2e_test.dart','-r','expanded',
             cwd=Path(os.getenv('OFFLINE_FLUTTER_PROJECT', str(Path(__file__).parents[2]/'Companion_flutter'))),env=env,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT)
         output,_=await asyncio.wait_for(process.communicate(),timeout=120)

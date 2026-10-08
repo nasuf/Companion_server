@@ -792,15 +792,9 @@ async def mark_arrived(
         if str(_field(row, "status") or "") != "accepted":
             return None
         if bool(_field(row, "reached")):
-            existing = await tx.query_raw(
-                "SELECT * FROM offline_activity_recommendations WHERE id = $1",
-                activity_id,
-            )
-            return (
-                activity_from_row(existing[0], reveal_task=True)
-                if existing
-                else None
-            )
+            # Only the transaction that changes reached may emit arrival side
+            # effects. The service returns the existing row for a retry.
+            return None
         workspace_id = _field(row, "workspace_id", "workspaceId")
         lock_scope = f"offline-arrive:{user_id}:{workspace_id or 'legacy'}"
         # pg_advisory_xact_lock returns void. Selecting it directly makes

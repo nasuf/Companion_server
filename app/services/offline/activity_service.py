@@ -504,10 +504,9 @@ async def arrive_activity(
             detail="你还有一段正在进行的旅途，先把那一段收好再开始这里吧",
         )
     has_place = activity.get('place_lat') is not None and activity.get('place_lng') is not None
-    if not has_place:
-        if not manual_confirmation or settings.offline_arrival_require_geocode:
+    if not manual_confirmation:
+        if not has_place:
             raise HTTPException(status_code=422, detail={"reason": "no_geocode", "message": "暂时没能确认到达，请稍后再试"})
-    else:
         if lat is None or lng is None or not all(math.isfinite(v) for v in (lat, lng)):
             raise HTTPException(status_code=422, detail={"reason": "location_required", "message": "需要当前位置才能确认到达，请开启定位后重试"})
         if accuracy_m is None or not math.isfinite(accuracy_m) or not 0 <= accuracy_m <= 100:
@@ -520,7 +519,14 @@ async def arrive_activity(
             raise HTTPException(status_code=422, detail={'reason': 'no_geocode', 'message': '暂时没能确认到达，请稍后再试'})
         check_lat, check_lng = wgs84_to_gcj02(lat, lng) if crs == 'gcj02' else (lat, lng)
         _verify_arrival_distance(activity, check_lat, check_lng)
-    updated = await repo.mark_arrived(activity_id, user_id, lat=lat, lng=lng, verified=has_place)
+    # Explicit user confirmation overrides only location checks. It is a user
+    # statement, not a GPS-verified observation or an inferred device position.
+    updated = await repo.mark_arrived(
+        activity_id, user_id,
+        lat=None if manual_confirmation else lat,
+        lng=None if manual_confirmation else lng,
+        verified=has_place and not manual_confirmation,
+    )
     if not updated:
         # 并发：别处已置为到达
         current = await repo.get_activity(activity_id, user_id, reveal_task=True)

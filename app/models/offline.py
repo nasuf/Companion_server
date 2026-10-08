@@ -138,7 +138,7 @@ class OfflineActivityCompleteRequest(BaseModel):
 
 
 class OfflineActivityArriveRequest(BaseModel):
-    """System WGS84 GPS. Manual confirmation is allowed only without destination coordinates."""
+    """System WGS84 GPS, or explicit user confirmation when location cannot verify arrival."""
     lat: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
     lng: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
     accuracy_m: float | None = Field(default=None, ge=0, allow_inf_nan=False)
