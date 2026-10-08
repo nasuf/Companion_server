@@ -8,7 +8,10 @@ datasource db {
 generator client {
   provider             = "prisma-client-py"
   previewFeatures      = ["postgresqlExtensions"]
-  recursive_type_depth = 5
+  // Share recursive relation types instead of expanding depth-five copies.
+  // The expanded graph used >1.4 GiB per Python worker on this schema.
+  // Recursive types retain nested-query support and do not change the DB schema.
+  recursive_type_depth = -1
 }
 
 model User {
