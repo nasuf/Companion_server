@@ -82,34 +82,9 @@ async def test_null_workspace_passes_through_without_crash():
 
 
 @pytest.mark.asyncio
-async def test_adjust_side_counts_access_with_snake_case_columns():
-    """Raw SQL must use actual DB column names so L2 frequency factor works."""
-    from app.services.memory.lifecycle.l2_dynamics import _adjust_side
-
-    mem = _mem(
-        importance=0.6,
-        updatedAt=datetime.now(UTC),
-        createdAt=datetime.now(UTC),
-    )
-    find_many_mock = AsyncMock(return_value=[mem])
-    update_mock = AsyncMock()
-    query_raw_mock = AsyncMock(return_value=[{"memory_id": "mem-1", "cnt": 4}])
-
-    with patch("app.services.memory.lifecycle.l2_dynamics.db") as mock_db, \
-         patch("app.services.memory.lifecycle.l2_dynamics._track_low_score_streak", AsyncMock(return_value=False)), \
-         patch("app.services.memory.lifecycle.l2_dynamics._check_promotion_conditions", AsyncMock(return_value=False)):
-        mock_db.usermemory = MagicMock(find_many=find_many_mock, update=update_mock)
-        mock_db.query_raw = query_raw_mock
-
-        await _adjust_side("user", "user-1")
-
-    sql = query_raw_mock.await_args.args[0]
-    assert "memory_id" in sql
-    assert "created_at" in sql
-    assert '"memoryId"' not in sql
-    assert '"createdAt"' not in sql
-    update_data = update_mock.await_args.kwargs["data"]
-    # importance is the immutable initial score; the dynamic score goes to
-    # its own column (writing it back to importance compounded nightly).
-    assert "importance" not in update_data
-    assert update_data["currentScore"] == pytest.approx(0.66)
+async def test_adjust_side_delegates_to_scoped_decay_backstop():
+    from app.services.memory.lifecycle import l2_dynamics
+    expected={"total":2,"promoted":0,"demoted":1,"adjusted":1}
+    with patch("app.services.memory.lifecycle.lazy_update.sweep_stale_values", new=AsyncMock(return_value={"user":expected})) as sweep:
+        assert await l2_dynamics._adjust_side("user","user-1") == expected
+    sweep.assert_awaited_once_with(sources=("user",),user_id="user-1")

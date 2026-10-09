@@ -1,213 +1,234 @@
-"""在检索热路径上就地更新记忆效用值.
+"""Cumulative lifecycle; usage receipts and values commit in one transaction.
 
-衰减发生在**记忆被用到的那一刻**, 不是夜里回头补算。这样值不依赖任何定时任务
-活着 —— 生产上那个 cron 死了几个月都没人发现, 期间零衰减。
-
-热路径的三条约束:
-
-    不阻塞    全部在 fire-and-forget 的后台任务里跑, 失败只记日志
-    少往返    一轮对话涉及十几条记忆, 用单条 UPDATE ... FROM (VALUES ...) 批量写
-    幂等      值更新带 value_updated_at 时间戳, 重复执行只会让 Δt=0 即不衰减,
-              不会双重扣分。这让它和 cron 兜底扫描可以安全并存。
+Scope locks followed by ordered row locks serialize rewards and singleton
+promotions. Thirty-day receipts outlive the seven-day usage replay horizon.
 """
-
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from datetime import UTC, datetime
+import uuid
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 
 from app.db import db
 from app.services.memory.lifecycle.value import (
-    ACCESS_CEILING,
-    ACCESS_REWARD,
-    CONTRIBUTION_REWARD,
-    DECAY_LAMBDA,
-    HOT_DEMOTE_AT,
-    HOT_PROMOTE_AT,
-    VALUE_MAX,
-    WARM_DEMOTE_AT,
-    WARM_PROMOTE_AT,
+    ACCESS_CEILING, ACCESS_REWARD, CONTRIBUTION_REWARD, VALUE_MAX,
+    decayed_value, next_level,
 )
 from app.services.memory.taxonomy import L1_SINGLETON_SUBS
 
 logger = logging.getLogger(__name__)
-
-_TABLES = ("memories_user", "memories_ai")
-
-
-def _singleton_arrays() -> tuple[list[str], list[str]]:
-    """把 (主类, 子类) 二元组拆成两个并行数组供 SQL 配对匹配。
-
-    L1_SINGLETON_SUBS 是元组集合, 不是子类名集合 —— 直接当 text[] 传会在驱动层
-    报序列化错, 而调用方吞异常, 于是整个效用值更新静默失效。上线前的 EXPLAIN
-    验证就是抓这个的。
-    """
-    pairs = sorted(L1_SINGLETON_SUBS)
-    return [main for main, _ in pairs], [sub for _, sub in pairs]
+_TABLES = {"user": "memories_user", "ai": "memories_ai"}
+_BATCH_SIZE = 250
+USAGE_MAX_AGE_DAYS = 7
+RECEIPT_RETENTION_DAYS = 30
 
 
-def _render_sql(table: str) -> str:
-    """把常数烘进 SQL。常数来自 value.py 这一处定义, 两边不会漂。"""
-    return _UPDATE_SQL.format(
-        table=table, vmax=VALUE_MAX, lam=DECAY_LAMBDA,
-        alpha=ACCESS_REWARD, beta=CONTRIBUTION_REWARD, ceiling=ACCESS_CEILING,
-        hot_up=HOT_PROMOTE_AT, hot_down=HOT_DEMOTE_AT,
-        warm_up=WARM_PROMOTE_AT, warm_down=WARM_DEMOTE_AT,
-    )
-
-# 层级迁移和值更新在同一条 SQL 里做完。放在 SQL 里而不是先 SELECT 再算再 UPDATE,
-# 是为了避免热路径上的读-改-写竞态: 两个并发的对话轮次同时更新同一条记忆时,
-# 后写的会覆盖先写的回报。让数据库基于当前行值做算术就没有这个问题。
-#
-# 身份事实豁免降级 —— 见 value.next_level 的说明。singleton 是 (主类, 子类) 二元组
-# 而不是子类名, 所以按两个并行数组配对匹配: 只比子类会让不同主类下的同名子类被
-# 误判 (taxonomy 里"其他"这类子类在多个主类下都存在)。
-#
-# 两种信号形式不同 (见 value.ACCESS_CEILING): contribution 是加法, access 是趋向
-# 天花板的递减回报。u.is_contribution 区分二者。衰减后的分数在 CTE 里算一次,
-# 值和层级都从它派生, 避免同一表达式抄两遍而漂移。
-_UPDATE_SQL = """
-WITH scored AS (
-  SELECT
-    m.id,
-    m.level AS old_level,
-    CASE WHEN u.is_contribution
-      THEN LEAST({vmax}, GREATEST(0.0, d.decayed + {beta}))
-      ELSE LEAST({vmax}, GREATEST(0.0,
-        d.decayed + {alpha} * GREATEST(0.0, {ceiling} - d.decayed)))
-    END AS val,
-    -- 该 (主类, 子类) 是否属于 singleton
-    EXISTS (
-      SELECT 1 FROM unnest($3::text[], $4::text[]) AS sg(main, sub)
-      WHERE sg.main = m.main_category AND sg.sub = m.sub_category
-    ) AS is_singleton,
-    -- singleton 闸门: 该类目已存在别的 L1 时禁止再升一条上去。旧的夜间 cron 在
-    -- Python 侧做这个检查, 惰性更新把层级迁移搬到了热路径, 必须一并搬过来 ——
-    -- 否则两条"姓名"记忆会同时坐在 L1 上, 正是人设分层要消灭的那种数据损坏。
-    EXISTS (
-      SELECT 1 FROM {table} AS o
-      WHERE o.level = 1 AND o.is_archived = false AND o.id <> m.id
-        AND o.user_id = m.user_id
-        AND o.workspace_id IS NOT DISTINCT FROM m.workspace_id
-        AND o.main_category = m.main_category
-        AND o.sub_category = m.sub_category
-    ) AS l1_taken,
-    -- 同一条语句里可能有两条同类目的记忆同时越过 hot 阈值。上面的 EXISTS 看的是
-    -- 语句开始时的表状态, 两条都会看到"还没有 L1" 于是双双晋升 —— 正好造出我们
-    -- 要防的第二条 L1。按分值取组内第一名, 其余这轮不升 (下轮再看)。
-    ROW_NUMBER() OVER (
-      PARTITION BY m.user_id, m.workspace_id, m.main_category, m.sub_category
-      ORDER BY COALESCE(m.current_score, m.importance) DESC, m.id
-    ) AS group_rank
-  FROM {table} AS m
-  JOIN (SELECT unnest($1::text[]) AS id, unnest($2::bool[]) AS is_contribution) AS u
-    ON m.id = u.id
-  CROSS JOIN LATERAL (SELECT
-    COALESCE(m.current_score, m.importance)
-      * EXP(-{lam} * GREATEST(0, EXTRACT(EPOCH FROM
-          (CURRENT_TIMESTAMP - COALESCE(m.value_updated_at, m.created_at))) / 86400.0))
-    AS decayed) AS d
-  WHERE m.is_archived = false
-)
-UPDATE {table} AS t SET
-  current_score = s.val,
-  level = CASE
-    WHEN s.is_singleton AND s.old_level = 1 THEN 1
-    WHEN s.old_level = 1 THEN CASE WHEN s.val < {hot_down} THEN 2 ELSE 1 END
-    WHEN s.old_level = 2 THEN CASE
-      WHEN s.val >= {hot_up}
-        AND NOT (s.is_singleton AND (s.l1_taken OR s.group_rank > 1)) THEN 1
-      WHEN s.val < {warm_down} THEN 3
-      ELSE 2 END
-    ELSE CASE WHEN s.val >= {warm_up} THEN 2 ELSE 3 END
-  END,
-  value_updated_at = CURRENT_TIMESTAMP
-FROM scored AS s
-WHERE t.id = s.id
-"""
-
-
-def _signals(
-    contributed_ids: list[str], accessed_ids: list[str],
-) -> dict[str, bool]:
-    """把两种使用信号归到每条记忆上, True 表示"被注入过"。
-
-    同时进候选又被注入的记忆只按 contribution 计, 不叠加 —— 注入本来就蕴含了
-    "进过候选", 叠加等于给同一件事记两次功。
-    """
+def _signals(contributed_ids: list[str], accessed_ids: list[str]) -> dict[str, bool]:
     signals = {mid: False for mid in accessed_ids if mid}
     signals.update({mid: True for mid in contributed_ids if mid})
     return signals
 
 
-async def record_memory_usage(
-    *,
-    contributed_ids: list[str] | None = None,
-    accessed_ids: list[str] | None = None,
-) -> int:
-    """记忆被用到时更新它们的效用值与层级, 返回更新的行数。
+def _stamp(value) -> datetime:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
-    contributed_ids 是真正注入 prompt 的; accessed_ids 是进了候选但没能注入的。
-    后者权重更低 (AMV-L 的 α < β), 作用是让"总差一口气"的记忆不至于一路凉到底。
-    """
+
+def scope_lock_key(source: str, user_id: str, workspace_id: str | None) -> int:
+    return int.from_bytes(hashlib.sha256(json.dumps(
+        [_TABLES[source], user_id, workspace_id], ensure_ascii=False,
+    ).encode()).digest()[:8], "big", signed=True)
+
+
+async def _apply_batch(
+    *, source: str, user_id: str, workspace_id: str | None, ids: list[str],
+    signals: dict[str, bool] | None = None, event_id: str | None = None,
+    older_than_days: int = 30,
+) -> dict:
+    table = _TABLES[source]
+    stats = {"side": source, "total": 0, "promoted": 0, "demoted": 0, "adjusted": 0}
+    lock_key = scope_lock_key(source, user_id, workspace_id)
+    async with db.tx(timeout=timedelta(seconds=15)) as tx:
+        await tx.execute_raw("SELECT pg_advisory_xact_lock($1::bigint)", lock_key)
+        params = [ids, user_id, workspace_id]
+        if signals is not None:
+            params.append(event_id)
+            guard = f"""AND EXISTS (
+              SELECT 1 FROM messages msg JOIN conversations c ON c.id=msg.conversation_id
+              WHERE msg.id=$4 AND msg.role='user' AND c.user_id=$2
+                AND c.workspace_id IS NOT DISTINCT FROM $3::text AND NOT c.is_deleted
+                AND msg.created_at >= CURRENT_TIMESTAMP - INTERVAL '{USAGE_MAX_AGE_DAYS} days'
+                AND (c.workspace_id IS NULL OR EXISTS (
+                  SELECT 1 FROM chat_workspaces w WHERE w.id=c.workspace_id
+                    AND w.user_id=c.user_id AND w.agent_id=c.agent_id AND w.status='active'
+                ))
+            )"""
+        else:
+            guard = f"AND COALESCE(value_updated_at, created_at) < CURRENT_TIMESTAMP - INTERVAL '{older_than_days} days'"
+        rows = await tx.query_raw(
+            f"""SELECT id, level, importance, current_score, value_updated_at, created_at,
+                       main_category, sub_category, provenance
+                FROM {table} WHERE id=ANY($1::text[]) AND user_id=$2
+                  AND workspace_id IS NOT DISTINCT FROM $3::text AND NOT is_archived
+                  AND sub_category IS DISTINCT FROM '提醒' {guard}
+                ORDER BY id FOR UPDATE""", *params,
+        )
+        if not rows:
+            return stats
+        previous = {}
+        if signals is not None:
+            previous = {r["memory_id"]: r for r in await tx.query_raw(
+                "SELECT memory_id, contributed, reward, created_at FROM memory_usage_receipts "
+                "WHERE event_id=$1 AND memory_side=$2 AND memory_id=ANY($3::text[])",
+                event_id, source, [r["id"] for r in rows],
+            )}
+        occupied = {(r["main_category"], r["sub_category"]) for r in await tx.query_raw(
+            f"SELECT DISTINCT main_category, sub_category FROM {table} WHERE user_id=$1 "
+            "AND workspace_id IS NOT DISTINCT FROM $2::text AND level=1 AND NOT is_archived",
+            user_id, workspace_id,
+        )}
+        now = datetime.now(UTC)
+        updates, receipts, changes = [], [], []
+        rows.sort(key=lambda r: (-float(r["current_score"] if r["current_score"] is not None else r["importance"]), r["id"]))
+        for row in rows:
+            mid, old_level = row["id"], row["level"]
+            old_receipt = previous.get(mid)
+            contributed = signals is not None and signals[mid]
+            if old_receipt and (old_receipt["contributed"] or not contributed):
+                continue
+            anchor = _stamp(row["value_updated_at"] or row["created_at"])
+            base = float(row["current_score"] if row["current_score"] is not None else row["importance"])
+            value = decayed_value(base, max(0, (now - anchor).total_seconds()) / 86400)
+            if signals is not None:
+                reward = CONTRIBUTION_REWARD if contributed else ACCESS_REWARD * max(0, ACCESS_CEILING - value)
+                # Upgrade an earlier candidate credit, never award the event twice.
+                previous_credit = decayed_value(float(old_receipt["reward"]), max(
+                    0, (now - _stamp(old_receipt["created_at"])).total_seconds(),
+                ) / 86400) if old_receipt else 0.0
+                value += reward - previous_credit
+                receipts.append((event_id, source, mid, contributed, reward))
+            value = max(0.0, min(VALUE_MAX, value))
+            category = (row["main_category"], row["sub_category"])
+            singleton = category in L1_SINGLETON_SUBS
+            level = next_level(value, old_level, protected=singleton and old_level == 1)
+            if row["provenance"] == "daily_summary" and old_level != 1:
+                level = max(2, level)
+            if level == 1 and old_level != 1 and singleton:
+                if category in occupied:
+                    level = old_level
+                else:
+                    occupied.add(category)
+            updates.append((mid, value, level, max(now, anchor)))
+            stats["total"] += 1
+            if level != old_level:
+                operation = "promote" if level < old_level else "demote"
+                stats["promoted" if operation == "promote" else "demoted"] += 1
+                changes.append((str(uuid.uuid4()), user_id, workspace_id, mid,
+                                operation, f"level={old_level}", f"level={level}"))
+            else:
+                stats["adjusted"] += 1
+        if not updates:
+            return stats
+        await tx.execute_raw(
+            f"""UPDATE {table} m SET current_score=u.value, level=u.level,
+                    value_updated_at=u.stamp FROM (
+                SELECT unnest($1::text[]) AS id, unnest($2::float8[]) AS value,
+                       unnest($3::int[]) AS level, unnest($4::timestamp[]) AS stamp
+              ) u WHERE m.id=u.id""",
+            [r[0] for r in updates], [r[1] for r in updates],
+            [r[2] for r in updates], [r[3].replace(tzinfo=None).isoformat() for r in updates],
+        )
+        if receipts:
+            await tx.execute_raw(
+                """INSERT INTO memory_usage_receipts(event_id,memory_side,memory_id,contributed,reward)
+                   SELECT unnest($1::text[]),unnest($2::text[]),unnest($3::text[]),
+                          unnest($4::bool[]),unnest($5::float8[])
+                   ON CONFLICT(event_id,memory_side,memory_id) DO UPDATE
+                     SET contributed=EXCLUDED.contributed,reward=EXCLUDED.reward""",
+                *[[r[i] for r in receipts] for i in range(5)],
+            )
+        if changes:
+            await tx.execute_raw(
+                """INSERT INTO memory_changelogs(id,user_id,workspace_id,memory_id,operation,old_value,new_value)
+                   SELECT unnest($1::text[]),unnest($2::text[]),unnest($3::text[]),unnest($4::text[]),
+                          unnest($5::text[]),unnest($6::text[]),unnest($7::text[])""",
+                *[[r[i] for r in changes] for i in range(7)],
+            )
+    return stats
+
+
+async def record_memory_usage(
+    *, contributed_ids: list[str] | None = None, accessed_ids: list[str] | None = None,
+    event_id: str | None = None, user_id: str | None = None, workspace_id: str | None = None,
+) -> int:
     signals = _signals(contributed_ids or [], accessed_ids or [])
     if not signals:
         return 0
-
-    ids = list(signals)
-    is_contribution = [signals[i] for i in ids]
-    sg_main, sg_sub = _singleton_arrays()
-
+    if not event_id or not user_id:
+        logger.warning("memory usage skipped: missing stable event or owner")
+        return 0
+    if len(signals) > 500:
+        logger.warning("memory usage skipped: candidate bound exceeded")
+        return 0
     total = 0
-    for table in _TABLES:
-        # ID 全局唯一, 所以对另一张表是空操作 —— 比先查归属再定表少一次往返。
-        try:
-            total += await db.execute_raw(
-                _render_sql(table), ids, is_contribution, sg_main, sg_sub,
-            )
-        except Exception as e:
-            # 效用值更新是尽力而为: 失败只意味着这次使用没被记入, 下次还会记。
-            # 绝不能让它影响回复 —— 调用方在后台任务里, 这里再兜一层。
-            logger.debug(f"lazy value update failed on {table}: {e}")
+    for source in _TABLES:
+        for offset in range(0, len(signals), _BATCH_SIZE):
+            try:
+                stats = await _apply_batch(source=source, user_id=user_id, workspace_id=workspace_id,
+                    ids=list(signals)[offset:offset + _BATCH_SIZE], signals=signals, event_id=event_id)
+                total += stats["total"]
+            except Exception:
+                logger.warning("memory usage transaction failed (%s)", source, exc_info=True)
     return total
 
 
-async def sweep_stale_values(*, older_than_days: int = 30, limit: int = 5000) -> dict:
-    """兜底扫描: 照顾长期没被用到、因而惰性更新碰不到的记忆。
-
-    惰性更新只在记忆被检索到时触发, 所以彻底没人问津的记忆永远不会衰减 —— 那恰恰
-    是最该衰减的一批。这个扫描补上这个盲区。
-
-    它不是主路径。旧实现把整个生命周期押在夜间 cron 上, 结果 cron 死了几个月无人
-    察觉。现在即使这个扫描完全不跑, 活跃记忆的值仍然是对的, 只有僵尸记忆会滞留在
-    偏高的层级 —— 影响面小得多。
-    """
-    cutoff_expr = f"CURRENT_TIMESTAMP - INTERVAL '{int(older_than_days)} days'"
-    sg_main, sg_sub = _singleton_arrays()
-    stats = {"scanned": 0, "demoted": 0}
-
-    for table in _TABLES:
-        # 复用同一条 UPDATE, 只把"哪些行参与"换成久未更新的一批, 且不带任何使用
-        # 信号 —— 纯衰减。按最旧优先 + LIMIT, 让单次扫描的规模和持锁时间可控。
-        scoped = _render_sql(table).replace(
-            "JOIN (SELECT unnest($1::text[]) AS id, unnest($2::bool[]) "
-            "AS is_contribution) AS u\n    ON m.id = u.id",
-            "JOIN (SELECT id, false AS is_contribution FROM {t} "
-            "WHERE is_archived = false "
-            "AND COALESCE(value_updated_at, created_at) < {cut} "
-            "ORDER BY COALESCE(value_updated_at, created_at) ASC "
-            "LIMIT {lim}) AS u\n    ON m.id = u.id".format(
-                t=table, cut=cutoff_expr, lim=int(limit)),
+async def sweep_stale_values(
+    *, older_than_days: int = 30, limit: int = 1000, user_id: str | None = None,
+    sources: tuple[str, ...] = ("user", "ai"),
+) -> dict:
+    """Oldest first; bounded IDs then small scoped batches, never ORM full loads."""
+    if not 1 <= older_than_days <= 3650 or not 1 <= limit <= 5000:
+        raise ValueError("Invalid bounded maintenance parameters")
+    result = {"scanned": 0, "demoted": 0, "promoted": 0, "adjusted": 0}
+    for source in sources:
+        table = _TABLES[source]
+        owner_guard = "AND user_id=$1" if user_id else ""
+        candidates = await db.query_raw(
+            f"""SELECT id,user_id,workspace_id FROM {table} WHERE NOT is_archived
+                AND sub_category IS DISTINCT FROM '提醒'
+                AND COALESCE(value_updated_at,created_at) < CURRENT_TIMESTAMP - INTERVAL '{older_than_days} days'
+                {owner_guard} ORDER BY COALESCE(value_updated_at,created_at),id LIMIT {limit}""",
+            *([user_id] if user_id else []),
         )
-        # $1/$2 已被内联查询取代, 只剩 singleton 两个数组 —— 重编号为 $1/$2。
-        scoped = scoped.replace("$3::text[], $4::text[]", "$1::text[], $2::text[]")
-        if "$3" in scoped or "unnest($1::text[]) AS id" in scoped:
-            # 占位符改写没生效就会把带参 SQL 当另一组参数执行。宁可不扫。
-            logger.error(f"stale sweep SQL rewrite failed for {table}; skipped")
-            continue
-        try:
-            stats["scanned"] += await db.execute_raw(scoped, sg_main, sg_sub)
-        except Exception as e:
-            logger.warning(f"stale value sweep failed on {table}: {e}")
-    stats["swept_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-    return stats
+        buckets = defaultdict(list)
+        for row in candidates:
+            buckets[(row["user_id"], row["workspace_id"])].append(row["id"])
+        side_stats = {"side": source, "total": 0, "promoted": 0, "demoted": 0, "adjusted": 0}
+        for (owner, workspace), ids in buckets.items():
+            for offset in range(0, len(ids), _BATCH_SIZE):
+                stats = await _apply_batch(source=source, user_id=owner, workspace_id=workspace,
+                    ids=ids[offset:offset + _BATCH_SIZE], older_than_days=older_than_days)
+                for key in ("total", "promoted", "demoted", "adjusted"):
+                    side_stats[key] += stats[key]
+        result[source] = side_stats
+        result["scanned"] += side_stats["total"]
+        for key in ("demoted", "promoted", "adjusted"):
+            result[key] += side_stats[key]
+        logger.info("L2 adjustment [%s] complete: %s", source, side_stats)
+    result["swept_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    return result
+
+
+async def purge_usage_receipts(*, limit: int = 5000) -> int:
+    if not 1 <= limit <= 5000:
+        raise ValueError("Invalid receipt retention batch")
+    return await db.execute_raw(
+        f"""DELETE FROM memory_usage_receipts WHERE (event_id,memory_side,memory_id) IN (
+              SELECT event_id,memory_side,memory_id FROM memory_usage_receipts
+              WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '{RECEIPT_RETENTION_DAYS} days'
+              ORDER BY created_at LIMIT {limit})""",
+    )

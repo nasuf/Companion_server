@@ -350,6 +350,26 @@ async def test_publication_default_and_disabled_have_one_content_identity(flow):
     assert disabled['content_version_id']==initial['content_version_id']
     assert disabled['is_enabled'] is False and disabled['revision']>initial['revision']
 
+
+async def test_list_loads_complete_displayed_history_without_unrelated_retired_keys(flow):
+    retired='retired.synthetic.'+uuid4().hex
+    row=await flow.db.prompttemplate.find_unique(where={'key':flow.key})
+    try:
+        await flow.db.prompttemplateversion.create_many(data=[{
+            'promptId':row.id,'promptKey':retired,'content':'retired '*1000,
+            'source':'db','changeType':'manual_save','revision':i+1,
+        } for i in range(200)])
+        await store.update_prompt_text(flow.key,'current Web version')
+        async with flow.db.tx() as tx:
+            history,numbers=await store._publication_data(tx)
+        assert len(history)==2 and all(v.promptKey==flow.key for v in history)
+        assert len(numbers)==1
+        listed=(await store.list_prompts())[0]
+        assert listed['content']=='current Web version' and listed['web_version']==1
+        assert await flow.db.prompttemplateversion.count(where={'promptKey':retired})==200
+    finally:
+        await flow.db.prompttemplateversion.delete_many(where={'promptKey':retired})
+
 async def test_web_publications_count_content_actions_only(flow):
     first=await store.update_prompt_text(flow.key,'Web one')
     assert first['web_version']==1 and first['revision']==2

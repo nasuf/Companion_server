@@ -5,7 +5,7 @@
 表里的几百行, 而且没人记得哪些属于哪个簇。
 
 依据是 `consolidated_into` changelog: 每条被归档的原行都有一条记录, new_value
-指向摘要 ID。归档前先写 changelog 正是为了保证这条线索一定存在。
+指向摘要 ID。审计与归档在同一事务提交；撤销会先重建被回收的向量。
 
 用法:
     # 看某次整合动了什么 (不改数据)
@@ -23,9 +23,6 @@ import asyncio
 import json
 
 from app.db import db
-
-_TABLES = ("memories_user", "memories_ai")
-
 
 async def _digests_of_run(run_id: str) -> list[str]:
     rows = await db.query_raw(
@@ -69,34 +66,11 @@ async def _restore(digest_id: str, apply: bool) -> tuple[int, int]:
     if not apply:
         return (len(ids), 0)
 
-    restored = 0
-    for table in _TABLES:
-        # ID 全局唯一, 对另一张表是空操作。
-        restored += await db.execute_raw(
-            f"UPDATE {table} SET is_archived = false "
-            "WHERE id = ANY($1::text[]) AND is_archived = true",
-            ids,
-        )
-    archived = 0
-    for table in _TABLES:
-        archived += await db.execute_raw(
-            f"UPDATE {table} SET is_archived = true WHERE id = $1", digest_id,
-        )
-    # 留痕: 撤销本身也要可追溯, 否则下次看到"原行活着且有 consolidated_into"
-    # 会以为是整合出了 bug。
-    await db.execute_raw(
-        """
-        INSERT INTO memory_changelogs (id, user_id, memory_id, operation, new_value)
-        SELECT gen_random_uuid()::text, cl.user_id, cl.memory_id,
-               'consolidation_undone', $1
-        FROM memory_changelogs cl
-        WHERE cl.operation = 'consolidated_into' AND cl.new_value = $1
-        """,
-        digest_id,
-    )
-    print(f"      取回 {restored} 条, 摘要归档 {archived} 条")
-    return (len(ids), restored)
+    from app.services.memory.lifecycle.capacity import restore_consolidated_digest
 
+    result = await restore_consolidated_digest(digest_id)
+    print(f"      取回 {result['restored']} 条（已重建向量）")
+    return (result["found"], result["restored"])
 
 async def main() -> None:
     ap = argparse.ArgumentParser()

@@ -7,13 +7,13 @@
 两套策略共享一个接口: 给定一条记忆的状态和经过的时间, 返回它的分数与所在层级。
 差别集中在三处:
 
-    现行 (l2_dynamics)   分数 = 不可变的初始 importance × 时间档 × 频率档 × 质量档
+    历史基线 (l2_dynamics)   分数 = 不可变的初始 importance × 时间档 × 频率档 × 质量档
                          全表夜间重算; 降级需"低于 0.50 持续 30 天"; L3 完全不可检索
     AMV-L 式             V ← min(V·e^(-λΔt) + α·access + β·contrib, Vmax)
                          惰性更新; 上下行分离的滞回阈值; warm 有界采样仍可检索
 
-现行策略的档位是照抄 l2_dynamics 的实现, 不是重新设计 —— 推演和生产口径必须
-一致, 否则推演结论不适用。
+CurrentPolicy 保留历史档位基线，供旧快照比较；它不再代表当前生产执行策略。
+当前累计算法由 AmvlPolicy 共用 lifecycle/value.py。
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ CURRENT_PROMOTE_MIN_MENTIONS = 10
 
 @dataclass(frozen=True)
 class CurrentPolicy(Policy):
-    name: str = "现行 (l2_dynamics)"
+    name: str = "历史基线 (l2_dynamics)"
     # 升级还要求"用户曾标记重要", 生产上几乎不可能满足 —— 历史 0 次升级。
     # 推演里用它复现现状: False 表示该条件永不满足。
     user_marked_reachable: bool = False

@@ -96,8 +96,8 @@ class TestAmvlValueModel:
         assert state.value < 0.1, "分数该照常衰减, 只是不触发降级"
 
 
-class TestCurrentPolicyMatchesProduction:
-    """推演里的现行策略必须复刻生产实现, 否则对比的是两个都不存在的东西。"""
+class TestHistoricalPolicyBaseline:
+    """保留旧档位策略的历史基线；当前生产由 AmvlPolicy 对齐。"""
 
     def test_l1_never_decays(self):
         policy = CurrentPolicy()

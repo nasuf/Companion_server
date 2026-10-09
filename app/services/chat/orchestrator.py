@@ -1071,7 +1071,8 @@ async def _stream_legacy_response(
                 )
                 # 危机回合同样要喂效用值 —— 这条路径拿到的记忆恰恰是最该保住的。
                 _fire_background(
-                    record_memory_usage(contributed_ids=crisis_accessed_ids)
+                    record_memory_usage(contributed_ids=crisis_accessed_ids,
+                        event_id=user_message_id, user_id=user_id, workspace_id=workspace_id)
                 )
             if detected_intent.metadata.get("followup"):
                 async for evt in handle_crisis_followup(
@@ -1504,6 +1505,7 @@ async def _stream_legacy_response(
         if injected_ids or candidate_only:
             _fire_background(record_memory_usage(
                 contributed_ids=injected_ids, accessed_ids=candidate_only,
+                event_id=user_message_id, user_id=user_id, workspace_id=workspace_id,
             ))
 
         # spec §6 异步回复机制只规定延迟分布, 没"对方正在输入"占位事件; 早期作为

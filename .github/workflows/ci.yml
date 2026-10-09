@@ -154,6 +154,10 @@ jobs:
             tests/test_memory_watermark.py \
             tests/test_memory_system_integration.py \
             tests/test_l2_dynamics_workspace_scope.py \
+            tests/test_memory_lazy_value.py tests/test_memory_lifecycle_postgres.py \
+            tests/test_memory_daily_review.py tests/test_memory_capacity_postgres.py \
+            tests/test_memory_maintenance_bounds.py \
+            tests/test_memory_consolidation.py tests/test_game_daily_digest.py \
             tests/test_prisma_client_runtime.py \
             tests/test_api_server.py tests/test_worker_diagnostics.py tests/test_worker_probe_contracts.py tests/test_agent_schedule_api.py tests/test_runtime_roles.py tests/test_multi_worker_safety.py tests/test_scheduler_timezone.py tests/test_cron_health.py tests/test_cron_health_reporting.py \
             tests/test_runtime_job_queue.py \

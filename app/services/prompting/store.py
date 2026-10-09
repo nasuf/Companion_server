@@ -99,8 +99,12 @@ def _publication_metadata(row, versions, numbers):
 
 
 async def _publication_data(tx, key=None):
-    versions = await tx.prompttemplateversion.find_many(where={"promptKey": key} if key else {})
-    mappings = await tx.promptpublicationversion.find_many(where={"promptKey": key} if key else {})
+    # Complete history for displayed registry keys, including deleted-row
+    # history. Unrelated retired keys must not make this read-only transaction
+    # load every historical template body or expire under registry growth.
+    where = {"promptKey": key} if key else {"promptKey": {"in": [d.key for d in PROMPT_DEFINITIONS]}}
+    versions = await tx.prompttemplateversion.find_many(where=where)
+    mappings = await tx.promptpublicationversion.find_many(where=where)
     return versions, {p.versionId: p.number for p in mappings}
 
 

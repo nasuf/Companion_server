@@ -96,7 +96,7 @@ def _build_kwargs(
 # --- CRUD ---
 
 
-async def create(source: Source = "user", **data) -> MemoryRecord:
+async def create(source: Source = "user", *, database=None, **data) -> MemoryRecord:
     """Create a memory in the appropriate table.
 
     Pass fields as keyword args: userId, content, level, importance, type, etc.
@@ -104,7 +104,8 @@ async def create(source: Source = "user", **data) -> MemoryRecord:
     """
     if data.get("userId") and not data.get("workspaceId"):
         data["workspaceId"] = await resolve_workspace_id(user_id=data["userId"])
-    row = await _table(source).create(data=data)
+    model = (database.aimemory if source == "ai" else database.usermemory) if database is not None else _table(source)
+    row = await model.create(data=data)
     await _invalidate_caches(data.get("userId"), data.get("workspaceId"))
     return _to_record(row, source)
 
@@ -119,6 +120,11 @@ async def _invalidate_caches(user_id: str | None, workspace_id: str | None) -> N
         await bump_cache_version(user_id, workspace_id)
     except Exception as e:
         logger.debug(f"cache bump failed for {user_id}/{workspace_id}: {e}")
+
+
+async def invalidate_scope(user_id: str, workspace_id: str | None) -> None:
+    """Invalidate retrieval caches after a raw transactional lifecycle write."""
+    await _invalidate_caches(user_id, workspace_id)
 
 
 async def _scope_where(where: dict | None, *, allow_cross_user: bool = False) -> dict | None:

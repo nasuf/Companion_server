@@ -72,7 +72,7 @@ class TestCompression:
             patch.object(cons, "invoke_json", AsyncMock(return_value={"summary": "十月里我常在早晨散步、买咖啡，偶尔去河边拍照"})),
             patch.object(cons, "get_utility_model", lambda: object()),
             patch.object(cons, "store_memory", store_mock),
-            patch.object(cons.db, "execute_raw", _execute),
+            patch.object(cons, "_archive_originals", AsyncMock()) as archive,
         ):
             stats = await cons.compress_l3_clusters_for_workspace(
                 user_id="u1", workspace_id="ws1",
@@ -92,12 +92,10 @@ class TestCompression:
         # 2026-07-28: 原先是逐行 update + 逐行 changelog, 中途失败会留下"摘要已生成
         # 但原行还在"的半失败态, 下一轮同一簇再被压一次产出重复摘要。批量语句天然
         # 原子, 没有这个中间态。
-        changelog_sql = [s for s in executed if "memory_changelogs" in s]
-        archive_sql = [s for s in executed if "is_archived = true" in s]
-        assert len(changelog_sql) == 1
-        assert len(archive_sql) == 1
-        assert "consolidated_into" in changelog_sql[0]
-        assert "ANY($1::text[])" in archive_sql[0]
+        archive.assert_awaited_once()
+        assert len(archive.await_args.kwargs["originals"]) == 6
+        assert store_kwargs["_consolidation_staged"] is True
+        assert store_kwargs["_split_done"] is True
 
     async def test_short_digest_rejected_nothing_archived(self):
         rows = [_cand(f"m{i}", [1.0, 0.0]) for i in range(5)]

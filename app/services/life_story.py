@@ -221,8 +221,8 @@ def _substantive_items(value: object) -> list[str]:
 # 0.72-0.82。**保持原有相对高低** —— 那些 literal 里编着人工判断, 不该被抹平。
 # 人设不是错的, 只是可能用不上, 慢慢淡出比永久占位合理。
 #
-# 淡出速度: 2026-07-28 换成惰性指数衰减 (lifecycle/value.py, 半衰期 180 天) 之后,
-# 0.72 的人设零访问约 140 天跌到 L3, 0.82 约 174 天 —— 也就是四到六个月, 不是这里
+# 淡出速度: 2026-07-28 换成惰性指数衰减 (lifecycle/value.py, 半衰期 240 天) 之后,
+# 0.72 的人设零访问约 187 天跌到 L3, 0.82 约 232 天 —— 也就是六到八个月, 不是这里
 # 原先写的"约一年"。那个数字是按旧的档位公式 (time_factor 分段常数) 算的, 换公式
 # 后不再成立。任何一次检索都会重置计时, 所以真正用得上的人设不会掉下去。
 #
@@ -709,6 +709,19 @@ async def store_memories_batch(
     if not valid:
         return []
 
+    # Validate before embedding or force replacement; invalid generated
+    # categories must not erase a previously valid persona.
+    for mem in valid:
+        taxonomy = resolve_taxonomy(
+            main_category=mem.get("main_category", "生活"),
+            sub_category=mem.get("sub_category", "其他"),
+            legacy_type=normalize_memory_type(mem.get("type", "life")),
+            source="ai", level=level_for_importance(float(mem.get("importance", 0.85))),
+            provenance="profile_seed",
+        )
+        if not taxonomy.allowed:
+            raise ValueError("Invalid trusted persona category")
+
     total = len(valid)
 
     # Resolve workspace once (shared by all memories + changelogs)
@@ -773,6 +786,7 @@ async def store_memories_batch(
             legacy_type=mem_type,
             source="ai",
             level=level_for_importance(float(mem.get("importance", 0.85))),
+            provenance="profile_seed",
         )
         # 曾经这里 clamp 到 ≥0.85 并硬写 level=1, 依据是"spec §1.4: 创建期所有
         # 记忆都入 L1"。两件事都改了 (见 _tiered_importance 的实测数据):
@@ -793,6 +807,7 @@ async def store_memories_batch(
             # Persona ground truth — write-time reconciliation never mutates
             # profile_seed rows (contradictions go through spec §4 instead).
             "provenance": "profile_seed",
+            "valueUpdatedAt": datetime.now(UTC),
         }
         # Part 5 §3.1: life_events / emotion_events 等过去事件带 occur_time,
         # 让 retrieval 能按时间过滤、L3 awakening 能找到久远记忆.

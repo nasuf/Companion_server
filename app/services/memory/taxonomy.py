@@ -663,6 +663,7 @@ def resolve_taxonomy(
     legacy_type: str | None = None,
     source: Source = "user",
     level: int = 1,
+    provenance: str | None = None,
 ) -> TaxonomyResult:
     """Normalize a (main, sub) pair against the (source, level) allowed set.
 
@@ -701,7 +702,10 @@ def resolve_taxonomy(
 
     legacy = MAIN_CATEGORY_TO_LEGACY_TYPE.get(normalized_main, normalized_legacy)
 
-    allowed_subs = allowed_sub_categories(normalized_main, source=source, level=level)
+    # Trusted seed facts may become less prominent without losing their precise
+    # category. Generated replies/summaries never receive this exception.
+    seed_level = 1 if source == "ai" and provenance in {"profile_seed", "knowledge_seed"} else level
+    allowed_subs = allowed_sub_categories(normalized_main, source=source, level=seed_level)
     if not allowed_subs:
         # Main category is forbidden at this (source, level). Keep the
         # original sub text so the caller can see what the LLM produced,

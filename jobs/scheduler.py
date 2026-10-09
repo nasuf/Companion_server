@@ -1058,13 +1058,14 @@ async def _run_l2_adjustment():
     """
     async def _body():
         try:
-            # 兜底扫描: 照顾长期没被检索到、因而惰性更新碰不到的记忆 —— 那恰恰是
-            # 最该衰减的一批。主路径在 lifecycle/lazy_update.record_memory_usage,
-            # 即使这里完全不跑, 活跃记忆的值依然是对的。
-            from app.services.memory.lifecycle.lazy_update import sweep_stale_values
+            from app.services.memory.lifecycle.lazy_update import purge_usage_receipts
 
-            swept = await sweep_stale_values()
             stats = await run_l2_adjustment()
+            swept = {"scanned": stats["total"]}
+            await purge_usage_receipts()
+            from app.services.memory.lifecycle.capacity import reclaim_consolidated_embeddings
+
+            stats["reclaimed_vectors"] = await reclaim_consolidated_embeddings()
             logger.info(
                 f"[CRON] l2_adjustment ok: swept={swept.get('scanned', 0)} {stats}",
                 extra={"event": EVT_SCHEDULER_JOB, "task_name": "l2_adjustment",
@@ -1079,6 +1080,9 @@ async def _run_l2_adjustment():
                 extra={"event": EVT_SCHEDULER_JOB, "task_name": "l2_adjustment",
                        "phase": "failed", "error_type": type(e).__name__},
             )
+            _job_failed("l2_adjustment", e)
+            raise
+
 
     await _run_distributed_job("l2_adjustment", 3600, _body)
 

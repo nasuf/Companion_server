@@ -191,6 +191,11 @@ async def _compress_cluster(
                 pass
     occur_mid = sorted(occur_times)[len(occur_times) // 2] if occur_times else None
 
+    from app.services.memory.retrieval.context_selector import estimate_tokens
+    if estimate_tokens(digest) > 180:
+        logger.warning("Consolidation digest exceeds per-memory context budget")
+        return None
+
     new_id = await store_memory(
         user_id=user_id,
         content=digest,
@@ -206,6 +211,8 @@ async def _compress_cluster(
         # 并进一条**非簇**同类记忆 (含 L2), 连带覆盖那条行内容并把它当作归档目标 —
         # 一次整合意外改写了不该动的记忆. digest 内容本就是新摘要, 无需去重.
         skip_reconciliation=True,
+        _consolidation_staged=True,
+        _split_done=True,
     )
     if not new_id:
         return None
@@ -232,60 +239,49 @@ async def _archive_originals(
     *, source: str, user_id: str, workspace_id: str | None,
     originals: list[dict], digest_id: str,
 ) -> None:
-    """把簇内原行一次性归档, 并留下可回滚的 changelog 轨迹。
-
-    两条语句都是批量的, 各自天然原子 —— 旧实现逐条 update 且吞异常, 中途失败会
-    留下"部分归档"的状态, 而部分归档意味着下一轮同一簇再被压一次。
-
-    顺序是先写 changelog 再归档: 这样任何被归档的行一定有回滚线索。反过来的话,
-    归档成功而 changelog 失败就产生了无从追溯的孤儿。
-    """
-    if not originals:
-        return
-
+    """Lock scope/content; archive, audit and publish the staged digest atomically."""
+    if not originals or len(originals) > _CANDIDATE_LIMIT:
+        raise ValueError("Invalid consolidation cluster size")
     table = "memories_ai" if source == "ai" else "memories_user"
-    ids = [c["id"] for c in originals]
-
-    # old_value 存原文快照。原行只是归档不是删除, 所以数据本身不会丢 —— 但撤销
-    # 脚本要靠它把"这次整合吞掉了什么"直接显示出来。少了它, 运维得先去两张表里捞
-    # 原行才看得懂自己在撤什么, 那这份审计就等于没有。
-    values = ",".join(
-        f"(${i * 5 + 1}, ${i * 5 + 2}, ${i * 5 + 3}, ${i * 5 + 4}, "
-        f"'consolidated_into', ${i * 5 + 5}, ${len(ids) * 5 + 1})"
-        for i in range(len(ids))
-    )
-    args: list = []
-    for c in originals:
-        args.extend((
-            str(uuid.uuid4()), user_id, workspace_id, c["id"],
-            (c.get("content") or "")[:200],
-        ))
-    args.append(digest_id)
-    await db.execute_raw(
-        "INSERT INTO memory_changelogs "
-        "(id, user_id, workspace_id, memory_id, operation, old_value, new_value) "
-        f"VALUES {values}",
-        *args,
-    )
-
-    archived = await db.execute_raw(
-        f"UPDATE {table} SET is_archived = true "
-        "WHERE id = ANY($1::text[]) AND is_archived = false",
-        ids,
-    )
-    if archived != len(ids):
-        # 少归档了几行 —— 可能是并发改动。让调用方回滚摘要, 下一轮重来。
-        raise RuntimeError(
-            f"archived {archived}/{len(ids)} rows; refusing partial consolidation"
+    ids = sorted(c["id"] for c in originals)
+    snapshots = {c["id"]: c["content"] for c in originals}
+    async with db.tx(timeout=timedelta(seconds=15)) as tx:
+        digest = await tx.query_raw(
+            f"SELECT id FROM {table} WHERE id=$1 AND user_id=$2 "
+            "AND workspace_id IS NOT DISTINCT FROM $3::text AND is_archived "
+            "AND level=3 AND provenance='consolidated' FOR UPDATE",
+            digest_id, user_id, workspace_id,
         )
+        rows = await tx.query_raw(
+            f"SELECT id,content FROM {table} WHERE id=ANY($1::text[]) AND user_id=$2 "
+            "AND workspace_id IS NOT DISTINCT FROM $3::text AND NOT is_archived "
+            "AND level=3 ORDER BY id FOR UPDATE", ids, user_id, workspace_id,
+        )
+        if not digest or len(rows) != len(ids) or any(snapshots[r["id"]] != r["content"] for r in rows):
+            raise RuntimeError("Consolidation scope or originals changed")
+        await tx.execute_raw(
+            "INSERT INTO memory_changelogs(id,user_id,workspace_id,memory_id,operation,old_value,new_value) "
+            "SELECT unnest($1::text[]),$2,$3,unnest($4::text[]),'consolidated_into',unnest($5::text[]),$6",
+            [str(uuid.uuid4()) for _ in ids], user_id, workspace_id, ids,
+            [snapshots[mid][:200] for mid in ids], digest_id,
+        )
+        await tx.execute_raw(f"UPDATE {table} SET is_archived=true WHERE id=ANY($1::text[])", ids)
+        await tx.execute_raw(f"UPDATE {table} SET is_archived=false WHERE id=$1", digest_id)
+    await memory_repo.invalidate_scope(user_id, workspace_id)
 
 
 async def _rollback_digest(*, source: str, digest_id: str) -> None:
-    """归档失败时撤销刚建的摘要。撤销本身失败只记日志 —— 再抛会掩盖真正的错因。"""
+    """Remove only an unpublished staged digest; preserve ambiguous commits."""
     try:
-        await memory_repo.update(
-            digest_id, source=source, isArchived=True,  # type: ignore[arg-type]
-        )
+        table = "memories_ai" if source == "ai" else "memories_user"
+        async with db.tx(timeout=timedelta(seconds=15)) as tx:
+            deleted = await tx.query_raw(
+                f"DELETE FROM {table} WHERE id=$1 AND is_archived AND provenance='consolidated' "
+                "AND NOT EXISTS (SELECT 1 FROM memory_changelogs WHERE operation='consolidated_into' AND new_value=$1) RETURNING id",
+                digest_id,
+            )
+            if deleted:
+                await tx.execute_raw("DELETE FROM memory_embeddings WHERE memory_id=$1", digest_id)
     except Exception as e:
         logger.error(f"digest rollback failed for {digest_id}: {e}")
 

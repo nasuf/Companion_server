@@ -239,6 +239,7 @@ async def store_memory(
     skip_reconciliation: bool = False,
     _singleton_locked: bool = False,
     _split_done: bool = False,
+    _consolidation_staged: bool = False,
 ) -> str | None:
     """Store a memory with deduplication.
 
@@ -257,13 +258,22 @@ async def store_memory(
     """
     # Source narrows to the literal Source type expected by the taxonomy
     repo_source = "ai" if source == "ai" else "user"
+    if _consolidation_staged and (provenance != "consolidated" or not skip_reconciliation or level != 3):
+        raise ValueError("Only independent L3 consolidation digests may be staged")
+    if provenance == "daily_summary":
+        level, importance = 3, min(0.49, max(0.1, importance))
     taxonomy = resolve_taxonomy(
         main_category=main_category,
         sub_category=sub_category,
         legacy_type=normalize_memory_type(memory_type),
         source=repo_source,
         level=level,
+        provenance=provenance,
     )
+    if (repo_source == "ai" and provenance in {"ai_authored", "daily_summary"}
+            and taxonomy.main_category in {"身份", "偏好", "思维"}):
+        logger.info("Refusing generated persona memory (%s)", taxonomy.main_category)
+        return None
     if not taxonomy.allowed:
         # The (source, level, main) combination is forbidden by the spec —
         # e.g. trying to write an AI 身份/偏好/思维 memory at L2 or L3.
@@ -312,6 +322,7 @@ async def store_memory(
                     workspace_id=workspace_id, recurrence=recurrence,
                     entities=entities, topics=topics, provenance=provenance,
                     skip_reconciliation=skip_reconciliation, _split_done=True,
+                    _consolidation_staged=_consolidation_staged,
                 )
                 first_id = first_id or mid
             return first_id
@@ -518,6 +529,7 @@ async def store_memory(
     from app.services.memory.provenance import normalize_provenance
 
     create_data = dict(
+        isArchived=_consolidation_staged,
         userId=user_id,
         content=content,
         level=level,
@@ -526,6 +538,7 @@ async def store_memory(
         mainCategory=taxonomy.main_category,
         subCategory=taxonomy.sub_category,
         workspaceId=workspace_id,
+        valueUpdatedAt=datetime.now(timezone.utc),
     )
     normalized_provenance = normalize_provenance(provenance)
     if normalized_provenance:
@@ -538,7 +551,24 @@ async def store_memory(
     # Part 5 §4.2: 提醒重复规则; 仅提醒子类有效, 其他子类强制清空避免脏数据.
     if recurrence and taxonomy.sub_category == "提醒":
         create_data["recurrence"] = recurrence
-    memory = await memory_repo.create(source=source, **create_data)
+    if level == 1 and is_singleton(taxonomy.main_category, taxonomy.sub_category):
+        # Share the DB scope lock with lifecycle promotions; a Redis lock alone
+        # cannot serialize a new singleton against a simultaneous L2 promotion.
+        from datetime import timedelta
+        from app.services.memory.lifecycle.lazy_update import scope_lock_key
+        table = "memories_ai" if repo_source == "ai" else "memories_user"
+        async with db.tx(timeout=timedelta(seconds=15)) as tx:
+            await tx.execute_raw("SELECT pg_advisory_xact_lock($1::bigint)", scope_lock_key(repo_source, user_id, workspace_id))
+            taken = await tx.query_raw(
+                f"SELECT id FROM {table} WHERE user_id=$1 AND workspace_id IS NOT DISTINCT FROM $2::text "
+                "AND main_category=$3 AND sub_category=$4 AND level=1 AND NOT is_archived LIMIT 1",
+                user_id, workspace_id, taxonomy.main_category, taxonomy.sub_category,
+            )
+            if taken:
+                return None
+            memory = await memory_repo.create(source=source, database=tx, **create_data)
+    else:
+        memory = await memory_repo.create(source=source, **create_data)
 
     # Store embedding. If this fails the memory row exists but would never
     # be retrievable by vector search — delete the orphan to keep state

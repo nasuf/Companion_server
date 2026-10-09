@@ -180,9 +180,9 @@ class TestWiring:
     def test_review_passes_games_text(self):
         import inspect
 
-        from app.services.schedule_domain.schedule import review_daily_schedule
+        from app.services.schedule_domain.schedule import _review_daily_schedule
 
-        src = inspect.getsource(review_daily_schedule)
+        src = inspect.getsource(_review_daily_schedule)
         assert "games_text=" in src
         # 必须在 summary_prompt.format 之前算好
         assert src.index("collect_today_games") < src.index("summary_prompt")

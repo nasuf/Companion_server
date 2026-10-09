@@ -192,96 +192,6 @@ class TestDaysSince:
         assert days_since(naive) == pytest.approx(5, abs=0.01)
 
 
-class TestSqlMatchesPython:
-    """SQL 里的算术必须和 Python 纯函数算出同一个数。
-
-    两处实现分别服务热路径 (SQL, 免读-改-写竞态) 和离线推演 (Python), 一旦漂移,
-    推演的结论就不适用于生产 —— 而推演正是我们判断"改了会不会变差"的唯一依据。
-    这里用符号比对常量, 真值比对靠下面的 SQL 结构断言。
-    """
-
-    def test_sql_embeds_the_same_constants(self):
-        from app.services.memory.lifecycle import lazy_update
-
-        sql = lazy_update._render_sql("memories_user")
-        for constant in (DECAY_LAMBDA, HOT_PROMOTE_AT, WARM_DEMOTE_AT,
-                         ACCESS_CEILING, CONTRIBUTION_REWARD):
-            assert str(constant) in sql, f"{constant} 没进 SQL"
-
-    def test_sql_distinguishes_the_two_signals(self):
-        """两种信号形式不同 —— SQL 里必须体现, 否则 access 又能把记忆推进 hot。"""
-        from app.services.memory.lifecycle import lazy_update
-
-        sql = lazy_update._render_sql("memories_user")
-        assert "u.is_contribution" in sql
-        assert f"{ACCESS_REWARD} * GREATEST(0.0, {ACCESS_CEILING}" in sql
-
-    def test_sql_decays_before_rewarding(self):
-        """`decayed + reward` 而不是 `(base + reward) * EXP(...)`。"""
-        from app.services.memory.lifecycle import lazy_update
-
-        sql = lazy_update._render_sql("memories_user")
-        assert f"d.decayed + {CONTRIBUTION_REWARD}" in sql
-
-    def test_sql_uses_value_updated_at_as_the_time_anchor(self):
-        """复用 updated_at 会让 Δt 被无关写入不断归零, 记忆永远衰减不下去。"""
-        from app.services.memory.lifecycle import lazy_update
-
-        sql = lazy_update._render_sql("memories_user")
-        assert "COALESCE(m.value_updated_at, m.created_at)" in sql
-        assert "CURRENT_TIMESTAMP - m.updated_at" not in sql
-
-    def test_sql_matches_singletons_as_category_pairs(self):
-        """L1_SINGLETON_SUBS 是 (主类, 子类) 二元组集合, 不是子类名集合。
-
-        当成 text[] 直接传会在驱动层报序列化错, 而调用方吞异常 —— 整个效用值更新
-        静默失效, 没有任何日志。这个 bug 单元测试抓不到 (SQL 字符串看着没问题),
-        是上线前的 EXPLAIN 验证抓到的。只比子类名也不行: taxonomy 里"其他"这类
-        子类在多个主类下都存在。
-        """
-        from app.services.memory.lifecycle import lazy_update
-
-        sql = lazy_update._render_sql("memories_ai")
-        assert "unnest($3::text[], $4::text[]) AS sg(main, sub)" in sql
-        assert "sg.main = m.main_category AND sg.sub = m.sub_category" in sql
-
-    def test_singleton_arrays_are_parallel_and_flat(self):
-        from app.services.memory.lifecycle.lazy_update import _singleton_arrays
-        from app.services.memory.taxonomy import L1_SINGLETON_SUBS
-
-        mains, subs = _singleton_arrays()
-        assert len(mains) == len(subs) == len(L1_SINGLETON_SUBS)
-        assert all(isinstance(x, str) for x in mains + subs), "元组漏进了数组"
-        assert set(zip(mains, subs)) == set(L1_SINGLETON_SUBS)
-
-    def test_sql_breaks_ties_within_a_singleton_group(self):
-        """同一条语句里两条同类目记忆可能同时越过 hot 阈值。
-
-        l1_taken 的 EXISTS 看的是语句开始时的表状态, 两条都会读到"还没有 L1",
-        于是双双晋升 —— 正好造出要防的第二条 L1。必须再按组内排名去重。
-        """
-        from app.services.memory.lifecycle import lazy_update
-
-        sql = lazy_update._render_sql("memories_user")
-        assert "ROW_NUMBER() OVER" in sql
-        assert "PARTITION BY m.user_id, m.workspace_id" in sql
-        assert "s.group_rank > 1" in sql
-
-    def test_sql_blocks_a_second_l1_for_singleton_subs(self):
-        """惰性更新把层级迁移搬到了热路径, 旧 cron 的 singleton 闸门必须一起搬。
-
-        少了它, 两条"姓名"记忆会同时坐在 L1 上 —— 正是人设分层要消灭的数据损坏。
-        """
-        from app.services.memory.lifecycle import lazy_update
-
-        sql = lazy_update_sql = lazy_update._render_sql("memories_user")
-        assert "l1_taken" in sql
-        assert "s.l1_taken OR s.group_rank > 1" in sql
-        # 冲突范围必须按 user + workspace 隔离, 否则不同 agent 会互相阻塞晋升
-        assert "o.workspace_id IS NOT DISTINCT FROM m.workspace_id" in sql
-        assert "o.user_id = m.user_id" in lazy_update_sql
-
-
 class TestRecordMemoryUsage:
     @pytest.mark.asyncio
     async def test_contribution_wins_over_access_for_the_same_memory(self):
@@ -302,76 +212,39 @@ class TestRecordMemoryUsage:
 
     @pytest.mark.asyncio
     async def test_database_failure_never_propagates(self):
-        """效用值更新是尽力而为的 —— 它绝不能影响用户拿到回复。"""
         from app.services.memory.lifecycle import lazy_update
-
-        with patch.object(
-            lazy_update.db, "execute_raw",
-            new=AsyncMock(side_effect=RuntimeError("db down")),
-        ):
-            assert await lazy_update.record_memory_usage(contributed_ids=["m1"]) == 0
+        with patch.object(lazy_update, "_apply_batch", new=AsyncMock(side_effect=RuntimeError("db down"))):
+            assert await lazy_update.record_memory_usage(event_id="event", user_id="user", contributed_ids=["m1"]) == 0
 
     @pytest.mark.asyncio
-    async def test_both_tables_are_targeted(self):
-        """记忆 ID 全局唯一, 打两张表比先查归属再定表少一次往返。"""
+    async def test_both_sides_receive_stable_event_and_scope(self):
         from app.services.memory.lifecycle import lazy_update
-
-        with patch.object(
-            lazy_update.db, "execute_raw", new=AsyncMock(return_value=1),
-        ) as raw:
-            await lazy_update.record_memory_usage(contributed_ids=["m1"])
-        tables = {
-            "memories_user" if "memories_user" in c.args[0] else "memories_ai"
-            for c in raw.await_args_list
-        }
-        assert tables == {"memories_user", "memories_ai"}
-
-
-def _expected_singleton_args() -> tuple:
-    from app.services.memory.lifecycle.lazy_update import _singleton_arrays
-
-    return _singleton_arrays()
-
-
-class TestSweepIsOnlyABackstop:
-    @pytest.mark.asyncio
-    async def test_sweep_applies_pure_decay(self):
-        """兜底扫描不该给任何回报 —— 它照顾的正是没人用的记忆。"""
-        from app.services.memory.lifecycle import lazy_update
-
-        with patch.object(
-            lazy_update.db, "execute_raw", new=AsyncMock(return_value=3),
-        ) as raw:
-            await lazy_update.sweep_stale_values()
-        assert raw.await_count == 2, "占位符改写失败会跳过执行"
-        sql = raw.await_args_list[0].args[0]
-        assert "false AS is_contribution" in sql
-        # ID 连接必须被内联查询取代 —— 残留会让扫描按一组不存在的参数执行。
-        # 注意 unnest 本身仍在 (singleton 二元组用它), 所以要匹配具体形态。
-        assert "unnest($1::text[]) AS id" not in sql
-        assert raw.await_args_list[0].args[1:] == _expected_singleton_args()
+        with patch.object(lazy_update, "_apply_batch", new=AsyncMock(return_value={"total": 1})) as batch:
+            assert await lazy_update.record_memory_usage(event_id="event", user_id="user", workspace_id="scope", contributed_ids=["m1"]) == 2
+        assert {c.kwargs["source"] for c in batch.await_args_list} == {"user", "ai"}
+        assert all(c.kwargs["event_id"] == "event" and c.kwargs["workspace_id"] == "scope" for c in batch.await_args_list)
 
     @pytest.mark.asyncio
-    async def test_sweep_is_bounded(self):
-        """无上限的扫描会在大表上长时间持锁。"""
+    async def test_missing_event_cannot_reward(self):
         from app.services.memory.lifecycle import lazy_update
+        with patch.object(lazy_update, "_apply_batch", new=AsyncMock()) as batch:
+            assert await lazy_update.record_memory_usage(user_id="user", contributed_ids=["m1"]) == 0
+        batch.assert_not_awaited()
 
-        with patch.object(
-            lazy_update.db, "execute_raw", new=AsyncMock(return_value=0),
-        ) as raw:
-            await lazy_update.sweep_stale_values(limit=100)
-        assert "LIMIT 100" in raw.await_args_list[0].args[0]
+
+class TestSweepFailureVisibility:
+    @pytest.mark.asyncio
+    async def test_failure_propagates_to_scheduler(self):
+        from app.services.memory.lifecycle import lazy_update
+        with patch.object(lazy_update.db, "query_raw", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            with pytest.raises(RuntimeError, match="boom"):
+                await lazy_update.sweep_stale_values()
 
     @pytest.mark.asyncio
-    async def test_sweep_failure_is_reported_but_contained(self):
+    async def test_invalid_batch_is_rejected(self):
         from app.services.memory.lifecycle import lazy_update
-
-        with patch.object(
-            lazy_update.db, "execute_raw",
-            new=AsyncMock(side_effect=RuntimeError("boom")),
-        ):
-            stats = await lazy_update.sweep_stale_values()
-        assert stats["scanned"] == 0
+        with pytest.raises(ValueError):
+            await lazy_update.sweep_stale_values(limit=0)
 
 
 def test_half_life_change_requires_rerunning_the_simulation():

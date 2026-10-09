@@ -858,12 +858,68 @@ def format_full_schedule_for_query(
 # --- 每日作息回顾 ---
 
 async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "伙伴") -> list[str]:
-    """回顾当日作息，合并调整记录+主动日志+聊天摘要，生成AI自我记忆。"""
-    from app.services.memory.storage.persistence import store_memory
-    from app.services.proactive.history import get_proactive_history
+    """Review yesterday once in the exact active owner/agent workspace.
 
-    schedule = await get_cached_schedule(agent_id)
-    if not schedule:
+    Daily summaries are optional derived memories. A failed attempt is recorded
+    explicitly and cannot silently repeat partially committed memory writes.
+    """
+    import uuid
+    from app.services.workspace.workspaces import get_active_workspace
+    from app.services.memory.lifecycle.capacity import DAILY_SUMMARY_ROW_BUDGET
+
+    workspace = await get_active_workspace(user_id=user_id, agent_id=agent_id)
+    if workspace is None or workspace.userId != user_id or workspace.agentId != agent_id:
+        return []
+    day_end = _local_now().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = day_end - timedelta(days=1)
+    local_date = day_start.replace(tzinfo=None)
+    claimed = await db.query_raw(
+        """INSERT INTO memory_daily_reviews(id,workspace_id,local_date,status)
+           VALUES($1,$2,$3::date,'running') ON CONFLICT(workspace_id,local_date)
+           DO NOTHING RETURNING id""", str(uuid.uuid4()), workspace.id, local_date.isoformat(),
+    )
+    if not claimed:
+        logger.info("Daily review already attempted for this workspace/day")
+        return []
+    review_id = claimed[0]["id"]
+    try:
+        count = await db.aimemory.count(where={
+            "userId": user_id, "workspaceId": workspace.id, "provenance": "daily_summary",
+        })
+        budget = min(5, max(0, DAILY_SUMMARY_ROW_BUDGET - count))
+        if budget == 0:
+            await db.execute_raw("UPDATE memory_daily_reviews SET status='capacity_skipped',updated_at=NOW() WHERE id=$1", review_id)
+            logger.warning("Daily summary memory budget reached; factual chat memories are unaffected")
+            return []
+        stored = await _review_daily_schedule(
+            agent_id, user_id, agent_name, workspace.id, day_start, day_end, budget,
+        )
+        await db.execute_raw(
+            "UPDATE memory_daily_reviews SET status='completed',memory_ids=$2::jsonb,updated_at=NOW() WHERE id=$1",
+            review_id, json.dumps(stored),
+        )
+        return stored
+    except Exception:
+        try:
+            await db.execute_raw("UPDATE memory_daily_reviews SET status='failed',updated_at=NOW() WHERE id=$1", review_id)
+        except Exception:
+            logger.exception("Could not persist failed daily review status")
+        raise
+
+
+async def _review_daily_schedule(
+    agent_id: str, user_id: str, agent_name: str, workspace_id: str,
+    day_start: datetime, day_end: datetime, budget: int,
+) -> list[str]:
+    from app.services.memory.storage.persistence import store_memory
+
+    row = await db.aidailyschedule.find_unique(where={
+        "agentId_date": {"agentId": agent_id, "date": day_start.replace(tzinfo=None)},
+    })
+    schedule = row.scheduleData if row else None
+    if isinstance(schedule, str):
+        schedule = json.loads(schedule)
+    if not isinstance(schedule, list) or not schedule:
         return []
 
     schedule_text = "\n".join(
@@ -873,27 +929,30 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     # 查询当日调整记录
     adjustments_text = ""
     try:
-        today_start = _local_now().replace(hour=0, minute=0, second=0, microsecond=0)
         adjustments = await db.scheduleadjustlog.find_many(
             where={
                 "agentId": agent_id,
-                "createdAt": {"gte": today_start},
+                "createdAt": {"gte": day_start, "lt": day_end},
             },
         )
         if adjustments:
             lines = [f"- {a.adjustType}: {a.reason}" for a in adjustments]
-            adjustments_text = "\n今日作息调整：\n" + "\n".join(lines)
+            adjustments_text = "\n昨日作息调整：\n" + "\n".join(lines)
     except Exception as e:
         logger.warning(f"Failed to load adjustments for review: {e}")
 
     # 查询当日主动消息日志
     proactive_text = ""
     try:
-        logs = await get_proactive_history(agent_id, user_id, limit=5)
+        logs = await db.proactivechatlog.find_many(
+            where={"agentId": agent_id, "userId": user_id, "workspaceId": workspace_id,
+                   "createdAt": {"gte": day_start, "lt": day_end}},
+            order={"createdAt": "desc"}, take=5,
+        )
         if logs:
-            lines = [f"- {p['content']}" for p in logs if p.get("content")]
+            lines = [f"- {p.message}" for p in logs if p.message]
             if lines:
-                proactive_text = "\n今日主动消息：\n" + "\n".join(lines)
+                proactive_text = "\n昨日主动消息：\n" + "\n".join(lines)
     except Exception as e:
         logger.warning(f"Failed to load proactive history for review: {e}")
 
@@ -912,23 +971,10 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     games_text = ""
     try:
         from app.services.games.daily_digest import collect_today_games, render_digest
-        from app.services.workspace import get_active_workspace
-
-        workspace = await get_active_workspace(agent_id=agent_id)
-        if workspace is not None:
-            # 这个 job 在凌晨 4:00 跑, 回顾的是**前一天**。取"今天 00:00 起"只会
-            # 覆盖 0-4 点那四个小时, 几乎必然是空的。
-            #
-            # 注意上面的 adjustments / proactive 用的正是 today_start 口径 —— 那是
-            # 既有的不一致 (prompt 写「昨日」, 数据取「今日凌晨至今」), 不在本次
-            # 改动范围内, 但游戏这段不跟着错。
-            day_start = _local_now().replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ) - timedelta(days=1)
-            digest = await collect_today_games(
-                workspace_id=workspace.id, local_day_start=day_start,
-            )
-            games_text = render_digest(digest)
+        digest = await collect_today_games(
+            workspace_id=workspace_id, local_day_start=day_start, local_day_end=day_end,
+        )
+        games_text = render_digest(digest)
     except Exception as e:
         logger.warning(f"Failed to collect today's games for review: {e}")
 
@@ -946,7 +992,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         summary_text = (await invoke_text(get_utility_model(), summary_prompt)).strip()
     except Exception as e:
         logger.warning(f"Daily summary (text) failed for agent {agent_id}: {e}")
-        return []
+        raise
     if not summary_text:
         logger.info(f"Daily summary empty for agent {agent_id}, skip memory extraction")
         return []
@@ -959,15 +1005,13 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         result = await invoke_json(get_utility_model(), memories_prompt)
     except Exception as e:
         logger.warning(f"Daily summary memory classification failed for agent {agent_id}: {e}")
-        return []
+        raise
 
     if not isinstance(result, dict):
-        logger.warning(f"Schedule review returned non-dict: {type(result)}")
-        return []
+        raise ValueError("Daily summary classification must return an object")
     memories = result.get("memories", [])
     if not isinstance(memories, list):
-        logger.warning(f"Schedule review 'memories' is not a list: {type(memories)}")
-        return []
+        raise ValueError("Daily summary memories must be a list")
 
     # Spec Part 1 §2.3 layer mapping: score ≥85→L1, 50-84→L2, 10-49→L3, <10→drop
     def _score_to_level(score: float) -> tuple[int, float] | None:
@@ -980,15 +1024,25 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
             return (2, importance)
         return (3, importance)
 
+    current_workspace = await db.chatworkspace.find_first(where={
+        "id": workspace_id, "userId": user_id, "agentId": agent_id, "status": "active",
+    })
+    if current_workspace is None:
+        raise RuntimeError("Daily review workspace is no longer active")
     stored = []
-    for mem in memories[:10]:
+    for mem in memories[:50]:
+        if len(stored) >= budget:
+            break
         # Spec 格式：{"type":"类型","content":"记忆内容","score":0-100}
         if isinstance(mem, str):
             content, level, importance = mem, 3, 0.3
         elif isinstance(mem, dict):
             content = mem.get("content", "")
             score = mem.get("score")
-            if isinstance(score, (int, float)):
+            if isinstance(score, (int, float)) and not isinstance(score, bool):
+                import math
+                if not math.isfinite(score):
+                    continue
                 mapped = _score_to_level(float(score))
                 if mapped is None:
                     continue
@@ -996,30 +1050,46 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
             else:
                 # 兜底：旧格式 level + importance
                 level = mem.get("level", 3)
-                importance = min(1.0, mem.get("importance", 0.3))
+                raw_importance = mem.get("importance", 0.3)
+                import math
+                if not isinstance(raw_importance, (int, float)) or isinstance(raw_importance, bool) or not math.isfinite(raw_importance):
+                    continue
+                importance = min(1.0, max(0.1, raw_importance))
         else:
             continue
 
-        if not content:
+        if not isinstance(content, str) or not content.strip():
             continue
 
         # Spec §2.3 五类记忆：身份/情绪/偏好边界/生活/思维
         raw_type = mem.get("type") if isinstance(mem, dict) else None
         main_cat = _MEM_TYPE_TO_MAIN.get(str(raw_type or "").strip(), "生活")
 
-        mem_id = await store_memory(
-            user_id=user_id,
-            content=content,
-            memory_type="life",
-            main_category=main_cat,
-            level=level,
-            importance=importance,
-            source="ai",
-            # Daily-life summary trivia — first in line for consolidation.
-            provenance="daily_summary",
-        )
-        if mem_id:
-            stored.append(mem_id)
+        if main_cat not in {"生活", "情绪"}:
+            continue
+        # A summary is derived context, never a new permanent persona fact.
+        level, importance = 3, min(0.49, importance)
+        from app.services.memory.recording.splitting import split_multi_fact
+        for piece in split_multi_fact(content):
+            if len(stored) >= budget:
+                break
+            mem_id = await store_memory(
+                user_id=user_id,
+                content=piece,
+                memory_type="life",
+                main_category=main_cat,
+                level=level,
+                importance=importance,
+                source="ai",
+                # Daily-life summary trivia — first in line for consolidation.
+                provenance="daily_summary",
+                workspace_id=workspace_id,
+                occur_time=day_start,
+                statement_time=day_end,
+                _split_done=True,
+            )
+            if mem_id:
+                stored.append(mem_id)
 
     return stored
 

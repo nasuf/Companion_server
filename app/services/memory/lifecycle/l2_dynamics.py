@@ -1,58 +1,15 @@
-"""L2 动态分与层级调整 —— **已退为兜底路径**.
+"""Compatibility API for bounded cumulative maintenance.
 
-主路径现在是 `lifecycle/lazy_update.py`: 记忆被检索到的那一刻就地更新效用值。
-改动的原因是这个 cron 的两个结构性问题都在生产上兑现了:
-
-  1. 它因为一处 SQL 类型错死了几个月, 期间所有 L2 零衰减、零升降级, 无任何告警。
-     整个记忆生命周期押在一个夜间任务上, 它一停就是彻底静止。
-  2. 每晚从不可变的初始 importance 重算, 分数不累积 —— "用过一百次"和"用过十次"
-     落在同一个频率档里, 使用信号被档位抹平。
-
-这个模块保留下来是因为惰性更新有个盲区: 彻底没人问津的记忆永远不会被检索到,
-也就永远不会被更新 —— 而那恰恰是最该衰减的一批。`sweep_stale_values` 补这个洞。
-下面的旧公式仍在跑, 但它现在只是第二道保险: 即使完全不跑, 活跃记忆的值依然正确。
-
-新增记忆或需要改公式时, 改 `lifecycle/value.py` —— 那里是效用值的唯一定义处,
-SQL 与离线推演都从它取常数。
-
---- 以下为旧实现的说明 ---
-
-Product spec §1.5.2: L2 memories have a "current score" that decays with
-time and grows with mention frequency. Periodically (daily cron) we
-recalculate current scores and promote/demote as needed:
-
-  current_score = initial_importance × time_factor × frequency_factor
-  P1 adds a bounded quality factor derived from changelog signals.
-
-`importance` is the IMMUTABLE initial score (the formula's base); the computed
-dynamic score is persisted to the separate `current_score` column, which the
-retrieval ranker reads via COALESCE(current_score, importance). Never write the
-computed score back into `importance` — doing so compounds the factors on every
-cron run (upward inflation for frequently-accessed rows, downward spiral for
-idle ones) because the next run would treat last night's product as the base.
-
-Time factor (days since last accessed/mentioned):
-  <30d → 1.0 | 30-90d → 0.9 | 90-180d → 0.8 | 180-365d → 0.7
-  365-730d → 0.6 | >730d → 0.5
-
-Frequency factor (mentions in rolling 1-year window):
-  1-2 → 1.0 | 3-5 → 1.1 | 6-10 → 1.2 | >10 → 1.3
-
-Level transitions:
-  current_score ≥ 0.85 AND mentions≥10 AND user expressed importance
-    AND no L1 conflict → promote to L1
-  0.50 ≤ current_score < 0.85 → stay L2
-  current_score < 0.50 *持续 30 天* → demote to L3
+Legacy pure factor functions remain for historical offline comparisons. The
+production entrypoints delegate exclusively to lazy_update's pure decay.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
 from app.db import db
-from app.observability.events import EVT_MEMORY_L2_ADJUSTED
 from app.redis_client import get_redis
 from app.services.memory.taxonomy import is_singleton
 
@@ -180,217 +137,21 @@ async def _track_low_score_streak(side: str, mem_id: str, below_threshold: bool)
 
 
 async def _adjust_side(side: str, user_id: str | None) -> dict:
-    """Process L2 adjustments for one side (user or ai)."""
-    now = datetime.now(UTC)
-    one_year_ago = now - timedelta(days=365)
+    """Compatibility entry; maintenance uses the same reward-free lifecycle."""
+    from app.services.memory.lifecycle.lazy_update import sweep_stale_values
 
-    model = db.usermemory if side == "user" else db.aimemory
-
-    # 周期性 L2 衰减扫描: 每个 user 的所有 L2 都要算时间+频率因子更新分数,
-    # 按 userId 过滤足够 (user_id=None 时 cron 模式全量扫), 不需要 workspaceId
-    # 过滤——每个 L2 独立 score, 跨 workspace 不相互依赖.
-    where: dict = {"level": 2, "isArchived": False}
-    if user_id:
-        where["userId"] = user_id
-
-    l2_memories = await model.find_many(where=where)
-    if not l2_memories:
-        return {"side": side, "total": 0, "promoted": 0, "demoted": 0, "adjusted": 0}
-
-    mem_ids = [m.id for m in l2_memories]
-    mention_counts: dict[str, int] = {}
-    last_access_at: dict[str, datetime] = {}
-    quality_counts: dict[str, dict[str, int]] = {}
-    if mem_ids:
-        # Spec time_factor is "days since last access". Read the real last access
-        # from the changelog instead of `updatedAt` — the row's updatedAt is
-        # @updatedAt-refreshed by this cron's own writes (and any admin edit),
-        # which would freeze the time factor at 1.0 forever. The 1-year window
-        # only applies to the frequency count; last access is MAX(created_at)
-        # over retained access rows. NB: changelog_retention purges `access`
-        # rows older than 13 months, so a row whose newest access predates that
-        # falls back to createdAt (a strictly older or equal timestamp → equal
-        # or MORE decay, never inflated). Bounded, acknowledged tradeoff.
-        rows = await db.query_raw(
-            """
-            SELECT memory_id,
-                   COUNT(*) FILTER (WHERE created_at >= $2::timestamp)::int AS cnt,
-                   MAX(created_at) AS last_access
-            FROM memory_changelogs
-            WHERE memory_id = ANY($1::text[])
-              AND operation = 'access'
-            GROUP BY memory_id
-            """,
-            mem_ids,
-            one_year_ago,
-        )
-        for r in rows:
-            mid = r.get("memory_id", "")
-            mention_counts[mid] = r.get("cnt", 0)
-            raw_last = r.get("last_access")
-            if isinstance(raw_last, str):
-                try:
-                    raw_last = datetime.fromisoformat(raw_last.replace("Z", "+00:00"))
-                except ValueError:
-                    raw_last = None
-            if isinstance(raw_last, datetime):
-                if raw_last.tzinfo is None:
-                    raw_last = raw_last.replace(tzinfo=UTC)
-                last_access_at[mid] = raw_last
-        quality_rows = await db.query_raw(
-            """
-            SELECT
-              memory_id,
-              SUM(CASE WHEN operation IN (
-                'user_edit',
-                'contradiction_archived',
-                'contradiction_new',
-                'retrieval_feedback_confirmed'
-              ) THEN 1 ELSE 0 END)::int AS corrections,
-              SUM(CASE WHEN operation = 'evidence_linked' THEN 1 ELSE 0 END)::int AS evidence_links
-            FROM memory_changelogs
-            WHERE memory_id = ANY($1::text[])
-              AND created_at >= $2::timestamp
-            GROUP BY memory_id
-            """,
-            mem_ids,
-            one_year_ago,
-        )
-        for r in quality_rows:
-            mid = r.get("memory_id", "")
-            quality_counts[mid] = {
-                "corrections": int(r.get("corrections") or 0),
-                "evidence_links": int(r.get("evidence_links") or 0),
-            }
-
-    promoted = 0
-    demoted = 0
-    adjusted = 0
-    # (memory_id, update_data, changelog_op_or_None, mem_ref)
-    updates: list[tuple[str, dict, str | None, object]] = []
-
-    for mem in l2_memories:
-        # IMMUTABLE base — never overwritten by this cron (see module docstring).
-        initial_importance = float(mem.importance or 0.5)
-
-        last_access = last_access_at.get(mem.id) or mem.createdAt
-        if isinstance(last_access, datetime):
-            if last_access.tzinfo is None:
-                last_access = last_access.replace(tzinfo=UTC)
-            days = (now - last_access).days
-        else:
-            days = 90
-
-        tf = _time_factor(days)
-        mc = mention_counts.get(mem.id, 0)
-        ff = _frequency_factor(mc)
-        q_counts = quality_counts.get(mem.id, {})
-        qf = _quality_factor(
-            q_counts.get("corrections", 0),
-            q_counts.get("evidence_links", 0),
-        )
-        current_score = max(0.0, min(1.0, initial_importance * tf * ff * qf))
-
-        # Track the continuous-below-threshold streak regardless of outcome
-        sustained_low = await _track_low_score_streak(
-            side, mem.id, below_threshold=current_score < 0.50,
-        )
-
-        prev_score = getattr(mem, "currentScore", None)
-        score_changed = (
-            prev_score is None or abs(current_score - float(prev_score)) > 0.01
-        )
-
-        if current_score >= 0.85 and mc >= 10:
-            if not await _check_promotion_conditions(mem, side):
-                if score_changed:
-                    updates.append((mem.id, {"currentScore": current_score}, None, mem))
-                    adjusted += 1
-            else:
-                # One-time level transition: promoted rows must land in the L1
-                # importance band (≥0.85); this is the only place importance is
-                # written, and it's a transition, not a recompute.
-                updates.append((
-                    mem.id,
-                    {
-                        "level": 1,
-                        "importance": min(1.0, max(initial_importance, 0.85)),
-                        "currentScore": current_score,
-                    },
-                    "promote",
-                    mem,
-                ))
-                promoted += 1
-        elif sustained_low:
-            # Spec §1.5.2: demote only after continuously below 0.50 for 30+ days.
-            # importance (initial score) stays untouched — the demotion itself is
-            # recorded by the level change + changelog.
-            updates.append((
-                mem.id, {"level": 3, "currentScore": current_score}, "demote", mem,
-            ))
-            demoted += 1
-        elif score_changed:
-            updates.append((mem.id, {"currentScore": current_score}, None, mem))
-            adjusted += 1
-
-    for mid, data, changelog_op, mem_ref in updates:
-        try:
-            await model.update(where={"id": mid}, data=data)
-        except Exception as e:
-            logger.warning(f"L2 update failed ({side}/{mid}): {e}")
-            continue
-        if changelog_op:
-            try:
-                from app.services.memory.storage.persistence import log_memory_changelog
-
-                await log_memory_changelog(
-                    getattr(mem_ref, "userId", user_id or ""),
-                    mid,
-                    changelog_op,
-                    old_value="level=2",
-                    new_value=f"level={data.get('level')} current_score={data.get('currentScore'):.3f}",
-                    workspace_id=getattr(mem_ref, "workspaceId", None),
-                )
-            except Exception as e:
-                logger.debug(f"L2 {changelog_op} changelog write failed ({mid}): {e}")
-
-    stats = {
-        "side": side,
-        "total": len(l2_memories),
-        "promoted": promoted,
-        "demoted": demoted,
-        "adjusted": adjusted,
-    }
-    logger.info(
-        f"L2 adjustment [{side}] complete: {stats}",
-        extra={
-            "event": EVT_MEMORY_L2_ADJUSTED,
-            "side": side,
-            "n_total": len(l2_memories),
-            "n_promoted": promoted,
-            "n_demoted": demoted,
-            "n_adjusted": adjusted,
-        },
-    )
-    return stats
+    result = await sweep_stale_values(user_id=user_id, sources=(side,))
+    return result[side]
 
 
 async def run_l2_adjustment(user_id: str | None = None) -> dict:
-    """Recalculate L2 scores and apply promote/demote rules for BOTH sides.
+    """Bounded pure decay; never overwrite cumulative scores from importance."""
+    from app.services.memory.lifecycle.lazy_update import sweep_stale_values
 
-    Spec §1.5.2 applies to user and AI memories symmetrically. If user_id is
-    None, runs for all users. The two sides share no state (distinct tables,
-    distinct Redis keys) so we run them concurrently.
-    """
-    user_stats, ai_stats = await asyncio.gather(
-        _adjust_side("user", user_id),
-        _adjust_side("ai", user_id),
-    )
+    result = await sweep_stale_values(user_id=user_id)
     return {
-        "user": user_stats,
-        "ai": ai_stats,
-        "total": user_stats["total"] + ai_stats["total"],
-        "promoted": user_stats["promoted"] + ai_stats["promoted"],
-        "demoted": user_stats["demoted"] + ai_stats["demoted"],
-        "adjusted": user_stats["adjusted"] + ai_stats["adjusted"],
+        "user": result["user"], "ai": result["ai"],
+        "total": result["scanned"], "promoted": result["promoted"],
+        "demoted": result["demoted"], "adjusted": result["adjusted"],
+        "engine": "cumulative_decay_v2", "batch_limit_per_side": 1000,
     }

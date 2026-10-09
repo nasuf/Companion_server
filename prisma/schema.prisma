@@ -237,6 +237,7 @@ model ChatWorkspace {
   realWorldGifts           RealWorldGift[]
   realWorldTriggerState    RealWorldTriggerState?
   interactionDays          WorkspaceInteractionDay[]
+  memoryDailyReviews       MemoryDailyReview[]
 
   agentRuns                AgentRun[] @ignore
 
@@ -307,6 +308,7 @@ model Message {
   bugReports     BugReport[]
   attachments    ChatMessageAttachment[]
   linkCards      ChatLinkCard[]
+  memoryUsageReceipts MemoryUsageReceipt[]
 
   runtimeEvents  RuntimeOutbox[] @ignore
 
@@ -1284,6 +1286,35 @@ model MemoryChangelog {
   // access 保留期清理按 (operation, created_at) 扫
   @@index([operation, createdAt], map: "memory_changelogs_op_created_idx")
   @@map("memory_changelogs")
+}
+
+model MemoryUsageReceipt {
+  eventId     String @map("event_id")
+  event       Message @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  memorySide  String @map("memory_side")
+  memoryId    String @map("memory_id")
+  contributed Boolean
+  reward      Float
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@id([eventId, memorySide, memoryId])
+  @@index([createdAt], map: "memory_usage_receipts_retention_idx")
+  @@map("memory_usage_receipts")
+}
+
+model MemoryDailyReview {
+  id            String @id @default(uuid())
+  workspaceId   String @map("workspace_id")
+  workspace     ChatWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  localDate     DateTime @db.Date @map("local_date")
+  status        String
+  memoryIds     Json @default("[]") @map("memory_ids")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@unique([workspaceId, localDate])
+  @@index([createdAt], map: "memory_daily_reviews_retention_idx")
+  @@map("memory_daily_reviews")
 }
 
 model MemoryRepairItem {
