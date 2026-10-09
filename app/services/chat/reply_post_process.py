@@ -186,6 +186,7 @@ async def emit_replies(
     reply_is_fallback: bool = False,
     conversation_id: str | None = None,
     component_card: dict | None = None,
+    persona_checked: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """spec §5/§6.4-§6.5：延迟解释 + emoji/sticker + reply SSE 事件流。
 
@@ -194,6 +195,12 @@ async def emit_replies(
     reply_emotion: spec §5 step 1 的 ai_reply_emotion 输出 `{emotion, intensity}`。
     conversation_id: 供 emoji 跨轮重复回避 (C4); 不传则只做轮内去重。
     """
+    if not persona_checked:
+        from app.services.persona_grounding import guard_reply
+        guarded, corrected = await guard_reply(agent, " ".join(replies), question=user_message)
+        if corrected:
+            replies[:] = [guarded]
+            reply_emotion = {"emotion": "中性", "intensity": 0}
     ai_primary_emotion, emotion_intensity = _reply_decoration_signal(reply_emotion)
     # W4 AI 情绪连续性: 记录本轮情绪 (Redis ~1ms), 下一轮衰减后作为"当下心情"
     await save_ai_mood(conversation_id, ai_primary_emotion, emotion_intensity)
@@ -216,6 +223,11 @@ async def emit_replies(
         # 剥完为空 (整条都是标记) 就跳过, 绝不回退未清理原文.
         if explain_text:
             explain_text = strip_system_markers(explain_text)
+        if explain_text:
+            from app.services.persona_grounding import guard_reply
+            _, corrected = await guard_reply(agent, explain_text)
+            if corrected:
+                explain_text = "抱歉，回复晚了。"
         if explain_text:
             data: dict = {
                 "text": limit_emojis(explain_text),

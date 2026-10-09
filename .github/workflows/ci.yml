@@ -82,6 +82,7 @@ jobs:
         run: |
           python evals/run_local.py --validate-only
           python evals/long_companion_sim.py --validate-only
+          python evals/persona_grounding/run_eval.py --validate-only --output /tmp/persona-validation.json
 
       - name: Prepare isolated proactive E2E database
         env:
@@ -95,6 +96,7 @@ jobs:
       - name: Run backend quality tests
         run: |
           pytest \
+            tests/test_persona_grounding.py tests/test_persona_quarantine_postgres.py \
             tests/test_sql_job_contracts.py \
             tests/test_sql_job_postgres.py tests/test_outbox_postgres.py tests/test_outbox_realtime.py \
             tests/test_chat_ingress_contracts.py \

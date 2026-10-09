@@ -62,6 +62,7 @@ async def short_circuit_reply(
     proactive_reason: str | None = "short_circuit",
     workspace_id: str | None = None,
     defer_turn_finalization: bool = False,
+    persona_conflict_fallback: str | None = None,
 ) -> list[dict]:
     """构造短路分支的 SSE 事件列表。
 
@@ -84,6 +85,12 @@ async def short_circuit_reply(
     # 整条都是标记时给占位省略号 (与 split_and_validate_replies 兜底一致),
     # 绝不回退到未清理的原文.
     reply = limit_emojis(strip_system_markers(reply) or "...")
+    if agent is not None:
+        from app.services.persona_grounding import guard_reply
+        reply, corrected = await guard_reply(agent, reply)
+        if corrected:
+            reply = persona_conflict_fallback or reply
+            extra_metadata = {**(extra_metadata or {}), "persona_location_corrected": True}
     metadata = dict(extra_metadata or {})
     if not sub_intent_mode:
         try:
@@ -315,6 +322,7 @@ async def finalize_short_circuit(
     proactive_reason: str | None = "short_circuit",
     workspace_id: str | None = None,
     defer_turn_finalization: bool = False,
+    persona_conflict_fallback: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
@@ -340,6 +348,7 @@ async def finalize_short_circuit(
         proactive_reason=proactive_reason,
         workspace_id=workspace_id,
         defer_turn_finalization=defer_turn_finalization,
+        persona_conflict_fallback=persona_conflict_fallback,
     )
     for evt in events:
         yield evt

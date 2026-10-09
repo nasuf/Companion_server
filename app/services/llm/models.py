@@ -105,6 +105,13 @@ def get_utility_model() -> BaseChatModel:
     return _build_utility_model(_provider_for("utility"), _utility_model_name())
 
 
+def get_grounding_model() -> BaseChatModel:
+    """Use the calibrated verifier on DashScope; keep offline/provider routing."""
+    provider = _provider_for("utility")
+    model = settings.persona_grounding_model if provider == "dashscope" else _utility_model_name()
+    return _build_utility_model(provider, model)
+
+
 def get_fallback_chat_model() -> ChatOllama:
     return _build_fallback_chat_model(_resolved().local_chat_model)
 

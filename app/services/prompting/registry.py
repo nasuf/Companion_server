@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.prompting.defaults import (
+    PERSONA_GROUNDING_CONTEXT_PROMPT,
+    PERSONA_GROUNDING_CHECK_PROMPT,
     AI_REPLY_EMOTION_PROMPT,
     PROACTIVE_COMMON_RULES_PROMPT,
     ANTI_HALLUCINATION_HARD_RULE_PROMPT,
@@ -216,6 +218,16 @@ class PromptDefinition:
 # 工程项以 【工程补丁】/【工程附加】/【工程扩展】/【工程主导】 前缀标识, 不带 spec 引用.
 
 PROMPT_DEFINITIONS = [
+    PromptDefinition(
+        "persona.grounding_context", "角色事实与主体归属", "聊天热路径", "聊天",
+        "【工程】角色档案优先于日程、模型自述和衍生记忆；用户事实不可变成角色事实。占位符 {facts}。",
+        PERSONA_GROUNDING_CONTEXT_PROMPT,
+    ),
+    PromptDefinition(
+        "persona.grounding_check", "角色地点事实校验", "记忆录入", "记忆",
+        "【工程】批量校验日程、位置自述和自我记忆，完整返回每项判定。占位符 {facts}/{kind}/{items}/{question}。",
+        PERSONA_GROUNDING_CHECK_PROMPT,
+    ),
     # ── 聊天热路径 (Part 3) ──
     PromptDefinition(
         "chat.system_base", "聊天核心规则", "聊天热路径", "聊天",

@@ -74,6 +74,7 @@ _BOUNDARY_BODY_PROMPT_KEYS = {
 
 # Registry 中不作为独立 LangSmith LLM step 出现、但会作为组合 prompt 的可编辑片段出现.
 _COMPONENT_ONLY_PROMPT_KEYS = {
+    "persona.grounding_context",
     "proactive.common_rules",
     "boundary.patience_instruction_blocked",
     "boundary.patience_instruction_low",
@@ -305,6 +306,19 @@ def _label_reply_text(output: str) -> str | None:
     return text[:40] + ("…" if len(text) > 40 else "")
 
 
+def _label_persona_grounding(output: str) -> str | None:
+    try:
+        verdicts = json.loads(_label_strip_codeblock(output))["verdicts"]
+        if not isinstance(verdicts, list) or not verdicts:
+            return None
+        if any(type(item.get("allowed")) is not bool for item in verdicts):
+            return None
+        rejected = sum(not item["allowed"] for item in verdicts)
+        return f"拦截 {rejected} 项地点冲突" if rejected else "角色地点一致"
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def _label_crisis_followup_classify(output: str) -> str | None:
     try:
         data = json.loads(_label_strip_codeblock(output))
@@ -505,6 +519,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     tuple[str, str, Category, Callable[[str], str | None] | None]
 ] = [
     # Decision 类
+    ("persona.grounding_check", "角色地点事实校验", "decision", _label_persona_grounding),
     ("memory.relevance", "记忆相关度判定", "decision", _label_passthrough),
     ("intent.unified", "统一意图识别", "decision", _label_intent_unified),
     ("intent.split", "多意图拆分", "decision", _label_passthrough),

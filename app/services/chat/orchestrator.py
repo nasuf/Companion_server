@@ -1598,6 +1598,13 @@ async def _stream_legacy_response(
         if continuation_lines and not reply_is_fallback:
             replies = [*continuation_lines, *replies]
         full_response = " ".join(replies)
+        from app.services.persona_grounding import guard_reply
+        guarded, corrected = await guard_reply(agent, full_response, question=user_message)
+        if corrected:
+            replies = [guarded]
+            full_response = guarded
+            reply_emotion_pre = None
+            response_diagnostics["persona_location_corrected"] = True
         if reply_emotion_pre is not None:
             reply_emotion = reply_emotion_pre
         else:
@@ -1686,6 +1693,7 @@ async def _stream_legacy_response(
                 reply_emotion=reply_emotion,
                 reply_is_fallback=reply_is_fallback,
                 conversation_id=conversation_id,
+                persona_checked=True,
             ):
                 yield evt
 

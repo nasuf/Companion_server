@@ -22,6 +22,7 @@ def _fake_get_factory():
         "chat.personality_section": d.CHAT_PERSONALITY_SECTION_PROMPT,
         "chat.style_base_rule": d.CHAT_STYLE_BASE_RULE_PROMPT,
         "chat.style_closing_rule": d.CHAT_STYLE_CLOSING_RULE_PROMPT,
+        "persona.grounding_context": d.PERSONA_GROUNDING_CONTEXT_PROMPT,
     }
 
     async def fake_get(key, **kwargs):

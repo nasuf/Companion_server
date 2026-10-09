@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # blank to reuse DASHSCOPE_BASE_URL for accounts where that endpoint works.
     dashscope_character_base_url: str = ""
     dashscope_enable_thinking: bool = False
+    # Semantic subject/location verification needs the calibrated reasoning
+    # model, independently of the conversational small-model choice.
+    persona_grounding_model: str = "qwen3.5-plus"
     # Short voice messages in chat use the native DashScope multimodal HTTP
     # endpoint.  Keep this separate from the OpenAI-compatible LLM base URL.
     dashscope_asr_endpoint: str = (

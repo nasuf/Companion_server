@@ -61,6 +61,12 @@ async def _current_ai_status(agent_id: str | None) -> dict | None:
                 where={"agentId_date": {"agentId": agent_id, "date": date_only}}
             )
             schedule = getattr(row, "scheduleData", None) if row else None
+            if schedule:
+                # Redis failures must not expose ungrounded legacy DB scenes
+                # through the conversation activity/status response.
+                from app.services.schedule_domain.schedule import _ground_schedule
+                agent = await db.aiagent.find_unique(where={"id": agent_id})
+                schedule = await _ground_schedule(agent, schedule)
         except Exception:
             schedule = None
     if not schedule:

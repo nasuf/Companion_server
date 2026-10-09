@@ -69,6 +69,7 @@ async def test_mismatched_workspace_cannot_claim(memory_flow,monkeypatch,field):
 
 async def test_summary_reads_yesterday_exact_scope_and_rejects_persona(monkeypatch):
     d=MagicMock()
+    d.aiagent.find_unique=AsyncMock(return_value=SimpleNamespace(name="伙伴", city=None))
     d.aidailyschedule.find_unique=AsyncMock(return_value=SimpleNamespace(scheduleData=[{"start":"09:00","end":"10:00","event":"散步"}]))
     d.scheduleadjustlog.find_many=AsyncMock(return_value=[])
     d.proactivechatlog.find_many=AsyncMock(return_value=[])
@@ -76,7 +77,10 @@ async def test_summary_reads_yesterday_exact_scope_and_rejects_persona(monkeypat
     monkeypatch.setattr(schedule,"db",d)
     monkeypatch.setattr(schedule,"get_prompt_text",AsyncMock(return_value="{schedule_text}{games_text}"))
     # The extraction template has different placeholders.
-    async def prompt(key):return "{summary_text}" if key.endswith("memories") else "{schedule_text}{games_text}"
+    async def prompt(key):
+        if key == "persona.grounding_context":
+            return "角色档案：{facts}"
+        return "{summary_text}" if key.endswith("memories") else "{schedule_text}{games_text}"
     monkeypatch.setattr(schedule,"get_prompt_text",prompt)
     monkeypatch.setattr(schedule,"get_utility_model",lambda:object())
     monkeypatch.setattr(models,"invoke_text",AsyncMock(return_value="散步后的心情不错"))

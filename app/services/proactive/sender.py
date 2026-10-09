@@ -430,6 +430,8 @@ async def _generate_message(ctx: dict) -> str | None:
     trigger_type = ctx["trigger_type"]
     source = ctx.get("source") or "greeting"
     personality_brief = build_personality_brief(agent)
+    from app.services.persona_grounding import grounding_context, guard_reply
+    personality_brief += "\n\n" + await grounding_context(agent, prompt_reader=get_prompt_text)
     # 《主动交流提示词》4-3: 热点已由 4-1/4-2 筛好并摘要 (_attach_trending)
     trending_pick = ctx.get("trending_pick")
 
@@ -493,12 +495,16 @@ async def _generate_message(ctx: dict) -> str | None:
                 retry = (await invoke_text(get_chat_model(), diversity_prompt)).strip()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[proactive-repeat] retry LLM failed: {exc!r}; shipping first attempt")
-                return response
+                retry = None
             if retry and not is_skip_output(retry) and len(retry) >= 4:
                 response = retry
                 if await is_repeat_of_recent(str(workspace_id), response):
                     # 重复即重复, 发出去 —— 不再 return None. 详见函数上方注释.
                     logger.info("[proactive-repeat] retry still similar, shipping anyway")
+    _, corrected = await guard_reply(agent, response)
+    if corrected:
+        ctx["_skip_reason_detail"] = "persona_location_conflict_or_unverified"
+        return None
     return response
 
 

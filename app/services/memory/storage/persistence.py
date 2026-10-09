@@ -220,6 +220,24 @@ async def is_duplicate(
     return matched is not None
 
 
+async def _generated_self_memory_allowed(user_id, workspace_id, content, provenance) -> bool:
+    if provenance in {"profile_seed", "knowledge_seed"}:
+        return True
+    from app.services.persona_grounding import (
+        generated_stable_self_claim, needs_location_verification,
+        verify_generated_locations, workspace_agent,
+    )
+    if generated_stable_self_claim(content):
+        logger.info("[persona-grounding] refusing generated stable identity claim")
+        return False
+    if needs_location_verification(content, implicit_self=True):
+        # A location must be attributed to the exact generating Agent. Missing
+        # scope is retryable, never resolved to the user's most recent Agent.
+        agent = await workspace_agent(user_id, workspace_id)
+        return not await verify_generated_locations(agent, [content], kind="memory")
+    return True
+
+
 async def store_memory(
     user_id: str,
     content: str,
@@ -258,6 +276,10 @@ async def store_memory(
     """
     # Source narrows to the literal Source type expected by the taxonomy
     repo_source = "ai" if source == "ai" else "user"
+    if repo_source == "ai" and not await _generated_self_memory_allowed(
+        user_id, workspace_id, content, provenance,
+    ):
+        return None
     if _consolidation_staged and (provenance != "consolidated" or not skip_reconciliation or level != 3):
         raise ValueError("Only independent L3 consolidation digests may be staged")
     if provenance == "daily_summary":
@@ -483,6 +505,9 @@ async def store_memory(
 
     if decision.action in {"update_existing", "merge_existing"} and decision.existing_id and decision.existing_record:
         updated_content = decision.merged_content or content
+        if (repo_source == "ai" and updated_content != content
+                and not await _generated_self_memory_allowed(user_id, workspace_id, updated_content, provenance)):
+            return None
         update_data = dict(
             content=updated_content,
             level=min(decision.existing_record.level, level),

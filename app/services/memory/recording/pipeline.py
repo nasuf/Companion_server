@@ -315,6 +315,10 @@ async def process_memory_pipeline(
     # Step 3: Store each memory with dedup and conflict check
     for mem in memories:
         content = mem.get("content", "")
+        from app.services.persona_grounding import generated_stable_self_claim
+        if side == "ai" and generated_stable_self_claim(content):
+            logger.info("[MEM-ai] skipped stable self-claim regardless of category")
+            continue
         if side == "ai" and is_user_fact_acknowledgement(content):
             logger.info(
                 f"[MEM-{side}] skipped user-fact acknowledgement: {content[:40]}"
@@ -467,7 +471,6 @@ async def process_memory_pipeline(
             # AI-side 反思 (e.g. "我差点又忘记提醒用户喝水") extraction LLM 偶尔
             # 误归 sub_category=="提醒" + 给一个 occur_time, 不能据此真的发提醒
             # — AI 的内省不该变成产品行为. 严格限制 side="user" 避免这类误触发.
-            #
             # once 已经在前面校验过必须是未来; 周期性 (yearly/monthly/weekly/daily)
             # 即使 occur_time 是历史(首次发生时间)也合法, trigger handler 会按
             # recurrence 续期到下次.

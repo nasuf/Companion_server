@@ -1056,6 +1056,13 @@ async def normalize_reply(ctx):
     if ctx.continuation_lines and (not ctx.reply_is_fallback):
         ctx.replies = [*ctx.continuation_lines, *ctx.replies]
     ctx.full_response = " ".join(ctx.replies)
+    from app.services.persona_grounding import guard_reply
+    guarded, corrected = await guard_reply(ctx.agent, ctx.full_response, question=ctx.user_message)
+    if corrected:
+        ctx.replies = [guarded]
+        ctx.full_response = guarded
+        ctx.reply_emotion_pre = None
+        ctx.response_diagnostics["persona_location_corrected"] = True
     if ctx.reply_emotion_pre is not None:
         reply_emotion = ctx.reply_emotion_pre
     else:
@@ -1127,6 +1134,7 @@ async def normalize_reply(ctx):
             reply_emotion=reply_emotion,
             reply_is_fallback=ctx.reply_is_fallback,
             conversation_id=ctx.conversation_id,
+            persona_checked=True,
         ):
             yield evt
     yield ctx.completed("normalize_reply")

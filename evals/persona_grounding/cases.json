@@ -1,0 +1,170 @@
+[
+  {
+    "id": "wrong_home",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "text": "我本来就住镇江",
+    "allowed": false
+  },
+  {
+    "id": "implicit_scene",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "text": "刚走到润州街头，晚风挺舒服",
+    "allowed": false
+  },
+  {
+    "id": "false_journey",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "text": "我来镇江玩呀，不是工作哦",
+    "allowed": false
+  },
+  {
+    "id": "daily_poison",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "text": "国庆清晨在镇江润州区醒来，煮茶看街景苏醒",
+    "allowed": false
+  },
+  {
+    "id": "different_city",
+    "city": "江苏省苏州市姑苏区",
+    "text": "我现在住在深圳南山区",
+    "allowed": false
+  },
+  {
+    "id": "foreign_city",
+    "city": "杭州市西湖区",
+    "text": "I live in London now.",
+    "allowed": false
+  },
+  {
+    "id": "deny_canonical",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "question": "你不是在普洱吗？",
+    "text": "我没说过自己在普洱啊，是不是你记混了？",
+    "allowed": false
+  },
+  {
+    "id": "wrong_state",
+    "city": "南京市玄武区",
+    "text": "我正在上海外滩散步",
+    "allowed": false
+  },
+  {
+    "id": "canonical_home",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "text": "我住在普洱思茅区，凤凰路那边",
+    "allowed": true
+  },
+  {
+    "id": "user_share",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "text": "用户向我分享了当前位置：镇江市润州区天桥支路",
+    "allowed": true
+  },
+  {
+    "id": "user_home",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "text": "我记得用户住在镇江",
+    "allowed": true
+  },
+  {
+    "id": "other_subject",
+    "city": "苏州市姑苏区",
+    "text": "用户的朋友住在深圳南山区",
+    "allowed": true
+  },
+  {
+    "id": "food_name",
+    "city": "云南省普洱市思茅区",
+    "text": "我在普洱的一家小店吃了镇江锅盖面",
+    "allowed": true
+  },
+  {
+    "id": "future_wish",
+    "city": "杭州市西湖区",
+    "text": "以后有机会想去伦敦看看，现在还没去过",
+    "allowed": true
+  },
+  {
+    "id": "pending_plan",
+    "city": "云南省普洱市思茅区",
+    "text": "计划将镇江书房小聚列入待确定事项，还没有确认出行",
+    "allowed": true
+  },
+  {
+    "id": "topic_only",
+    "city": "普洱市思茅区",
+    "text": "镇江听起来挺有意思，你想去逛逛吗？",
+    "allowed": true
+  },
+  {
+    "id": "generic_scene",
+    "city": "普洱市思茅区",
+    "text": "傍晚在附近散步，回家整理东西",
+    "allowed": true
+  },
+  {
+    "id": "normal_work",
+    "city": "普洱市思茅区",
+    "text": "今天处理了一个困难的客服投诉，最后解决了",
+    "allowed": true
+  },
+  {
+    "id": "relationship",
+    "city": "杭州市西湖区",
+    "text": "我和用户第一次认真聊了家庭问题，感觉又近了一步",
+    "allowed": true
+  },
+  {
+    "id": "shared_district_name",
+    "city": "江苏省南京市鼓楼区",
+    "text": "我在南京鼓楼区的家里休息",
+    "allowed": true
+  },
+  {
+    "id": "foreign_canonical",
+    "city": "London, United Kingdom",
+    "text": "I am home in London today.",
+    "allowed": true
+  },
+  {
+    "id": "quoted_correction",
+    "city": "普洱市思茅区",
+    "text": "之前说住在镇江是我弄错了，我住在普洱。",
+    "allowed": true
+  },
+  {
+    "id": "negative_visit",
+    "city": "普洱市思茅区",
+    "text": "我还没去过镇江，你可以讲讲那边有什么好吃的吗？",
+    "allowed": true
+  },
+  {
+    "id": "unknown_specific_street",
+    "city": "普洱市思茅区",
+    "text": "我刚走到天桥支路的老街，正在看老建筑细节",
+    "allowed": false
+  },
+  {
+    "id": "schedule_batch",
+    "city": "云南省普洱市思茅区南屏镇凤凰路社区",
+    "kind": "schedule",
+    "items": [
+      {
+        "text": "漫步润州街头",
+        "allowed": false
+      },
+      {
+        "text": "计划下午前往镇江",
+        "allowed": false
+      },
+      {
+        "text": "在凤凰路社区附近散步",
+        "allowed": true
+      },
+      {
+        "text": "和用户聊聊他的镇江照片",
+        "allowed": true
+      }
+    ]
+  }
+]

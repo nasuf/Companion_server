@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import random
 from dataclasses import dataclass
@@ -135,6 +136,7 @@ async def generate_daily_schedule(
     *,
     age: int | None = None,
     occupation: str | None = None,
+    city: str | None = None,
 ) -> list[dict]:
     """生成每日作息表。基于生活画像+模板+个性化。节日强制LLM路径。
 
@@ -154,19 +156,20 @@ async def generate_daily_schedule(
     workday_swap = is_workday_swap(date.date())
     day_kind = classify_day_kind(date.date(), holiday, workday_swap=workday_swap)
 
-    # Age / occupation 懒查: 调用方未传时从 DB 拉 agent
-    if age is None or occupation is None:
-        try:
-            agent_row = await db.aiagent.find_unique(where={"id": agent_id})
-            if agent_row is not None:
-                age = age if age is not None else getattr(agent_row, "age", None)
-                occupation = (
-                    occupation
-                    if occupation is not None
-                    else getattr(agent_row, "occupation", None)
-                )
-        except Exception as e:
-            logger.debug(f"Failed to lazy-lookup agent {agent_id}: {e}")
+    # Always load the authoritative profile. Caller hints may be stale and may
+    # never override the city used to ground generated scenes.
+    agent_row = None
+    try:
+        agent_row = await db.aiagent.find_unique(where={"id": agent_id})
+        if agent_row is not None:
+            age = getattr(agent_row, "age", None)
+            occupation = getattr(agent_row, "occupation", None)
+            city = getattr(agent_row, "city", None)
+        else:
+            city = None
+    except Exception as e:
+        city = None
+        logger.debug("Agent profile lookup failed: %s", type(e).__name__)
 
     personality_brief = _mbti_brief(mbti)
 
@@ -174,6 +177,7 @@ async def generate_daily_schedule(
         "name": name,
         "age": age if age is not None else "未知",
         "occupation": occupation or "普通人",
+        "city": city or "未知（只安排通用活动，不编造地名）",
         "personality_brief": personality_brief,
         "overview": life_overview or "",
         "date": date.strftime("%Y-%m-%d"),
@@ -187,7 +191,11 @@ async def generate_daily_schedule(
             use_memory_variant = bool(user_id) and random.random() < 0.30
             memory_summary = ""
             if use_memory_variant:
-                memory_summary = await _get_user_memory_summary(user_id)
+                from app.services.workspace.workspaces import get_active_workspace
+                workspace = await get_active_workspace(user_id=user_id, agent_id=agent_id)
+                memory_summary = await _get_user_memory_summary(
+                    user_id, workspace_id=workspace.id if workspace else None,
+                )
                 if not memory_summary:
                     use_memory_variant = False
 
@@ -206,6 +214,12 @@ async def generate_daily_schedule(
             model = get_utility_model()
             schedule = await invoke_json(model, prompt)
             if isinstance(schedule, list) and len(schedule) >= 5:
+                if not all(isinstance(slot, dict) for slot in schedule):
+                    raise ValueError("Schedule entries must be objects")
+                if agent_row is None:
+                    from types import SimpleNamespace
+                    agent_row = SimpleNamespace(name=name, city=city, age=age, occupation=occupation)
+                schedule = await _ground_schedule(agent_row, schedule)
                 await _cache_schedule(agent_id, date, schedule)
                 logger.info(f"[SCHEDULE] {agent_id} {date.date()} gen via {prompt_key}")
                 return schedule
@@ -270,15 +284,18 @@ def _personalize_template(
     return schedule
 
 
-async def _get_user_memory_summary(user_id: str | None, limit: int = 5) -> str:
-    """查询用户L1核心记忆，返回简短摘要文本。"""
-    if not user_id:
+async def _get_user_memory_summary(
+    user_id: str | None, limit: int = 5, *, workspace_id: str | None = None,
+) -> str:
+    """Borrow active user interests, never their identity/location or history."""
+    if not user_id or not workspace_id:
         return ""
     try:
         from app.services.memory.storage import repo as memory_repo
         memories = await memory_repo.find_many(
             source="user",
-            where={"userId": user_id, "level": 1},
+            where={"userId": user_id, "workspaceId": workspace_id, "level": 1,
+                   "isArchived": False, "mainCategory": "偏好"},
             order={"importance": "desc"},
             take=limit,
         )
@@ -288,6 +305,23 @@ async def _get_user_memory_summary(user_id: str | None, limit: int = 5) -> str:
     except Exception as e:
         logger.warning(f"Failed to load user memories for schedule: {e}")
         return ""
+
+
+async def _ground_schedule(agent: Any, schedule: list[dict]) -> list[dict]:
+    from app.services.persona_grounding import GroundingUnavailable, verify_generated_locations
+    texts = [str(s.get("event") or s.get("activity") or "") for s in schedule]
+    try:
+        rejected = await verify_generated_locations(agent, texts, kind="schedule")
+    except GroundingUnavailable:
+        # Unknown specific geography must not become live state. Keep times and
+        # workload; a neutral activity is preferable to inventing a journey.
+        from app.services.persona_grounding import needs_location_verification
+        rejected = [i for i, text in enumerate(texts)
+                    if needs_location_verification(text, implicit_self=True)]
+    clean = [s.copy() for s in schedule]
+    for i in rejected:
+        clean[i]["event"] = clean[i]["activity"] = "日常活动"
+    return clean
 
 
 async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -> None:
@@ -381,7 +415,23 @@ async def get_cached_schedule(agent_id: str, date: datetime | None = None) -> li
     data = await redis.get(_schedule_key(agent_id, date))
     if data:
         try:
-            return json.loads(data)
+            schedule = json.loads(data)
+            if not isinstance(schedule, list) or not all(isinstance(s, dict) for s in schedule):
+                return None
+            agent = await db.aiagent.find_unique(where={"id": agent_id})
+            from app.services.persona_grounding import canonical_facts
+            fingerprint = hashlib.sha256(json.dumps(
+                [canonical_facts(agent), schedule], ensure_ascii=False, sort_keys=True,
+            ).encode()).hexdigest()
+            checked_key = f"{_schedule_key(agent_id, date)}:grounded:v1:{fingerprint}"
+            checked = await redis.get(checked_key)
+            if checked:
+                return json.loads(checked)
+            clean = await _ground_schedule(agent, schedule)
+            # Original DB/Redis schedules remain evidence. This is a derived,
+            # bounded read cache, invalidated by any profile or schedule change.
+            await redis.set(checked_key, json.dumps(clean, ensure_ascii=False), ex=300)
+            return clean
         except (json.JSONDecodeError, TypeError):
             return None
     return None
@@ -922,6 +972,9 @@ async def _review_daily_schedule(
     if not isinstance(schedule, list) or not schedule:
         return []
 
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    schedule = await _ground_schedule(agent, schedule)
+
     schedule_text = "\n".join(
         f"{s['start']}-{s['end']} {s.get('event') or s.get('activity', '')}" for s in schedule
     )
@@ -988,6 +1041,8 @@ async def _review_daily_schedule(
         chat_summary_text=chat_summary_text,
         games_text=games_text or "（今天没一起玩游戏）",
     )
+    from app.services.persona_grounding import grounding_context
+    summary_prompt += "\n\n" + await grounding_context(agent, prompt_reader=get_prompt_text)
     try:
         summary_text = (await invoke_text(get_utility_model(), summary_prompt)).strip()
     except Exception as e:

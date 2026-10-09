@@ -248,6 +248,11 @@ async def _build_personality_section(agent: Any) -> _PromptBody | None:
     })
     if not _has_prompt_body(body):
         return None
+    from app.services.persona_grounding import grounding_context
+    grounding_tpl = await _get_optional_prompt("persona.grounding_context")
+    grounding = await grounding_context(agent, template=grounding_tpl) if grounding_tpl else ""
+    if grounding:
+        body += "\n\n" + grounding
     return _PromptBody(body, "chat.personality_section")
 
 

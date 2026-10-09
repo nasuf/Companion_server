@@ -209,9 +209,19 @@ class ShortCircuitCtx:
             voice_context=voice_context,
             # 告别 / 系统确认有专属 arm 原因 (判定窗据此不做 B 追问); 危机短路不 arm
             proactive_reason=short_circuit_arm_reason(kind),
+            # Location verification must never replace crisis care with an
+            # unrelated apology. Retain a safe, tested care response on failure.
+            persona_conflict_fallback=_CRISIS_STATIC_FALLBACK if kind.startswith("crisis") else None,
             workspace_id=self.workspace_id,
             **({"defer_turn_finalization": True} if self.defer_turn_finalization else {}),
         ):
+            if evt.get("event") == "reply":
+                import json
+                payload = json.loads(evt["data"])
+                if payload.get("index") == self.reply_index_offset:
+                    # Legacy background processing must use the delivered text,
+                    # including any deterministic persona correction.
+                    self.last_short_circuit_reply = payload["text"]
             yield evt
 
 
