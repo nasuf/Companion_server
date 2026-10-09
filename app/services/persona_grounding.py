@@ -123,6 +123,7 @@ async def grounding_context(
 
 async def verify_generated_locations(
     agent: Any, texts: list[str], *, kind: str, always: bool = False, question: str = "",
+    policy_template: str | None = None,
 ) -> list[int]:
     """Return rejected indices; only fully typed, complete verdicts are accepted.
 
@@ -145,7 +146,7 @@ async def verify_generated_locations(
         raise GroundingUnavailable("Grounding input exceeds its bounded batch")
     items = [{"index": i, "text": texts[i]} for i in indices]
     try:
-        tpl = await get_prompt_text("persona.grounding_check")
+        tpl = policy_template if policy_template is not None else await get_prompt_text("persona.grounding_check")
         prompt = tpl.format(
             facts=json.dumps(facts, ensure_ascii=False, sort_keys=True),
             kind=kind, items=json.dumps(items, ensure_ascii=False),

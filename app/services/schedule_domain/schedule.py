@@ -308,11 +308,20 @@ async def _get_user_memory_summary(
 
 
 async def _ground_schedule(agent: Any, schedule: list[dict]) -> list[dict]:
+    clean, _ = await _ground_schedule_result(agent, schedule)
+    return clean
+
+
+async def _ground_schedule_result(
+    agent: Any, schedule: list[dict], *, policy_template: str | None = None,
+) -> tuple[list[dict], bool]:
     from app.services.persona_grounding import GroundingUnavailable, verify_generated_locations
     texts = [str(s.get("event") or s.get("activity") or "") for s in schedule]
+    verified = True
     try:
-        rejected = await verify_generated_locations(agent, texts, kind="schedule")
+        rejected = await verify_generated_locations(agent, texts, kind="schedule", policy_template=policy_template)
     except GroundingUnavailable:
+        verified = False
         # Unknown specific geography must not become live state. Keep times and
         # workload; a neutral activity is preferable to inventing a journey.
         from app.services.persona_grounding import needs_location_verification
@@ -321,7 +330,7 @@ async def _ground_schedule(agent: Any, schedule: list[dict]) -> list[dict]:
     clean = [s.copy() for s in schedule]
     for i in rejected:
         clean[i]["event"] = clean[i]["activity"] = "日常活动"
-    return clean
+    return clean, verified
 
 
 async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -> None:
@@ -419,18 +428,28 @@ async def get_cached_schedule(agent_id: str, date: datetime | None = None) -> li
             if not isinstance(schedule, list) or not all(isinstance(s, dict) for s in schedule):
                 return None
             agent = await db.aiagent.find_unique(where={"id": agent_id})
-            from app.services.persona_grounding import canonical_facts
+            from app.services.persona_grounding import canonical_facts, needs_location_verification
+            policy = ""
+            if any(needs_location_verification(
+                str(slot.get("event") or slot.get("activity") or ""), implicit_self=True,
+            ) for slot in schedule):
+                try:
+                    # Read the same current Web-managed policy as the verifier.
+                    # A disabled/unavailable policy cannot reuse an old verdict.
+                    policy = await get_prompt_text("persona.grounding_check")
+                except Exception:
+                    return await _ground_schedule(agent, schedule)
             fingerprint = hashlib.sha256(json.dumps(
-                [canonical_facts(agent), schedule], ensure_ascii=False, sort_keys=True,
+                [canonical_facts(agent), schedule, policy], ensure_ascii=False, sort_keys=True,
             ).encode()).hexdigest()
-            checked_key = f"{_schedule_key(agent_id, date)}:grounded:v1:{fingerprint}"
+            checked_key = f"{_schedule_key(agent_id, date)}:grounded:v2:{fingerprint}"
             checked = await redis.get(checked_key)
             if checked:
                 return json.loads(checked)
-            clean = await _ground_schedule(agent, schedule)
+            clean, verified = await _ground_schedule_result(agent, schedule, policy_template=policy or None)
             # Original DB/Redis schedules remain evidence. This is a derived,
             # bounded read cache, invalidated by any profile or schedule change.
-            await redis.set(checked_key, json.dumps(clean, ensure_ascii=False), ex=300)
+            await redis.set(checked_key, json.dumps(clean, ensure_ascii=False), ex=86400 if verified else 300)
             return clean
         except (json.JSONDecodeError, TypeError):
             return None

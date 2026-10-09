@@ -152,16 +152,43 @@ async def test_cached_schedule_validation_is_bound_to_profile_and_content(checke
     redis = SimpleNamespace(get=AsyncMock(side_effect=lambda key: cache.get(key)),
                             set=AsyncMock(side_effect=lambda key, value, **kw: cache.update({key: value})))
     monkeypatch.setattr(s, "get_redis", AsyncMock(return_value=redis))
+    policy = AsyncMock(return_value=defaults.PERSONA_GROUNDING_CHECK_PROMPT)
+    monkeypatch.setattr(s, "get_prompt_text", policy)
     profile = agent()
     monkeypatch.setattr(s, "db", SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=profile))))
     day = datetime(2026, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
     assert (await s.get_cached_schedule("agent", day))[0]["event"] == "日常活动"
     await s.get_cached_schedule("agent", day)
     assert checker.await_count == 1
+    assert redis.set.await_args.kwargs["ex"] == 86400
     profile.city = "江苏省镇江市润州区"
     checker.return_value = {"verdicts": [{"index": 0, "allowed": True}]}
     assert (await s.get_cached_schedule("agent", day))[0]["event"] == "润州街头"
     assert checker.await_count == 2
+    policy.return_value += "\nA new Web policy version"
+    await s.get_cached_schedule("agent", day)
+    assert checker.await_count == 3
+    assert "A new Web policy version" in checker.await_args.args[1]
+    data[0]["event"] = "在凤凰路社区附近散步"
+    cache["schedule:agent:20261009"] = json.dumps(data)
+    await s.get_cached_schedule("agent", day)
+    assert checker.await_count == 4
+    checker.side_effect = TimeoutError()
+    policy.return_value += "\nRetry policy"
+    assert (await s.get_cached_schedule("agent", day))[0]["event"] == "日常活动"
+    assert redis.set.await_args.kwargs["ex"] == 300
+
+
+async def test_disabled_schedule_policy_cannot_reuse_a_previous_verdict(checker, monkeypatch):
+    from app.services.prompting.store import PromptDisabledError
+    data = [{"start": "18:00", "end": "19:00", "event": "润州街头", "status": "空闲"}]
+    redis = SimpleNamespace(get=AsyncMock(return_value=json.dumps(data)), set=AsyncMock())
+    monkeypatch.setattr(s, "get_redis", AsyncMock(return_value=redis))
+    monkeypatch.setattr(s, "db", SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=agent()))))
+    monkeypatch.setattr(s, "get_prompt_text", AsyncMock(side_effect=PromptDisabledError("persona.grounding_check")))
+    assert (await s.get_cached_schedule("agent", datetime(2026, 10, 9)))[0]["event"] == "日常活动"
+    assert redis.get.await_count == 1  # no old derived verdict read
+    redis.set.assert_not_awaited()
 
 
 async def test_storage_gate_runs_before_embeddings_and_classification(monkeypatch):
