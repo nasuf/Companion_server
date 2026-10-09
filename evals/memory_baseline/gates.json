@@ -1,0 +1,21 @@
+{
+  "version": "memory-evaluation-v1",
+  "minimum_independent_scenarios": 240,
+  "holdout_fraction": 0.3,
+  "minimum_critical_model_pairs": 5,
+  "cluster_unit": "scenario_family",
+  "confidence": 0.95,
+  "bootstrap_draws": 2000,
+  "target_group_minimum_recall_delta": 0.05,
+  "target_group_minimum_delta_lower_bound": 0.0,
+  "overall_minimum_recall_delta": -0.01,
+  "overall_minimum_delta_lower_bound": -0.02,
+  "maximum_new_hard_failures": 0,
+  "maximum_core_scenario_regressions": 0,
+  "maximum_p95_latency_ratio": 1.1,
+  "maximum_mean_model_cost_ratio": 1.1,
+  "missing_stage": "not_run",
+  "missing_live_evidence": "model_quality_not_proven",
+  "baseline_collection_is_algorithm_activation": false,
+  "optional_mem0_comparison_requires": ["immutable_oss_commit", "same_model_stack", "same_dataset_and_budget", "no_production_uploads"]
+}

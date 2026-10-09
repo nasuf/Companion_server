@@ -48,6 +48,8 @@ jobs:
       TTS_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       G03_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       RUNTIME_JOB_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      MEMORY_EVAL_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/companion_memory_eval_ci
+      MEMORY_EVAL_TEST_REDIS_URL: redis://127.0.0.1:6379/13
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       PROACTIVE_E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/companion_proactive_e2e
@@ -83,6 +85,17 @@ jobs:
           python evals/run_local.py --validate-only
           python evals/long_companion_sim.py --validate-only
           python evals/persona_grounding/run_eval.py --validate-only --output /tmp/persona-validation.json
+          python -m evals.memory_baseline.run_eval --validate-only
+
+      - name: Prepare isolated memory evaluation database
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/companion_memory_eval_ci
+          DIRECT_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/companion_memory_eval_ci
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE companion_memory_eval_ci;'
+          psql -h 127.0.0.1 -p 5433 -U postgres -d companion_memory_eval_ci -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS extensions; CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;'
+          prisma migrate deploy
 
       - name: Prepare isolated proactive E2E database
         env:
@@ -96,6 +109,7 @@ jobs:
       - name: Run backend quality tests
         run: |
           pytest \
+            tests/test_memory_baseline_eval.py tests/test_memory_baseline_postgres.py \
             tests/test_persona_grounding.py tests/test_persona_quarantine_postgres.py \
             tests/test_sql_job_contracts.py \
             tests/test_sql_job_postgres.py tests/test_outbox_postgres.py tests/test_outbox_realtime.py \
