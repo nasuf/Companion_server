@@ -60,6 +60,20 @@ async def test_plain_reply_has_no_extra_model_call(checker):
     checker.assert_not_awaited()
 
 
+@pytest.mark.parametrize("question", ["你在忙吗？", "你在干嘛？", "你在吃饭吗？", "你现在在想什么？"])
+async def test_activity_questions_do_not_add_geography_model_call(checker, question):
+    text = "今天处理工作有点累，想先休息一会儿"
+    assert await g.guard_reply(agent(), text, question=question) == (text, False)
+    checker.assert_not_awaited()
+
+
+@pytest.mark.parametrize("question", ["你在镇江吗？", "你不是在普洱吗？", "你在忙吗？你在镇江吗？"])
+async def test_location_confirmation_still_checks_short_answers(checker, question):
+    _, corrected = await g.guard_reply(agent(), "对呀", question=question)
+    assert corrected
+    checker.assert_awaited_once()
+
+
 async def test_wrong_implicit_proactive_place_is_caught(checker):
     text, corrected = await g.guard_reply(agent(), "刚走到润州街头，晚风挺舒服")
     assert corrected and "普洱" in text and "来玩" not in text

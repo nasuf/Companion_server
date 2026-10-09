@@ -182,7 +182,13 @@ async def location_correction(agent: Any) -> str:
 
 
 async def guard_reply(agent: Any, text: str, *, question: str = "") -> tuple[str, bool]:
-    location_question = bool(re.search(r"你.{0,16}(?:住|在.{0,8}(?:哪|吗|？|\?)|哪(?:里|儿|个城市)|搬家|回家)", question))
+    # Ordinary activity questions must not add a geography-model round trip.
+    # Match each clause independently: an activity question cannot hide a
+    # second question asking whether the Agent is in a particular city.
+    location_question = bool(re.search(
+        r"你.{0,16}(?:住|(?<!现)在(?!\s*(?:干嘛|干什么|做什么|忙|吃|喝|想|看|听|写|工作|学习|睡|休息|玩|等|陪))"
+        r".{0,8}(?:哪|吗|？|\?)|哪(?:里|儿|个城市)|搬家|回家)", question,
+    ))
     try:
         rejected = await verify_generated_locations(
             agent, [text], kind="reply", always=location_question, question=question,
