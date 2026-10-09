@@ -403,6 +403,32 @@ def restore_web(path, destination, association):
     return manifest
 
 
+def release_verified_read_cache(path, manifest):
+    """Release gzip read cache before checking the next retained archive.
+
+    Linux otherwise keeps successive multi-GB image archives in page cache,
+    which can evict idle API workers into swap. This is a best-effort hint;
+    all checksums, image/layer verification and retention still run unchanged.
+    """
+    advise = getattr(os, "posix_fadvise", None)
+    flag = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if advise is None or flag is None:
+        return False
+    name = "image.tar.gz" if manifest["kind"] == "server" else "dist.tar.gz"
+    descriptor = None
+    try:
+        descriptor = os.open(path / name, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                             | getattr(os, "O_NOFOLLOW", 0))
+        advise(descriptor, 0, 0, flag)
+        return True
+    except OSError:
+        # Unsupported filesystem/kernel advice must not invalidate a backup.
+        return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def prune(root, keep_days=14, minimum=3):
     if keep_days < 14 or minimum < 3:
         raise ArchiveError("Retention must keep at least 14 days and 3 archives")
@@ -411,6 +437,7 @@ def prune(root, keep_days=14, minimum=3):
         for path in root.iterdir():
             if path.is_dir() and not path.name.startswith("."):
                 manifest = verify(path)  # Fail closed if any old artifact is corrupt.
+                release_verified_read_cache(path, manifest)
                 archives.append((dt.datetime.fromisoformat(manifest["created_at"]), path))
         archives.sort(reverse=True)
         latest = (root / "latest").read_text().strip() if (root / "latest").exists() else None

@@ -112,6 +112,79 @@ class ReleaseArchiveTests(unittest.TestCase):
     def create_web(self):
         return release.archive_web(self.root, self.site, self.association, "incoming")
 
+    def test_prune_releases_verified_cache_before_the_next_archive(self):
+        first = self.create_server()
+        second = self.create_web()
+        original_verify = release.verify
+        order = []
+
+        def verify(path):
+            manifest = original_verify(path)
+            order.append(("verified", path))
+            return manifest
+
+        def advise(path, manifest):
+            self.assertEqual(manifest["kind"], "server" if path == first else "web")
+            order.append(("released", path))
+
+        with patch.object(release, "verify", verify), patch.object(
+                release, "release_verified_read_cache", advise):
+            release.prune(self.root)
+        self.assertEqual(len(order), 4)
+        for i in (0, 2):
+            self.assertEqual(order[i][0], "verified")
+            self.assertEqual(order[i + 1], ("released", order[i][1]))
+        self.assertTrue(first.is_dir() and second.is_dir())
+        self.assertEqual((self.root / "latest").read_text().strip(), second.name)
+
+    def test_cache_advice_does_not_modify_archives_or_private_configuration(self):
+        archive = self.create_server()
+        manifest = release.verify(archive)
+        observed = []
+        expected_inode = (archive / "image.tar.gz").stat().st_ino
+
+        def advise(descriptor, offset, length, flag):
+            self.assertEqual(os.fstat(descriptor).st_ino, expected_inode)
+            self.assertEqual((offset, length, flag), (0, 0, 4))
+            observed.append(descriptor)
+
+        with patch.object(release.os, "posix_fadvise", advise, create=True), patch.object(
+                release.os, "POSIX_FADV_DONTNEED", 4, create=True):
+            self.assertTrue(release.release_verified_read_cache(archive, manifest))
+        self.assertEqual(len(observed), 1)
+        with self.assertRaises(OSError):
+            os.fstat(observed[0])
+        self.assertEqual(release.verify(archive), manifest)
+        self.assertEqual((self.server / ".env").read_text(), "JWT_SECRET=synthetic-do-not-log\n")
+
+    def test_optional_cache_advice_failure_preserves_verification_and_closes_fd(self):
+        archive = self.create_server()
+        manifest = release.verify(archive)
+        observed = []
+
+        def unsupported(descriptor, *args):
+            observed.append(descriptor)
+            raise OSError("synthetic unsupported advice")
+
+        with patch.object(release.os, "posix_fadvise", unsupported, create=True), patch.object(
+                release.os, "POSIX_FADV_DONTNEED", 4, create=True):
+            self.assertFalse(release.release_verified_read_cache(archive, manifest))
+        with self.assertRaises(OSError):
+            os.fstat(observed[0])
+        with patch.object(release.os, "posix_fadvise", None, create=True):
+            release.prune(self.root)
+        self.assertEqual(release.verify(archive), manifest)
+
+    def test_corrupt_archive_still_blocks_prune_before_cache_hint_or_removal(self):
+        archive = self.create_server()
+        (archive / "image.tar.gz").write_bytes(b"synthetic corruption")
+        with patch.object(release, "release_verified_read_cache") as hint:
+            with self.assertRaises(release.ArchiveError):
+                release.prune(self.root)
+            hint.assert_not_called()
+        self.assertTrue(archive.is_dir())
+        self.assertEqual((self.root / "latest").read_text().strip(), archive.name)
+
     def test_server_saves_exact_running_identity_config_and_private_permissions(self):
         archive = self.create_server()
         manifest = release.verify(archive)
