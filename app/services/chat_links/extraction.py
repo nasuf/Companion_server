@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import httpx
 
+from app.services.chat_links.fetch import public_link_client
+
 logger = logging.getLogger(__name__)
 
 _USER_AGENT = (
@@ -122,7 +124,7 @@ async def extract_link_metadata(
             "accept-language": "zh-CN,zh;q=0.9,en;q=0.6",
         }
         api_platform_data: dict[str, str] = {}
-        async with httpx.AsyncClient(
+        async with public_link_client(
             follow_redirects=True,
             timeout=timeout,
             headers=headers,
@@ -634,11 +636,10 @@ async def _resolve_bilibili_final_url(source_url: str, *, timeout: float) -> str
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
-        async with httpx.AsyncClient(
+        async with public_link_client(
             follow_redirects=False,
             timeout=min(max(timeout, 3.0), 12.0),
             headers=headers,
-            trust_env=False,
         ) as client:
             for method in ("HEAD", "GET"):
                 response = await client.request(method, source_url)
@@ -654,14 +655,13 @@ async def _resolve_bilibili_final_url(source_url: str, *, timeout: float) -> str
 
 async def _fetch_bilibili_api_metadata(*, bvid: str, timeout: float) -> dict[str, str]:
     try:
-        async with httpx.AsyncClient(
+        async with public_link_client(
             timeout=min(max(timeout, 3.0), 12.0),
             headers={
                 "user-agent": _USER_AGENT,
                 "referer": "https://www.bilibili.com/",
                 "accept": "application/json",
             },
-            trust_env=False,
         ) as client:
             response = await client.get(
                 "https://api.bilibili.com/x/web-interface/view",

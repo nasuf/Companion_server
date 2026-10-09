@@ -7,12 +7,13 @@ from urllib.parse import urlparse
 import httpx
 
 from app.services.chat_links.extraction import LinkMetadata
+from app.services.chat_links.fetch import COVER_MAX_BYTES, public_link_client
 from app.services.chat_media import storage
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(8.0, connect=4.0, read=6.0, write=4.0, pool=4.0)
-_MAX_COVER_BYTES = 10 * 1024 * 1024
+_MAX_COVER_BYTES = COVER_MAX_BYTES
 _USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Companion/0.1"
@@ -75,12 +76,9 @@ async def _download_image(url: str, referer_url: str | None = None) -> tuple[byt
         "accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
         "referer": _origin(referer_url or url),
     }
-    async with httpx.AsyncClient(timeout=_TIMEOUT, headers=headers, follow_redirects=True) as client:
+    async with public_link_client(timeout=_TIMEOUT, headers=headers, max_bytes=_MAX_COVER_BYTES) as client:
         response = await client.get(url)
         response.raise_for_status()
-        content_length = response.headers.get("content-length")
-        if content_length and int(content_length) > _MAX_COVER_BYTES:
-            raise ValueError("cover image is too large")
         blob = response.content
     storage.validate_image_size(blob)
     mime = storage.normalize_image_mime(_response_mime(response))

@@ -163,6 +163,7 @@ jobs:
             tests/test_scheduler_distributed_jobs.py \
             tests/test_public_endpoints_ownership.py \
             tests/test_chat_endpoint_security.py \
+            tests/test_chat_link_fetch.py tests/test_chat_links.py \
             tests/test_ws_auth.py \
             tests/test_ws_pubsub.py \
             tests/test_ws_ack.py \
