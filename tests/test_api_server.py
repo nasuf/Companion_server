@@ -13,6 +13,42 @@ import uvicorn.supervisors.multiprocess as upstream
 from app import api_server
 
 
+@pytest.fixture
+def diagnostic_e2e(monkeypatch):
+    import importlib
+    from pathlib import Path
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    return importlib.import_module("test_api_server_diagnostics_e2e")
+
+
+def test_e2e_cleanup_waits_for_retiring_worker_without_weakening_checks(diagnostic_e2e, monkeypatch):
+    ready = {"registrations": [{"pid": 2, "trace_bytes": 0}, {"pid": 3, "trace_bytes": 0}], "trace_files": 2}
+    retiring = {"registrations": [*ready["registrations"], {"pid": 1, "trace_bytes": 32}], "trace_files": 3}
+    probe = Mock(side_effect=[retiring, ready])
+    clock = SimpleNamespace(monotonic=Mock(return_value=0), sleep=Mock())
+    monkeypatch.setattr(diagnostic_e2e, "registrations", probe)
+    monkeypatch.setattr(diagnostic_e2e, "time", clock)
+    assert diagnostic_e2e.wait_clean_registrations("owned-container", {2, 3}) == ready
+    assert probe.call_count == 2
+    clock.sleep.assert_called_once_with(0.1)
+
+
+def test_e2e_cleanup_still_fails_when_sinks_leak(diagnostic_e2e, monkeypatch):
+    probe = Mock(return_value={"registrations": [{"pid": 2, "trace_bytes": 0}, {"pid": 3, "trace_bytes": 0}], "trace_files": 3})
+    clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 10]), sleep=Mock())
+    monkeypatch.setattr(diagnostic_e2e, "registrations", probe)
+    monkeypatch.setattr(diagnostic_e2e, "time", clock)
+    with pytest.raises(AssertionError, match="did not settle"):
+        diagnostic_e2e.wait_clean_registrations("owned-container", {2, 3})
+    assert probe.call_count == 2
+
+
+def test_e2e_cleanup_does_not_hide_private_permission_failure(diagnostic_e2e, monkeypatch):
+    monkeypatch.setattr(diagnostic_e2e, "registrations", Mock(side_effect=AssertionError("unsafe modes")))
+    with pytest.raises(AssertionError, match="unsafe modes"):
+        diagnostic_e2e.wait_clean_registrations("owned-container", {2, 3})
+
+
 class FakeProcess:
     def __init__(self, *, alive=True, exitcode=None, pid=7):
         self.alive = alive

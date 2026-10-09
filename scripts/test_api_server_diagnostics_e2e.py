@@ -10,7 +10,7 @@ import uuid
 
 from test_server_workers_e2e import docker, wait_pair
 
-FIXTURE = '''import json,os,re,faulthandler,signal
+FIXTURE = '''import asyncio,json,os,re,faulthandler,signal
 from pathlib import Path
 def hold_gil():
  synthetic_private_value='DIAGNOSTIC_PRIVATE_LOCAL_CANARY_7951'
@@ -25,6 +25,7 @@ async def app(scope, receive, send):
      return
     await send({'type':'lifespan.startup.complete'})
    elif event['type']=='lifespan.shutdown':
+    await asyncio.sleep(float(os.getenv('WORKER_FIXTURE_SHUTDOWN_DELAY','0')))
     await send({'type':'lifespan.shutdown.complete'})
     return
  elif scope['type']=='http':
@@ -43,8 +44,11 @@ folders=list(Path('/tmp').glob('companion-worker-diagnostic-*'))
 assert len(folders)==1
 folder=folders[0];session=json.loads((folder/'session.json').read_text());rows=[]
 for marker in folder.glob('*.ready'):
- data=json.loads(marker.read_text());trace=folder/f"{data['pid']}.trace"
- rows.append({'pid':data['pid'],'marker_mode':oct(marker.stat().st_mode&0o777),'trace_mode':oct(trace.stat().st_mode&0o777),'trace_bytes':trace.stat().st_size})
+ try:
+  data=json.loads(marker.read_text());trace=folder/f"{data['pid']}.trace"
+  rows.append({'pid':data['pid'],'marker_mode':oct(marker.stat().st_mode&0o777),'trace_mode':oct(trace.stat().st_mode&0o777),'trace_bytes':trace.stat().st_size})
+ except FileNotFoundError:
+  pass  # A retiring worker may be joined while the snapshot is being read.
 print(json.dumps({'parent_pid':session['parent_pid'],'directory_mode':oct(folder.stat().st_mode&0o777),'registrations':rows,'trace_files':len(list(folder.glob('*.trace')))}))'''
 
 
@@ -57,6 +61,20 @@ def registrations(name):
     return result
 
 
+def wait_clean_registrations(name, expected, *, timeout=10):
+    """Ready-before-retire HTTP readiness precedes old-worker join/cleanup."""
+    deadline=time.monotonic()+timeout
+    while True:
+        final=registrations(name)
+        if ({row['pid'] for row in final['registrations']}==expected
+                and final['trace_files']==2
+                and all(row['trace_bytes']==0 for row in final['registrations'])):
+            return final
+        if time.monotonic()>=deadline:
+            raise AssertionError(f'Worker diagnostic sinks did not settle: {final}')
+        time.sleep(0.1)
+
+
 def trigger_gil_stall(name, *, scenario):
     path={'unregistered':'/stall-unregistered','handler-removed':'/stall-handler-removed'}.get(scenario,'/stall')
     r=docker('exec',name,'python','-c',
@@ -65,7 +83,7 @@ def trigger_gil_stall(name, *, scenario):
     return json.loads(r.stdout)['pid']
 
 
-def launch(image, name, folder, *, fail_startup=False):
+def launch(image, name, folder, *, fail_startup=False, shutdown_delay=0):
     command = docker('image', 'inspect', image, '--format', '{{json .Config.Cmd}}')
     assert command.returncode == 0
     cmd = json.loads(command.stdout)
@@ -75,6 +93,7 @@ def launch(image, name, folder, *, fail_startup=False):
     options = ['run', '-d', '--name', name, '--network', 'none', '--cpus', '1', '--memory', '512m',
                '-e', 'WEB_CONCURRENCY=2', '-e', 'UVICORN_WORKER_HEALTHCHECK_TIMEOUT=5',
                '-e', 'WORKER_FIXTURE_FAIL_STARTUP=' + ('1' if fail_startup else '0'),
+               '-e', 'WORKER_FIXTURE_SHUTDOWN_DELAY=' + str(shutdown_delay),
                '-v', str(folder) + ':/worker-test:ro', '--entrypoint', cmd[0], image, *cmd[1:]]
     result = docker(*options)
     assert result.returncode == 0, result.stderr
@@ -107,7 +126,8 @@ def main():
             output = args.output / scenario
             output.mkdir(exist_ok=True)
             try:
-                launch(args.image, name, folder, fail_startup=scenario == 'startup-failure')
+                launch(args.image, name, folder, fail_startup=scenario == 'startup-failure',
+                       shutdown_delay=1 if scenario=='hup' else 0)
                 if scenario != 'startup-failure':
                     original = wait_pair(name, timeout=30)
                     initial=registrations(name)
@@ -121,7 +141,7 @@ def main():
                             recovered=wait_pair(name,timeout=5)
                             if not original.intersection(recovered):break
                         else:raise AssertionError('HUP did not replace both workers')
-                        final=registrations(name)
+                        final=wait_clean_registrations(name,recovered)
                         assert {row['pid'] for row in final['registrations']}==recovered and final['trace_files']==2
                         assert capture(name,output)==[]
                         result['checks'].append('real HUP preserves ready-before-retire policy and cleans normal worker sinks')
@@ -163,7 +183,7 @@ def main():
                         assert snapshot['stack_status']=='no_frames_before_deadline'
                         assert any(thread['state']=='T' for thread in snapshot['native']['threads'])
                         result['checks'].append('SIGSTOP records native stopped state and bounded unavailable-stack deadline')
-                    final=registrations(name)
+                    final=wait_clean_registrations(name,recovered)
                     assert {row['pid'] for row in final['registrations']}==recovered and final['trace_files']==2
                     assert all(row['trace_bytes']==0 for row in final['registrations'])
                     result['checks'].append(scenario+': old raw sink is deleted after join and healthy/replacement sinks stay empty')
