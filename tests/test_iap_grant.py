@@ -121,6 +121,14 @@ def _payload(product_id: str, *, txn="t1", otxn="t1", expires_ms=None, quantity=
     )
 
 
+@pytest.fixture(autouse=True)
+def close_unexecuted_background_test_coroutines():
+    yield
+    for coro in getattr(grant, "_bg_coros_for_tests", []):
+        coro.close()
+    grant._bg_coros_for_tests = []
+
+
 def _wire(monkeypatch, fake_db, *, fetch_payload):
     monkeypatch.setattr(grant, "db", fake_db)
     monkeypatch.setattr(
@@ -345,7 +353,7 @@ async def test_consumable_vip_floor_stacks_by_purchase_order():
 async def test_recompute_sets_vip_until_to_entitlement_end(monkeypatch):
     from datetime import timedelta
 
-    month_at = datetime(2026, 9, 6, 10, 7, 40, tzinfo=timezone.utc)
+    month_at = datetime.now(timezone.utc) - timedelta(days=1)
     short_until = datetime(2026, 9, 6, 14, 14, 56, tzinfo=timezone.utc)
     expected = month_at + timedelta(days=31)
 

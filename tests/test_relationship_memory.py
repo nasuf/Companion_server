@@ -157,7 +157,9 @@ def test_extraction_ai_prompt_teaches_milestones_and_bans_persona():
 
     assert "生活/交互" in p
     assert "关系里程碑" in p
-    assert "不要输出\"偏好\"和\"身份\"类别" in p
+    assert "不要抽取新的稳定人设事实" in p
+    assert "可选类别只有：生活 / 情绪 / 思维" in p
+    assert "不要把用户说的事情当作我的记忆" in p
     # Old persona examples must be gone (they contradict the pipeline block).
     assert "我喜欢喝红茶" not in p
     assert "我是个程序员" not in p

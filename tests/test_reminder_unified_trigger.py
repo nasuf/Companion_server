@@ -1660,24 +1660,11 @@ def test_handle_record_request_uses_received_at_not_now():
 def test_trigger_scan_runs_at_least_every_15s():
     """'两分钟后' 类短期提醒, scan 1min 一次会让 worst-case 延迟 1min.
     必须 ≤15s 以让总延迟接近实时."""
-    import inspect
     from jobs import scheduler as sched_mod
 
-    src = inspect.getsource(sched_mod.setup_scheduler)
-    # 找 trigger_scan job 的间隔配置
-    assert 'id="trigger_scan"' in src
-    # 确保不是 minutes=1 (旧值)
-    trigger_scan_idx = src.find('id="trigger_scan"')
-    job_block = src[max(0, trigger_scan_idx - 300):trigger_scan_idx]
-    assert "minutes=1" not in job_block, (
-        "trigger_scan must not be 1-minute interval — short-term reminders "
-        "(N分钟后) need finer cadence"
-    )
-    assert "seconds=" in job_block, (
-        "trigger_scan must use seconds=N interval; current implementation "
-        "uses 15s for ~15s worst-case reminder latency"
-    )
-
+    jobs = {job.id: job for job in sched_mod.scheduler_job_definitions()}
+    assert jobs["trigger_scan"].func is sched_mod._run_trigger_scan
+    assert 0 < jobs["trigger_scan"].trigger.interval.total_seconds() <= 15
 
 def test_time_parser_handles_minute_offset():
     """Round-3 prod regression: '一分钟后' must parse to a future time so

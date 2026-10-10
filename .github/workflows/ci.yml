@@ -10,6 +10,7 @@ on:
 jobs:
   backend-quality:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     services:
       tts-test-postgres:
         image: postgres:16-alpine
@@ -59,6 +60,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -106,109 +109,34 @@ jobs:
           psql -h localhost -p 5433 -U postgres -d companion_proactive_e2e -c 'CREATE SCHEMA IF NOT EXISTS extensions; CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;'
           prisma migrate deploy
 
-      - name: Run backend quality tests
+      - name: Install pinned browser for real API regression
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run ALL backend tests with real disposable dependencies
+        run: python scripts/run_regression_gate.py --output reports/regression
+
+      - name: Enforce coverage, inventory, skips and evidence identity
+        if: always()
+        env:
+          GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: python scripts/check_regression_gate.py --output reports/regression --base "$GATE_BASE"
+
+      - name: Publish regression summary
+        if: always()
         run: |
-          pytest \
-            tests/test_memory_baseline_eval.py tests/test_memory_baseline_postgres.py \
-            tests/test_persona_grounding.py tests/test_persona_quarantine_postgres.py \
-            tests/test_sql_job_contracts.py \
-            tests/test_sql_job_postgres.py tests/test_outbox_postgres.py tests/test_outbox_realtime.py \
-            tests/test_chat_ingress_contracts.py \
-            tests/test_chat_entrypoint.py tests/test_chat_entrypoint_postgres.py \
-            tests/test_chat_ingress_postgres.py \
-            tests/test_chat_ingress_effects_postgres.py tests/test_vip_chat_quota.py tests/test_wallet_gift_tickets.py \
-            tests/test_runtime_execution_foundation.py \
-            tests/test_execution_scope.py \
-            tests/test_execution_scope_postgres.py \
-            tests/test_runtime_data_reset.py \
-            tests/test_prompt_publication_metadata.py \
-            tests/test_configuration_consistency_e2e.py \
-            tests/test_prompt_store.py \
-            tests/test_prompt_sync_overwrite_warning.py \
-            tests/test_proactive_common_rules.py \
-            tests/test_proactive_activity_e2e.py \
-            tests/test_offline_quality_e2e.py \
-            tests/test_cleversee_facts.py \
-            tests/test_cleversee_provider.py \
-            tests/test_offline_public_cache.py \
-            tests/test_offline_public_cache_e2e.py \
-            tests/test_offline_recommendation_quality.py \
-            tests/test_offline_llm_route.py \
-            tests/test_cleversee_activity_e2e.py \
-            tests/test_offline_regional_discovery_e2e.py \
-            tests/test_offline_gallery_quality.py \
-            tests/test_reply_prefix.py \
-            tests/test_offline_activity_companion.py \
-            tests/test_offline_activity_lifecycle.py \
-            tests/test_prompt_optional_reference_rows.py \
-            tests/test_voice_enrollment_flow.py \
-            tests/test_voice_enrollment_postgres.py \
-            tests/test_release_archive.py \
-            tests/test_release_archive_workflow.py \
-            tests/test_chat_graph_deploy_config.py \
-            tests/test_chat_main_graph.py \
-            tests/test_chat_graph_rollout.py \
-            tests/test_chat_graph_rollout_postgres.py \
-            tests/test_chat_graph_equivalence.py \
-            tests/test_chat_graph_trace_structure.py \
-            tests/test_trace_enrich.py \
-            tests/test_trace_mirror.py \
-            tests/test_graph_eval_safety.py \
-            tests/test_graph_eval_preconditions.py \
-            tests/test_reply_register_eval.py \
-            tests/test_local_tracer.py \
-            tests/test_tracing.py \
-            tests/test_traced_usage_session.py \
-            tests/test_orchestrator_phases.py \
-            tests/test_short_circuit_post_process.py \
-            tests/test_crisis_safety.py \
-            tests/test_agent_evals.py \
-            tests/test_security_config.py \
-            tests/test_auth_security.py \
-            tests/test_memory_privacy_api.py \
-            tests/test_memory_quality.py \
-            tests/test_memory_watermark.py \
-            tests/test_memory_system_integration.py \
-            tests/test_l2_dynamics_workspace_scope.py \
-            tests/test_memory_lazy_value.py tests/test_memory_lifecycle_postgres.py \
-            tests/test_memory_daily_review.py tests/test_memory_capacity_postgres.py \
-            tests/test_memory_maintenance_bounds.py \
-            tests/test_memory_consolidation.py tests/test_game_daily_digest.py \
-            tests/test_prisma_client_runtime.py \
-            tests/test_api_server.py tests/test_worker_diagnostics.py tests/test_worker_probe_contracts.py tests/test_agent_schedule_api.py tests/test_runtime_roles.py tests/test_multi_worker_safety.py tests/test_scheduler_timezone.py tests/test_cron_health.py tests/test_cron_health_reporting.py \
-            tests/test_runtime_job_queue.py \
-            tests/test_runtime_job_atomic.py \
-            tests/test_runtime_job_crash_recovery.py \
-            tests/test_agent_initialization_queue.py \
-            tests/test_scheduler_distributed_jobs.py \
-            tests/test_public_endpoints_ownership.py \
-            tests/test_chat_endpoint_security.py \
-            tests/test_chat_link_fetch.py tests/test_chat_links.py \
-            tests/test_ws_auth.py \
-            tests/test_ws_pubsub.py \
-            tests/test_ws_ack.py \
-            tests/test_ws_route_registered.py \
-            tests/test_user_turn_aggregation.py \
-            tests/test_scheduler_aggregation_enqueue.py \
-            tests/test_aggregation_workspace_isolation.py \
-            tests/test_redis_resilience.py \
-            tests/test_ownership_dependencies.py \
-            tests/test_api_integration.py \
-            tests/test_llm_resilience.py \
-            tests/test_observability_filter.py \
-            tests/test_legacy_apns_logging.py \
-            tests/test_deploy_apns_preflight.py \
-            tests/test_prompt_store.py \
-            tests/test_prompt_phase7_hardening.py \
-            tests/test_reply_prompt_format.py \
-            tests/test_prompt_optional_reference_rows.py \
-            tests/test_phase6_prompt_audit.py \
-            tests/test_admin_prompt_replay.py \
-            tests/test_admin_stats_operations.py \
-            tests/test_proactive_history.py \
-            tests/test_proactive_policy.py \
-            tests/test_proactive_reminder_double_fire.py \
-            -q
+          if test -f reports/regression/summary.md; then
+            cat reports/regression/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Regression evidence was not produced; gate did not pass.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Preserve full regression and browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-regression-${{ github.sha }}
+          path: reports/
+          retention-days: 7
 
   chat-safety-integration:
     runs-on: ubuntu-24.04

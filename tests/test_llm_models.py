@@ -17,8 +17,12 @@ def _reset_caches() -> None:
 @pytest.fixture(autouse=True)
 def _reset_profiles_cache():
     """Defense-in-depth: 即便测试直接动了 _PROFILES_CACHE, 每个测试结束也复位."""
+    resilience.reset_breakers_for_testing()
+    resilience.reset_slots_for_testing()
     yield
     resilience.reset_profiles_cache_for_testing()
+    resilience.reset_breakers_for_testing()
+    resilience.reset_slots_for_testing()
 
 
 def test_dashscope_chat_and_embedding_provider(monkeypatch):

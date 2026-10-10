@@ -584,6 +584,7 @@ def _patch_context_deps(monkeypatch, context, memories):
 
     monkeypatch.setattr(context, "_load_proactive_memories", _load)
     monkeypatch.setattr(context, "_load_recent_dialogue", AsyncMock(return_value=""))
+    monkeypatch.setattr(context, "get_cancelled_activity_plans", AsyncMock(return_value=[]))
     monkeypatch.setattr(context, "load_core_memory_strings", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         context, "db",

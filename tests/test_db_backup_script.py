@@ -64,15 +64,17 @@ def test_rotation_runs_after_the_new_backup_is_confirmed(script):
 def test_deploy_reinstalls_it(script):
     """只装在机器上不算数 —— 重建实例就没了。"""
     deploy = DEPLOY.read_text(encoding="utf-8")
-    assert "/usr/local/bin/companion-db-backup.sh" in deploy
-    assert "/etc/cron.d/companion-db-backup" in deploy
+    assert "source scripts/deploy_host_maintenance.sh" in deploy
+    maintenance = (ROOT / "scripts/deploy_host_maintenance.sh").read_text()
+    assert "/usr/local/bin/companion-db-backup.sh" in maintenance
+    assert "/etc/cron.d/companion-db-backup" in maintenance
 
 
 def test_embedded_copy_matches_the_source(script):
-    """deploy.yml 里内嵌了脚本副本, 两处会漂移。改了源文件忘了同步, 服务器上跑的
+    """deploy_host_maintenance.sh 里内嵌了脚本副本, 两处会漂移。改了源文件忘了同步, 服务器上跑的
     还是旧版, 而本地看到的是新版 —— 这种不一致只有在恢复失败那天才会发现。"""
-    deploy = DEPLOY.read_text(encoding="utf-8")
-    body = deploy.split("<<'BACKUP'\n", 1)[1].split("\n            BACKUP\n", 1)[0]
+    deploy = (ROOT / "scripts/deploy_host_maintenance.sh").read_text(encoding="utf-8")
+    body = deploy.split("<<'BACKUP'\n", 1)[1].split("\nBACKUP\n", 1)[0]
     embedded = "\n".join(
         line[12:] if line.startswith(" " * 12) else line
         for line in body.splitlines()

@@ -393,6 +393,7 @@ async def test_scan_due_last_wills_uses_consecutive_missed_login_days(monkeypatc
     monkeypatch.setattr(last_will_service, "db", db)
     monkeypatch.setattr(last_will_service.settings, "last_will_sms_enabled", True)
     monkeypatch.setattr(last_will_service.settings, "sms_enabled", True)
+    monkeypatch.setattr(last_will_service.settings, "sms_mock_enabled", True)
     monkeypatch.setattr(
         last_will_service.settings, "tencent_sms_last_will_template_id", "tpl-123"
     )

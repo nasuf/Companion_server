@@ -124,7 +124,7 @@ def test_colon_inside_sentence_is_not_a_label():
 def test_gb18030_documents_decode():
     assert "我所在的公司「伴生」定位：陪伴科技公司" in [
         i.summary
-        for i in parse_knowledge_document(XIJIA_DOC.encode("gb18030"))
+        for i in parse_knowledge_document(MARATHON_DOC.encode("gb18030"))
     ]
 
 

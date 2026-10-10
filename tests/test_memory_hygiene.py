@@ -140,13 +140,10 @@ async def test_memory_hygiene_merges_then_archives_absorbed_record():
 
 
 def test_scheduler_registers_memory_hygiene_job():
-    import inspect
-
     from jobs import scheduler as scheduler_mod
 
-    source = inspect.getsource(scheduler_mod.setup_scheduler)
-    assert 'id="memory_hygiene"' in source
-    assert "_run_memory_hygiene" in source
+    jobs = {job.id: job for job in scheduler_mod.scheduler_job_definitions()}
+    assert jobs["memory_hygiene"].func is scheduler_mod._run_memory_hygiene
 
 
 @pytest.mark.asyncio

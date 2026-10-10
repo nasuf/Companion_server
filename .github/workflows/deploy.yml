@@ -14,17 +14,32 @@ concurrency:
   group: companion-production
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
 
   deploy:
     runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'main' &&
+       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Require exact successful CI (including manual deployments)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: python3 scripts/require_ci_success.py
 
       # rsync 要以普通用户身份写入, 所以目标目录得先存在且属主正确。冷启动时
       # /app 本身不可写, 这一步不能省成 rsync --rsync-path='mkdir -p ...'。

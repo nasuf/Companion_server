@@ -225,17 +225,21 @@ async def test_fun_asr_maps_provider_rate_limit(monkeypatch):
             )
 
 
-def test_speech_route_precedes_chat_conversation_fallback():
+def test_speech_route_precedes_chat_conversation_fallback(monkeypatch):
     from app.main import app
-
-    paths = [
-        getattr(route, "path", "")
-        for route in app.routes
-        if "POST" in getattr(route, "methods", set())
-    ]
-
-    assert paths.index("/chat/transcribe") < paths.index("/chat/{conversation_id}")
-
+    from fastapi.testclient import TestClient
+    # Use the actual production router order. Anonymous 401 alone would also
+    # pass for /chat/{conversation_id}; the speech-specific body proves dispatch.
+    monkeypatch.setitem(app.dependency_overrides, speech.require_user, lambda: {"sub": "route-test"})
+    client = TestClient(app)
+    try:
+        response = client.post("/chat/transcribe", json={})
+    finally:
+        client.close()
+    assert response.status_code == 422
+    fields = {tuple(error["loc"]) for error in response.json()["detail"]}
+    assert ("body", "conversation_id") in fields
+    assert ("body", "base64") in fields
 
 @pytest.mark.asyncio
 async def test_voice_send_persists_audio_and_returns_attachment(

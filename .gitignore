@@ -20,6 +20,8 @@ build/
 # Server runtime
 .server.pid
 reports/
+.coverage*
+htmlcov/
 evals/results/
 var/
 

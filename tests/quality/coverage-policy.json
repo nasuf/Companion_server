@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "global": {"lines": 77, "branches": 64},
+  "changed": {"lines": 90, "branches": 80},
+  "critical": {
+    "app/services/chat/graph_executor.py": {"lines": 90, "branches": 70},
+    "app/services/memory/lifecycle/lazy_update.py": {"lines": 95, "branches": 85},
+    "app/services/persona_grounding.py": {"lines": 90, "branches": 80},
+    "app/services/prompting/store.py": {"lines": 85, "branches": 80},
+    "app/services/runtime/chat_ingress.py": {"lines": 90, "branches": 75},
+    "app/services/runtime/execution_scope.py": {"lines": 95, "branches": 85},
+    "app/services/runtime/job_queue.py": {"lines": 90, "branches": 75},
+    "app/services/runtime/ws_auth.py": {"lines": 95, "branches": 85}
+  },
+  "allowed_skips": [
+    {
+      "id": "tests.test_cleversee_activity_e2e::test_flutter_native_recommendation_gps_and_review_over_real_http",
+      "message": "Set OFFLINE_FLUTTER_E2E=1 and OFFLINE_FLUTTER_PROJECT for cross-client E2E",
+      "platforms": ["linux", "darwin"],
+      "reason": "Sibling Flutter SDK/repository is a separate cross-client gate; this backend/Web gate does not claim Flutter coverage."
+    },
+    {
+      "id": "tests.test_offline_quality_e2e::test_flutter_real_http_client",
+      "message": "Set OFFLINE_FLUTTER_E2E=1 to run the sibling Flutter checkout",
+      "platforms": ["linux", "darwin"],
+      "reason": "Sibling Flutter SDK/repository is a separate cross-client gate; report this as not run, never as passed."
+    },
+    {
+      "id": "tests.test_prisma_client_runtime::test_generated_client_fits_a_single_worker_import_budget",
+      "message": "The worker resource contract uses Linux /proc",
+      "platforms": ["darwin"],
+      "reason": "Local macOS has no /proc. This test MUST execute on the Linux CI runner."
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,7 +24,7 @@ def _ctx():
 
 
 async def _fake_finalize_short_circuit(reply, **kwargs):
-    yield {"event": "reply", "data": reply}
+    yield {"event": "reply", "data": json.dumps({"text": reply, "index": 0})}
 
 
 @pytest.mark.asyncio

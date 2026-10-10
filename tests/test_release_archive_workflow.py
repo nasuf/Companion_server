@@ -120,9 +120,12 @@ def test_archive_guard_remains_part_of_ci():
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
     quality = next(s for s in workflow["jobs"]["backend-quality"]["steps"]
-                   if s["name"] == "Run backend quality tests")
-    assert "tests/test_release_archive.py" in quality["run"]
-    assert "tests/test_release_archive_workflow.py" in quality["run"]
+                   if s.get("name") == "Run ALL backend tests with real disposable dependencies")
+    assert "scripts/run_regression_gate.py" in quality["run"]
+    runner = (root / "scripts/run_regression_gate.py").read_text()
+    assert '"tests", "-q"' in runner  # Includes both archive files, plus new tests.
+    assert (root / "tests/test_release_archive.py").is_file()
+    assert (root / "tests/test_release_archive_workflow.py").is_file()
 
 
 def test_failed_remote_archive_never_runs_rsync():

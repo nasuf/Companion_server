@@ -438,6 +438,8 @@ async def test_create_recommendation_requires_location_anchor(monkeypatch):
 async def test_article_place_requires_independent_source_and_survives_image_timeout(monkeypatch, city, timeout, expected):
     import json
     from app.services.offline import activity_generation as gen
+    monkeypatch.setattr(gen.settings, 'offline_search_provider', 'tavily')
+    monkeypatch.setattr(gen, 'get_chat_model', lambda: object())
     article = SearchResult(title='镇江这些咖啡店', url='https://example.com/list', content='镇江折光咖啡')
     verified = SearchResult(title='折光咖啡', url='https://example.com/place', content=city + '某路1号')
     monkeypatch.setattr(gen.repo, 'list_user_tags', AsyncMock(return_value=[]))

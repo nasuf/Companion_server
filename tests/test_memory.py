@@ -7,7 +7,8 @@
 - 记忆存储去重阈值
 """
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -561,7 +562,15 @@ def _patch_storage_chain(*, existing_l1: list | None = None, create_id: str = "n
     """patch store_memory 的依赖. existing_l1 控制 SINGLETON find_many 返回值."""
     P = "app.services.memory.storage.persistence"
     existing_records = existing_l1 if existing_l1 is not None else []
+    @asynccontextmanager
+    async def transaction(**kwargs):
+        # The final singleton check runs under a DB advisory transaction lock.
+        # The outer check already handles replacement of a user name.
+        yield SimpleNamespace(execute_raw=AsyncMock(), query_raw=AsyncMock(return_value=[]))
+
     with (
+        patch(f"{P}._generated_self_memory_allowed", AsyncMock(return_value=True)),
+        patch(f"{P}.db.tx", transaction),
         patch(f"{P}.memory_repo.find_many", new_callable=AsyncMock, return_value=existing_records),
         patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
         patch(f"{P}.generate_embedding", new_callable=AsyncMock, return_value=[0.1]) as mock_embed,
@@ -727,7 +736,12 @@ class TestSingletonWriteLock:
             await asyncio.sleep(0.05)  # 拉宽检查→create 的竞争窗口
             return [0.1]
 
+        @asynccontextmanager
+        async def transaction(**kwargs):
+            yield SimpleNamespace(execute_raw=AsyncMock(), query_raw=AsyncMock(return_value=[]))
+
         with (
+            patch(f"{P}.db.tx", transaction),
             patch(f"{P}.distributed_lock", fake_lock),
             patch(f"{P}.memory_repo.find_many", side_effect=fake_find_many),
             patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
@@ -800,6 +814,7 @@ async def test_store_memory_skip_reconciliation_bypasses_adjudication():
     )
     resolve_spy = AsyncMock()
     with (
+        patch.object(pers, "_generated_self_memory_allowed", AsyncMock(return_value=True)),
         patch.object(pers, "resolve_taxonomy", return_value=tax),
         patch.object(pers, "resolve_workspace_id", AsyncMock(return_value="ws1")),
         patch.object(pers, "generate_embedding", AsyncMock(return_value=[0.1] * 4)),

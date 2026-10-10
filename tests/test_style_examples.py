@@ -72,6 +72,7 @@ async def test_personality_section_includes_examples():
     tpl_by_key = {
         "chat.personality_section": d.CHAT_PERSONALITY_SECTION_PROMPT,
         "chat.style_base_rule": d.CHAT_STYLE_BASE_RULE_PROMPT,
+        "persona.grounding_context": "",
         "chat.style_closing_rule": d.CHAT_STYLE_CLOSING_RULE_PROMPT,
     }
 

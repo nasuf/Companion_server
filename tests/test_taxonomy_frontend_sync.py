@@ -1,4 +1,4 @@
-"""CI guard: frontend `Companion_web/src/utils.ts` taxonomy constants must
+"""Consumer contract guard: frontend taxonomy constants must
 include every sub-category that backend `app/services/memory/taxonomy.py`
 defines for L1 (admin UI must be able to render every backend category).
 
@@ -9,18 +9,24 @@ those memories.
 Direction is `backend ⊆ frontend`. Frontend may carry extras (legacy aliases,
 forward-compat) — that's fine; backend additions being silently dropped
 from the UI is what we want to catch.
+
+Independent CI verifies tests/quality/web-taxonomy.json; Web CI validates the
+same contract against its exported TAXONOMY_MATRIX. For live source comparison,
+explicitly set COMPANION_WEB_UTILS to the qualified consumer src/utils.ts.
 """
 
 from __future__ import annotations
 
 import re
+import json
+import os
 from pathlib import Path
 
 import pytest
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_UTILS_TS = _REPO_ROOT / "Companion_web" / "src" / "utils.ts"
+_CONTRACT = Path(__file__).parent / "quality/web-taxonomy.json"
+_UTILS_TS = Path(os.environ["COMPANION_WEB_UTILS"]) if os.environ.get("COMPANION_WEB_UTILS") else None
 
 
 def _parse_ts_array(source: str, name: str) -> list[str]:
@@ -47,9 +53,15 @@ def _parse_ts_array(source: str, name: str) -> list[str]:
 
 @pytest.fixture(scope="module")
 def frontend_source() -> str:
-    if not _UTILS_TS.exists():
-        pytest.skip(f"Frontend not present at {_UTILS_TS}")
-    return _UTILS_TS.read_text(encoding="utf-8")
+    if _UTILS_TS is not None:
+        # An explicitly requested live consumer comparison must fail if missing.
+        return _UTILS_TS.read_text(encoding="utf-8")
+    # Independent CI uses a consumer contract, verified against the actual
+    # exported taxonomy in Web CI. Never silently skip when a sibling is absent.
+    contract = json.loads(_CONTRACT.read_text())
+    assert contract["schema_version"] == 1
+    return "\n".join(f"const {key} = {json.dumps(value, ensure_ascii=False)};"
+                     for key, value in contract["arrays"].items())
 
 
 def _assert_backend_subset(
@@ -109,3 +121,8 @@ def test_frontend_thought_l1_matches_backend(frontend_source: str) -> None:
         backend=_THOUGHT_L1,
         frontend=_parse_ts_array(frontend_source, "THOUGHT_L1"),
     )
+
+
+def test_a_missing_backend_category_is_a_failure_not_a_skip():
+    with pytest.raises(AssertionError, match="重要日期"):
+        _assert_backend_subset(name="LIFE_BASE", backend=["重要日期"], frontend=["其他"])
