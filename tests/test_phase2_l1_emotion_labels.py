@@ -151,13 +151,16 @@ def test_emotion_section_no_intimacy_returns_none():
 
 def test_legacy_emotion_vector_helper_no_longer_imported_in_chat_paths():
     """生产链路 (intent_replies, contradiction, boundary) 不应 import 旧向量 helper."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
     paths = [
         "app/services/chat/intent_replies.py",
         "app/services/memory/interaction/contradiction.py",
         "app/services/interaction/boundary.py",
     ]
     for p in paths:
-        src = open(f"/Users/songtao/Projects/companion/Companion_server/{p}").read()
+        src = (root / p).read_text()
         assert "pad" + "_params" not in src, (
             f"{p} 仍引用旧情绪向量 helper"
         )
