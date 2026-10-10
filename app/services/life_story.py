@@ -23,6 +23,10 @@ from app.redis_client import get_redis
 from app.services.llm.models import get_embedding_model, get_utility_model, invoke_json
 from app.services.prompting.store import get_prompt_text
 from app.services.memory.config import level_for_importance
+from app.services.memory.evidence import EvidenceSource, bind_memory_evidence
+from app.services.memory.profile_evidence import (
+    PROFILE_EXTRACTOR, ProfileOrigin, prepare_profile_origin, persist_profile_origin,
+)
 from app.services.memory.recording.splitting import split_multi_fact
 from app.services.memory.demographics import (
     derive_constellation,
@@ -690,6 +694,7 @@ async def store_memories_batch(
     workspace_id: str | None = None,
     *,
     force: bool = False,
+    origin: ProfileOrigin | None = None,
 ) -> list[str]:
     """Store memories with batch optimizations for initial provisioning.
 
@@ -697,12 +702,12 @@ async def store_memories_batch(
     - Batch embedding: aembed_documents() instead of N × aembed_query()
     - Dedup guard: refuse to run if the target workspace already has AI
       memories (re-running provisioning would otherwise duplicate records).
-      Set `force=True` to clear existing L1 in the workspace first —
+      Set `force=True` to atomically replace existing AI memories in this workspace —
       retry / re-generation path uses this.
     - Bulk insert: client-side UUIDs + create_many for memories/changelog,
       one multi-VALUES SQL for embeddings
-    - Best-effort rollback: if the embedding insert fails we delete the
-      freshly-inserted memory rows so retrieval never sees a half-state
+    - Memory/vector/audit/origin writes and force replacement share a transaction.
+      Failure preserves the previous persona; Redis/entity work follows commit.
     """
     # Filter empty contents
     valid = [m for m in all_memories if m.get("content")]
@@ -726,6 +731,10 @@ async def store_memories_batch(
 
     # Resolve workspace once (shared by all memories + changelogs)
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
+    scope_query = """SELECT w.id FROM chat_workspaces w JOIN ai_agents a ON a.id=w.agent_id
+        WHERE w.id=$1 AND w.user_id=$2 AND a.id=$3 AND a.user_id=$2"""
+    if not await db.query_raw(scope_query, workspace_id, user_id, agent_id):
+        raise ValueError("persona_workspace_scope_mismatch")
 
     # 仅在非 force 路径需要查 existing (force=True 会无条件 delete_many);
     # provisioning 主路径走 force=True, 跳过这次 count 节省一次往返.
@@ -757,17 +766,6 @@ async def store_memories_batch(
 
     # Refresh DB connection (may have gone stale during embedding)
     await ensure_connected()
-
-    if force:
-        # 无条件 delete_many: rows 数没意义, 由 delete_many 返回值取代之前的 existing 计数
-        deleted = await db.aimemory.delete_many(
-            where={"userId": user_id, "workspaceId": workspace_id}
-        )
-        if deleted:
-            logger.info(
-                f"store_memories_batch force=True for agent {agent_id}: cleared "
-                f"{deleted} existing AI memories in workspace {workspace_id}"
-            )
 
     # Pre-generate IDs so we can bulk-insert memories AND link embeddings
     # without a per-row RETURNING round-trip.
@@ -826,7 +824,6 @@ async def store_memories_batch(
     await set_progress(agent_id, "storing_memories",
                        current=int(total * 0.3), total=total,
                        message=f"正在写入记忆 ({total} 条)...")
-    await db.aimemory.create_many(data=memory_rows)
 
     # ── Bulk insert embeddings: single multi-VALUES SQL ──
     # pgvector lacks Prisma binding, so we hand-build the placeholder list:
@@ -842,29 +839,30 @@ async def store_memories_batch(
     for mid, emb in zip(ids, embeddings):
         args.append(mid)
         args.append(format_vector(emb))
-    try:
-        await db.execute_raw(
+    async with db.tx(timeout=timedelta(seconds=30)) as tx:
+        # Serialize provisioning only. SHARE guards prevent ownership changes
+        # without blocking ordinary evidence writers that also take SHARE.
+        await tx.query_raw("SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text",
+                           "persona-init:" + workspace_id)
+        if not await tx.query_raw(scope_query + " FOR SHARE OF w,a",
+                                  workspace_id, user_id, agent_id):
+            raise ValueError("persona_workspace_scope_mismatch")
+        where = {"userId": user_id, "workspaceId": workspace_id}
+        if not force and await tx.aimemory.count(where=where):
+            return []
+        if force:
+            await tx.aimemory.delete_many(where=where)
+        source = (await persist_profile_origin(tx, user_id=user_id, workspace_id=workspace_id,
+                    agent_id=agent_id, origin=origin)) if origin else EvidenceSource("unlinked", "persona_input_uncollected")
+        await tx.aimemory.create_many(data=memory_rows)
+        await tx.execute_raw(
             f"INSERT INTO memory_embeddings (memory_id, embedding) VALUES {placeholders}",
             *args,
         )
-    except Exception:
-        # Embedding write failed — roll back the memories we just inserted
-        # so vector search never sees records without vectors.
-        logger.error(
-            f"Embedding batch insert failed for agent {agent_id}; "
-            f"rolling back {len(ids)} orphan memory rows"
-        )
-        try:
-            await db.aimemory.delete_many(where={"id": {"in": ids}})
-        except Exception as cleanup_err:
-            logger.error(f"Rollback failed for agent {agent_id}: {cleanup_err}")
-        raise
-
-    # ── Bulk insert changelog (advisory, never abort for it) ──
-    try:
-        await db.memorychangelog.create_many(data=changelog_rows)
-    except Exception as e:
-        logger.warning(f"Bulk changelog insert failed for agent {agent_id}: {e}")
+        await tx.memorychangelog.create_many(data=changelog_rows)
+        for mid in ids:
+            await bind_memory_evidence(memory_id=mid, side="ai", user_id=user_id,
+                workspace_id=workspace_id, sources=(source,), extractor_version=PROFILE_EXTRACTOR, database=tx)
 
     # Phase 2-6: seed the entity graph for relation-type persona memories
     # (pet/family/friend names) so entity recall works for the persona, not
@@ -988,6 +986,8 @@ async def generate_l1_coverage(
     profile: dict,
     career_template: dict | None,
     workspace_id: str | None = None,
+    *,
+    origin: ProfileOrigin | None = None,
 ) -> int:
     """Plan B 核心: 把已生成的 profile dict 转成 L1 记忆库 + 入库.
 
@@ -1008,11 +1008,19 @@ async def generate_l1_coverage(
     prompt; convert_profile_to_memories 直接从 profile.identity 拿姓名/性别 (硬覆盖).
     旧架构的 phase3/4 LLM gap-fill / select_character_profile 已废弃。
     """
+    origin = origin or prepare_profile_origin(profile, career_template)
+    # Process the frozen copy, so awaits cannot detach the snapshot from the
+    # conversion input. The caller's mutable dictionaries remain untouched.
+    frozen = json.loads(origin.payload)
+    if frozen["profile"] != profile or frozen["career"] != career_template:
+        raise ValueError("profile_origin_input_mismatch")
+    profile, career_template = frozen["profile"], frozen["career"]
     try:
         async with memory_generation_lock(agent_id):
             async with init_report(agent_id, profile_id=None) as report:
                 return await _run_l1_coverage(
                     agent_id, user_id, profile, career_template, workspace_id, report,
+                    origin=origin,
                 )
     except MemoryGenerationLocked:
         logger.warning(f"generate_l1_coverage already running for agent {agent_id}; skipping")
@@ -1022,6 +1030,7 @@ async def generate_l1_coverage(
 async def _run_l1_coverage(
     agent_id: str, user_id: str, profile: dict, career_template: dict | None,
     workspace_id: str | None, report: InitReport,
+    *, origin: ProfileOrigin | None = None,
 ) -> int:
     """Plan B 简化版主流程. profile 是 character_generation 输出的字典 (字段名
     与 character.generation prompt JSON schema 对齐). career_template 是池里
@@ -1095,6 +1104,7 @@ async def _run_l1_coverage(
             agent_id, user_id, memories,
             workspace_id=workspace_id,
             force=True,
+            origin=origin or prepare_profile_origin(profile, career_template),
         )
 
     report.total_stored = len(stored_ids)

@@ -1,6 +1,7 @@
 """Agent initialization pipeline, shared by local fallback and queue workers."""
 import asyncio
 import logging
+from copy import deepcopy
 from prisma import Json
 from app.db import db
 from app.services.interaction.boundary import init_patience
@@ -9,6 +10,7 @@ from app.services.career import pick_random_active_career
 from app.services.character import _apply_postprocess_overrides
 from app.services.character_generation import generate_full_profile
 from app.services.life_story import activate_agent, generate_l1_coverage, set_progress
+from app.services.memory.profile_evidence import prepare_profile_origin
 from app.services.proactive.sender import dispatch_first_greeting_for_agent
 from app.services.schedule_domain.schedule import generate_and_save_life_overview, generate_daily_schedule
 
@@ -91,6 +93,8 @@ async def _run_agent_initialization_inner(
     await set_progress(agent.id, "prompt_building", message="正在构建生成提示...")
     profile: dict
     career = career_template_override
+    invocation_inputs = deepcopy({"name": agent.name, "gender": agent.gender,
+        "mbti": mbti, "personality": personality_dict, "profile_override": profile_override})
     if profile_override is not None:
         await set_progress(agent.id, "llm_generating", message="正在读取文档背景...")
         profile = dict(profile_override)
@@ -131,6 +135,13 @@ async def _run_agent_initialization_inner(
         else "背景生成完成, 正在解析..."
     )
     await set_progress(agent.id, "llm_done", message=done_message)
+    try:
+        profile_origin = prepare_profile_origin(profile, career, inputs=invocation_inputs,
+            kind="imported_profile" if profile_override is not None else "generated_profile")
+    except (TypeError, ValueError):
+        logger.exception("Invalid persona origin for agent %s", agent.id)
+        await set_progress(agent.id, "failed", message="生成失败: 人设档案来源格式无效")
+        return
 
     identity = profile.get("identity", {}) if isinstance(profile, dict) else {}
     update_payload: dict = {}
@@ -161,6 +172,7 @@ async def _run_agent_initialization_inner(
                 profile=profile,
                 career_template=career,
                 workspace_id=workspace_id,
+                origin=profile_origin,
             )
         except Exception as e:
             memories_failed = True

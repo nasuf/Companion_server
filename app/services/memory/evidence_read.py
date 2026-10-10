@@ -38,6 +38,12 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
     rows = await db.query_raw(
         """SELECT e.*,
              CASE WHEN e.agent_id IS DISTINCT FROM $7::text THEN 'unavailable'
+             WHEN e.source_kind='profile' THEN
+               CASE WHEN o.id IS NULL THEN 'deleted'
+                    WHEN o.user_id IS DISTINCT FROM e.user_id OR o.workspace_id IS DISTINCT FROM e.workspace_id
+                         OR o.agent_id IS DISTINCT FROM e.agent_id THEN 'unavailable'
+                    WHEN o.source_version IS DISTINCT FROM e.source_version THEN 'changed'
+                    ELSE 'recorded_snapshot' END
              WHEN e.source_kind='message' THEN
                CASE WHEN e.source_message_id IS NULL THEN 'deleted'
                     WHEN c.user_id IS DISTINCT FROM e.user_id OR c.workspace_id IS DISTINCT FROM e.workspace_id
@@ -55,10 +61,12 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
                     ELSE 'available' END
              WHEN e.source_kind IN ('unlinked','import') THEN 'unverified'
              ELSE 'recorded_snapshot' END AS availability,
-             c.id AS conversation_id
+             c.id AS conversation_id, o.input_status AS profile_input_status,
+             o.format_version AS profile_format_version
            FROM memory_evidence_links e
            LEFT JOIN messages m ON m.id=e.source_message_id
            LEFT JOIN conversations c ON c.id=m.conversation_id
+           LEFT JOIN memory_profile_origins o ON o.id=e.source_profile_id
            LEFT JOIN LATERAL (
              SELECT id,user_id,workspace_id,content FROM memories_user WHERE id=e.parent_user_memory_id
              UNION ALL
@@ -77,7 +85,9 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
             "current_content":row["content_version"]==version,
             "extractor_version":row["extractor_version"],"relation":row["relation"],
             "availability":row["availability"],"created_at":row["created_at"],
-            "conversation_id":row["conversation_id"] if accessible and row["source_kind"]=="message" else None})
+            "conversation_id":row["conversation_id"] if accessible and row["source_kind"]=="message" else None,
+            "profile": {"input_status":row["profile_input_status"], "format_version":row["profile_format_version"]}
+                if accessible and row["source_kind"]=="profile" else None})
     # A previous-page match must not disappear as users page through history.
     counts = await db.query_raw(
         """SELECT EXISTS(SELECT 1 FROM memory_evidence_links WHERE memory_id=$1 AND memory_source=$2

@@ -18,10 +18,13 @@ from app.api.admin import memory_repairs
 from app.services.auth import create_jwt
 from app.services.memory.evidence import EvidenceSource
 from tests.test_memory_evidence_postgres import origins
+from tests.test_memory_profile_evidence_postgres import persona
+from app.services.memory.profile_evidence import prepare_profile_origin
 
 
 @pytest.mark.asyncio
-async def test_browser_readonly_evidence_permissions_and_source_deletion(origins):
+@pytest.mark.parametrize("source_kind", ["message", "profile"])
+async def test_browser_readonly_evidence_permissions_and_source_deletion(origins,persona,source_kind):
     db,uid,wid,mid,msg,bind,detail,users,agents,spaces,convs=origins
     app=FastAPI()
     app.include_router(memory_repairs.router)
@@ -62,31 +65,46 @@ async def test_browser_readonly_evidence_permissions_and_source_deletion(origins
                 errors=[];page.on("pageerror",lambda error:errors.append(str(error)))
                 try:
                     await page.goto(origin)
-                    path=f"/admin-api/memory-repairs/evidence/user/{mid}?user_id={uid}&workspace_id={wid}&limit=20"
+                    side="ai" if source_kind=="profile" else "user"
+                    path=f"/admin-api/memory-repairs/evidence/{side}/{mid}?user_id={uid}&workspace_id={wid}&limit=20"
                     admin=create_jwt("synthetic-evidence-browser-admin",role="admin")
-                    async def request(token,path=path):
-                        return await page.evaluate("args=>window.read(...args)",[token,path])
+                    async def request(token,selected_path=None):
+                        return await page.evaluate("args=>window.read(...args)",[token,selected_path or path])
                     assert (await request(""))["status"]==401
                     assert (await request(create_jwt(uid,role="user")))["status"]==403
                     assert (await request(admin))["data"]["state"]=="historical_unknown"
-                    await bind(EvidenceSource("message",msg.id))
+                    expected_ref=msg.id
+                    if source_kind=="profile":
+                        _,store,inspect=persona
+                        ids=await store(origin=prepare_profile_origin({"private":"Synthetic hidden profile"},None),force=True)
+                        mid=ids[0]
+                        path=f"/admin-api/memory-repairs/evidence/ai/{mid}?user_id={uid}&workspace_id={wid}&limit=20"
+                        expected_ref=(await inspect(mid))["items"][0]["source_ref"]
+                    else:
+                        await bind(EvidenceSource("message",msg.id))
                     await page.evaluate("args=>{window.token=args[0];window.path=args[1]}",[admin,path])
                     await page.get_by_role("button",name="查看来源").click()
                     await page.wait_for_function("document.querySelector('output').textContent.length>0")
                     linked=await request(admin)
-                    assert linked["data"]["state"]=="linked" and linked["data"]["items"][0]["source_ref"]==msg.id
+                    assert linked["data"]["state"]=="linked" and linked["data"]["items"][0]["source_ref"]==expected_ref
+                    if source_kind=="profile":
+                        assert linked["data"]["items"][0]["profile"]["input_status"]=="uncollected"
+                        assert "Synthetic hidden profile" not in str(linked)
                     assert msg.content not in str(linked)
                     assert (await request(admin,path.replace(wid,spaces[1])))["status"]==404
-                    await db.message.delete(where={"id":msg.id})
+                    if source_kind=="profile":
+                        await db.execute_raw("DELETE FROM memory_profile_origins WHERE id=$1",expected_ref)
+                    else:
+                        await db.message.delete(where={"id":msg.id})
                     deleted=(await request(admin))["data"]["items"][0]
                     assert deleted["availability"]=="deleted" and deleted["source_ref"] is None
                     assert not violations and not errors
                     assert await db.usermemory.count(where={"userId":uid})==1
                 except BaseException:
-                    await page.screenshot(path=str(artifacts/"memory-evidence-real-api-failure.png"),full_page=True)
+                    await page.screenshot(path=str(artifacts/f"memory-evidence-{source_kind}-real-api-failure.png"),full_page=True)
                     raise
                 finally:
-                    await context.tracing.stop(path=str(artifacts/"memory-evidence-real-api-trace.zip"))
+                    await context.tracing.stop(path=str(artifacts/f"memory-evidence-{source_kind}-real-api-trace.zip"))
             finally:
                 await browser.close()
     finally:

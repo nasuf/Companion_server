@@ -1367,6 +1367,7 @@ model MemoryEvidenceLink {
   sourceRole           String?  @map("source_role")
   sourceStatus         String?  @map("source_status")
   sourceMessageId      String?  @map("source_message_id")
+  sourceProfileId      String?  @map("source_profile_id")
   parentUserMemoryId   String?  @map("parent_user_memory_id")
   parentAiMemoryId     String?  @map("parent_ai_memory_id")
   relation             String
@@ -1375,9 +1376,28 @@ model MemoryEvidenceLink {
 
   @@index([workspaceId, memorySource, memoryId, id], map: "memory_evidence_target_idx")
   @@index([sourceMessageId], map: "memory_evidence_message_idx")
+  @@index([sourceProfileId], map: "memory_evidence_profile_idx")
   @@index([parentUserMemoryId], map: "memory_evidence_parent_user_idx")
   @@index([parentAiMemoryId], map: "memory_evidence_parent_ai_idx")
   @@map("memory_evidence_links")
+  @@ignore
+}
+
+// Private immutable initialization snapshots, accessed by bounded raw queries.
+model MemoryProfileOrigin {
+  id            String   @id
+  userId        String   @map("user_id")
+  workspaceId   String   @map("workspace_id")
+  agentId       String   @map("agent_id")
+  sourceVersion String   @map("source_version")
+  sourceStatus  String   @map("source_status")
+  inputStatus   String   @map("input_status")
+  formatVersion String   @map("format_version")
+  payloadText   String   @map("payload_text")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, agentId, id], map: "memory_profile_scope_idx")
+  @@map("memory_profile_origins")
   @@ignore
 }
 

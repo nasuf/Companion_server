@@ -42,7 +42,7 @@ GET /admin-api/memory-repairs/evidence-audit
 
 Detail limits are 1–50; audit limits are 1–500. Cursors are keyset-based. Audit
 counts refer only to the returned page and the current content/Agent scope:
-`linked` means a recorded message/parent origin exists, including a subsequently
+`linked` means a recorded message/parent/profile origin exists, including a subsequently
 deleted origin. It does not mean the source is currently available or the claim
 is verified. `unknown` is the complement within `checked`. The response includes
 the denominator, definition and sampling time. Unknown scopes return 404 rather
@@ -75,7 +75,7 @@ performs no writes, backfill, retrieval changes or prompt changes.
 ## Remaining original roadmap work
 
 - M02.02.03: durable tool/business receipts and exact model/prompt snapshots.
-- M02.02.04: profile, clone, knowledge/import publishing, corrections, admin and
+- M02.02.04: remaining clone, knowledge/import publishing, corrections, admin and
   public edits, daily summaries, compression, location, offerings, offline/game
   and reminder adapters. Their uncollected provenance must remain unknown.
 - M02.02.05: a multi-page audit controller with rate/stop limits. No inferred
@@ -98,3 +98,45 @@ exercise real HTTP/JWT routes and PostgreSQL with synthetic fixtures. Web's
 separate Chromium suite exercises the production React components, pagination,
 desktop completeness, errors and stale-request isolation using controlled API
 responses. Neither is a claim of complete production UI/model E2E coverage.
+
+
+## Persona initialization follow-up (M02.02 PROFILE01)
+
+Initialization now stores one immutable, scope-bound `memory_profile_origins`
+snapshot for the actual profile and career consumed by conversion. Its SHA-256
+also covers the invocation inputs when recorded. Generated, imported/postprocessed
+and directly provided profiles are distinguished. These are fictional character
+settings, not real-world experiences. An imported profile does not certify the
+original document. Exact model/prompt receipts and internal random/repair steps
+are still uncollected (M02.02.03); a processing revision is not a Web prompt version.
+
+The snapshot is limited to 256 KiB and deduplicated by content version within the
+owner/workspace/Agent scope. Every resulting memory gets an independent link.
+Raw profile/input text is not returned by the admin API. The existing panel shows
+source kind, availability and whether invocation inputs were recorded. Deleted
+or inaccessible sources hide their reference and profile metadata. Old memories
+are not inferred or backfilled. Direct batch writes without a real profile remain
+explicitly unlinked.
+
+Prisma migration 157 is additive and preserves old client compatibility. It
+adds immutable payload/scope guards and nullable live profile references. The
+legacy dependency cleanup trigger now preserves shared ID-only vectors/audit
+while an opposite-side memory survives. Memory, vector, audit, snapshot, source
+links and forced replacement commit together under a workspace lock. Embedding
+runs before the transaction; entity seeding/cache invalidation follow commit.
+Failure preserves the previous memories and sources. This does not claim all
+Agent profile fields or the full initialization job share that transaction.
+
+Snapshots cascade on owner/workspace/Agent deletion; regenerations may retain
+previous snapshots. A global retention/capacity policy remains M02.18. Schema
+rollback is unnecessary for application rollback; do not drop evidence tables.
+The initialized snapshot is provenance for the batch input, not a per-field
+explanation of deterministic fallbacks or the model's consistency repair.
+
+Qualification adds empty/populated 156→157 Prisma upgrades, repeat deploy,
+lock-timeout rollback/retry in a disposable DB, actual PostgreSQL initialization
+writes, 250-row transaction timing, same-ID side cleanup, partial failures,
+concurrency and scope guards. Real HTTP/JWT/PostgreSQL Chromium tests and separate
+actual React controlled-response tests cover the admin display. Production
+qualification is read-only; a natural post-release initialization is a separate
+positive sample and must not be claimed before one exists.
