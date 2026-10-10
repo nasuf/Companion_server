@@ -96,6 +96,7 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "title": plain_text(_field(row, "title")),
         "summary": plain_text(_field(row, "summary")),
         "description": plain_text(_field(row, "description")),
+        "recommendation_message": metadata.get("recommendation_message") or None,
         "category": _field(row, "category"),
         "city": _field(row, "city"),
         "location_name": _field(row, "location_name", "locationName"),
@@ -431,6 +432,21 @@ async def memory_brief(
         if text:
             parts.append(f"- {label}: {text}" if label else f"- {text}")
     return "\n".join(parts)[:3000]
+
+
+async def recommendation_memory_items(user_id: str, workspace_id: str | None) -> list[str]:
+    """Bounded original user records; never truncate a quote or mix in AI memories."""
+    rows = await db.query_raw(
+        """
+        SELECT content FROM memories_user
+        WHERE user_id = $1 AND workspace_id IS NOT DISTINCT FROM $2::text
+          AND is_archived = FALSE AND COALESCE(sub_category, '') <> '提醒'
+          AND length(content) BETWEEN 1 AND 1000
+        ORDER BY importance DESC, updated_at DESC, id DESC LIMIT 30
+        """,
+        user_id, workspace_id,
+    )
+    return [str(row['content']) for row in rows or []]
 
 
 async def create_activity(data: dict[str, Any]) -> dict[str, Any]:

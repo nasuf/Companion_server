@@ -550,6 +550,8 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("intent.crisis_followup_classify", "危机后续状态判定", "decision", _label_crisis_followup_classify),
     ("music.user_pause_followup_decision", "共听暂停后跟进判定", "decision", _label_passthrough),
     ("offline.recommendation_fact_check", "活动文案事实核验", "decision", lambda out: _label_json_bool(out, "supported", "有事实依据", "缺少事实依据")),
+    ("offline.activity_recommendation_message", "活动推荐寄语", "data", _label_reply_text),
+    ("offline.recommendation_message_check", "活动寄语及关联核验", "decision", lambda out: _label_json_bool(out, "supported", "核验通过", "需要修订")),
     ("offline.image_quality", "活动配图类型核验", "decision", _label_passthrough),
 
     # Data 类

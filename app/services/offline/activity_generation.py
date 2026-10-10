@@ -15,6 +15,9 @@ from app.config import settings
 from app.services.llm.models import invoke_text, invoke_json
 from app.services.offline.llm import get_offline_chat_model as get_chat_model, get_offline_small_model as get_utility_model
 from app.services.offline.activity_images import persist_activity_images
+from app.services.offline.activity_recommendation_message import (
+    attach_recommendation_message, evidence_inputs,
+)
 from app.services.offline.image_evidence import indexed_image_evidence
 from app.services.offline.prompt_fields import clip_text, filled, parse_text_field
 from app.services.offline.recommendation_content import fallback_detail, fallback_summary, useful_detail
@@ -591,6 +594,7 @@ async def _verify_discovery_leads(proposals: list[dict], results: list[SearchRes
                 task = card.get('easter_egg_task')
                 if isinstance(task, dict) and all(isinstance(task.get(k), str) for k in ('title', 'body', 'principle')):
                     facts['easter_egg_task'] = {k: plain_text(task[k])[:500] for k in ('title', 'body', 'principle')}
+                facts['user_relevance'] = card.get('user_relevance', [])
                 verified.append(facts)
                 continue
         # A model cannot send arbitrary unmentioned names to a verification API.
@@ -617,6 +621,8 @@ async def _verify_discovery_leads(proposals: list[dict], results: list[SearchRes
     async def collect(name: str) -> None:
         found, card = await verify(name)
         if card:
+            proposal = next((item for item in proposals if item.get('location_name') == name), {})
+            card['user_relevance'] = proposal.get('user_relevance', [])
             results.extend(r for r in found if r.url not in {item.url for item in results})
             verified.append(card)
     try:
@@ -636,9 +642,14 @@ async def generate_activity_card(
     search_location: str | None = None,
     location_terms: list[str] | None = None,
     center: tuple[float, float] | None = None,
+    conversation_id: str | None = None,
 ) -> dict[str, Any] | None:
     tags = await repo.list_user_tags(user_id, workspace_id, limit=9)
-    memory = await repo.memory_brief(user_id, workspace_id, limit=60)
+    evidence, source_statuses = await evidence_inputs(
+        user_id=user_id, workspace_id=workspace_id, conversation_id=conversation_id, tags=tags,
+    )
+    memory = json.dumps(evidence['memory'], ensure_ascii=False)
+    dialogue = json.dumps(evidence['dialogue'], ensure_ascii=False)
     recent_activities = await repo.list_recent_activity_fingerprints(
         user_id,
         workspace_id,
@@ -651,8 +662,10 @@ async def generate_activity_card(
         candidates = await discover(city=native_city, search_anchor=search_anchor, tags=tags,
                                     recent=recent_activities, center=center)
         if candidates:
-            return await _native_card(candidates, user_id=user_id, city=native_city,
-                search_anchor=search_anchor, tags=tags, memory=memory, recent=recent_activities)
+            card = await _native_card(candidates, user_id=user_id, city=native_city,
+                search_anchor=search_anchor, tags=tags, memory=memory, recent=recent_activities,
+                dialogue_context=dialogue)
+            return await attach_recommendation_message(card, evidence, source_statuses)
         if not settings.offline_tavily_fallback:
             return None
     filtered_results, all_usable_results, query = await _search_activity_candidates(
@@ -683,8 +696,9 @@ async def generate_activity_card(
             prompt_text = prompt_template.format(
                 city=city,
                 search_anchor=search_location or city,
-                tags=", ".join(tags) if tags else "暂无",
-                memory=memory or "暂无足够记忆，使用城市热门和季节普适活动兜底。",
+                tags=json.dumps(evidence['preference'], ensure_ascii=False),
+                memory=memory,
+                dialogue_context=dialogue,
                 avoid_text=_avoid_text(recent_activities),
                 sources_json=json.dumps(sources, ensure_ascii=False),
             )
@@ -781,7 +795,7 @@ async def generate_activity_card(
         card["description"] = plain_text(copy)
     if not useful_detail(card["description"]):
         card["description"] = fallback_detail(card)
-    return card
+    return await attach_recommendation_message(card, evidence, source_statuses)
 
 
 async def _native_card(
@@ -793,6 +807,7 @@ async def _native_card(
     tags: list[str],
     memory: str,
     recent: list[dict],
+    dialogue_context: str = '[]',
 ) -> dict:
     # Model output selects an ID and supplies copy, never place/session facts.
     facts = [{**{k: v for k, v in c.items() if k != "native_images"},
@@ -801,8 +816,9 @@ async def _native_card(
     prompt = (await get_prompt_text("offline.activity_card")).format(
         city=city,
         search_anchor=search_anchor,
-        tags="、".join(tags) or "暂无",
+        tags=json.dumps(tags, ensure_ascii=False),
         memory=memory or "暂无",
+        dialogue_context=dialogue_context,
         avoid_text=_avoid_text(recent),
         sources_json=json.dumps(facts, ensure_ascii=False),
     )
@@ -868,6 +884,7 @@ async def _native_card(
         source = _native_album_source(card, city)
     if card["candidate_id"] != selected["candidate_id"]:
         copy = {}  # Never attach the original place's reason to its replacement.
+    card['user_relevance'] = copy.get('user_relevance', [])
     card["summary"] = fallback_summary(card)
     notes = [
         dict(title=p.title, url=p.url, text=source_text(p)[:2200])
@@ -931,7 +948,7 @@ async def _native_card(
                     {
                         k: v
                         for k, v in facts_for_copy.items()
-                        if k not in {"native_images", "vibe", "image_provenance"}
+                        if k not in {"native_images", "vibe", "image_provenance", "user_relevance"}
                     },
                     ensure_ascii=False,
                 ),

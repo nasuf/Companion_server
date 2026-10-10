@@ -41,3 +41,26 @@ async def message_context(ctx: dict[str, Any]) -> dict[str, str]:
     except Exception as exc:
         logger.warning("[offline] recent dialogue unavailable: %s", type(exc).__name__)
     return fields
+
+
+async def recommendation_dialogue(
+    *, user_id: str, workspace_id: str | None, conversation_id: str | None,
+) -> list[str]:
+    """Whole user utterances only: assistant statements are not user evidence."""
+    if not conversation_id:
+        return []
+    rows = await db.query_raw(
+        """
+        SELECT m.content FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.id = $1 AND c.user_id = $2
+          AND c.workspace_id IS NOT DISTINCT FROM $3::text
+          AND c.is_deleted = FALSE AND m.role = 'user'
+          AND COALESCE(m.metadata->>'trigger_type', '') NOT LIKE 'offline_%'
+          AND NOT (COALESCE(m.metadata, '{}'::jsonb) ? 'component_card')
+          AND length(m.content) BETWEEN 1 AND 1000
+        ORDER BY m.created_at DESC, m.id DESC LIMIT 10
+        """,
+        conversation_id, user_id, workspace_id,
+    )
+    return [str(row['content']) for row in reversed(rows or [])]

@@ -27,6 +27,7 @@ class OfflineActivityItem(BaseModel):
     title: str
     summary: str
     description: str
+    recommendation_message: str | None = None
     category: str | None = None
     city: str | None = None
     vibe: str | None = None

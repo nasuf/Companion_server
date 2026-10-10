@@ -21,6 +21,7 @@ from app.services.offline import (
     activity_generation as generation,
     activity_images as images,
     activity_service as service,
+    activity_recommendation_message as recommendation,
 )
 from app.services.offline import (
     repository as repo,
@@ -53,9 +54,11 @@ DETAIL_RELEASE = json.loads(
         / "scripts/prompt_releases/20261008_activity_detail_quality.json"
     ).read_text()
 )
+MESSAGE_RELEASE = json.loads((Path(__file__).parents[1] /
+    "scripts/prompt_releases/20261010_activity_recommendation_message.json").read_text())
 RELEASE["prompts"] = list(
     {
-        entry["key"]: entry for entry in RELEASE["prompts"] + DETAIL_RELEASE["prompts"]
+        entry["key"]: entry for entry in RELEASE["prompts"] + DETAIL_RELEASE["prompts"] + MESSAGE_RELEASE["prompts"]
     }.values()
 )
 
@@ -266,6 +269,17 @@ async def native(journey, monkeypatch, tmp_path):  # noqa: F811 — imported pyt
     monkeypatch.setattr(generation, "invoke_text", model)
     monkeypatch.setattr(generation, "get_chat_model", lambda: object())
     monkeypatch.setattr(generation, "get_utility_model", lambda: object())
+    monkeypatch.setattr(recommendation, "get_chat_model", lambda: object())
+    monkeypatch.setattr(recommendation, "get_utility_model", lambda: object())
+    monkeypatch.setattr(recommendation, "invoke_text", AsyncMock(return_value=(
+        "想把这家咖啡馆推荐给你，给下次出门多留一个选择。可以先看看这里的介绍，"
+        "再决定是不是你想尝试的内容。如果想换一条平常走的路线，可以把它作为一站，"
+        "不用安排得太满，也不用为了这次推荐特意挤出时间。出发前看看当天的开放安排，"
+        "按自己的节奏来就好。有兴趣的话，要不要找个方便的时候去看看？暂时不想去也没关系，先放着就好。"
+    )))
+    monkeypatch.setattr(recommendation, "invoke_json", AsyncMock(return_value={
+        "supported": True, "unsupported_claims": [], "relevant_indices": [],
+    }))
     monkeypatch.setattr(
         generation, "invoke_json", AsyncMock(return_value={"supported": True})
     )

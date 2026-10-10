@@ -196,50 +196,51 @@ async def create_recommendation_for_user(
                 "reason": "location_required", "message": "还没有获取到所在城市，请更新定位后再生成活动。",
             })
         return None
-    card = await generate_activity_card(
-        user_id=user_id,
-        workspace_id=ctx["workspace_id"],
-        city=city,
-        source=source,
-        search_location=search_anchor,
-        location_terms=list(match_terms),
-        center=(float(ctx['user_location_latitude']), float(ctx['user_location_longitude']))
-        if ctx.get('user_location_latitude') is not None and ctx.get('user_location_longitude') is not None else None,
-    )
-    if not card:
-        if source == "manual":
-            raise HTTPException(status_code=503, detail={
-                "reason": "no_suitable_activity", "message": "暂时没找到合适的新去处，请稍后再试。",
-            })
-        return None
-    # 地理编码：地址 -> 经纬度（供到达 ≤200m 校验）+ 同地点去重键。key 未配置或失败
-    # 时 coords=None，不阻断推荐（到达校验按 offline_arrival_require_geocode 处理）。
-    metadata = card.get('discovery_metadata') or {}
-    if metadata.get('coordinate_source') == 'native_poi':
-        place_lat, place_lng = card['place_lat'], card['place_lng']
-        place_key = metadata.get('session_key') or ('poi:' + metadata['poi_id'])
-    else:
-        coords = await geocode_address(card.get("address"), card.get("city") or city)
-        place_lat, place_lng = coords if coords else (None, None)
-        place_key = make_place_key(card.get("location_name"), card.get("address"), card.get("city") or city)
-    activity = await repo.create_activity(
-        {
-            **card,
-            "user_id": user_id,
-            "agent_id": ctx["agent_id"],
-            "workspace_id": ctx["workspace_id"],
-            "conversation_id": ctx["conversation_id"],
-            "status": "pending",
-            "place_lat": place_lat,
-            "place_lng": place_lng,
-            "place_key": place_key,
-        }
-    )
     async with offline_trace(
         "activity_invite",
         conversation_id=ctx["conversation_id"],
-        agent_id=ctx["agent_id"], user_id=user_id,
+        agent_id=ctx.get("agent_id"), user_id=user_id,
     ) as tracer:
+        card = await generate_activity_card(
+            user_id=user_id,
+            workspace_id=ctx["workspace_id"],
+            city=city,
+            source=source,
+            conversation_id=ctx["conversation_id"],
+            search_location=search_anchor,
+            location_terms=list(match_terms),
+            center=(float(ctx['user_location_latitude']), float(ctx['user_location_longitude']))
+            if ctx.get('user_location_latitude') is not None and ctx.get('user_location_longitude') is not None else None,
+        )
+        if not card:
+            if source == "manual":
+                raise HTTPException(status_code=503, detail={
+                    "reason": "no_suitable_activity", "message": "暂时没找到合适的新去处，请稍后再试。",
+                })
+            return None
+        # 地理编码：地址 -> 经纬度（供到达距离校验）+ 同地点去重键。key 未配置或失败
+        # 时 coords=None，不阻断推荐（到达校验按 offline_arrival_require_geocode 处理）。
+        metadata = card.get('discovery_metadata') or {}
+        if metadata.get('coordinate_source') == 'native_poi':
+            place_lat, place_lng = card['place_lat'], card['place_lng']
+            place_key = metadata.get('session_key') or ('poi:' + metadata['poi_id'])
+        else:
+            coords = await geocode_address(card.get("address"), card.get("city") or city)
+            place_lat, place_lng = coords if coords else (None, None)
+            place_key = make_place_key(card.get("location_name"), card.get("address"), card.get("city") or city)
+        activity = await repo.create_activity(
+            {
+                **card,
+                "user_id": user_id,
+                "agent_id": ctx["agent_id"],
+                "workspace_id": ctx["workspace_id"],
+                "conversation_id": ctx["conversation_id"],
+                "status": "pending",
+                "place_lat": place_lat,
+                "place_lng": place_lng,
+                "place_key": place_key,
+            }
+        )
         message = await generate_activity_invite_message(
             activity=activity,
             user_id=user_id,
@@ -255,23 +256,28 @@ async def create_recommendation_for_user(
             source_id=activity["id"],
             trigger_type="offline_activity_recommendation",
             trace_id=tracer.safe_trace_id,
+            extra_metadata={
+                "recommendation_message_status": (activity.get("discovery_metadata") or {}).get("recommendation_message_status", "not_generated"),
+                "user_relevance_count": (activity.get("discovery_metadata") or {}).get("user_relevance_count", 0),
+                "recommendation_evidence_status": (activity.get("discovery_metadata") or {}).get("recommendation_evidence_status", {}),
+            },
         )
-    await emit_activity_card(
-        conversation_id=ctx["conversation_id"],
-        user_id=user_id,
-        agent_id=ctx["agent_id"],
-        workspace_id=ctx["workspace_id"],
-        activity=activity,
-        trigger_type="offline_activity_recommendation_card",
-        status_label="待确定",
-    )
-    await repo.update_next_activity_due(
-        user_id,
-        ctx["agent_id"],
-        ctx["workspace_id"],
-        repo.next_activity_due(datetime.now(UTC)),
-    )
-    return activity
+        await emit_activity_card(
+            conversation_id=ctx["conversation_id"],
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx["workspace_id"],
+            activity=activity,
+            trigger_type="offline_activity_recommendation_card",
+            status_label="待确定",
+        )
+        await repo.update_next_activity_due(
+            user_id,
+            ctx["agent_id"],
+            ctx["workspace_id"],
+            repo.next_activity_due(datetime.now(UTC)),
+        )
+        return activity
 
 
 async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem:

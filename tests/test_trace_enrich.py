@@ -257,6 +257,8 @@ def test_trace_prompt_key_coverage_matches_runtime_surfaces():
     ("offline.event_extract", "data"),
     ("offline.image_quality", "decision"),
     ("offline.recommendation_fact_check", "decision"),
+    ("offline.activity_recommendation_message", "data"),
+    ("offline.recommendation_message_check", "decision"),
 ])
 def test_cleversee_steps_expose_editable_prompt_and_semantic_category(key, category):
     import json
@@ -268,7 +270,9 @@ def test_cleversee_steps_expose_editable_prompt_and_semantic_category(key, categ
 
     release = json.loads((Path(__file__).resolve().parents[1]
                           / "scripts/prompt_releases/20261008_cleversee_activity.json").read_text())
-    content = next(item["content"] for item in release["prompts"] if item["key"] == key)
+    message_release = json.loads((Path(__file__).resolve().parents[1]
+                          / "scripts/prompt_releases/20261010_activity_recommendation_message.json").read_text())
+    content = next(item["content"] for item in release["prompts"] + message_release["prompts"] if item["key"] == key)
     token = start_prompt_render_trace()
     try:
         prompt = ManagedPromptText(content, key).format_map(SafeDict())

@@ -292,6 +292,19 @@ PROMPT_DEFINITIONS = [
         '事实：{facts_json}\n待审文案：{copy_text}\n文案核验模板等待 Web 发布。输出{{"supported":false}}',
     ),
     PromptDefinition(
+        "offline.activity_recommendation_message", "活动推荐寄语", "线下互动", "线下活动",
+        "仅使用选中候选的原文关联依据生成页内寄语；不替代聊天短消息或地点事实简介。",
+        '用户记忆库：{user_memory}\n用户喜好库：{user_preference}\n对话上下文：{dialogue_context}\n'
+        '活动名称：{activity_name}\n时间：{date_time}\n地点：{location}\n类别：{category}\n'
+        '简介：{description}\n活动摘要：{activity_summary}\n寄语模板等待 Web 版本发布。',
+    ),
+    PromptDefinition(
+        "offline.recommendation_message_check", "活动推荐寄语及关联依据核验", "线下互动", "线下活动",
+        "核验原文关联的语义相关性与寄语事实；失败退回不引用用户经历的通用寄语。",
+        '已知事实：{facts_json}\n关联依据：{references_json}\n待审寄语：{message}\n'
+        '核验模板等待 Web 版本发布。输出{{"supported":false,"relevant_indices":[]}}',
+    ),
+    PromptDefinition(
         "offline.activity_invite_message", "线下活动朋友式推荐语", "线下互动", "线下活动",
         "【工程扩展】V3 现实世界互动. 给生成的活动卡配一条不像通知模板的主动聊天消息.",
         OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT,
