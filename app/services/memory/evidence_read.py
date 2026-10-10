@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from app.db import db
 from app.services.memory.evidence import _table, content_version
+from app.services.memory.legacy_evidence_read import legacy_evidence_preview
 
 
 def _cursor(value: str | None) -> str:
@@ -28,7 +29,7 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
         raise ValueError("invalid_evidence_limit")
     after = _cursor(cursor)
     targets = await db.query_raw(
-        f"""SELECT m.content,m.provenance,w.agent_id FROM {_table(side)} m
+        f"""SELECT m.content,m.provenance,m.created_at,w.agent_id FROM {_table(side)} m
             JOIN chat_workspaces w ON w.id=m.workspace_id AND w.user_id=m.user_id
             WHERE m.id=$1 AND m.user_id=$2 AND m.workspace_id=$3""", memory_id,user_id,workspace_id)
     if not targets:
@@ -84,10 +85,13 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
            AND source_kind NOT IN ('unlinked','import') AND agent_id=$6) AS has_current,
            EXISTS(SELECT 1 FROM memory_evidence_links WHERE memory_id=$1 AND memory_source=$2
            AND user_id=$3 AND workspace_id=$4) AS has_history""",memory_id,side,user_id,workspace_id,version,targets[0]["agent_id"])
+    legacy = await legacy_evidence_preview(database=db, user_id=user_id, workspace_id=workspace_id,
+        side=side, memory_id=memory_id, agent_id=targets[0]["agent_id"],
+        target_created_at=targets[0]["created_at"])
     return {"memory_id":memory_id,"memory_source":side,"user_id":user_id,"workspace_id":workspace_id,
         "agent_id":targets[0]["agent_id"],"content_version":version,"provenance":targets[0]["provenance"],
         "state":"linked" if counts[0]["has_current"] else "current_unlinked" if counts[0]["has_history"] else "historical_unknown",
-        "items":items,"limit":limit,
+        "items":items,"limit":limit,"legacy":legacy,
         "next_cursor":urlsafe_b64encode(rows[limit-1]["id"].encode()).decode() if len(rows)>limit else None,
         "sampled_at":datetime.now(timezone.utc).isoformat()}
 

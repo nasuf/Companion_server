@@ -52,6 +52,26 @@ Content/source SHA-256 values identify text versions. `extractor_version` is the
 server processing protocol revision; it is **not** a Web prompt publication
 version or an exact model/prompt snapshot.
 
+## Legacy read-only compatibility (M02.02 follow-up)
+
+Detail responses add a separate optional `legacy` preview. The original snapshot
+`state` and audit counts are unchanged. Explicit `evidence_linked` changelogs are
+inspected under the target owner/workspace, newest 20 logs and at most 50 unique
+message IDs. Payloads are limited to 16,000 characters; malformed or truncated
+records remain incomplete. Counters describe this bounded sample, not all
+historical evidence. A full multi-page controller remains M02.02.05.
+
+The preview checks current message owner, workspace, Agent, role, deletion and
+creation time. Same-ID memories in both sides of the same scope are ambiguous
+because old logs did not store a side. Missing/inaccessible/ambiguous sources
+have their message/conversation IDs redacted. A recreated target or source cannot
+inherit a pre-creation association. No raw message text is returned.
+
+Even an accessible legacy reference stays **旧版来源待核验**: neither the message
+version at extraction nor the linked memory content version was recorded. It
+never becomes a new snapshot, verified fact or confidence update. This route
+performs no writes, backfill, retrieval changes or prompt changes.
+
 ## Remaining original roadmap work
 
 - M02.02.03: durable tool/business receipts and exact model/prompt snapshots.
