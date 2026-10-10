@@ -56,7 +56,8 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
                          OR p.workspace_id IS DISTINCT FROM e.source_workspace_id THEN 'unavailable'
                     WHEN e.relation='template_copy' AND p.workspace_id<>e.workspace_id
                          AND NOT EXISTS (SELECT 1 FROM ai_agents a JOIN chat_workspaces w ON w.agent_id=a.source_template_id
-                           WHERE a.id=e.agent_id AND w.id=p.workspace_id) THEN 'unavailable'
+                           JOIN ai_agents t ON t.id=w.agent_id AND t.user_id=w.user_id
+                           WHERE a.id=e.agent_id AND w.id=p.workspace_id AND w.user_id=p.user_id) THEN 'unavailable'
                     WHEN encode(sha256(convert_to(p.content,'UTF8')),'hex')<>e.source_version THEN 'changed'
                     ELSE 'available' END
              WHEN e.source_kind IN ('unlinked','import') THEN 'unverified'

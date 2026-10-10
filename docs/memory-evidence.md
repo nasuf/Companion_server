@@ -140,3 +140,29 @@ concurrency and scope guards. Real HTTP/JWT/PostgreSQL Chromium tests and separa
 actual React controlled-response tests cover the admin display. Production
 qualification is read-only; a natural post-release initialization is a separate
 positive sample and must not be claimed before one exists.
+
+### Template clone origins
+
+New clones bind each copied AI memory to the exact current source memory version
+with `memory/template_copy` and `template-clone-v1`. This records the copy event;
+it does not reconstruct the template's original creation history or verify facts.
+Existing clones remain unchanged. Source editing, deletion or ownership changes
+are shown separately; no template text or owner identity is returned by the API.
+
+Only active, enrolling Agents owned by the reserved template system user with a
+matching active workspace can be copied. Up to 1000 nonarchived AI memories are
+read, across all existing tiers; over-limit or empty templates fail explicitly.
+Memory tiers/importance/provenance are preserved; usage score is not copied and
+the new decay clock starts at the copy. Archived, user-side and foreign-owner
+rows are excluded. Existing missing template vectors remain missing; actual SQL
+copy errors fail the transaction instead of producing a partial clone.
+
+Persona creation, workspace switching, copied memories/vectors, new audit/source
+links and conversation creation share a 30-second SQL transaction. A per-user
+advisory lock and default-signup recheck prevent duplicate automatic clones
+when Redis is unavailable. The shared template-persona lock serializes copies
+against force initialization, while allowing concurrent copies for other users.
+Voice, entity seeding, old runtime cleanup and first-day scheduling run after
+commit and retain their best-effort behavior. Their failure does not undo the
+committed clone; durable retry/aggregate diagnostics remain existing O01/M02.06
+follow-ups. This is not an atomic migration of all runtime/Redis state.

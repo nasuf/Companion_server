@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from prisma import Json
@@ -43,20 +43,22 @@ from prisma import Json
 from app.db import db
 from app.services.agent_avatars import pick_agent_avatar
 from app.services.agent_template.registry import (
+    TEMPLATE_SYSTEM_USERNAME,
     list_enrolling_template_ids,
     pick_enrolling_template_id,
 )
+from app.services.memory.evidence import EvidenceSource, bind_memory_evidence, content_version
 from app.services.memory.retrieval.context_selector import exceeds_injection_limit
 from app.services.speech_output.voices import assign_random_voice
 from app.services.workspace.workspaces import (
-    create_workspace,
     finalize_archived_workspaces,
     get_active_workspace,
-    restore_staged_workspaces,
-    stage_active_workspaces_for_user,
 )
 
 logger = logging.getLogger(__name__)
+
+MAX_TEMPLATE_MEMORIES = 1000
+CLONE_EXTRACTOR = "template-clone-v1"
 
 # Scalar columns copied verbatim from a template AiMemory row into the clone.
 _MEMORY_COPY_FIELDS = (
@@ -102,18 +104,33 @@ def _clone_persona_data(template, user_id: str) -> dict[str, Any]:
 
 
 async def _clone_ai_memories(
-    *, template_workspace_id: str, new_workspace_id: str, user_id: str
-) -> int:
-    """Copy the template's L1 self-memory rows + their embeddings.
+    *, database, template_workspace_id: str, template_user_id: str,
+    new_workspace_id: str, user_id: str
+) -> list[tuple[str, str]]:
+    """Copy bounded active template memories, their vectors and versioned origins.
 
     Uses client-generated UUIDs so the vector rows can be copied in the same
     pass without a round-trip to read back generated ids.
     """
-    template_rows = await db.aimemory.find_many(
-        where={"workspaceId": template_workspace_id, "isArchived": False}
+    # Pair with persona initialization's exclusive lock. Shared holders allow
+    # concurrent signups while preventing a force-replacement from deleting
+    # vectors before this snapshot has been copied.
+    await database.query_raw(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))::text AS held",
+        "persona-init:" + template_workspace_id,
     )
-    if not template_rows:
-        return 0
+    snapshot = await database.query_raw(
+        """SELECT id FROM memories_ai WHERE workspace_id=$1 AND user_id=$2
+           AND NOT is_archived ORDER BY id LIMIT $3 FOR SHARE""",
+        template_workspace_id, template_user_id, MAX_TEMPLATE_MEMORIES + 1,
+    )
+    if not snapshot:
+        raise ValueError("template_memories_missing")
+    if len(snapshot) > MAX_TEMPLATE_MEMORIES:
+        raise ValueError("template_memories_over_limit")
+    template_rows = await database.aimemory.find_many(
+        where={"id": {"in": [r["id"] for r in snapshot]}}, order={"id": "asc"}
+    )
 
     new_rows: list[dict[str, Any]] = []
     id_pairs: list[tuple[str, str]] = []  # (template_id, new_id)
@@ -124,6 +141,7 @@ async def _clone_ai_memories(
             "id": new_id,
             "userId": user_id,
             "workspaceId": new_workspace_id,
+            "valueUpdatedAt": datetime.now(UTC),
         }
         for field in _MEMORY_COPY_FIELDS:
             payload[field] = getattr(row, field, None)
@@ -158,7 +176,7 @@ async def _clone_ai_memories(
             new_workspace_id[:8],
         )
 
-    await db.aimemory.create_many(data=new_rows)
+    await database.aimemory.create_many(data=new_rows)
 
     # Copy embeddings in a single batched INSERT ... SELECT. A per-row loop here
     # is an N+1 round-trip storm (one query per memory) that holds a DB
@@ -166,31 +184,27 @@ async def _clone_ai_memories(
     # bursts. The VALUES join maps each new id to its template embedding in one
     # statement; a template row without an embedding is simply skipped by the
     # JOIN, and ON CONFLICT keeps the copy idempotent.
-    copied = 0
-    try:
-        values_clause = ",".join(
-            f"(${i * 2 + 1},${i * 2 + 2})" for i in range(len(id_pairs))
-        )
-        flat_args: list[str] = []
-        for template_id, new_id in id_pairs:
-            flat_args.extend((new_id, template_id))
-        copied = await db.execute_raw(
-            f"""
-            INSERT INTO memory_embeddings (memory_id, embedding)
+    values_clause = ",".join(
+        f"(${i * 2 + 1},${i * 2 + 2})" for i in range(len(id_pairs))
+    )
+    flat_args = [value for template_id, new_id in id_pairs for value in (new_id, template_id)]
+    copied = await database.execute_raw(
+        f"""INSERT INTO memory_embeddings (memory_id, embedding)
             SELECT v.new_id::text, e.embedding
             FROM (VALUES {values_clause}) AS v(new_id, template_id)
             JOIN memory_embeddings e ON e.memory_id = v.template_id::text
-            ON CONFLICT (memory_id) DO NOTHING
-            """,
-            *flat_args,
-        )
-    except Exception as exc:
-        # A batch embedding-copy failure must not fail the whole clone; the rows
-        # still exist and can be re-embedded lazily later.
-        logger.warning(
-            "[AGENT-CLONE] batch embedding copy failed for workspace %s: %s",
-            new_workspace_id[:8],
-            exc,
+            ON CONFLICT (memory_id) DO NOTHING""", *flat_args,
+    )
+    await database.memorychangelog.create_many(data=[{
+        "userId": user_id, "workspaceId": new_workspace_id,
+        "memoryId": new_id, "operation": "insert", "newValue": row.content,
+    } for row, (_, new_id) in zip(template_rows, id_pairs)])
+    for row, (_, new_id) in zip(template_rows, id_pairs):
+        await bind_memory_evidence(
+            memory_id=new_id, side="ai", user_id=user_id, workspace_id=new_workspace_id,
+            sources=(EvidenceSource("memory", row.id, side="ai", relation="template_copy",
+                                    expected_version=content_version(row.content)),),
+            extractor_version=CLONE_EXTRACTOR, database=database,
         )
     logger.info(
         "[AGENT-CLONE] copied %d memories (%d embeddings) into workspace %s",
@@ -199,26 +213,14 @@ async def _clone_ai_memories(
         new_workspace_id[:8],
     )
 
-    # Phase 2-6: carry the entity graph over. Entities are scoped per
-    # (user, workspace), so re-upsert them in the clone's scope and link the
-    # mapped memory ids. Persona entity volume is small (pet/family/friends),
-    # so per-row upserts are fine; failures never abort the clone.
-    try:
-        await _clone_memory_entities(
-            template_workspace_id=template_workspace_id,
-            id_pairs=id_pairs,
-            user_id=user_id,
-            new_workspace_id=new_workspace_id,
-        )
-    except Exception as exc:
-        logger.warning("[AGENT-CLONE] entity graph copy failed: %s", exc)
-
-    return len(new_rows)
+    return id_pairs
 
 
 async def _clone_memory_entities(
     *,
     template_workspace_id: str,
+    template_user_id: str,
+    template_agent_id: str,
     id_pairs: list[tuple[str, str]],
     user_id: str,
     new_workspace_id: str,
@@ -231,9 +233,14 @@ async def _clone_memory_entities(
         SELECT mm.memory_id, me.canonical_name, me.entity_type, me.role, me.aliases
         FROM memory_mentions mm
         JOIN memory_entities me ON me.id = mm.entity_id
-        WHERE mm.workspace_id = $1 AND me.is_archived = false
+        JOIN chat_workspaces w ON w.id=mm.workspace_id AND w.user_id=mm.user_id
+        JOIN ai_agents a ON a.id=w.agent_id AND a.user_id=w.user_id
+        WHERE mm.workspace_id=$1 AND me.is_archived=false AND mm.memory_source='ai'
+          AND mm.user_id=$2 AND me.user_id=$2 AND me.workspace_id=$1 AND a.id=$3
+          AND mm.memory_id=ANY($4::text[])
         """,
-        template_workspace_id,
+        template_workspace_id, template_user_id, template_agent_id,
+        [pair[0] for pair in id_pairs],
     )
     if not rows:
         return 0
@@ -268,92 +275,95 @@ async def _clone_memory_entities(
     return linked
 
 
-async def clone_template_agent_for_user(user_id: str, template_agent_id: str):
-    """Clone the template agent into a new per-user agent + workspace + conversation.
+async def _stage_clone_workspaces(database, user_id: str) -> list[dict[str, Any]]:
+    """Stage existing workspaces in the clone transaction; no runtime effects."""
+    workspaces = await database.chatworkspace.find_many(
+        where={"userId": user_id, "status": "active"},
+        include={"agent": True, "conversations": True}, order={"id": "asc"},
+    )
+    staged = []
+    now = datetime.now(UTC)
+    for workspace in workspaces:
+        if workspace.agent and workspace.agent.userId != user_id:
+            raise ValueError("clone_existing_workspace_scope_mismatch")
+        await database.chatworkspace.update(where={"id": workspace.id},
+            data={"status": "archived", "archivedAt": now})
+        if workspace.agentId and workspace.agent:
+            await database.aiagent.update(where={"id": workspace.agentId},
+                data={"status": "archived", "archivedAt": now})
+        await database.conversation.update_many(
+            where={"workspaceId": workspace.id, "isDeleted": False},
+            data={"isDeleted": True, "archivedAt": now})
+        staged.append({"workspace_id": workspace.id, "agent_id": workspace.agentId,
+                       "user_id": user_id,
+                       "conversation_ids": [c.id for c in (workspace.conversations or [])]})
+    return staged
 
-    Returns ``(agent, workspace, conversation)``. Raises ``ValueError`` if the
-    template is missing/archived or has no active workspace to copy memory from.
+
+async def clone_template_agent_for_user(user_id: str, template_agent_id: str, *,
+                                        only_if_missing: bool = False):
+    """Commit a complete independent clone or preserve the prior workspace.
+
+    Template ownership/enrollment and actual source versions are checked in the
+    same transaction as persona, memories, vectors, origins and conversation.
+    Cache/runtime cleanup, voice selection and schedule dispatch follow commit.
     """
-    template = await db.aiagent.find_unique(where={"id": template_agent_id})
-    # Only clone a fully-provisioned template; a "provisioning" one may still have
-    # incomplete / empty L1 memory, which would produce a broken clone.
-    if not template or getattr(template, "status", "") != "active":
-        raise ValueError("template agent not available")
+    async with db.tx(timeout=timedelta(seconds=30)) as tx:
+        await tx.query_raw("SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS held",
+                           "agent-clone:" + user_id)
+        users = await tx.query_raw(
+            "SELECT id FROM users WHERE id=$1 AND status='active' AND username<>$2 FOR SHARE",
+            user_id, TEMPLATE_SYSTEM_USERNAME)
+        if not users:
+            raise ValueError("clone_user_not_available")
+        if only_if_missing and (await tx.chatworkspace.find_first(
+                where={"userId": user_id, "status": "active"}) or
+                await tx.aiagent.find_first(where={"userId": user_id, "status": "provisioning"})):
+            raise ValueError("clone_user_already_provisioned")
+        sources = await tx.query_raw(
+            """SELECT w.id,w.user_id FROM ai_agents a JOIN users u ON u.id=a.user_id
+               JOIN chat_workspaces w ON w.agent_id=a.id AND w.user_id=a.user_id
+               WHERE a.id=$1 AND u.username=$2 AND a.status='active'
+               AND a.template_enabled AND w.status='active'
+               ORDER BY w.created_at DESC LIMIT 1 FOR SHARE OF a,w,u""",
+            template_agent_id, TEMPLATE_SYSTEM_USERNAME)
+        if not sources:
+            raise ValueError("template agent not available")
+        source = sources[0]
+        template = await tx.aiagent.find_unique(where={"id": template_agent_id})
+        staged = await _stage_clone_workspaces(tx, user_id)
+        agent = await tx.aiagent.create(data=_clone_persona_data(template, user_id))
+        # Required for cross-scope evidence. A failed provenance write must roll
+        # back the clone, rather than silently yielding untraceable memories.
+        await tx.execute_raw("UPDATE ai_agents SET source_template_id=$1 WHERE id=$2",
+                             template_agent_id, agent.id)
+        workspace = await tx.chatworkspace.create(data={"id": uuid.uuid4().hex,
+            "user": {"connect": {"id": user_id}}, "agent": {"connect": {"id": agent.id}},
+            "status": "active"})
+        id_pairs = await _clone_ai_memories(database=tx,
+            template_workspace_id=source["id"], template_user_id=source["user_id"],
+            new_workspace_id=workspace.id, user_id=user_id)
+        conversation = await tx.conversation.create(data={
+            "user": {"connect": {"id": user_id}}, "agent": {"connect": {"id": agent.id}},
+            "workspace": {"connect": {"id": workspace.id}}})
 
-    template_ws = await get_active_workspace(agent_id=template_agent_id)
-    if not template_ws:
-        raise ValueError("template agent has no active workspace")
-
-    agent = await db.aiagent.create(data=_clone_persona_data(template, user_id))
     try:
-        await assign_random_voice(
-            agent_id=agent.id,
-            gender=agent.gender,
-            agent=agent,
-        )
+        await finalize_archived_workspaces(staged)
+    except Exception as exc:
+        logger.warning("[AGENT-CLONE] committed clone runtime cleanup failed: %s", exc)
+    try:
+        await assign_random_voice(agent_id=agent.id, gender=agent.gender, agent=agent)
     except Exception as exc:
         logger.warning("[AGENT-CLONE] TTS voice assignment failed: %s", exc)
-    # Record provenance via raw SQL so this works even before a Prisma client
-    # regen picks up the new column. Failure here must not break the clone.
     try:
-        await db.execute_raw(
-            "UPDATE ai_agents SET source_template_id = $1 WHERE id = $2",
-            template_agent_id,
-            agent.id,
-        )
+        await _clone_memory_entities(template_workspace_id=source["id"],
+            template_user_id=source["user_id"], template_agent_id=template_agent_id, id_pairs=id_pairs,
+            user_id=user_id, new_workspace_id=workspace.id)
     except Exception as exc:
-        logger.warning("[AGENT-CLONE] source_template_id write failed: %s", exc)
-
-    staged: list[dict[str, Any]] = []
-    workspace = None
-    try:
-        # Make the clone the user's single active workspace (mirrors create_agent).
-        staged = await stage_active_workspaces_for_user(user_id)
-        workspace = await create_workspace(user_id, agent.id)
-        await finalize_archived_workspaces(staged)
-
-        await _clone_ai_memories(
-            template_workspace_id=template_ws.id,
-            new_workspace_id=workspace.id,
-            user_id=user_id,
-        )
-
-        conversation = await db.conversation.create(
-            data={
-                "user": {"connect": {"id": user_id}},
-                "agent": {"connect": {"id": agent.id}},
-                "workspace": {"connect": {"id": workspace.id}},
-            }
-        )
-    except Exception:
-        # Roll back best-effort so a failed clone never leaves a half-active user.
-        if workspace is not None:
-            try:
-                await db.chatworkspace.update(
-                    where={"id": workspace.id},
-                    data={"status": "archived", "archivedAt": datetime.now(UTC)},
-                )
-            except Exception:
-                pass
-        if staged:
-            await restore_staged_workspaces(staged)
-        try:
-            await db.aiagent.update(
-                where={"id": agent.id},
-                data={"status": "archived", "archivedAt": datetime.now(UTC)},
-            )
-        except Exception:
-            pass
-        raise
-
+        logger.warning("[AGENT-CLONE] entity graph copy failed: %s", exc)
     _dispatch_day_one_schedule(agent, user_id)
-
-    logger.info(
-        "[AGENT-CLONE] provisioned agent %s for user %s from template %s",
-        agent.id[:8],
-        user_id[:8],
-        template_agent_id[:8],
-    )
+    logger.info("[AGENT-CLONE] provisioned agent %s for user %s from template %s",
+                agent.id[:8], user_id[:8], template_agent_id[:8])
     return agent, workspace, conversation
 
 
@@ -455,7 +465,7 @@ async def ensure_default_agent_for_user(user_id: str, gender: str | None = None)
         if await _has_agent_or_pending(user_id):
             return None
         agent, _workspace, _conversation = await clone_template_agent_for_user(
-            user_id, template_id
+            user_id, template_id, only_if_missing=True
         )
         return agent
     except Exception as exc:
