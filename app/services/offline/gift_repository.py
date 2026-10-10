@@ -111,6 +111,15 @@ async def upsert_address(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return address_from_row(rows[0], masked=True) or {}
 
 
+async def delete_default_address(user_id: str) -> None:
+    # Orders retain their independent address_snapshot. Remove all default rows
+    # for this owner so legacy duplicates cannot reappear after deletion.
+    await db.execute_raw(
+        "DELETE FROM gift_addresses WHERE user_id = $1 AND is_default = TRUE",
+        user_id,
+    )
+
+
 async def create_gift(data: dict[str, Any]) -> dict[str, Any]:
     gift_id = data.get("id") or new_id()
     rows = await db.query_raw(

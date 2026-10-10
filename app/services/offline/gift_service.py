@@ -86,8 +86,13 @@ async def get_gifts(user_id: str, workspace_id: str | None = None) -> GiftsHomeR
 
 
 async def get_address(user_id: str) -> GiftAddressResponse:
-    address = await gift_repo.default_address(user_id, masked=True)
+    # Authenticated owner-only editing endpoint; home listings stay masked.
+    address = await gift_repo.default_address(user_id, masked=False)
     return GiftAddressResponse(**address) if address else GiftAddressResponse()
+
+
+async def delete_address(user_id: str) -> None:
+    await gift_repo.delete_default_address(user_id)
 
 
 async def save_address(user_id: str, data: GiftAddressRequest) -> GiftAddressResponse:

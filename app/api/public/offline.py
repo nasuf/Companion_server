@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.jwt_auth import require_admin_jwt, require_user
 from app.models.chat_media import ChatAttachmentResponse
@@ -275,7 +275,8 @@ async def get_offline_gifts(
 
 
 @router.get("/gifts/address", response_model=GiftAddressResponse)
-async def get_gift_address(user: dict = Depends(require_user)):
+async def get_gift_address(response: Response, user: dict = Depends(require_user)):
+    response.headers["Cache-Control"] = "no-store"
     return await gift_service.get_address(str(user["sub"]))
 
 
@@ -285,6 +286,12 @@ async def update_gift_address(
     user: dict = Depends(require_user),
 ):
     return await gift_service.save_address(str(user["sub"]), data)
+
+
+@router.delete("/gifts/address", status_code=204)
+async def delete_gift_address(user: dict = Depends(require_user)):
+    await gift_service.delete_address(str(user["sub"]))
+    return Response(status_code=204)
 
 
 @router.get("/gifts/{gift_id}", response_model=RealWorldGiftItem)
