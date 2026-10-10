@@ -15,11 +15,14 @@ import pytest
 @pytest.mark.asyncio
 @pytest.mark.parametrize("old_count", [154, 155])
 async def test_prisma_evidence_upgrade_is_additive_and_redeployable(tmp_path, old_count):
-    url = os.environ.get("G03_TEST_DATABASE_URL", "")
+    # The proactive test service has pgvector, as required by the historical
+    # migration chain. G03 deliberately uses plain PostgreSQL in Linux CI.
+    url = os.environ.get("PROACTIVE_E2E_DATABASE_URL", "")
     if not url:
         pytest.skip("Memory evidence migration requires disposable PostgreSQL")
     parsed = urlsplit(url)
-    assert parsed.hostname in {"localhost", "127.0.0.1"} and parsed.path == "/postgres"
+    assert parsed.hostname in {"localhost", "127.0.0.1"} and parsed.path == "/companion_proactive_e2e"
+    url = urlunsplit(parsed._replace(path="/postgres"))
     database_name = "evidence_migration_" + uuid4().hex
     target_url = urlunsplit(parsed._replace(path="/" + database_name))
     admin = Prisma(datasource={"url": url}, http={"trust_env": False})
