@@ -92,6 +92,8 @@ async def test_clone_copies_entity_links_with_mapped_ids():
          ):
         linked = await clone_mod._clone_memory_entities(
             template_workspace_id="tpl-ws",
+            template_user_id="template-owner",
+            template_agent_id="template-agent",
             id_pairs=[("tpl-m1", "new-m1"), ("tpl-m2", "new-m2")],
             user_id="u1",
             new_workspace_id="new-ws",

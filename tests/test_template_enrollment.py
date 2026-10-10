@@ -116,7 +116,7 @@ async def test_ensure_clones_the_picked_open_template(monkeypatch):
 
     result = await clone_mod.ensure_default_agent_for_user("user-1")
     assert result is cloned
-    clone_fn.assert_awaited_once_with("user-1", "open-2")
+    clone_fn.assert_awaited_once_with("user-1", "open-2", only_if_missing=True)
     clone_mod.list_enrolling_template_ids.assert_awaited_once_with(gender=None)
 
 
@@ -136,7 +136,7 @@ async def test_ensure_filters_pool_by_gender(monkeypatch):
 
     await clone_mod.ensure_default_agent_for_user("user-1", gender="female")
     listed.assert_awaited_once_with(gender="female")
-    clone_fn.assert_awaited_once_with("user-1", "female-1")
+    clone_fn.assert_awaited_once_with("user-1", "female-1", only_if_missing=True)
 
 
 @pytest.mark.asyncio
