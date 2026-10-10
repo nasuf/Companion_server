@@ -155,4 +155,3 @@ async def bind_memory_evidence(
             source.relation, extractor_version, source.side if source.kind == "memory" else None,
         )
     return inserted
-
