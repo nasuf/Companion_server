@@ -1346,6 +1346,41 @@ model MemoryRepairItem {
   @@map("memory_repair_items")
 }
 
+// Polymorphic source/target constraints are enforced by the additive SQL migration.
+// Raw bounded queries keep the generated Python client footprint unchanged.
+model MemoryEvidenceLink {
+  id                   String   @id
+  memoryId             String   @map("memory_id")
+  memorySource         String   @map("memory_source")
+  userMemoryId         String?  @map("user_memory_id")
+  aiMemoryId           String?  @map("ai_memory_id")
+  userId               String   @map("user_id")
+  workspaceId          String   @map("workspace_id")
+  agentId              String   @map("agent_id")
+  contentVersion       String   @map("content_version")
+  sourceKind           String   @map("source_kind")
+  sourceRef            String   @map("source_ref")
+  sourceMemorySide     String?  @map("source_memory_side")
+  sourceVersion        String?  @map("source_version")
+  sourceUserId         String?  @map("source_user_id")
+  sourceWorkspaceId    String?  @map("source_workspace_id")
+  sourceRole           String?  @map("source_role")
+  sourceStatus         String?  @map("source_status")
+  sourceMessageId      String?  @map("source_message_id")
+  parentUserMemoryId   String?  @map("parent_user_memory_id")
+  parentAiMemoryId     String?  @map("parent_ai_memory_id")
+  relation             String
+  extractorVersion     String   @map("extractor_version")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, memorySource, memoryId, id], map: "memory_evidence_target_idx")
+  @@index([sourceMessageId], map: "memory_evidence_message_idx")
+  @@index([parentUserMemoryId], map: "memory_evidence_parent_user_idx")
+  @@index([parentAiMemoryId], map: "memory_evidence_parent_ai_idx")
+  @@map("memory_evidence_links")
+  @@ignore
+}
+
 model MemoryQualityState {
   memoryId             String    @map("memory_id")
   memorySource         String    @map("memory_source")

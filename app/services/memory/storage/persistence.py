@@ -254,6 +254,8 @@ async def store_memory(
     entities: list[str] | None = None,
     topics: list[str] | None = None,
     provenance: str | None = None,
+    evidence_sources: tuple | None = None,
+    extractor_version: str = "memory-write-v1",
     skip_reconciliation: bool = False,
     _singleton_locked: bool = False,
     _split_done: bool = False,
@@ -343,6 +345,7 @@ async def store_memory(
                     occur_time=occur_time, statement_time=statement_time,
                     workspace_id=workspace_id, recurrence=recurrence,
                     entities=entities, topics=topics, provenance=provenance,
+                    evidence_sources=evidence_sources, extractor_version=extractor_version,
                     skip_reconciliation=skip_reconciliation, _split_done=True,
                     _consolidation_staged=_consolidation_staged,
                 )
@@ -379,6 +382,9 @@ async def store_memory(
                     statement_time=statement_time, workspace_id=workspace_id,
                     recurrence=recurrence, entities=entities, topics=topics,
                     provenance=provenance,
+                    evidence_sources=evidence_sources, extractor_version=extractor_version,
+                    skip_reconciliation=skip_reconciliation, _split_done=_split_done,
+                    _consolidation_staged=_consolidation_staged,
                     _singleton_locked=True,
                 )
         except DistributedLockNotAcquired:
@@ -392,6 +398,7 @@ async def store_memory(
     # spec §1.5.1 闸门: L1 SINGLETON 子类 (姓名/年龄/生日 等身份硬唯一字段) 永
     # 远只能 1 条 L1. 即便 LLM 把"我今年28岁"复述为"我今年28岁，生日是3月15号"
     # 这种合并表述, dedup 单看跟任一已有 L1 都 < 0.85 阈值拦不住, 这里硬拦.
+    name_replacement = None
     if level == 1 and is_singleton(taxonomy.main_category, taxonomy.sub_category):
         # find_many(take=1) 比 count() 快: Prisma count 生成 SELECT COUNT(*) 是
         # 全过滤行扫描, take=1 生成 LIMIT 1 命中第一行就停; 没建索引时差距更明显.
@@ -415,28 +422,9 @@ async def store_memory(
                 old_record = existing[0]
                 old_text = getattr(old_record, "content", None)
                 if _normalize_singleton_text(old_text) != _normalize_singleton_text(content):
-                    await memory_repo.update(
-                        old_record.id,
-                        source=repo_source,
-                        record=old_record,
-                        isArchived=True,
-                    )
-                    try:
-                        await log_memory_changelog(
-                            user_id,
-                            old_record.id,
-                            "singleton_replaced",
-                            old_value=getattr(old_record, "content", None),
-                            new_value=content,
-                            workspace_id=workspace_id,
-                        )
-                    except Exception:
-                        pass
-                    logger.info(
-                        f"L1 SINGLETON replaced: ({repo_source}, {taxonomy.main_category}/"
-                        f"{taxonomy.sub_category}) old_id={old_record.id} "
-                        f"new_content={content[:60]}"
-                    )
+                    # Archive only inside the replacement transaction. A bad
+                    # origin or failed insert must leave the current name live.
+                    name_replacement = old_record
                 else:
                     logger.info(
                         f"L1 SINGLETON blocked: ({repo_source}, {taxonomy.main_category}/"
@@ -459,7 +447,7 @@ async def store_memory(
     # suppression all happen here. This supersedes the old boolean dedup gate
     # for the main write path; is_duplicate/find_duplicate_id remain for legacy
     # callers that only need a yes/no answer.
-    if skip_reconciliation:
+    if skip_reconciliation or name_replacement is not None:
         # Caller guarantees this row must be inserted standalone (never merged
         # into an unrelated existing row). Bypass update/merge/drop adjudication.
         from app.services.memory.storage.reconciliation import ReconciliationDecision
@@ -522,17 +510,21 @@ async def store_memory(
         if recurrence and taxonomy.sub_category == "提醒":
             update_data["recurrence"] = recurrence
 
-        # Keep vector and row consistent: update the embedding first, then row.
+        # A rejected origin must roll back the vector as well as the row.
         updated_embedding = embedding
         if updated_content != content:
             updated_embedding = await generate_embedding(updated_content)
-        await store_embedding(decision.existing_id, updated_embedding)
-        await memory_repo.update(
-            decision.existing_id,
-            source=repo_source,
-            record=decision.existing_record,
-            **update_data,
-        )
+        if evidence_sources is not None:
+            async with db.tx() as tx:
+                await store_embedding(decision.existing_id, updated_embedding, database=tx)
+                await memory_repo.update(decision.existing_id, source=repo_source,
+                    record=decision.existing_record, database=tx,
+                    evidence_sources=evidence_sources, extractor_version=extractor_version, **update_data)
+            await memory_repo.invalidate_scope(user_id, workspace_id)
+        else:
+            await store_embedding(decision.existing_id, updated_embedding)
+            await memory_repo.update(decision.existing_id, source=repo_source,
+                record=decision.existing_record, **update_data)
         try:
             await log_memory_changelog(
                 user_id,
@@ -589,11 +581,25 @@ async def store_memory(
                 "AND main_category=$3 AND sub_category=$4 AND level=1 AND NOT is_archived LIMIT 1",
                 user_id, workspace_id, taxonomy.main_category, taxonomy.sub_category,
             )
-            if taken:
+            if taken and (name_replacement is None or taken[0]["id"] != name_replacement.id):
                 return None
-            memory = await memory_repo.create(source=source, database=tx, **create_data)
+            if name_replacement is not None:
+                await tx.usermemory.update(where={"id":name_replacement.id},data={"isArchived":True})
+            memory = await memory_repo.create(source=source, database=tx,
+                evidence_sources=evidence_sources, extractor_version=extractor_version, **create_data)
+            if name_replacement is not None:
+                await store_embedding(memory.id, embedding, database=tx)
+        # A pre-commit version bump can cache the old row under the new key.
+        await memory_repo.invalidate_scope(user_id, workspace_id)
+        if name_replacement is not None:
+            try:
+                await log_memory_changelog(user_id,name_replacement.id,"singleton_replaced",
+                    old_value=name_replacement.content,new_value=content,workspace_id=workspace_id)
+            except Exception:
+                logger.warning("Singleton replacement audit failed for %s", name_replacement.id)
     else:
-        memory = await memory_repo.create(source=source, **create_data)
+        memory = await memory_repo.create(source=source, evidence_sources=evidence_sources,
+            extractor_version=extractor_version, **create_data)
 
     # Store embedding. If this fails the memory row exists but would never
     # be retrievable by vector search — delete the orphan to keep state
@@ -603,7 +609,8 @@ async def store_memory(
     # PG 真实故障 (非 transient). Rollback 也 retry, rollback 失败就 emit
     # EVT_MEMORY_ORPHAN 让 admin 可查 (背景 cure 脚本扫这个事件).
     try:
-        await store_embedding(memory.id, embedding)
+        if name_replacement is None:
+            await store_embedding(memory.id, embedding)
     except Exception as embed_err:
         logger.error(
             f"Embedding store failed for memory {memory.id} after retries; "

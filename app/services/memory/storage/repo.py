@@ -96,7 +96,8 @@ def _build_kwargs(
 # --- CRUD ---
 
 
-async def create(source: Source = "user", *, database=None, **data) -> MemoryRecord:
+async def create(source: Source = "user", *, database=None, evidence_sources=None,
+                 extractor_version="memory-write-v1", **data) -> MemoryRecord:
     """Create a memory in the appropriate table.
 
     Pass fields as keyword args: userId, content, level, importance, type, etc.
@@ -104,9 +105,21 @@ async def create(source: Source = "user", *, database=None, **data) -> MemoryRec
     """
     if data.get("userId") and not data.get("workspaceId"):
         data["workspaceId"] = await resolve_workspace_id(user_id=data["userId"])
+    if evidence_sources is not None and database is None:
+        async with db.tx() as tx:
+            record = await create(source, database=tx, evidence_sources=evidence_sources,
+                                  extractor_version=extractor_version, **data)
+        await _invalidate_caches(record.userId, record.workspaceId)
+        return record
     model = (database.aimemory if source == "ai" else database.usermemory) if database is not None else _table(source)
     row = await model.create(data=data)
-    await _invalidate_caches(data.get("userId"), data.get("workspaceId"))
+    if evidence_sources is not None:
+        from app.services.memory.evidence import bind_memory_evidence
+        await bind_memory_evidence(memory_id=row.id, side=source, user_id=row.userId,
+            workspace_id=row.workspaceId, sources=evidence_sources,
+            extractor_version=extractor_version, database=database)
+    if database is None:
+        await _invalidate_caches(data.get("userId"), data.get("workspaceId"))
     return _to_record(row, source)
 
 
@@ -255,6 +268,9 @@ async def update(
     source: Source | None = None,
     *,
     record: MemoryRecord | None = None,
+    database=None,
+    evidence_sources=None,
+    extractor_version="memory-write-v1",
     **data,
 ) -> None:
     """Update a memory by ID. If source unknown, auto-detect.
@@ -266,16 +282,34 @@ async def update(
     come from **data.
     """
     if record is None:
-        record = await find_unique(id)
+        if source is not None:
+            row = await _table(source).find_unique(where={"id": id})
+            record = _to_record(row, source) if row else None
+        else:
+            record = await find_unique(id)
     if record is None:
         logger.warning(f"Memory {id} not found for update")
         return
     if source is None:
         source = record.source
-
-    await _table(source).update(where={"id": id}, data=data)
+    if source != record.source or id != record.id:
+        raise ValueError("memory_update_side_mismatch")
+    if evidence_sources is not None and database is None:
+        async with db.tx() as tx:
+            await update(id, source=source, record=record, database=tx,
+                evidence_sources=evidence_sources, extractor_version=extractor_version, **data)
+        await _invalidate_caches(record.userId, record.workspaceId)
+        return
+    model = (database.aimemory if source == "ai" else database.usermemory) if database is not None else _table(source)
+    await model.update(where={"id": id}, data=data)
+    if evidence_sources is not None:
+        from app.services.memory.evidence import bind_memory_evidence
+        await bind_memory_evidence(memory_id=id, side=source, user_id=record.userId,
+            workspace_id=record.workspaceId, sources=evidence_sources,
+            extractor_version=extractor_version, database=database)
     # userId/workspaceId don't change on update; safe to bump from record
-    await _invalidate_caches(record.userId, record.workspaceId)
+    if database is None:
+        await _invalidate_caches(record.userId, record.workspaceId)
 
 
 async def update_many(

@@ -562,11 +562,14 @@ def _patch_storage_chain(*, existing_l1: list | None = None, create_id: str = "n
     """patch store_memory 的依赖. existing_l1 控制 SINGLETON find_many 返回值."""
     P = "app.services.memory.storage.persistence"
     existing_records = existing_l1 if existing_l1 is not None else []
+    tx_update = AsyncMock()
     @asynccontextmanager
     async def transaction(**kwargs):
         # The final singleton check runs under a DB advisory transaction lock.
-        # The outer check already handles replacement of a user name.
-        yield SimpleNamespace(execute_raw=AsyncMock(), query_raw=AsyncMock(return_value=[]))
+        # Name archival and creation must now use this same transaction.
+        yield SimpleNamespace(execute_raw=AsyncMock(),
+            query_raw=AsyncMock(return_value=[{"id":existing_records[0].id}] if existing_records else []),
+            usermemory=SimpleNamespace(update=tx_update))
 
     with (
         patch(f"{P}._generated_self_memory_allowed", AsyncMock(return_value=True)),
@@ -577,11 +580,12 @@ def _patch_storage_chain(*, existing_l1: list | None = None, create_id: str = "n
         patch(f"{P}.is_duplicate", new_callable=AsyncMock, return_value=False),
         patch(f"{P}.resolve_memory_write", new_callable=AsyncMock, return_value=ReconciliationDecision(action="insert_new")),
         patch(f"{P}.memory_repo.update", new_callable=AsyncMock) as mock_update,
+        patch(f"{P}.memory_repo.invalidate_scope", new_callable=AsyncMock),
         patch(f"{P}.memory_repo.create", new_callable=AsyncMock, return_value=MagicMock(id=create_id)) as mock_create,
         patch(f"{P}.store_embedding", new_callable=AsyncMock),
         patch(f"{P}.log_memory_changelog", new_callable=AsyncMock),
     ):
-        yield {"embed": mock_embed, "create": mock_create, "update": mock_update}
+        yield {"embed": mock_embed, "create": mock_create, "update": mock_update, "tx_update": tx_update}
 
 
 @pytest.mark.asyncio
@@ -677,8 +681,9 @@ class TestProvenancePassthrough:
                 main_category="身份", sub_category="姓名", source="user",
             )
         assert result == "new-id"
-        mocks["update"].assert_awaited_once()
-        assert mocks["update"].await_args.kwargs["isArchived"] is True
+        mocks["update"].assert_not_called()
+        mocks["tx_update"].assert_awaited_once_with(where={"id":"old-name-id"},data={"isArchived":True})
+        assert mocks["create"].call_args.kwargs["database"].usermemory.update is mocks["tx_update"]
         mocks["create"].assert_called_once()
 
     async def test_user_singleton_same_text_still_blocked(self):

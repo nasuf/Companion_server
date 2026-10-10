@@ -83,7 +83,7 @@ async def generate_embedding(text: str) -> list[float]:
     raise last_exc or RuntimeError("generate_embedding exhausted without raise")
 
 
-async def store_embedding(memory_id: str, embedding: list[float]) -> None:
+async def store_embedding(memory_id: str, embedding: list[float], *, database=None) -> None:
     """Store an embedding in the memory_embeddings table (with retry).
 
     INSERT ON CONFLICT 是幂等的, 重试安全. 仅 transient PG 错误 (connection
@@ -96,7 +96,7 @@ async def store_embedding(memory_id: str, embedding: list[float]) -> None:
     last_exc: Exception | None = None
     for attempt in range(_EMBEDDING_MAX_ATTEMPTS):
         try:
-            await db.execute_raw(
+            await (database if database is not None else db).execute_raw(
                 """
                 INSERT INTO memory_embeddings (memory_id, embedding)
                 VALUES ($1, $2::extensions.vector)
@@ -107,6 +107,10 @@ async def store_embedding(memory_id: str, embedding: list[float]) -> None:
             )
             return
         except Exception as e:
+            # A PostgreSQL transaction is aborted by a statement failure. Its
+            # owner must roll back the complete memory write, not retry within it.
+            if database is not None:
+                raise
             last_exc = e
             if attempt < _EMBEDDING_MAX_ATTEMPTS - 1:
                 delay = _EMBEDDING_RETRY_DELAYS[attempt]

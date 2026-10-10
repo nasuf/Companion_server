@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
@@ -24,6 +24,38 @@ from app.services.memory.lifecycle.quality_state import (
 )
 
 router = APIRouter(prefix="/admin-api/memory-repairs", tags=["admin-memory-repairs"])
+
+
+@router.get("/evidence/{side}/{memory_id}")
+async def get_memory_evidence(
+    side: str, memory_id: str = Path(min_length=1, max_length=200), user_id: str = Query(min_length=1, max_length=200),
+    workspace_id: str = Query(min_length=1, max_length=200),
+    limit: int = Query(20, ge=1, le=50), cursor: str | None = Query(None, max_length=300),
+    _: dict = Depends(require_admin_jwt),
+) -> dict:
+    from app.services.memory.evidence_read import memory_evidence_detail
+    try:
+        return await memory_evidence_detail(user_id=user_id, workspace_id=workspace_id,
+            side=side, memory_id=memory_id, limit=limit, cursor=cursor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/evidence-audit")
+async def preview_memory_evidence(
+    side: str = Query(pattern="^(user|ai)$"), user_id: str = Query(min_length=1, max_length=200),
+    workspace_id: str = Query(min_length=1, max_length=200),
+    limit: int = Query(100, ge=1, le=500), after_id: str = Query("", max_length=200),
+    _: dict = Depends(require_admin_jwt),
+) -> dict:
+    from app.services.memory.evidence_read import audit_evidence_page
+    try:
+        return await audit_evidence_page(user_id=user_id, workspace_id=workspace_id,
+            side=side, limit=limit, after_id=after_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 class UpdateMemoryRepairRequest(BaseModel):

@@ -262,6 +262,15 @@ async def process_memory_pipeline(
         except Exception as e:
             logger.warning(f"[MEM-{side}] pre-filter failed ({e}), proceeding")
 
+    from app.services.memory.evidence import EvidenceSource, snapshot_message_sources
+    origins = (EvidenceSource("unlinked", "chat_without_message_ids"),)
+    if evidence_message_ids:
+        try:
+            origins = await snapshot_message_sources(user_id=user_id, workspace_id=workspace_id,
+                side=side, message_ids=evidence_message_ids, extraction_input=new_conversation)
+        except ValueError as exc:
+            raise MemoryExtractionError(str(exc)) from exc
+
     # Step 2 (spec §2.1.3 / §2.2.3): Big model extraction
     extraction = await extract_memories(
         new_conversation,
@@ -452,6 +461,8 @@ async def process_memory_pipeline(
                 provenance_mod.USER_STATED if side == "user"
                 else provenance_mod.AI_AUTHORED
             ),
+            evidence_sources=origins,
+            extractor_version="memory-extraction-v1",
         )
 
         if memory_id:
@@ -462,6 +473,8 @@ async def process_memory_pipeline(
                     memory_id=memory_id,
                     message_ids=evidence_message_ids or [],
                     workspace_id=workspace_id,
+                    source=side,
+                    evidence_sources=origins,
                 )
             except Exception as e:
                 logger.debug(f"[MEM-{side}] evidence link failed for {memory_id}: {e}")

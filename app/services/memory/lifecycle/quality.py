@@ -94,6 +94,8 @@ async def log_memory_evidence(
     memory_id: str,
     message_ids: list[str],
     workspace_id: str | None = None,
+    source: str = "user",
+    evidence_sources=None,
 ) -> None:
     if not message_ids:
         return
@@ -102,6 +104,13 @@ async def log_memory_evidence(
     unique_ids = list(dict.fromkeys(str(mid) for mid in message_ids if mid))
     if not unique_ids:
         return
+    # The normalized store already captured every split output in its write
+    # transaction. Retain the legacy audit only after validating these IDs.
+    from app.services.memory.evidence import EvidenceSource, bind_memory_evidence
+    await bind_memory_evidence(memory_id=memory_id, side=source, user_id=user_id,
+        workspace_id=workspace_id, sources=evidence_sources or tuple(EvidenceSource("message", mid,
+            relation="extracted_from", expected_role="user" if source == "user" else "assistant")
+            for mid in unique_ids), extractor_version="memory-extraction-v1")
     await log_memory_changelog(
         user_id,
         memory_id,

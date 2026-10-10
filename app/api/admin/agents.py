@@ -285,7 +285,8 @@ async def get_memories(
             *params, limit, offset,
         )
         for r in rows:
-            all_rows.append(_memory_row(r, source=src_label))
+            all_rows.append({**_memory_row(r, source=src_label),
+                             "user_id": user_id, "workspace_id": workspace_id})
 
     all_rows.sort(key=lambda x: -x["importance"])
     qualities = await _admin_quality_map(all_rows, include_quality)
