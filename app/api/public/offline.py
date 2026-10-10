@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from app.api.jwt_auth import require_admin_jwt, require_user
 from app.models.chat_media import ChatAttachmentResponse
 from app.models.offline import (
+    AdminGiftClearResponse,
     GiftAddressRequest,
     GiftAddressResponse,
     GiftThanksRequest,
@@ -106,6 +107,11 @@ async def create_mock_gift(
         delivered=delivered,
     )
     return RealWorldGiftItem(**gift)
+
+
+@router.delete("/admin/gifts", response_model=AdminGiftClearResponse)
+async def clear_current_user_gifts(user: dict = Depends(require_admin_jwt)):
+    return await gift_service.clear_all_gifts(str(user["sub"]))
 
 
 @router.get("/activities/{activity_id}", response_model=OfflineActivityItem)

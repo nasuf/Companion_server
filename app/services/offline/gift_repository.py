@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.db import db
@@ -118,6 +118,55 @@ async def delete_default_address(user_id: str) -> None:
         "DELETE FROM gift_addresses WHERE user_id = $1 AND is_default = TRUE",
         user_id,
     )
+
+
+async def clear_user_gifts(user_id: str) -> dict[str, int]:
+    """Admin test reset, all workspaces/statuses, atomic and owner scoped."""
+    async with db.tx(timeout=timedelta(seconds=20)) as tx:
+        await tx.execute_raw("SET LOCAL statement_timeout = '15s'")
+        rows = await tx.query_raw(
+            """
+            WITH targets AS MATERIALIZED (
+                SELECT id FROM real_world_gifts WHERE user_id = $1 FOR UPDATE
+            ), deleted_messages AS (
+                DELETE FROM messages m USING conversations c
+                WHERE m.conversation_id = c.id AND c.user_id = $1
+                  AND (
+                    (m.metadata->>'real_world_type' = 'gift'
+                     AND m.metadata->>'source_id' IN (SELECT id FROM targets))
+                    OR (m.metadata->'component_card'->>'type' = 'offline_gift'
+                        AND m.metadata->'component_card'->'payload'->>'gift_id'
+                            IN (SELECT id FROM targets))
+                  )
+                RETURNING m.id
+            ), deleted_tracking AS (
+                DELETE FROM gift_tracking_events
+                WHERE gift_id IN (SELECT id FROM targets)
+                RETURNING id
+            ), deleted_gifts AS (
+                DELETE FROM real_world_gifts
+                WHERE user_id = $1 AND id IN (SELECT id FROM targets)
+                  -- Force explicit tracking deletion before FK cascade so
+                  -- its count reflects the rows actually removed here.
+                  AND (SELECT COUNT(*) FROM deleted_tracking) >= 0
+                RETURNING id
+            ), reset_states AS (
+                UPDATE real_world_trigger_states
+                SET last_gift_paid_at = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $1 AND last_gift_paid_at IS NOT NULL
+                RETURNING id
+            )
+            SELECT (SELECT COUNT(*) FROM deleted_gifts)::int AS deleted_gifts,
+                   (SELECT COUNT(*) FROM deleted_tracking)::int AS deleted_tracking_events,
+                   (SELECT COUNT(*) FROM deleted_messages)::int AS deleted_messages,
+                   (SELECT COUNT(*) FROM reset_states)::int AS reset_trigger_states
+            """,
+            user_id,
+        )
+        # Validate the result before committing; never turn missing data into zero.
+        return {key: int(rows[0][key]) for key in (
+            "deleted_gifts", "deleted_tracking_events", "deleted_messages", "reset_trigger_states",
+        )}
 
 
 async def create_gift(data: dict[str, Any]) -> dict[str, Any]:

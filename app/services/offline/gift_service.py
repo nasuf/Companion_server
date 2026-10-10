@@ -95,6 +95,12 @@ async def delete_address(user_id: str) -> None:
     await gift_repo.delete_default_address(user_id)
 
 
+async def clear_all_gifts(user_id: str) -> dict[str, int]:
+    result = await gift_repo.clear_user_gifts(user_id)
+    logger.info("[offline] admin gift clear user_id=%s counts=%s", user_id, result)
+    return result
+
+
 async def save_address(user_id: str, data: GiftAddressRequest) -> GiftAddressResponse:
     address = await gift_repo.upsert_address(user_id, data.model_dump())
     remember_user_event(

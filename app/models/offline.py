@@ -239,6 +239,13 @@ class GiftThanksRequest(BaseModel):
     client_id: str | None = Field(default=None, max_length=120)
 
 
+class AdminGiftClearResponse(BaseModel):
+    deleted_gifts: int
+    deleted_tracking_events: int
+    deleted_messages: int
+    reset_trigger_states: int
+
+
 class GiftThanksResponse(BaseModel):
     ok: bool
     gift: RealWorldGiftItem
