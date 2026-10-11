@@ -170,6 +170,8 @@ async def test_single_bounded_repair_or_factual_fallback(writer, repaired):
     "具体开放时段素材里没有写明。", "原文未提及开放时间。",
     "因为具体的开放时段没有详细列出。", "目前没有特别提到的偏好。",
     "开放时间并未在介绍中写明。", "用户记忆库没有提供相关信息。",
+    "具体开放时段未定。", "具体开放时段未在信息中注明。",
+    "目前尚不清楚开放时间。", "营业时间不详。",
 ])
 @pytest.mark.parametrize("repaired", [True, False])
 async def test_input_disclosure_is_blocked_even_if_model_guard_would_accept(writer, disclosure, repaired):
@@ -196,3 +198,22 @@ async def test_normal_opening_advice_does_not_disclose_input_state(writer, advic
     result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
     assert result["discovery_metadata"]["recommendation_message_status"] == "verified"
     assert text.await_count == 1 and check.await_count == 2
+
+
+async def test_dashscope_check_uses_structured_primary_without_mutating_shared_model(writer, monkeypatch):
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import HumanMessage
+    model = ChatOpenAI(model="qwen-fixture", api_key="fixture-key", temperature=0.7,
+        seed=7, model_kwargs={"response_format": {"type": "text"}})
+    object.__setattr__(model, "_companion_provider", "dashscope")
+    monkeypatch.setattr(note, "get_utility_model", lambda: model)
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
+    assert result["discovery_metadata"]["recommendation_message_status"] == "verified"
+    for call in writer[1].await_args_list:
+        primary = call.args[0]
+        assert primary is not model and note.provider_name(primary) == "dashscope"
+        assert primary.temperature == 0
+        payload = primary._get_request_payload([HumanMessage(content="fixture")])
+        assert payload["seed"] == 7 and payload["response_format"] == {"type": "json_object"}
+        assert not call.kwargs  # Provider-only options cannot reach the Ollama fallback.
+    assert model.temperature == 0.7 and model.model_kwargs == {"response_format": {"type": "text"}}

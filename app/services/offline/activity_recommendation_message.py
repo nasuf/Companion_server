@@ -12,7 +12,10 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from langchain_openai import ChatOpenAI
+
 from app.services.llm.models import invoke_json, invoke_text
+from app.services.llm.resilience import provider_name
 from app.services.offline import repository as repo
 from app.services.offline.activity_message_context import recommendation_dialogue
 from app.services.offline.content import plain_text
@@ -30,8 +33,10 @@ _KINDS = ("memory", "preference", "dialogue")
 # mistakenly accepts a fluent paragraph that describes its input instead.
 _INPUT_DISCLOSURE = re.compile(
     r"用户(?:记忆|喜好|偏好)库|(?:素材|原文|信息|介绍|偏好|时段|时间)[^。！？]{0,16}"
-    r"(?:未(?:在[^。！？]{0,8})?(?:提供|提及|列出|写明)|没有(?:提供|提到|详细列出|写明))"
+    r"(?:未(?:在[^。！？]{0,8})?(?:提供|提及|列出|写明|注明|说明|明确|确定|公布)|未定|不详|未知"
+    r"|没有(?:提供|提到|详细列出|写明|注明|说明))"
     r"|没有(?:特别)?提到的偏好"
+    r"|(?:尚不清楚|暂不清楚|不清楚|未知)[^。！？]{0,8}(?:开放时间|开放时段|营业时间)"
 )
 
 
@@ -139,8 +144,17 @@ async def attach_recommendation_message(
                     references_json=json.dumps(references, ensure_ascii=False),
                     message=json.dumps(text, ensure_ascii=False),
                 )
+                model = get_utility_model()
+                if provider_name(model) == "dashscope" and isinstance(model, ChatOpenAI):
+                    # Configure this call's primary model without mutating the
+                    # shared cached instance or leaking provider-only options
+                    # into invoke_json's independent Ollama fallback.
+                    model = model.model_copy(update={
+                        "temperature": 0,
+                        "model_kwargs": {**model.model_kwargs, "response_format": {"type": "json_object"}},
+                    })
                 async with asyncio.timeout(8):
-                    return await invoke_json(get_utility_model(), prompt)
+                    return await invoke_json(model, prompt)
 
             # Verify relevance before writing, so an unrelated but exact quote
             # cannot prime the writer to invent a connection to the venue.
