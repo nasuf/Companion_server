@@ -25,6 +25,14 @@ from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 
 logger = logging.getLogger(__name__)
 _KINDS = ("memory", "preference", "dialogue")
+# Data-availability explanations belong in private diagnostics, never in the
+# recommendation. This deterministic gate also applies when a model guard
+# mistakenly accepts a fluent paragraph that describes its input instead.
+_INPUT_DISCLOSURE = re.compile(
+    r"用户(?:记忆|喜好|偏好)库|(?:素材|原文|信息|介绍|偏好|时段|时间)[^。！？]{0,16}"
+    r"(?:未(?:在[^。！？]{0,8})?(?:提供|提及|列出|写明)|没有(?:提供|提到|详细列出|写明))"
+    r"|没有(?:特别)?提到的偏好"
+)
 
 
 def _whole_items(items: list[str], budget: int) -> list[str]:
@@ -172,6 +180,12 @@ async def attach_recommendation_message(
                         or candidate.startswith(("{", "[", "```"))):
                     status = "fallback_invalid"
                     break
+                if _INPUT_DISCLOSURE.search(candidate):
+                    status = "fallback_invalid"
+                    feedback = ["删除描述输入数据缺失的句子，只写活动推荐和普通出行建议。"]
+                    if attempt:
+                        break
+                    continue
                 checked = await check_message(candidate)
                 indices = checked.get("relevant_indices") if isinstance(checked, dict) else None
                 if (isinstance(checked, dict) and checked.get("supported") is True

@@ -164,3 +164,35 @@ async def test_single_bounded_repair_or_factual_fallback(writer, repaired):
     assert text.await_count == 2 and check.await_count == 3
     assert "资料齐全没有事实依据" in text.call_args.args[1]
     assert result["discovery_metadata"]["recommendation_message_status"] == ("verified" if repaired else "fallback_invalid")
+
+
+@pytest.mark.parametrize("disclosure", [
+    "具体开放时段素材里没有写明。", "原文未提及开放时间。",
+    "因为具体的开放时段没有详细列出。", "目前没有特别提到的偏好。",
+    "开放时间并未在介绍中写明。", "用户记忆库没有提供相关信息。",
+])
+@pytest.mark.parametrize("repaired", [True, False])
+async def test_input_disclosure_is_blocked_even_if_model_guard_would_accept(writer, disclosure, repaired):
+    text, check = writer
+    unsafe = MESSAGE + disclosure
+    text.side_effect = [unsafe, MESSAGE if repaired else unsafe]
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
+    meta = result["discovery_metadata"]
+    assert text.await_count == 2
+    assert "删除描述输入数据缺失" in text.call_args.args[1]
+    assert check.await_count == (2 if repaired else 1)  # Rejected drafts never reach the LLM guard.
+    assert meta["recommendation_message_status"] == ("verified" if repaired else "fallback_invalid")
+    assert disclosure not in meta["recommendation_message"]
+    assert meta["user_relevance_count"] == (3 if repaired else 0)
+
+
+@pytest.mark.parametrize("advice", [
+    "出发前可以确认开放时间，现场安排以场馆公告为准。",
+    "如果想看看手作素材或阅读作品原文，可以先确认现场安排。",
+])
+async def test_normal_opening_advice_does_not_disclose_input_state(writer, advice):
+    text, check = writer
+    text.return_value = MESSAGE + advice
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
+    assert result["discovery_metadata"]["recommendation_message_status"] == "verified"
+    assert text.await_count == 1 and check.await_count == 2
