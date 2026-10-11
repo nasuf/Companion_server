@@ -137,6 +137,7 @@ class ShortCircuitCtx:
     workspace_id: str | None = None
     # The graph parent owns fragment scheduling and the single turn completion.
     defer_turn_finalization: bool = False
+    memory_usage_event_id: str | None = None
 
     async def finalize(
         self,
@@ -213,6 +214,7 @@ class ShortCircuitCtx:
             # unrelated apology. Retain a safe, tested care response on failure.
             persona_conflict_fallback=_CRISIS_STATIC_FALLBACK if kind.startswith("crisis") else None,
             workspace_id=self.workspace_id,
+            memory_usage_event_id=self.memory_usage_event_id,
             **({"defer_turn_finalization": True} if self.defer_turn_finalization else {}),
         ):
             if evt.get("event") == "reply":

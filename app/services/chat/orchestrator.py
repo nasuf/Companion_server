@@ -60,8 +60,7 @@ from app.services.memory.interaction.contradiction import (
 from app.services.memory.interaction.retrieval_feedback import (
     resolve_retrieval_feedback_correction,
 )
-from app.services.memory.lifecycle.lazy_update import record_memory_usage
-from app.services.memory.retrieval.access_log import log_memory_access
+from app.services.chat.memory_usage import submit_memory_usage
 from app.services.topic import push_topic
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
@@ -424,6 +423,7 @@ async def _stream_legacy_response(
     parent_patience: int | None = None,
     parent_trace_id: str | None = None,
     achievement_turn_final: bool = True,
+    memory_usage_event_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """spec §3.3 step 3：多意图拆分后递归调用本函数处理每个子片段。
 
@@ -462,6 +462,8 @@ async def _stream_legacy_response(
         )
         user_message_id = saved_msg.id
 
+    # Children reuse the persisted root event without pretending to save a new message.
+    memory_usage_event_id = (memory_usage_event_id if sub_intent_mode else user_message_id)
     agent_id = getattr(agent, "id", None)
     conversation = await db.conversation.find_unique(where={"id": conversation_id})
     workspace_id = getattr(conversation, "workspaceId", None)
@@ -951,6 +953,7 @@ async def _stream_legacy_response(
             sub_intent_mode=sub_intent_mode,
             reply_index_offset=reply_index_offset,
             cached_patience=cached_patience,
+            memory_usage_event_id=memory_usage_event_id,
             # 复用 boundary/preflight 之前算好的同一份 recent_context, 避免二次格式化.
             # handler 把它传进 *_reply prompt 的 {context} 占位符 — 否则短路路径
             # LLM 看不到对话历史, 只能从 AI 当前作息编内容 (生产 bug 2026-05-05:
@@ -1065,15 +1068,11 @@ async def _stream_legacy_response(
             crisis_accessed_ids = [
                 getattr(m, "id", "") for m in crisis_classified if getattr(m, "id", "")
             ]
-            if crisis_accessed_ids:
-                _fire_background(
-                    log_memory_access(user_id, crisis_accessed_ids, workspace_id=workspace_id)
-                )
-                # 危机回合同样要喂效用值 —— 这条路径拿到的记忆恰恰是最该保住的。
-                _fire_background(
-                    record_memory_usage(contributed_ids=crisis_accessed_ids,
-                        event_id=user_message_id, user_id=user_id, workspace_id=workspace_id)
-                )
+            response_diagnostics["memory_usage_submission"] = submit_memory_usage(
+                event_id=memory_usage_event_id, user_id=user_id,
+                workspace_id=workspace_id, selected_ids=crisis_accessed_ids,
+                fire_background=_fire_background,
+            )
             if detected_intent.metadata.get("followup"):
                 async for evt in handle_crisis_followup(
                     user_message, sc_ctx,
@@ -1486,27 +1485,15 @@ async def _stream_legacy_response(
                 drop_older_than_seconds=drop_older,
             )
 
-        # 记忆使用打点 (后台, 不阻塞回复)。两条线并行:
-        #   changelog  审计与 admin 展示, 只记真正注入的
-        #   效用值     惰性衰减的输入, 注入是强信号、仅进候选是弱信号
-        # 后者取代了原先靠夜间 cron 数 changelog 的做法 —— 那个 cron 死了几个月,
-        # 期间所有记忆零衰减且无人察觉。
-        injected_ids: list[str] = []
-        if classified_memories:
-            injected_ids.extend(
-                getattr(m, "id", "") for m in classified_memories if getattr(m, "id", "")
-            )
-        candidate_only = [
-            mid for mid in getattr(fetched, "candidate_ids", []) or []
-            if mid and mid not in set(injected_ids)
-        ]
-        if injected_ids:
-            _fire_background(log_memory_access(user_id, injected_ids, workspace_id=workspace_id))
-        if injected_ids or candidate_only:
-            _fire_background(record_memory_usage(
-                contributed_ids=injected_ids, accessed_ids=candidate_only,
-                event_id=user_message_id, user_id=user_id, workspace_id=workspace_id,
-            ))
+        # Preserve the existing retrieval-selected signal policy in one shared
+        # submission boundary. This is not a receipt of final prompt consumption.
+        response_diagnostics["memory_usage_submission"] = submit_memory_usage(
+            event_id=memory_usage_event_id, user_id=user_id,
+            workspace_id=workspace_id,
+            selected_ids=[getattr(m, "id", "") for m in classified_memories or []],
+            candidate_ids=getattr(fetched, "candidate_ids", None) or [],
+            fire_background=_fire_background,
+        )
 
         # spec §6 异步回复机制只规定延迟分布, 没"对方正在输入"占位事件; 早期作为
         # UX 装饰加的, 关闭后前端直接看到流式 token 即可, 无视觉退化.
@@ -1902,6 +1889,7 @@ async def _stream_legacy_response(
                 reply_context, start_index=start_idx,
                 parent_patience=cached_patience,
                 parent_trace_id=tracer.trace_id,
+                memory_usage_event_id=memory_usage_event_id,
             ):
                 yield evt
 
@@ -2018,6 +2006,7 @@ async def stream_chat_response(
     parent_patience: int | None = None,
     parent_trace_id: str | None = None,
     achievement_turn_final: bool = True,
+    memory_usage_event_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Choose once. Legacy children retain their parent's executor."""
     from app.services.chat.graph_executor import select_executor, stream_graph_response
@@ -2031,6 +2020,7 @@ async def stream_chat_response(
         forced_intent=forced_intent, reply_index_offset=reply_index_offset,
         parent_patience=parent_patience, parent_trace_id=parent_trace_id,
         achievement_turn_final=achievement_turn_final,
+        memory_usage_event_id=memory_usage_event_id,
     )
     try:
         async for event in stream:

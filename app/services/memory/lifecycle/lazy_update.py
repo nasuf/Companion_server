@@ -22,6 +22,7 @@ from app.services.memory.taxonomy import L1_SINGLETON_SUBS
 logger = logging.getLogger(__name__)
 _TABLES = {"user": "memories_user", "ai": "memories_ai"}
 _BATCH_SIZE = 250
+USAGE_MAX_CANDIDATES = 500
 USAGE_MAX_AGE_DAYS = 7
 RECEIPT_RETENTION_DAYS = 30
 
@@ -171,7 +172,7 @@ async def record_memory_usage(
     if not event_id or not user_id:
         logger.warning("memory usage skipped: missing stable event or owner")
         return 0
-    if len(signals) > 500:
+    if len(signals) > USAGE_MAX_CANDIDATES:
         logger.warning("memory usage skipped: candidate bound exceeded")
         return 0
     total = 0

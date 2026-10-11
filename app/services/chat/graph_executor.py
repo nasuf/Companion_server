@@ -37,6 +37,7 @@ async def stream_graph_response(
     parent_patience=None,
     parent_trace_id=None,
     achievement_turn_final=True,
+    memory_usage_event_id=None,
 ):
     from app.services.chat import orchestrator as services
     from app.services.chat.graph_runtime import (
@@ -106,6 +107,7 @@ async def stream_graph_response(
             user_id=user_id,
             reply_context=reply_context,
             user_message_id=user_message_id,
+            memory_usage_event_id=user_message_id,
             delivered_from_queue=delivered_from_queue,
             sub_intent_mode=False,
             forced_intent=forced_intent,

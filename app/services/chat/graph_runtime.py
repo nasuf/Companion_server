@@ -43,6 +43,8 @@ class ChatFrame:
     agent_id: str | None
     workspace_id: str | None
     tracer: Any
+    # Stable persisted root user message, shared by every intent fragment.
+    memory_usage_event_id: str | None = None
     owned_tasks: list[asyncio.Task] = field(default_factory=list)
     completion_reason: str | None = None
     completion_reason_set: bool = False
@@ -315,6 +317,7 @@ class ChatGraphContext:
             user_id=parent.user_id,
             reply_context=parent.reply_context,
             user_message_id=None,
+            memory_usage_event_id=parent.memory_usage_event_id,
             delivered_from_queue=True,
             sub_intent_mode=True,
             forced_intent=LABEL_TO_INTENT.get(label, IntentType.NONE),

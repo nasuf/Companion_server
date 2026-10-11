@@ -245,6 +245,7 @@ async def process_sub_intents(
     start_index: int,
     parent_patience: int,
     parent_trace_id: str | None = None,
+    memory_usage_event_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """spec §3.3 step 3：按 priority 顺序处理拆分后的子意图片段。
 
@@ -294,6 +295,7 @@ async def process_sub_intents(
             parent_patience=parent_patience,
             parent_trace_id=parent_trace_id,
             achievement_turn_final=is_last_sub_intent,
+            memory_usage_event_id=memory_usage_event_id,
         ):
             if evt.get("event") == "done":
                 continue
@@ -323,6 +325,7 @@ async def finalize_short_circuit(
     workspace_id: str | None = None,
     defer_turn_finalization: bool = False,
     persona_conflict_fallback: str | None = None,
+    memory_usage_event_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
@@ -358,6 +361,7 @@ async def finalize_short_circuit(
             pending_sub_fragments, conversation_id, agent, user_id,
             reply_context, start_index=reply_index_offset + 1,
             parent_patience=cached_patience,
+            memory_usage_event_id=memory_usage_event_id,
         ):
             yield evt
 

@@ -7,6 +7,8 @@ It deliberately has no checkpoint or replay implementation.
 
 from __future__ import annotations
 
+from app.services.chat.memory_usage import submit_memory_usage
+
 
 async def load_turn(ctx):
     services = ctx.services
@@ -529,15 +531,12 @@ async def early_route(ctx):
         crisis_accessed_ids = [
             getattr(m, "id", "") for m in crisis_classified if getattr(m, "id", "")
         ]
-        if crisis_accessed_ids:
-            services._fire_background(
-                services.log_memory_access(
-                    ctx.user_id, crisis_accessed_ids, workspace_id=ctx.workspace_id
-                )
-            )
-            services._fire_background(
-                services.record_memory_usage(contributed_ids=crisis_accessed_ids)
-            )
+        ctx.response_diagnostics["memory_usage_submission"] = submit_memory_usage(
+            event_id=ctx.memory_usage_event_id, user_id=ctx.user_id,
+            workspace_id=ctx.workspace_id, selected_ids=crisis_accessed_ids,
+            fire_background=services._fire_background,
+        )
+        ctx.sc_ctx.response_diagnostics = ctx.response_diagnostics
         if ctx.detected_intent.metadata.get("followup"):
             async for evt in services.handle_crisis_followup(
                 ctx.user_message,
@@ -936,32 +935,13 @@ async def prepare_reply(ctx):
         )
 
     ctx._build_main_chat_messages = _build_main_chat_messages
-    injected_ids: list[str] = []
-    if ctx.classified_memories:
-        injected_ids.extend(
-            (
-                getattr(m, "id", "")
-                for m in ctx.classified_memories
-                if getattr(m, "id", "")
-            )
-        )
-    candidate_only = [
-        mid
-        for mid in getattr(ctx.fetched, "candidate_ids", []) or []
-        if mid and mid not in set(injected_ids)
-    ]
-    if injected_ids:
-        services._fire_background(
-            services.log_memory_access(
-                ctx.user_id, injected_ids, workspace_id=ctx.workspace_id
-            )
-        )
-    if injected_ids or candidate_only:
-        services._fire_background(
-            services.record_memory_usage(
-                contributed_ids=injected_ids, accessed_ids=candidate_only
-            )
-        )
+    ctx.response_diagnostics["memory_usage_submission"] = submit_memory_usage(
+        event_id=ctx.memory_usage_event_id, user_id=ctx.user_id,
+        workspace_id=ctx.workspace_id,
+        selected_ids=[getattr(m, "id", "") for m in ctx.classified_memories or []],
+        candidate_ids=getattr(ctx.fetched, "candidate_ids", None) or [],
+        fire_background=services._fire_background,
+    )
     from app.services.interaction.chat_management import (
         clamp_reply_delay_seconds,
     )
