@@ -214,65 +214,8 @@ async def test_start_sync_selected_mode():
     fired[0].close()
 
 
-# ── _sync_agent ────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_sync_agent_copies_missing_rows_and_embeddings():
-    template_rows = [_template_row("t1", "知识A"), _template_row("t2", "知识B")]
-    fake_aimemory = MagicMock()
-    fake_aimemory.find_many = AsyncMock(
-        return_value=[SimpleNamespace(content="知识A")]  # target already has A
-    )
-    fake_aimemory.create_many = AsyncMock()
-    fake_changelog = MagicMock()
-    fake_changelog.create_many = AsyncMock()
-    execute_raw = AsyncMock()
-    with (
-        patch.object(knowledge_mod, "get_active_workspace", AsyncMock(return_value=_ws("agent-ws"))),
-        patch.object(knowledge_mod.db, "aimemory", fake_aimemory),
-        patch.object(knowledge_mod.db, "memorychangelog", fake_changelog),
-        patch.object(knowledge_mod.db, "execute_raw", execute_raw),
-    ):
-        copied = await knowledge_mod._sync_agent(
-            template_rows=template_rows, agent_id="a1", user_id="u1"
-        )
-
-    assert copied == 1
-    rows = fake_aimemory.create_many.call_args.kwargs["data"]
-    assert len(rows) == 1 and rows[0]["content"] == "知识B"
-    assert rows[0]["userId"] == "u1" and rows[0]["workspaceId"] == "agent-ws"
-    # One embedding copy (INSERT ... SELECT) for the single new row.
-    assert execute_raw.await_count == 1
-    assert execute_raw.call_args.args[2] == "t2"  # copied FROM the template row
-    changelog_rows = fake_changelog.create_many.call_args.kwargs["data"]
-    assert changelog_rows[0]["operation"] == "knowledge_sync"
-
-
-@pytest.mark.asyncio
-async def test_sync_agent_idempotent_when_up_to_date():
-    template_rows = [_template_row("t1", "知识A")]
-    fake_aimemory = MagicMock()
-    fake_aimemory.find_many = AsyncMock(return_value=[SimpleNamespace(content="知识A")])
-    fake_aimemory.create_many = AsyncMock()
-    with (
-        patch.object(knowledge_mod, "get_active_workspace", AsyncMock(return_value=_ws("agent-ws"))),
-        patch.object(knowledge_mod.db, "aimemory", fake_aimemory),
-    ):
-        copied = await knowledge_mod._sync_agent(
-            template_rows=template_rows, agent_id="a1", user_id="u1"
-        )
-    assert copied == 0
-    fake_aimemory.create_many.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_sync_agent_without_workspace_raises():
-    with patch.object(knowledge_mod, "get_active_workspace", AsyncMock(return_value=None)):
-        with pytest.raises(RuntimeError, match="no_active_workspace"):
-            await knowledge_mod._sync_agent(
-                template_rows=[_template_row("t1", "知识A")], agent_id="a1", user_id="u1"
-            )
+# _sync_agent scope, copying, idempotency and rollback are exercised against
+# PostgreSQL in test_knowledge_sync_evidence_postgres.py.
 
 
 # ── _run_sync_locked: watermark semantics ──────────────────────────────
@@ -344,3 +287,55 @@ async def test_canary_sync_never_advances_watermark():
             full_mode=False,
         )
     advance.assert_not_awaited()
+
+
+async def test_watermark_failure_keeps_committed_counts_and_reports_finalization_error():
+    writes = []
+
+    async def capture(_tid, progress):
+        writes.append(dict(progress))
+
+    with (
+        patch.object(knowledge_mod, "_sync_agent", AsyncMock(return_value=2)),
+        patch.object(knowledge_mod, "_advance_watermark", AsyncMock(side_effect=RuntimeError("db offline"))),
+        patch.object(knowledge_mod, "_write_progress", capture),
+    ):
+        await knowledge_mod._run_sync_locked(
+            template_agent_id="tpl-1", template_rows=[_template_row("t1", "知识A")],
+            targets=[{"id": "a1", "user_id": "u1"}], full_mode=True,
+        )
+    final = writes[-1]
+    assert final["status"] == "error" and final["error"] == "watermark_write_failed"
+    assert final["watermark_advanced"] is False and final["finished_at"]
+    assert final["synced_agents"] == 1 and final["copied_memories"] == 2
+    assert final["processed_agents"] == 1 and final["failed_agents"] == 0
+
+
+async def test_watermark_missing_target_is_not_success():
+    with patch.object(knowledge_mod.db, "execute_raw", AsyncMock(return_value=0)):
+        with pytest.raises(ValueError, match="watermark_target_unavailable"):
+            await knowledge_mod._advance_watermark("missing", datetime.now(UTC))
+
+
+def test_build_copy_rows_deduplicates_a_dirty_template_batch_without_mutating_input():
+    existing={"already"}
+    rows=[_template_row("t1","same"),_template_row("t2","same"),_template_row("t3",""),_template_row("t4","already")]
+    new,pairs=_build_copy_rows(rows,existing_contents=existing,user_id="u",workspace_id="w")
+    assert len(new)==len(pairs)==1 and new[0]['content']=='same'
+    assert new[0]['valueUpdatedAt'] is not None and existing=={"already"}
+
+
+async def test_start_sync_over_limit_rejects_before_launch(monkeypatch):
+    monkeypatch.setattr(knowledge_mod,'MAX_KNOWLEDGE_SYNC_MEMORIES',1)
+    fake=MagicMock();fake.find_many=AsyncMock(return_value=[_template_row('t1','one'),_template_row('t2','two')])
+    fired=MagicMock()
+    with (
+        patch.object(knowledge_mod,'get_sync_progress',AsyncMock(return_value=None)),
+        patch.object(knowledge_mod,'get_active_workspace',AsyncMock(return_value=_ws('tpl-ws'))),
+        patch.object(knowledge_mod.db,'aimemory',fake),
+        patch.object(knowledge_mod,'fire_background',fired),
+    ):
+        with pytest.raises(ValueError,match='over_limit'):
+            await start_knowledge_sync(template_agent_id='tpl-1',agent_ids=None)
+    assert fake.find_many.await_args.kwargs['take']==2
+    fired.assert_not_called()

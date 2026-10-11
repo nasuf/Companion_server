@@ -166,3 +166,35 @@ Voice, entity seeding, old runtime cleanup and first-day scheduling run after
 commit and retain their best-effort behavior. Their failure does not undo the
 committed clone; durable retry/aggregate diagnostics remain existing O01/M02.06
 follow-ups. This is not an atomic migration of all runtime/Redis state.
+
+### Knowledge publication to existing clones
+
+Knowledge sync now records `memory/template_copy` with processing revision
+`knowledge-sync-v1`. Web shows **模板知识发布** separately from initial template
+cloning. This pins the copied template knowledge text version; it does not certify
+the original imported document or factual correctness. Old publications remain
+unknown; knowledge document/import snapshots and edit origins remain M02.02.
+
+Each target batch commits memories, available vectors, changelogs and origins
+in one transaction. Any write failure rolls back that target and is reported by
+the existing sync progress panel; other targets keep their independent outcomes.
+A missing template vector remains missing, while SQL copy errors fail explicitly.
+Exact duplicate knowledge (including archived target rows) is skipped, and duplicate
+source text is copied once. Physical deletion still follows the existing policy:
+an explicit later administrator publication may republish it. This is separate
+from the future derived-memory deletion barriers in M02.04.
+
+The queued target is bound to user/Agent/workspace generations. Current ownership,
+status, template lineage and source text versions are checked again under SQL
+locks. A stale scope cannot redirect a queued publish into a replacement workspace.
+The template persona lock is shared, acquired before row locks to coordinate with
+force initialization. Disabled new-user enrollment does not forbid administrator
+publication to existing clones. Each source batch is capped at 1000 rows; an
+oversized batch fails before launch. New copies start a new decay clock and keep
+existing levels/importance. Sync orchestration still uses the existing in-process
+background task and Redis progress; durable job/retry and aggregate capacity work
+remain on the original roadmap. No chat frame, prompt or schema changes are made.
+
+A failed full-sync watermark write reports an explicit finalization error while
+retaining committed copy counts. It never reports the pending badge as cleared.
+Retry skips previously committed knowledge, and the watermark cannot move back.

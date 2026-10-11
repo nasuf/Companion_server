@@ -20,12 +20,13 @@ from app.services.memory.evidence import EvidenceSource
 from tests.test_memory_evidence_postgres import origins
 from tests.test_memory_profile_evidence_postgres import persona
 from tests.test_clone_memory_evidence_postgres import cloning
+from tests.test_knowledge_sync_evidence_postgres import publishing
 from app.services.memory.profile_evidence import prepare_profile_origin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source_kind", ["message", "profile", "clone"])
-async def test_browser_readonly_evidence_permissions_and_source_deletion(origins,persona,cloning,source_kind):
+@pytest.mark.parametrize("source_kind", ["message", "profile", "clone", "knowledge"])
+async def test_browser_readonly_evidence_permissions_and_source_deletion(origins,persona,cloning,publishing,source_kind):
     db,uid,wid,mid,msg,bind,detail,users,agents,spaces,convs=origins
     app=FastAPI()
     app.include_router(memory_repairs.router)
@@ -66,7 +67,7 @@ async def test_browser_readonly_evidence_permissions_and_source_deletion(origins
                 errors=[];page.on("pageerror",lambda error:errors.append(str(error)))
                 try:
                     await page.goto(origin)
-                    side="ai" if source_kind in {"profile","clone"} else "user"
+                    side="ai" if source_kind in {"profile","clone","knowledge"} else "user"
                     path=f"/admin-api/memory-repairs/evidence/{side}/{mid}?user_id={uid}&workspace_id={wid}&limit=20"
                     admin=create_jwt("synthetic-evidence-browser-admin",role="admin")
                     async def request(token,selected_path=None):
@@ -89,6 +90,13 @@ async def test_browser_readonly_evidence_permissions_and_source_deletion(origins
                         mid=memory.id
                         path=f"/admin-api/memory-repairs/evidence/ai/{mid}?user_id={uid}&workspace_id={wid}&limit=20"
                         expected_ref=(await inspect(wid,mid))["items"][0]["source_ref"]
+                    elif source_kind=="knowledge":
+                        _,_,publish,inspect,_=publishing
+                        assert await publish()==2
+                        memory=await db.aimemory.find_first(where={"workspaceId":wid,"provenance":"knowledge_seed"})
+                        mid=memory.id
+                        path=f"/admin-api/memory-repairs/evidence/ai/{mid}?user_id={uid}&workspace_id={wid}&limit=20"
+                        expected_ref=(await inspect(mid))["items"][0]["source_ref"]
                     else:
                         await bind(EvidenceSource("message",msg.id))
                     await page.evaluate("args=>{window.token=args[0];window.path=args[1]}",[admin,path])
@@ -103,11 +111,15 @@ async def test_browser_readonly_evidence_permissions_and_source_deletion(origins
                         assert linked["data"]["items"][0]["relation"]=="template_copy"
                         assert linked["data"]["items"][0]["availability"]=="available"
                         assert "Synthetic template level" not in str(linked)
+                    if source_kind=="knowledge":
+                        assert linked["data"]["items"][0]["relation"]=="template_copy"
+                        assert linked["data"]["items"][0]["extractor_version"]=="knowledge-sync-v1"
+                        assert "Synthetic published knowledge" not in str(linked)
                     assert msg.content not in str(linked)
                     assert (await request(admin,path.replace(wid,spaces[1])))["status"]==404
                     if source_kind=="profile":
                         await db.execute_raw("DELETE FROM memory_profile_origins WHERE id=$1",expected_ref)
-                    elif source_kind=="clone":
+                    elif source_kind in {"clone","knowledge"}:
                         await db.aimemory.delete(where={"id":expected_ref})
                     else:
                         await db.message.delete(where={"id":msg.id})

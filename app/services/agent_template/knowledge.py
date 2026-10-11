@@ -32,14 +32,15 @@ import json
 import logging
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.db import db
 from app.redis_client import get_redis
 from app.services.agent_template.clone import _MEMORY_COPY_FIELDS
 from app.services.agent_template.knowledge_import import KnowledgeItem
-from app.services.agent_template.registry import count_active_clones
+from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME, count_active_clones
+from app.services.memory.evidence import EvidenceSource, bind_memory_evidence, content_version
 from app.services.memory.provenance import KNOWLEDGE_SEED
 from app.services.memory.retrieval.knowledge_hits import knowledge_rows_cache_key
 from app.services.memory.storage.persistence import store_memory
@@ -68,6 +69,8 @@ _SYNC_LOCK_TTL_S = 1800
 # expired by then too) and no longer blocks a new sync.
 _STALE_RUNNING_S = 1800
 _MAX_FAILURE_SAMPLES = 20
+MAX_KNOWLEDGE_SYNC_MEMORIES = 1000
+KNOWLEDGE_SYNC_EXTRACTOR = "knowledge-sync-v1"
 
 
 class KnowledgeSyncBusy(RuntimeError):
@@ -376,9 +379,12 @@ async def start_knowledge_sync(
             "isArchived": False,
         },
         order={"createdAt": "asc"},
+        take=MAX_KNOWLEDGE_SYNC_MEMORIES + 1,
     )
     if not template_rows:
         raise ValueError("模板还没有知识记忆，请先上传知识文档")
+    if len(template_rows) > MAX_KNOWLEDGE_SYNC_MEMORIES:
+        raise ValueError("template_knowledge_over_limit")
 
     full_mode = not agent_ids
     targets = await _resolve_target_agents(template_agent_id, agent_ids)
@@ -426,7 +432,7 @@ async def start_knowledge_sync(
 async def _resolve_target_agents(
     template_agent_id: str, agent_ids: list[str] | None
 ) -> list[dict[str, Any]]:
-    """Rows ``{id, user_id}`` of the agents to sync.
+    """Freeze each live target's owner, workspace and execution generations.
 
     sourceTemplateId is read via raw SQL everywhere (consistent with
     registry.count_active_clones) so this works even when the generated Prisma
@@ -437,11 +443,16 @@ async def _resolve_target_agents(
         for agent_id in dict.fromkeys(agent_ids):
             rows = await db.query_raw(
                 """
-                SELECT id, user_id FROM ai_agents
-                WHERE id = $1
-                  AND source_template_id = $2
-                  AND status = 'active'
-                  AND archived_at IS NULL
+                SELECT a.id,a.user_id,w.id AS workspace_id,
+                       a.execution_generation AS agent_generation,
+                       u.execution_generation AS user_generation,
+                       w.execution_generation AS workspace_generation
+                FROM ai_agents a JOIN users u ON u.id=a.user_id
+                JOIN chat_workspaces w ON w.agent_id=a.id AND w.user_id=a.user_id
+                WHERE a.id=$1 AND a.source_template_id=$2
+                  AND a.status='active' AND a.archived_at IS NULL
+                  AND u.status='active' AND u.archived_at IS NULL
+                  AND w.status='active' AND w.archived_at IS NULL
                 """,
                 agent_id,
                 template_agent_id,
@@ -452,11 +463,16 @@ async def _resolve_target_agents(
         return results
     return await db.query_raw(
         """
-        SELECT id, user_id FROM ai_agents
-        WHERE source_template_id = $1
-          AND status = 'active'
-          AND archived_at IS NULL
-        ORDER BY created_at ASC
+        SELECT a.id,a.user_id,w.id AS workspace_id,
+               a.execution_generation AS agent_generation,
+               u.execution_generation AS user_generation,
+               w.execution_generation AS workspace_generation
+        FROM ai_agents a JOIN users u ON u.id=a.user_id
+        JOIN chat_workspaces w ON w.agent_id=a.id AND w.user_id=a.user_id
+        WHERE a.source_template_id=$1 AND a.status='active' AND a.archived_at IS NULL
+          AND u.status='active' AND u.archived_at IS NULL
+          AND w.status='active' AND w.archived_at IS NULL
+        ORDER BY a.created_at ASC
         """,
         template_agent_id,
     )
@@ -538,7 +554,8 @@ async def _run_sync_locked(
         user_id = target["user_id"]
         try:
             copied = await _sync_agent(
-                template_rows=template_rows, agent_id=agent_id, user_id=user_id
+                template_rows=template_rows, template_agent_id=template_agent_id,
+                agent_id=agent_id, user_id=user_id, target_scope=target,
             )
             if copied > 0:
                 progress["synced_agents"] += 1
@@ -557,11 +574,19 @@ async def _run_sync_locked(
         progress["processed_agents"] += 1
         await _write_progress(template_agent_id, progress)
 
-    if full_mode and progress["failed_agents"] == 0 and watermark is not None:
-        await _advance_watermark(template_agent_id, watermark)
-        progress["watermark_advanced"] = True
-
     progress["status"] = "done"
+    if full_mode and progress["failed_agents"] == 0 and watermark is not None:
+        try:
+            await _advance_watermark(template_agent_id, watermark)
+            progress["watermark_advanced"] = True
+        except Exception:
+            # Copies have committed independently. Keep their counts while
+            # exposing a failed finalization, so the UI never claims that a
+            # failed watermark write cleared the pending badge.
+            logger.exception("[TEMPLATE-KSYNC] watermark finalization failed")
+            progress["status"] = "error"
+            progress["error"] = "watermark_write_failed"
+
     progress["finished_at"] = _now_iso()
     await _write_progress(template_agent_id, progress)
     logger.info(
@@ -588,15 +613,18 @@ def _build_copy_rows(
     copy. Mirrors clone._clone_ai_memories field-for-field."""
     new_rows: list[dict[str, Any]] = []
     id_pairs: list[tuple[str, str]] = []
+    seen = set(existing_contents)
     for row in template_rows:
         content = getattr(row, "content", None)
-        if not content or content in existing_contents:
+        if not content or content in seen:
             continue
+        seen.add(content)
         new_id = str(uuid.uuid4())
         payload: dict[str, Any] = {
             "id": new_id,
             "userId": user_id,
             "workspaceId": workspace_id,
+            "valueUpdatedAt": datetime.now(UTC),
         }
         for field in _MEMORY_COPY_FIELDS:
             payload[field] = getattr(row, field, None)
@@ -605,75 +633,121 @@ def _build_copy_rows(
     return new_rows, id_pairs
 
 
-async def _sync_agent(*, template_rows: list[Any], agent_id: str, user_id: str) -> int:
-    """Copy missing knowledge rows into one agent; returns rows copied."""
-    workspace = await get_active_workspace(agent_id=agent_id)
-    if workspace is None:
-        raise RuntimeError("no_active_workspace")
+async def _sync_agent(
+    *, template_rows: list[Any], template_agent_id: str, agent_id: str, user_id: str,
+    target_scope: dict[str, Any],
+) -> int:
+    """Publish one bounded snapshot atomically, rechecking both live scopes.
 
-    existing = await _knowledge_contents(workspace.id)
-    new_rows, id_pairs = _build_copy_rows(
-        template_rows,
-        existing_contents=existing,
-        user_id=user_id,
-        workspace_id=workspace.id,
-    )
-    if not new_rows:
-        return 0
+    The caller's snapshot only supplies IDs and expected text versions. Copy
+    fields come from locked source rows; model/caller supplied fields cannot
+    acquire template-copy authority. A failed vector, audit or source write
+    rolls back the entire target batch, so a retry cannot skip partial rows.
+    """
+    if not 1 <= len(template_rows) <= MAX_KNOWLEDGE_SYNC_MEMORIES:
+        raise ValueError("invalid_knowledge_sync_batch")
+    expected = {row.id: content_version(row.content) for row in template_rows}
+    if len(expected) != len(template_rows):
+        raise ValueError("duplicate_knowledge_source_ids")
 
-    await db.aimemory.create_many(data=new_rows)
-
-    # Copy embeddings row-by-row (same tolerance as the clone path: a missing
-    # embedding must not fail the sync; the row can be re-embedded later).
-    for template_memory_id, new_memory_id in id_pairs:
-        try:
-            await db.execute_raw(
-                """
-                INSERT INTO memory_embeddings (memory_id, embedding)
-                SELECT $1, embedding FROM memory_embeddings WHERE memory_id = $2
-                ON CONFLICT (memory_id) DO NOTHING
-                """,
-                new_memory_id,
-                template_memory_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[TEMPLATE-KSYNC] embedding copy failed for %s: %s",
-                new_memory_id[:8],
-                exc,
-            )
-
-    # Changelog is advisory — never abort the sync for it.
-    try:
-        await db.memorychangelog.create_many(
-            data=[
-                {
-                    "userId": user_id,
-                    "memoryId": row["id"],
-                    "operation": "knowledge_sync",
-                    "newValue": row.get("content"),
-                    "workspaceId": row["workspaceId"],
-                }
-                for row in new_rows
-            ]
+    async with db.tx(timeout=timedelta(seconds=30)) as tx:
+        template_query = """SELECT w.id,w.user_id FROM ai_agents a
+               JOIN users u ON u.id=a.user_id
+               JOIN chat_workspaces w ON w.agent_id=a.id AND w.user_id=a.user_id
+               WHERE a.id=$1 AND u.username=$2 AND u.status='active'
+                 AND a.status='active' AND a.archived_at IS NULL AND w.status='active'
+                 AND w.archived_at IS NULL AND u.archived_at IS NULL
+               """
+        templates = await tx.query_raw(template_query, template_agent_id, TEMPLATE_SYSTEM_USERNAME)
+        if len(templates) != 1:
+            raise ValueError("knowledge_template_scope_invalid")
+        template = templates[0]
+        # Coordinate with force persona replacement without blocking other
+        # publishers' reads of the same template.
+        await tx.query_raw(
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))::text AS held",
+            "persona-init:" + template["id"],
         )
-    except Exception as exc:
-        logger.warning("[TEMPLATE-KSYNC] changelog write failed: %s", exc)
-
-    await _bust_knowledge_rows_cache(workspace.id)
+        locked = await tx.query_raw(
+            template_query + " FOR SHARE OF a,u,w", template_agent_id, TEMPLATE_SYSTEM_USERNAME,
+        )
+        if locked != templates:
+            raise ValueError("knowledge_template_scope_changed")
+        targets = await tx.query_raw(
+            """SELECT w.id AS workspace_id,a.execution_generation AS agent_generation,
+                      u.execution_generation AS user_generation,w.execution_generation AS workspace_generation
+               FROM ai_agents a
+               JOIN users u ON u.id=a.user_id
+               JOIN chat_workspaces w ON w.agent_id=a.id AND w.user_id=a.user_id
+               WHERE a.id=$1 AND a.user_id=$2 AND a.source_template_id=$3
+                 AND a.status='active' AND a.archived_at IS NULL AND w.status='active'
+                 AND u.status='active' AND u.username<>$4
+                 AND u.archived_at IS NULL AND w.archived_at IS NULL
+               FOR UPDATE OF w FOR SHARE OF a,u""",
+            agent_id, user_id, template_agent_id, TEMPLATE_SYSTEM_USERNAME,
+        )
+        if len(targets) != 1:
+            raise ValueError("knowledge_target_scope_invalid")
+        if any(target_scope.get(key) != value for key,value in targets[0].items()):
+            raise ValueError("knowledge_target_scope_expired")
+        workspace_id = targets[0]["workspace_id"]
+        snapshot = await tx.query_raw(
+            """SELECT id FROM memories_ai WHERE id=ANY($1::text[]) AND workspace_id=$2
+               AND user_id=$3 AND provenance='knowledge_seed' AND NOT is_archived
+               ORDER BY id LIMIT $4 FOR SHARE""",
+            list(expected), template["id"], template["user_id"], MAX_KNOWLEDGE_SYNC_MEMORIES + 1,
+        )
+        if len(snapshot) != len(expected):
+            raise ValueError("knowledge_source_scope_or_state_changed")
+        rows = await tx.aimemory.find_many(
+            where={"id": {"in": [r["id"] for r in snapshot]}}, order={"id": "asc"},
+        )
+        if any(content_version(row.content) != expected[row.id] for row in rows):
+            raise ValueError("knowledge_source_version_changed")
+        existing = await tx.query_raw(
+            """SELECT content FROM memories_ai WHERE user_id=$1 AND workspace_id=$2
+               AND provenance='knowledge_seed' AND content=ANY($3::text[])""",
+            user_id, workspace_id, [row.content for row in rows],
+        )
+        new_rows, id_pairs = _build_copy_rows(
+            rows, existing_contents={r["content"] for r in existing},
+            user_id=user_id, workspace_id=workspace_id,
+        )
+        if not new_rows:
+            return 0
+        await tx.aimemory.create_many(data=new_rows)
+        values = ",".join(f"(${i*2+1},${i*2+2})" for i in range(len(id_pairs)))
+        await tx.execute_raw(
+            f"""INSERT INTO memory_embeddings (memory_id,embedding)
+                SELECT v.new_id::text,e.embedding FROM (VALUES {values}) v(new_id,template_id)
+                JOIN memory_embeddings e ON e.memory_id=v.template_id::text
+                ON CONFLICT (memory_id) DO NOTHING""",
+            *[v for source_id,new_id in id_pairs for v in (new_id,source_id)],
+        )
+        await tx.memorychangelog.create_many(data=[{
+            "userId": user_id, "memoryId": row["id"], "operation": "knowledge_sync",
+            "newValue": row["content"], "workspaceId": workspace_id,
+        } for row in new_rows])
+        for source_id, new_id in id_pairs:
+            await bind_memory_evidence(
+                memory_id=new_id, side="ai", user_id=user_id, workspace_id=workspace_id,
+                sources=(EvidenceSource("memory", source_id, side="ai", relation="template_copy",
+                                        expected_version=expected[source_id]),),
+                extractor_version=KNOWLEDGE_SYNC_EXTRACTOR, database=tx,
+            )
+    await _bust_knowledge_rows_cache(workspace_id)
     return len(new_rows)
 
 
 async def _advance_watermark(template_agent_id: str, watermark: datetime) -> None:
-    try:
-        await db.execute_raw(
-            "UPDATE ai_agents SET knowledge_synced_at = $2::timestamptz WHERE id = $1",
-            template_agent_id,
-            watermark.isoformat(),
-        )
-    except Exception as exc:
-        # Pre-migration tolerance: badge simply stays pending until migrated.
-        logger.warning("[TEMPLATE-KSYNC] watermark write failed: %s", exc)
+    updated = await db.execute_raw(
+        """UPDATE ai_agents SET knowledge_synced_at =
+           GREATEST(knowledge_synced_at, $2::timestamptz) WHERE id = $1""",
+        template_agent_id,
+        watermark.isoformat(),
+    )
+    if updated != 1:
+        raise ValueError("knowledge_watermark_target_unavailable")
 
 
 # ── Progress (Redis) ───────────────────────────────────────────────────
