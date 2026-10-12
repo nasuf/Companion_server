@@ -169,3 +169,9 @@ EVT_PROACTIVE_STATE_TRANSITION = "proactive.state_transition"  # session start, 
 
 # Runtime config / ops
 EVT_RUNTIME_CONFIG_STALE_CLIENT = "runtime_config.stale_client"  # prisma client 缺 SystemConfig 列, 静默走 env 兜底 (多 worker 一致性风险)
+
+# Human takeover. The Redis flag is written only after a successful claim.
+EVT_TAKEOVER_CREATED = "takeover.created"
+EVT_TAKEOVER_CLAIMED = "takeover.claimed"
+EVT_TAKEOVER_CLAIM_CONFLICT = "takeover.claim_conflict"
+EVT_TAKEOVER_MESSAGE = "takeover.message_routed"

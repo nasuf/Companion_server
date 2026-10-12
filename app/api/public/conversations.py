@@ -80,6 +80,22 @@ async def _current_ai_status(agent_id: str | None) -> dict | None:
     }
 
 
+async def _overlay_takeover_status(conversation_id: str, status: dict | None) -> dict | None:
+    """Replace only the header label after schedule and music have used the real status."""
+    from app.services.admin_takeover.service import display_status_override
+
+    try:
+        override = await display_status_override(conversation_id)
+    except Exception:
+        return status
+    if not override:
+        return status
+    merged = dict(status or {})
+    merged["ai_status"] = override
+    merged["ai_status_label"] = status_label(override)
+    return merged
+
+
 async def _conversation_response(conv, *, ensure_idle_music: bool = False) -> ConversationResponse:
     status = await _current_ai_status(getattr(conv, "agentId", None))
     music_co_listening = None
@@ -109,6 +125,7 @@ async def _conversation_response(conv, *, ensure_idle_music: bool = False) -> Co
             )
     except Exception:
         music_co_listening = None
+    status = await _overlay_takeover_status(conv.id, status)
     return ConversationResponse(
         id=conv.id,
         user_id=conv.userId,
@@ -159,6 +176,14 @@ async def create_conversation(
         order={"updatedAt": "desc"},
     )
     if existing:
+        from app.services.admin_takeover.service import attach_takeover_agent
+
+        await attach_takeover_agent(
+            user_id=existing.userId,
+            conversation_id=existing.id,
+            agent_id=existing.agentId,
+            workspace_id=existing.workspaceId,
+        )
         return await _conversation_response(existing, ensure_idle_music=True)
 
     try:
@@ -182,6 +207,14 @@ async def create_conversation(
             raise
         conv = existing
 
+    from app.services.admin_takeover.service import attach_takeover_agent
+
+    await attach_takeover_agent(
+        user_id=conv.userId,
+        conversation_id=conv.id,
+        agent_id=conv.agentId,
+        workspace_id=conv.workspaceId,
+    )
     return await _conversation_response(conv, ensure_idle_music=True)
 
 

@@ -362,6 +362,14 @@ async def clone_template_agent_for_user(user_id: str, template_agent_id: str, *,
     except Exception as exc:
         logger.warning("[AGENT-CLONE] entity graph copy failed: %s", exc)
     _dispatch_day_one_schedule(agent, user_id)
+    from app.services.admin_takeover.service import attach_takeover_agent
+
+    await attach_takeover_agent(
+        user_id=user_id,
+        conversation_id=conversation.id,
+        agent_id=agent.id,
+        workspace_id=workspace.id,
+    )
     logger.info("[AGENT-CLONE] provisioned agent %s for user %s from template %s",
                 agent.id[:8], user_id[:8], template_agent_id[:8])
     return agent, workspace, conversation

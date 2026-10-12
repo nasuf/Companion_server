@@ -867,6 +867,10 @@ async def generate_and_send_proactive(
     send_outcome: "AdminProactiveSendOutcome | None" = None,
 ) -> bool:
     """A 模式 (原主动回复) 发送主流程: 资格 → 话题 → 热点 → 生成 → 附件 → 发送 → 记账."""
+    from app.services.admin_takeover.service import is_user_taken_over
+
+    if await is_user_taken_over(state.user_id):
+        return False
     # 绑 ContextVar 让本调用栈的 LLM 工厂应用该 agent 的模型 override.
     # 不绑的话主动消息生成 / AI 自我记忆抽取都会用 system 全局, 跟 chat 路径
     # 的 per-agent 行为不一致, 同时 token stats 会把这些 LLM 调用归到全局模型名.
@@ -1108,13 +1112,24 @@ async def send_first_greeting(
 ) -> bool:
     """spec §12: 用户首次进入聊天 (对话消息数=0) 时 AI 主动发送第一句.
 
+    A takeover claimed before this call starts does not send the greeting.
+    A greeting that already passed this check still finishes.
+
     不走时间窗概率/不计入每日 3 次上限; 但需计入衰减 n=1 —
     走与其他主动消息相同的 mark_proactive_sent 路径, 用户不回复时才
     能进入 spec §8 的三级衰减等待 (`status=waiting_user`,
     `response_deadline_at` 写入等).
     """
     # 绑 ContextVar 让 LLM 工厂应用该 agent 的模型 override.
+    from app.services.admin_takeover.service import is_conversation_taken_over
     from app.services.runtime_config import bind_agent_context
+
+    try:
+        taken_over = await is_conversation_taken_over(conversation_id)
+    except Exception:
+        taken_over = False
+    if taken_over:
+        return False
     await bind_agent_context(agent_id)
 
     count = await db.message.count(where={"conversationId": conversation_id})

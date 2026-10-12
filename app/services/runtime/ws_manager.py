@@ -35,8 +35,10 @@ logger = logging.getLogger(__name__)
 _CONV_CHANNEL_PREFIX = "ws:conv:{"
 _CHANNEL_SUFFIX = "}"
 _WS_CHANNEL_PREFIX = "ws:workspace:{"
+_ADMIN_CHANNEL_PREFIX = "ws:admin:{"
 _PSUB_PATTERN_CONV = "ws:conv:*"
 _PSUB_PATTERN_WS = "ws:workspace:*"
+_PSUB_PATTERN_ADMIN = "ws:admin:*"
 
 
 def _conv_channel(conv_id: str) -> str:
@@ -47,9 +49,17 @@ def _workspace_channel(workspace_id: str) -> str:
     return f"{_WS_CHANNEL_PREFIX}{workspace_id}{_CHANNEL_SUFFIX}"
 
 
+def _admin_channel(admin_id: str) -> str:
+    return f"{_ADMIN_CHANNEL_PREFIX}{admin_id}{_CHANNEL_SUFFIX}"
+
+
 def _parse_channel(channel: str) -> tuple[str, str] | None:
     """`ws:conv:{abc}` → ("conv", "abc"); `ws:workspace:{xyz}` → ("workspace", "xyz")."""
-    for prefix, kind in ((_CONV_CHANNEL_PREFIX, "conv"), (_WS_CHANNEL_PREFIX, "workspace")):
+    for prefix, kind in (
+        (_CONV_CHANNEL_PREFIX, "conv"),
+        (_WS_CHANNEL_PREFIX, "workspace"),
+        (_ADMIN_CHANNEL_PREFIX, "admin"),
+    ):
         if channel.startswith(prefix) and channel.endswith(_CHANNEL_SUFFIX):
             return kind, channel[len(prefix):-len(_CHANNEL_SUFFIX)]
     return None
@@ -64,6 +74,9 @@ class ConnectionManager:
         self._workspace_convs: dict[str, set[str]] = {}
         self._conv_users: dict[str, str] = {}
         self._conv_workspace: dict[str, str | None] = {}
+        # Admin inbox sockets are a separate map. They must not occupy
+        # _connections, which is one socket per end-user conversation.
+        self._admin_connections: dict[str, WebSocket] = {}
         self._lock = asyncio.Lock()
         self._subscriber_task: asyncio.Task | None = None
         # 用于过滤 self-publish: 每个进程的 manager 实例 UUID 唯一,
@@ -177,6 +190,44 @@ class ConnectionManager:
         await self._publish(_workspace_channel(workspace_id), event_type, data)
         return local_count
 
+    async def connect_admin(self, admin_id: str, ws: WebSocket) -> None:
+        """Register the admin inbox socket. Does not touch conversation sockets."""
+        async with self._lock:
+            old = self._admin_connections.get(admin_id)
+            if old and old is not ws and old.client_state == WebSocketState.CONNECTED:
+                try:
+                    await old.close(code=4001, reason="replaced")
+                except Exception:
+                    pass
+            self._admin_connections[admin_id] = ws
+
+    async def disconnect_admin(self, admin_id: str, *, expected: WebSocket | None = None) -> None:
+        async with self._lock:
+            current = self._admin_connections.get(admin_id)
+            if expected is not None and current is not expected:
+                return
+            self._admin_connections.pop(admin_id, None)
+
+    async def send_to_admin(self, admin_id: str, event_type: str, data: Any = None) -> bool:
+        """Push to the owning admin's inbox socket, including across workers."""
+        if not admin_id:
+            return False
+        if await self._send_local_admin(admin_id, event_type, data):
+            return True
+        return await self._publish(_admin_channel(admin_id), event_type, data)
+
+    async def _send_local_admin(self, admin_id: str, event_type: str, data: Any) -> bool:
+        ws = self._admin_connections.get(admin_id)
+        if not ws or ws.client_state != WebSocketState.CONNECTED:
+            return False
+        try:
+            await ws.send_json({"type": event_type, "data": data or {}})
+            return True
+        except Exception as exc:
+            logger.warning("admin inbox send failed admin=%s type=%s: %s", admin_id[:8], event_type, exc)
+            await self.disconnect_admin(admin_id, expected=ws)
+            return False
+
     async def send_to_user(
         self, user_id: str, event_type: str, data: Any = None,
     ) -> int:
@@ -262,10 +313,12 @@ class ConnectionManager:
             try:
                 pubsub_client = self._make_pubsub_client()
                 pubsub = pubsub_client.pubsub()
-                await pubsub.psubscribe(_PSUB_PATTERN_CONV, _PSUB_PATTERN_WS)
+                await pubsub.psubscribe(
+                    _PSUB_PATTERN_CONV, _PSUB_PATTERN_WS, _PSUB_PATTERN_ADMIN,
+                )
                 logger.info(
                     f"WS subscriber started: psubscribe "
-                    f"{_PSUB_PATTERN_CONV} {_PSUB_PATTERN_WS}"
+                    f"{_PSUB_PATTERN_CONV} {_PSUB_PATTERN_WS} {_PSUB_PATTERN_ADMIN}"
                 )
                 backoff_sec = 1.0
                 async for msg in pubsub.listen():
@@ -352,6 +405,8 @@ class ConnectionManager:
         elif kind == "workspace":
             for cid in self._workspace_convs.get(scope_id, set()).copy():
                 await self._send_local_conv(cid, event_type, data)
+        elif kind == "admin":
+            await self._send_local_admin(scope_id, event_type, data)
 
 
 manager = ConnectionManager()

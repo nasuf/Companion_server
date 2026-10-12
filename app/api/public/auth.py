@@ -162,6 +162,9 @@ async def register(data: RegisterRequest, request: Request):
     if data.app_version:
         user_create_data["signupAppVersion"] = data.app_version
     user = await db.user.create(data=user_create_data)
+    from app.services.admin_takeover.service import open_takeover_case
+
+    await open_takeover_case(user.id)
 
     token = create_jwt(user.id, user.role)
     audit_auth_request_event(

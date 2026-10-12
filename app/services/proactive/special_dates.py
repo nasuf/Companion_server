@@ -305,6 +305,11 @@ async def send_special_date_proactive(
     if not occasions:
         return False
 
+    from app.services.admin_takeover.service import is_user_taken_over
+
+    if await is_user_taken_over(user_id):
+        return False
+
     now_ts = now or datetime.now(UTC)
 
     # 每日上限: 特殊日期也计入 (spec §10.2)

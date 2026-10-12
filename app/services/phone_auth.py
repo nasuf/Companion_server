@@ -80,7 +80,6 @@ async def find_or_create_phone_user(
                     "lastLoginAt": datetime.now(UTC),
                 }
             )
-            return user
     except UniqueViolationError:
         # Concurrent first-login for the same phone — converge on the winner.
         identity = await db.authidentity.find_first(
@@ -89,6 +88,11 @@ async def find_or_create_phone_user(
         if not identity:
             raise
         return await db.user.find_unique(where={"id": identity.userId})
+
+    from app.services.admin_takeover.service import open_takeover_case
+
+    await open_takeover_case(user.id)
+    return user
 
 
 async def bind_phone_to_user(user_id: str, phone: str) -> None:

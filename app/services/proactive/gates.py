@@ -112,6 +112,10 @@ async def check_window_gates(
 ) -> Gate | None:
     """A 模式窗口门槛, 按代价从低到高排列。None = 放行."""
     now_ts = now or datetime.now(UTC)
+    from app.services.admin_takeover.service import is_user_taken_over
+
+    if await is_user_taken_over(state.user_id):
+        return Gate("miss", "human_takeover")
     gate = await check_workspace(state)
     if gate:
         return gate

@@ -22,22 +22,30 @@ async def _store_chat_image(
     name: str | None,
     fallback_width: int | None = None,
     fallback_height: int | None = None,
+    is_admin: bool = False,
 ) -> ChatAttachmentResponse:
     """Shared ingest for the base64 and multipart upload routes: normalizes the
     image, stores original + thumbnail, and records server-measured metadata."""
+    owner_id = user_id
     if not await repo.conversation_belongs_to_user(conversation_id, user_id):
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        from app.services.admin_takeover.service import takeover_media_owner
+
+        owner_id = await takeover_media_owner(
+            user_id, conversation_id, is_admin=is_admin,
+        )
+        if not owner_id:
+            raise HTTPException(status_code=404, detail="Conversation not found")
     normalized_mime = storage.normalize_image_mime(mime)
     storage.validate_image_size(blob)
     storage_key, processed = storage.save_image_with_thumbnail(
-        user_id=user_id,
+        user_id=owner_id,
         conversation_id=conversation_id,
         blob=blob,
         mime=normalized_mime,
     )
     try:
         attachment = await repo.create_attachment(
-            user_id=user_id,
+            user_id=owner_id,
             conversation_id=conversation_id,
             storage_key=storage_key,
             url=storage.media_url(storage_key),
@@ -52,7 +60,7 @@ async def _store_chat_image(
     except Exception:
         storage.delete_media_file(storage_key)
         raise
-    fire_background(_cleanup_orphan_files(user_id))
+    fire_background(_cleanup_orphan_files(owner_id))
     return _response(attachment)
 
 
@@ -69,6 +77,7 @@ async def upload_chat_image(
         name=data.name,
         fallback_width=data.width or None,
         fallback_height=data.height or None,
+        is_admin=user.get("role") == "admin",
     )
 
 
@@ -89,6 +98,7 @@ async def upload_chat_image_multipart(
         blob=blob,
         mime=file.content_type or "image/jpeg",
         name=name or file.filename,
+        is_admin=user.get("role") == "admin",
     )
 
 

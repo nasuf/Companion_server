@@ -500,7 +500,6 @@ async def find_or_create_wechat_user(
                     "lastLoginAt": datetime.now(UTC),
                 }
             )
-            return user
     except UniqueViolationError:
         identity = await _find_identity_preferring_union(token)
         if not identity:
@@ -519,3 +518,8 @@ async def find_or_create_wechat_user(
             },
         )
         return await db.user.find_unique(where={"id": identity.userId})
+
+    from app.services.admin_takeover.service import open_takeover_case
+
+    await open_takeover_case(user.id)
+    return user

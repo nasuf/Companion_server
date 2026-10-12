@@ -433,10 +433,18 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
 
     豁免 30min in_chat 阻塞 (用户主动设置), 但守 AI 睡眠 + 22:00-08:00 主动时段.
     """
+    from app.services.admin_takeover.service import is_user_taken_over
     from app.services.chat.intent_replies import reminder_message, reminder_pre_check
 
     agent_id = trigger.aiAgentId
     user_id = trigger.userId
+    if await is_user_taken_over(user_id):
+        logger.info(
+            "reminder skipped for human takeover user=%s trigger=%s",
+            str(user_id)[:8],
+            trigger.id[:8],
+        )
+        return
     data = trigger.actionData or {}
     memory_id = data.get("memory_id")
     summary = (data.get("summary") or "").strip()

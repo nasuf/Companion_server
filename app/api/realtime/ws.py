@@ -1239,6 +1239,104 @@ def _link_card_needs_refresh(link) -> bool:
     return url_count > 0 and len(body.replace(" ", "")) <= 120 + url_count * 80
 
 
+async def _handle_takeover_user_message(
+    ws: WebSocket,
+    conversation_id: str,
+    user_id: str,
+    text: str,
+    *,
+    client_id: str | None = None,
+    component_card: dict | None = None,
+    attachment_ids: list[str] | None = None,
+    paid_confirmed: bool = False,
+) -> None:
+    """Post-claim user message: persist, ack, and notify the owning admin.
+
+    Quota stays. Aggregation, vision, memory, achievements, and the model
+    are not entered. Messages accepted before the claim keep the old path.
+    """
+    is_red_packet_or_gift = (
+        isinstance(component_card, dict)
+        and component_card.get("type") in {"red_packet", "gift"}
+    )
+    if not is_red_packet_or_gift:
+        try:
+            is_vip = await wallet.is_vip(user_id)
+            quota_result = await chat_quota.consume_one(
+                user_id, is_vip=is_vip, paid_confirmed=paid_confirmed
+            )
+        except Exception as exc:
+            logger.warning("takeover quota gate failed conv=%s: %s", conversation_id[:8], exc)
+            try:
+                await ws.send_json({
+                    "type": "error",
+                    "data": {"message": "额度检查失败，请重新发送"},
+                })
+            except Exception:
+                pass
+            return
+        if not quota_result["allowed"]:
+            await ws.send_json({
+                "type": "quota_blocked",
+                "data": {
+                    "reason": quota_result["reason"],
+                    "per_msg_cost": quota_result["per_msg_cost"],
+                    "spendable_tickets": quota_result["spendable_tickets"],
+                    "client_id": client_id,
+                },
+            })
+            return
+    attachments = await chat_media_repo.get_message_attachments(
+        attachment_ids=attachment_ids or [],
+        user_id=user_id,
+        conversation_id=conversation_id,
+    )
+    if attachment_ids and len(attachments) != len(set(attachment_ids)):
+        await ws.send_json({"type": "error", "data": {"message": "附件无效或已发送"}})
+        return
+    attachment_metadata = [
+        {
+            "id": item.id,
+            "kind": item.kind,
+            "name": item.name,
+            "mime": item.mime,
+            "size": item.size,
+            "width": item.width,
+            "height": item.height,
+            "duration_seconds": item.duration_seconds,
+            "url": item.url,
+            "vision_status": item.vision_status,
+            "transcription_status": item.transcription_status,
+            "transcription_text": item.transcription_text,
+        }
+        for item in attachments
+    ]
+    from app.services.admin_takeover.service import record_takeover_user_message
+
+    saved = await record_takeover_user_message(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        text=text,
+        metadata=_message_metadata(
+            client_id=client_id,
+            component_card=component_card,
+            attachments=attachment_metadata or None,
+        ),
+    )
+    if saved and attachment_ids:
+        await chat_media_repo.bind_attachments_to_message(
+            attachment_ids=attachment_ids,
+            message_id=saved["message_id"],
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+    await _send_ack(
+        ws,
+        message_id=(saved or {}).get("message_id") or "",
+        client_id=client_id,
+    )
+
+
 async def _handle_message(
     ws: WebSocket,
     conversation_id: str,
@@ -1255,6 +1353,45 @@ async def _handle_message(
     paid_confirmed: bool = False,
 ) -> None:
     """处理用户消息：额度闸门 → 聚合检查 → 生成回复 → 推送。"""
+    from app.services.admin_takeover.service import is_conversation_taken_over
+
+    try:
+        taken_over = await is_conversation_taken_over(conversation_id)
+    except Exception as exc:
+        # A broken takeover lookup must not close the user socket or skip
+        # the model. The legacy body below is the path every unmarked chat uses.
+        logger.warning(
+            "takeover gate failed open conv=%s: %s",
+            conversation_id[:8],
+            exc,
+        )
+        taken_over = False
+    if taken_over:
+        try:
+            await _handle_takeover_user_message(
+                ws,
+                conversation_id,
+                user_id,
+                text,
+                client_id=client_id,
+                component_card=component_card,
+                attachment_ids=attachment_ids,
+                paid_confirmed=paid_confirmed,
+            )
+        except Exception as exc:
+            logger.warning(
+                "takeover user message failed conv=%s: %s",
+                conversation_id[:8],
+                exc,
+            )
+            try:
+                await ws.send_json({
+                    "type": "error",
+                    "data": {"message": "消息发送失败，请重新发送"},
+                })
+            except Exception:
+                pass
+        return
     # CLAUDE.md 权益项 1 只约束"发消息聊天"这件事。红包/礼物走的是自己的
     # 钞票/积分支付流程 (offerings.py)，跟对话额度是两套互不相关的计费口径
     # —— 不豁免的话，一个聊天额度用尽、没钞票的用户会连"花钞票发红包"这个

@@ -47,7 +47,25 @@ async def transcribe_chat_audio(
         data.conversation_id,
         user_id,
     ):
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        from app.services.admin_takeover.service import takeover_media_owner
+
+        owner_id = await takeover_media_owner(
+            user_id,
+            data.conversation_id,
+            is_admin=user.get("role") == "admin",
+        )
+        if not owner_id:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        user_id = owner_id
+
+    from app.services.admin_takeover.service import is_conversation_taken_over
+
+    try:
+        taken_over = await is_conversation_taken_over(data.conversation_id)
+    except Exception:
+        taken_over = False
+    if taken_over:
+        return await _store_takeover_audio(data, user_id=user_id)
 
     mime = normalize_audio_mime(data.mime, data.name)
     audio_format = audio_format_for_mime(mime)
@@ -192,6 +210,55 @@ async def _enforce_rate_limit(user_id: str) -> None:
         # Redis availability must not make ordinary chat unusable. Provider
         # rate limits remain the final backstop while this warning is alerted.
         logger.warning("[speech-to-text] rate-limit check failed open", exc_info=True)
+
+
+async def _store_takeover_audio(
+    data: ChatAudioTranscriptionRequest,
+    *,
+    user_id: str,
+) -> ChatAudioTranscriptionResponse:
+    """Store the recording without calling ASR. The chat model is already bypassed."""
+    mime = normalize_audio_mime(data.mime, data.name)
+    audio = decode_audio_base64(data.base64)
+    validate_audio(
+        audio,
+        declared_size=data.size,
+        duration_seconds=data.duration_seconds,
+    )
+    duration_seconds = validate_chat_m4a_duration(
+        audio,
+        mime=mime,
+        declared_duration_seconds=data.duration_seconds,
+    )
+    storage_key = chat_media_storage.save_audio_blob(
+        user_id=user_id,
+        conversation_id=data.conversation_id,
+        blob=audio,
+        mime=mime,
+    )
+    try:
+        attachment = await chat_media_repo.create_audio_attachment(
+            user_id=user_id,
+            conversation_id=data.conversation_id,
+            storage_key=storage_key,
+            url=chat_media_storage.media_url(storage_key),
+            mime=mime,
+            size=len(audio),
+            duration_seconds=duration_seconds,
+            transcription_text="",
+            transcription_model="human_takeover",
+            transcription_request_id=None,
+            name=data.name,
+        )
+    except Exception:
+        chat_media_storage.delete_media_file(storage_key)
+        raise
+    return ChatAudioTranscriptionResponse(
+        text="［语音］",
+        duration_seconds=duration_seconds,
+        model="human_takeover",
+        attachment=_attachment_response(attachment),
+    )
 
 
 def _attachment_response(

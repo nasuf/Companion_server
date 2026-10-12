@@ -91,6 +91,9 @@ model User {
   bugReportsResolved       BugReport[]                     @relation("BugReportsResolved")
   userFeedback             UserFeedback[]
   workspaceInteractionDays WorkspaceInteractionDay[]
+  takeoverSubject          HumanTakeover?                  @relation("TakeoverSubject")
+  ownedTakeovers           HumanTakeover[]                 @relation("TakeoverOwner")
+  takeoverDismissals       HumanTakeoverDismissal[]
 
   agentRunsOwned           AgentRun[] @relation("RunOwner") @ignore
   agentRunsActed           AgentRun[] @relation("RunActor") @ignore
@@ -2461,4 +2464,44 @@ model ChatIngressReceipt {
   @@index([jobId], map: "chat_ingress_receipts_job_idx")
   @@ignore
   @@map("chat_ingress_receipts")
+}
+
+// One row per end user. Pending until an admin claims it; active is permanent.
+// Chat, memory, and proactive stay on the existing path until status becomes active.
+model HumanTakeover {
+  id                 String                    @id @default(uuid())
+  userId             String                    @unique @map("user_id")
+  user               User                      @relation("TakeoverSubject", fields: [userId], references: [id], onDelete: Cascade)
+  conversationId     String?                   @map("conversation_id")
+  agentId            String?                   @map("agent_id")
+  workspaceId        String?                   @map("workspace_id")
+  status             String                    @default("pending")
+  ownerAdminId       String?                   @map("owner_admin_id")
+  ownerAdmin         User?                     @relation("TakeoverOwner", fields: [ownerAdminId], references: [id], onDelete: SetNull)
+  claimedAt          DateTime?                 @map("claimed_at")
+  statusOverride     String?                   @map("status_override")
+  unreadCount        Int                       @default(0) @map("unread_count")
+  lastUserMessageAt  DateTime?                 @map("last_user_message_at")
+  lastMessagePreview String?                   @map("last_message_preview")
+  adminLastReadAt    DateTime?                 @map("admin_last_read_at")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  dismissals         HumanTakeoverDismissal[]
+
+  @@index([status, createdAt(sort: Desc)], map: "human_takeovers_status_created_idx")
+  @@index([ownerAdminId, status], map: "human_takeovers_owner_status_idx")
+  @@index([conversationId], map: "human_takeovers_conversation_idx")
+  @@map("human_takeovers")
+}
+
+model HumanTakeoverDismissal {
+  id         String        @id @default(uuid())
+  takeoverId String        @map("takeover_id")
+  takeover   HumanTakeover @relation(fields: [takeoverId], references: [id], onDelete: Cascade)
+  adminId    String        @map("admin_id")
+  admin      User          @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  createdAt  DateTime      @default(now()) @map("created_at")
+
+  @@unique([takeoverId, adminId], map: "human_takeover_dismissals_takeover_admin_key")
+  @@map("human_takeover_dismissals")
 }
