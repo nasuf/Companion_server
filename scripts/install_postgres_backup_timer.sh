@@ -63,7 +63,7 @@ After=docker.service
 StartLimitIntervalSec=120
 StartLimitBurst=20
 [Service]
-Type=oneshot
+Type=exec
 User=root
 WorkingDirectory=$PROJECT_DIR
 Environment=ENV_FILE=$PROJECT_DIR/.env
@@ -85,8 +85,17 @@ Unit=${SERVICE_NAME}-manual.service
 [Install]
 WantedBy=multi-user.target
 EOF
+# Validate the rendered units before reloading or activating them. In particular,
+# systemd rejects RestartForceExitStatus on oneshot services, even if a path unit
+# appears enabled. Type=exec preserves the exit-75 lock-contention retry.
+sudo systemd-analyze verify "/etc/systemd/system/${SERVICE_NAME}.service" \
+    "/etc/systemd/system/${SERVICE_NAME}.timer" \
+    "/etc/systemd/system/${SERVICE_NAME}-manual.service" \
+    "/etc/systemd/system/${SERVICE_NAME}-manual.path"
 sudo systemctl daemon-reload
 sudo systemctl enable --now "${SERVICE_NAME}.timer" "${SERVICE_NAME}-manual.path"
+sudo systemctl is-active --quiet "${SERVICE_NAME}.timer"
+sudo systemctl is-active --quiet "${SERVICE_NAME}-manual.path"
 sudo python3 - "$BACKUP_DIR" <<'PY_MARKER'
 import json, os, pathlib, sys
 root=pathlib.Path(sys.argv[1]); marker=root/".scheduler.json"
