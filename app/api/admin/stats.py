@@ -1689,17 +1689,17 @@ async def resources(_: dict = Depends(require_admin_jwt)):
 
 
 @router.get("/db-backups")
-async def list_db_backups(_: dict = Depends(require_admin_jwt)):
+async def list_db_backups(
+    offset: int = Query(0, ge=0, le=1000),
+    limit: int = Query(20, ge=1, le=50),
+    _: dict = Depends(require_admin_jwt),
+):
     from app.services.ops import db_backup
 
-    state = db_backup.availability()
-    return {
-        **state,
-        "backups": [b.as_dict() for b in db_backup.list_backups()],
-    }
+    return await asyncio.to_thread(db_backup.list_report, offset, limit)
 
 
-@router.post("/db-backups")
+@router.post("/db-backups", status_code=202)
 async def create_db_backup(_: dict = Depends(require_admin_jwt)):
     from app.services.ops import db_backup
 
@@ -1710,7 +1710,7 @@ async def create_db_backup(_: dict = Depends(require_admin_jwt)):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except asyncio.TimeoutError as exc:
         raise HTTPException(status_code=504, detail="备份超时") from exc
-    return {"backup": created.as_dict()}
+    return created
 
 
 @router.delete("/db-backups/{name}")
@@ -1718,7 +1718,7 @@ async def delete_db_backup(name: str, _: dict = Depends(require_admin_jwt)):
     from app.services.ops import db_backup
 
     try:
-        db_backup.delete_backup(name)
+        await asyncio.to_thread(db_backup.delete_backup, name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:

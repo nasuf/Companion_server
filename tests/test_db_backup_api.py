@@ -1,185 +1,214 @@
-"""数据库备份的查看 / 触发 / 删除.
-
-删除接口拿用户传来的字符串去碰文件系统, 是这套功能里唯一能造成真实破坏的地方,
-所以路径穿越单独重点守。防护用**白名单**而不是过滤 "../" —— 黑名单式过滤总有
-漏网写法 (URL 编码、绝对路径、符号链接), 白名单没有。
-
-另一类要守的是"不可用时的表现": 备份目录没挂载或镜像缺 pg_dump 时, 接口必须
-明确报缺什么, 而不是返回空列表让人以为一份备份都没做过, 更不能抛 500。
-"""
-
-from __future__ import annotations
-
-from pathlib import Path
+"""Real files and HTTP security, failure states and bounded admin contract."""
+import asyncio
+from datetime import timedelta
+import os
+import shutil
+import subprocess
+import sys
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.services.ops import db_backup
+from scripts import postgres_backup as engine
 
 
-@pytest.fixture()
-def backup_dir(tmp_path, monkeypatch) -> Path:
+@pytest.fixture
+def root(tmp_path, monkeypatch):
     monkeypatch.setattr(db_backup, "BACKUP_DIR", tmp_path)
+    engine.atomic_json(tmp_path/".scheduler.json", {"schema_version": 1})
     return tmp_path
 
 
-def _make(dir_: Path, name: str, size: int = 1024) -> Path:
-    path = dir_ / name
-    path.write_bytes(b"x" * size)
-    return path
+def complete(root, i=1, days=0, source="scheduled"):
+    name = f"companion_20261012T0000{i:02d}Z_{i:08x}.dump"
+    dump, glob, meta = engine.paths(root, name)
+    dump.write_bytes(b"snapshot" + bytes([i % 255]))
+    glob.write_bytes(b"role snapshot")
+    engine.atomic_json(meta, {"schema_version": 1, "name": name, "source": source, "checked_at": engine.stamp(),
+        "validation": "checksum_and_toc", "table_count": 30, "dump_bytes": dump.stat().st_size,
+        "globals_bytes": glob.stat().st_size, "dump_sha256": engine.digest(dump), "globals_sha256": engine.digest(glob)})
+    timestamp = (engine.now()-timedelta(days=days)).timestamp()
+    os.utime(dump, (timestamp, timestamp))
+    return name
 
 
-class TestPathTraversal:
-    @pytest.mark.parametrize("name", [
-        "../../etc/passwd",
-        "..%2f..%2fetc%2fpasswd",
-        "/etc/passwd",
-        "companion-20260728-1508.dump/../../../etc/passwd",
-        "companion-.dump",
-        "companion-20260728-1508.dump.bak",
-        "arbitrary.dump",
-        "",
-        ".",
-    ])
-    def test_rejects_anything_not_matching_the_backup_name(self, backup_dir, name):
-        with pytest.raises(ValueError):
-            db_backup.delete_backup(name)
-
-    def test_symlink_pointing_outside_is_refused(self, backup_dir, tmp_path):
-        """名字合法不代表指向合法 —— 目录里放一个指向别处的符号链接就能绕过纯
-        文件名校验, 所以解析后还要确认仍落在备份目录里."""
-        outside = tmp_path.parent / "outside.dump"
-        outside.write_bytes(b"secret")
-        link = backup_dir / "companion-20260728-1508.dump"
-        link.symlink_to(outside)
-        _make(backup_dir, "companion-20260727-0300.dump")
-        with pytest.raises(ValueError):
-            db_backup.delete_backup(link.name)
-        assert outside.exists(), "符号链接指向的目标不能被删掉"
+@pytest.mark.parametrize("name", ["../foo", "/etc/passwd", "..%2fetc", "", "companion_.dump", "companion_20261012T000000Z.dump/../foo"])
+def test_path_rejection(root, name):
+    with pytest.raises(ValueError): db_backup.delete_backup(name)
 
 
-class TestDelete:
-    def test_deletes_a_real_backup(self, backup_dir):
-        _make(backup_dir, "companion-20260728-1508.dump")
-        _make(backup_dir, "companion-20260727-0300.dump")
-        db_backup.delete_backup("companion-20260728-1508.dump")
-        assert {b.name for b in db_backup.list_backups()} == {
-            "companion-20260727-0300.dump"
-        }
-
-    def test_refuses_to_delete_the_only_remaining_backup(self, backup_dir):
-        """误点一下就没有任何退路, 代价不对称 —— 要清空得走文件系统."""
-        _make(backup_dir, "companion-20260728-1508.dump")
-        with pytest.raises(ValueError, match="最后一份"):
-            db_backup.delete_backup("companion-20260728-1508.dump")
-        assert db_backup.list_backups()
-
-    def test_missing_file_reports_not_found(self, backup_dir):
-        _make(backup_dir, "companion-20260727-0300.dump")
-        with pytest.raises(FileNotFoundError):
-            db_backup.delete_backup("companion-20260728-1508.dump")
+def test_symlinks_never_followed(root):
+    name = complete(root)
+    dump = root/name
+    dump.unlink(); dump.symlink_to(root / "secret")
+    (root/"secret").write_text("private")
+    with pytest.raises(ValueError): db_backup.delete_backup(name)
+    report = db_backup.list_report()
+    assert report["available"] is False and report["total"] is None
+    assert (root/"secret").read_text() == "private"
 
 
-class TestListing:
-    def test_newest_first(self, backup_dir):
-        import os
-        import time
-
-        now = time.time()
-        # mtime 决定顺序, 不是文件名 —— 见 TestOrderingDoesNotTrustFilenames
-        for offset, name in enumerate(("companion-20260728-0300.dump",
-                                       "companion-20260727-0300.dump",
-                                       "companion-20260726-0300.dump")):
-            path = _make(backup_dir, name)
-            os.utime(path, (now - offset * 86400, now - offset * 86400))
-        assert [b.name for b in db_backup.list_backups()] == [
-            "companion-20260728-0300.dump",
-            "companion-20260727-0300.dump",
-            "companion-20260726-0300.dump",
-        ]
-
-    def test_ignores_files_that_are_not_backups(self, backup_dir):
-        _make(backup_dir, "companion-20260728-0300.dump")
-        _make(backup_dir, "companion-20260728-0300.dump.partial")
-        _make(backup_dir, "notes.txt")
-        assert len(db_backup.list_backups()) == 1
-
-    def test_partial_files_never_appear(self, backup_dir):
-        """.partial 是写到一半的文件, 出现在列表里会让人以为有一份可用备份."""
-        _make(backup_dir, "companion-20260728-0300.dump.partial")
-        assert db_backup.list_backups() == []
+def test_recent_and_last_two_protected(root):
+    for i in range(1,4): complete(root,i,days=20)
+    recent = complete(root,4)
+    rows = engine.snapshot(root)["backups"]
+    newest_old = next(r for r in rows if r["name"] != recent)
+    for name in (recent, newest_old["name"]):
+        with pytest.raises(ValueError): db_backup.delete_backup(name)
+    removable = next(r for r in rows if r["can_delete"])
+    db_backup.delete_backup(removable["name"])
+    assert not any(p.name.startswith(removable["name"][:-5]) for p in root.iterdir())
 
 
-class TestAvailability:
-    def test_reports_missing_directory_instead_of_empty_list(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(db_backup, "BACKUP_DIR", tmp_path / "nope")
-        state = db_backup.availability()
-        assert state["available"] is False
-        assert any("未挂载" in r for r in state["reasons"])
+def test_failed_candidate_does_not_count_as_valid_copy(root):
+    name=complete(root,1,days=20); other=complete(root,2,days=20)
+    (root/other).write_bytes(b"wrong size")
+    with pytest.raises(ValueError): db_backup.delete_backup(name)
+    rows=engine.snapshot(root)["backups"]
+    assert next(r for r in rows if r["name"]==other)["integrity"]=="invalid"
 
-    def test_unreadable_directory_does_not_raise(self, tmp_path, monkeypatch):
-        """目录存在但没权限时 is_dir() 抛 PermissionError —— 报告可用性的函数
-        自己崩掉, 界面会拿到 500 而不是原因说明."""
-        blocked = tmp_path / "blocked"
-        blocked.mkdir()
-        blocked.chmod(0o000)
-        monkeypatch.setattr(db_backup, "BACKUP_DIR", blocked / "inner")
-        try:
-            state = db_backup.availability()
-            assert state["available"] is False
-            assert state["reasons"]
-            assert db_backup.list_backups() == []
-        finally:
-            blocked.chmod(0o755)
 
-    def test_reports_missing_pg_dump(self, backup_dir, monkeypatch):
-        monkeypatch.setattr(db_backup.shutil, "which", lambda _: None)
-        state = db_backup.availability()
-        assert state["available"] is False
-        assert any("pg_dump" in r for r in state["reasons"])
+def test_missing_partial_legacy_and_pagination_are_distinct(root):
+    for i in range(1,26): complete(root,i)
+    (root/".unfinished.tmp").write_bytes(b"x")
+    (root/"companion_20260901T000000Z.dump").write_bytes(b"old")
+    (root/"companion_20261012T230000Z_aabbccdd.dump").write_bytes(b"incomplete")
+    report=db_backup.list_report(limit=20)
+    assert report["total"]==26 and len(report["backups"])==20 and report["has_more"]
+    page2=db_backup.list_report(offset=20)
+    assert len(page2["backups"])==6 and not page2["has_more"]
+    assert page2["backups"][-1]["integrity"]=="not_checked"  # legacy is not silently qualified
+    assert len(report["summary"]["warnings"])>=2
+    assert "not_configured"==report["summary"]["offsite"]
+
+
+def test_missing_directory_and_binary(root,monkeypatch):
+    monkeypatch.setattr(db_backup,"BACKUP_DIR",root/"missing")
+    r=db_backup.list_report();assert not r["available"] and r["summary"] is None
+    assert any("执行器" in reason for reason in r["reasons"])
+
+
+def test_metadata_bound_and_corruption(root):
+    complete(root)
+    (root/".backup-status.json").write_text("x"*65537)
+    assert db_backup.list_report()["summary"] is None
+    (root/".backup-status.json").write_text("[]")
+    assert db_backup.list_report()["total"] is None
+
+
+def test_real_cross_process_lock_and_crash_state(root):
+    with engine.locked(root):
+        code='from pathlib import Path;from scripts.postgres_backup import locked;\nwith locked(Path(__import__("sys").argv[1])):pass'
+        result=subprocess.run([sys.executable,"-c",code,str(root)],capture_output=True,text=True)
+        assert result.returncode!=0 and "已有备份" in result.stderr
+        assert engine.snapshot(root)["summary"]["last_run"]["status"]=="running"
+    engine.atomic_json(root/".backup-status.json",{"status":"running"})
+    assert engine.snapshot(root)["summary"]["last_run"]["status"]=="interrupted"
+
+
+def test_budget_warns_without_deleting_and_missing_days(root, monkeypatch):
+    complete(root)
+    monkeypatch.setattr(engine,"BUDGET_BYTES",1)
+    r=engine.snapshot(root)
+    assert len(r["backups"])==1 and any("预算" in w for w in r["summary"]["warnings"])
+    assert r["summary"]["covered_days"]==0 and r["summary"]["coverage_days"]==14
+
+
+def test_restore_proof_bound_to_exact_hash_and_cutover(root):
+    name=complete(root);complete(root,2)
+    with pytest.raises(engine.BackupError):engine.cutover_ready(root)
+    path=root/(name[:-5]+".restore.json")
+    engine.atomic_json(path,{"status":"passed","checked_at":engine.stamp(),"dump_sha256":"0"*64})
+    row=next(r for r in engine.snapshot(root)["backups"] if r["name"]==name)
+    assert row["restore"]["status"]=="invalid"
+    engine.atomic_json(path,{"status":"passed","checked_at":engine.stamp(),"dump_sha256":engine.digest(root/name)})
+    assert engine.cutover_ready(root)["ready"]
+
+
+@pytest.fixture
+def client(root):
+    from app.api.admin.stats import router
+    from app.api.jwt_auth import require_admin_jwt
+    app=FastAPI();app.include_router(router)
+    # JWT boundary still exercised in unauthenticated cases by removing override.
+    app.dependency_overrides[require_admin_jwt]=lambda:{"role":"admin"}
+    return TestClient(app)
+
+
+def test_http_pagination_delete_and_permission(root,client):
+    for i in range(1,24):complete(root,i)
+    assert len(client.get('/admin-api/stats/db-backups?limit=10').json()['backups'])==10
+    for query in ('limit=51','offset=-1','offset=1001'):
+        assert client.get('/admin-api/stats/db-backups?'+query).status_code==422
+    assert client.delete('/admin-api/stats/db-backups/'+complete(root,24)).status_code==400
+    assert client.delete('/admin-api/stats/db-backups/companion_20261012T111111Z.dump').status_code==404
+    client.app.dependency_overrides.clear()
+    for method in ('get','post','delete'):
+        url='/admin-api/stats/db-backups'+('/anything' if method=='delete' else '')
+        assert getattr(client,method)(url).status_code in (401,403)
+
+
+def test_manual_http_success_and_safe_failures(root,client,monkeypatch):
+    fake=AsyncMock(return_value={'accepted':True,'request_id':'synthetic'})
+    monkeypatch.setattr(db_backup,'create_backup',fake)
+    assert client.post('/admin-api/stats/db-backups').json()=={'accepted':True,'request_id':'synthetic'}
+    fake.side_effect=engine.BackupError('已有备份操作正在进行')
+    assert client.post('/admin-api/stats/db-backups').status_code==409
+    fake.side_effect=asyncio.TimeoutError()
+    assert client.post('/admin-api/stats/db-backups').status_code==504
 
 
 @pytest.mark.asyncio
-async def test_create_refuses_when_environment_is_incomplete(tmp_path, monkeypatch):
-    """环境不满足时必须明确失败, 不能产出一个空文件让人以为备份成功了."""
-    monkeypatch.setattr(db_backup, "BACKUP_DIR", tmp_path / "missing")
-    with pytest.raises(RuntimeError):
+async def test_manual_adapter_queues_without_database_credentials(root,monkeypatch):
+    result=await db_backup.create_backup()
+    assert result['accepted'] and len(result['request_id'])==32
+    assert engine.read_json(root/'.manual-request.json')['request_id']==result['request_id']
+    assert engine.snapshot(root)['summary']['last_run']['status']=='queued'
+    with pytest.raises(engine.BackupError,match='等待执行'):await db_backup.create_backup()
+    monkeypatch.setattr(db_backup,'BACKUP_DIR',root/'missing')
+    with pytest.raises(RuntimeError):await db_backup.create_backup()
+
+
+def test_unreadable_directory_and_unsupported_executor_are_unavailable(root, monkeypatch):
+    complete(root)
+    monkeypatch.setattr(db_backup.os, 'access', lambda *_: False)
+    report = db_backup.list_report()
+    assert not report['available'] and '备份目录无读写权限' in report['reasons']
+    engine.atomic_json(root / '.scheduler.json', {'schema_version': 2})
+    report = db_backup.list_report()
+    assert not report['available'] and '宿主机备份执行器未配置' in report['reasons']
+    assert len(report['backups']) == 1  # Availability failure never deletes recovery points.
+
+
+def test_directory_stat_error_is_explicit(root, monkeypatch):
+    def denied(_):
+        raise PermissionError('private diagnostic must not escape')
+    monkeypatch.setattr(type(root), 'is_dir', denied)
+    state = db_backup.availability()
+    assert not state['available'] and '备份目录不可访问' in state['reasons']
+    assert 'private diagnostic' not in str(state)
+
+
+def test_delete_io_failure_is_controlled_and_preserves_files(root, client, monkeypatch):
+    name = complete(root)
+    def denied(*_):
+        raise PermissionError('private diagnostic must not escape')
+    monkeypatch.setattr(engine, 'remove', denied)
+    response = client.delete('/admin-api/stats/db-backups/' + name)
+    assert response.status_code == 400 and 'private diagnostic' not in response.text
+    assert (root / name).is_file()
+
+
+@pytest.mark.asyncio
+async def test_manual_request_write_failure_is_controlled(root, monkeypatch):
+    name = complete(root)
+    def denied(*_):
+        raise PermissionError('private diagnostic must not escape')
+    monkeypatch.setattr(engine, 'atomic_json', denied)
+    with pytest.raises(RuntimeError, match='备份请求写入失败'):
         await db_backup.create_backup()
-
-
-class TestOrderingDoesNotTrustFilenames:
-    """列表顺序按真实修改时间, 不按文件名.
-
-    生产上真踩到: 宿主机 cron 用 `date` (本地时区 CST) 命名, 而容器默认 UTC,
-    同一天两份备份出现 1508 和 0749 两个名字 —— 后者其实更新。按名字倒序排会把
-    刚生成的备份放到下面, 而"最新一份是什么时候"正是这个界面要回答的问题。
-    """
-
-    def test_sorted_by_mtime_not_name(self, backup_dir):
-        import os
-        import time
-
-        old = _make(backup_dir, "companion-20260728-1508.dump")
-        new = _make(backup_dir, "companion-20260728-0749.dump")
-        # 名字更小但更新 —— 就是时区不一致造成的那种情形
-        now = time.time()
-        os.utime(old, (now - 3600, now - 3600))
-        os.utime(new, (now, now))
-
-        assert [b.name for b in db_backup.list_backups()][0] == (
-            "companion-20260728-0749.dump"
-        ), "列表顺序依赖了文件名, 混时区时会把新备份排到后面"
-
-
-def test_manual_backup_names_align_with_the_cron_script():
-    """手动触发与 cron 的命名必须同一时区, 否则两边产出的文件排序会交错。
-
-    cron 脚本用宿主机 `date`, 业务时区是 Asia/Shanghai; 容器默认 UTC, 直接
-    astimezone() 会差 8 小时。
-    """
-    import inspect
-
-    source = inspect.getsource(db_backup.create_backup)
-    assert "ZoneInfo" in source and "schedule_timezone" in source, (
-        "手动备份的时间戳没有对齐业务时区 —— 会和 cron 产出的名字差 8 小时"
-    )
+    assert not (root / '.manual-request.json').exists()
+    assert (root / name).is_file()

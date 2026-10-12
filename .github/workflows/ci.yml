@@ -167,6 +167,9 @@ jobs:
           docker pull nginx:1.24-alpine
           docker pull pgvector/pgvector:0.8.0-pg16
 
+      - name: Verify unified native backup and isolated restore
+        run: python3 scripts/test_postgres_backup_e2e.py --output "$RUNNER_TEMP/chat-safety-e2e/backup"
+
       - name: Verify two workers survive slow imports and worker replacement
         run: |
           python3 scripts/test_server_workers_e2e.py \
