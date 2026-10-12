@@ -23,10 +23,12 @@ def main():
     name='companion-backup-e2e-'+uuid.uuid4().hex[:8]
     def run(command,input=None):
         return subprocess.run(command,input=input,text=True,capture_output=True,check=True,timeout=180).stdout
-    run(['docker','run','-d','--name',name,'--network','none','--memory','512m','--tmpfs','/var/lib/postgresql/data:rw,size=256m','-e','POSTGRES_USER=companion','-e','POSTGRES_PASSWORD=isolated-only','pgvector/pgvector:0.8.0-pg16'])
+    run(['docker','run','-d','--name',name,'--network','none','--memory','512m','--tmpfs','/var/lib/postgresql/data:rw,size=256m','-e','POSTGRES_USER=companion','-e','POSTGRES_DB=companion','-e','POSTGRES_PASSWORD=isolated-only','pgvector/pgvector:0.8.0-pg16'])
     try:
         for _ in range(60):
-            if subprocess.run(['docker','exec',name,'pg_isready','-U','companion'],capture_output=True).returncode==0:break
+            # The entrypoint's temporary bootstrap server accepts Unix sockets before
+            # database setup completes; TCP opens only on the final postmaster.
+            if subprocess.run(['docker','exec',name,'pg_isready','-h','127.0.0.1','-p','5432','-U','companion','-d','companion'],capture_output=True).returncode==0:break
             time.sleep(.5)
         else:raise RuntimeError('isolated source database not ready')
         sql=''.join(f'CREATE TABLE synthetic_{i}(id int primary key);INSERT INTO synthetic_{i} VALUES (42);' for i in range(25))
