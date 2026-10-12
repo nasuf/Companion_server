@@ -2481,6 +2481,8 @@ model HumanTakeover {
   claimedAt          DateTime?                 @map("claimed_at")
   statusOverride     String?                   @map("status_override")
   unreadCount        Int                       @default(0) @map("unread_count")
+  userMessageSeq     BigInt                    @default(0) @map("user_message_seq")
+  adminReadSeq       BigInt                    @default(0) @map("admin_read_seq")
   lastUserMessageAt  DateTime?                 @map("last_user_message_at")
   lastMessagePreview String?                   @map("last_message_preview")
   adminLastReadAt    DateTime?                 @map("admin_last_read_at")

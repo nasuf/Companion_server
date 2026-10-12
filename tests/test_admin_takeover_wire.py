@@ -76,11 +76,19 @@ async def test_claim_user_ack_admin_reply_reconnect_cross_process(human,tmp_path
                 peer=await stack.enter_async_context(connect(urls[0].replace('http','ws')+f'/ws/{conv}?client=flutter',
                     subprotocols=[CHAT_PROTOCOL,TICKET_PROTOCOL_PREFIX+ticket],proxy=None))
                 await operator.send(json.dumps({'type':'ping'}));assert await event(operator,'pong')=={}
-                await peer.send(json.dumps({'type':'message','data':{'message':'wire user message','client_id':'wire-1'}}))
+                long_text='wire user message '*30
+                await peer.send(json.dumps({'type':'message','data':{'message':long_text,'client_id':'wire-1'}}))
                 ack=await event(peer,'ack');assert ack['message_id']
                 received=await event(operator,'takeover_user_message');assert received['message_id']==ack['message_id']
+                assert received['text']==long_text.strip() and received['metadata']['takeover_sequence']==1
+                summary='/admin-api/takeovers/unread-summary'
+                assert (await client.get(urls[1]+summary,headers=admin)).json()['unread_count']==1
+                history=(await client.get(urls[1]+f'/conversations/{conv}/messages?include_metadata=true',headers=admin)).json()
+                assert history[0]['content']==long_text.strip() and history[0]['metadata']['takeover_sequence']==1
+                assert (await client.post(urls[1]+base+'/read',headers=admin,json={'message_id':ack['message_id']})).status_code==200
+                assert (await client.get(urls[0]+summary,headers=admin)).json()['unread_count']==0
                 # Same frame retry has no duplicate quota or inbox event.
-                await peer.send(json.dumps({'type':'message','data':{'message':'wire user message','client_id':'wire-1'}}))
+                await peer.send(json.dumps({'type':'message','data':{'message':long_text,'client_id':'wire-1'}}))
                 assert (await event(peer,'ack'))['message_id']==ack['message_id']
                 reply={'text':'wire human reply','client_id':'reply-1'}
                 response=await client.post(urls[1]+base+'/messages',headers=admin,json=reply)
@@ -96,7 +104,7 @@ async def test_claim_user_ack_admin_reply_reconnect_cross_process(human,tmp_path
             async with connect(urls[1].replace('http','ws')+f'/ws/{conv}',subprotocols=[CHAT_PROTOCOL,TICKET_PROTOCOL_PREFIX+ticket],proxy=None) as peer:
                 await peer.send(json.dumps({'type':'ping'}));assert await event(peer,'pong')=={}
             rows=await h.flow.db.query_raw('SELECT role,content FROM messages WHERE conversation_id=$1 ORDER BY created_at',conv)
-            assert rows==[{'role':'user','content':'wire user message'},{'role':'assistant','content':'wire human reply'}]
+            assert rows==[{'role':'user','content':long_text.strip()},{'role':'assistant','content':'wire human reply'}]
             assert (await h.flow.db.query_raw('SELECT used FROM user_message_quota WHERE user_id=$1',h.flow.ids['owner']))==[{'used':1}]
             assert await h.flow.db.agentrun.count(where={'conversationId':conv})==0
     finally:

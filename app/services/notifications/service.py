@@ -50,13 +50,14 @@ async def enqueue_notification(
     message_id: str | None = None,
     scheduled_for: datetime | None = None,
     dispatch_now: bool = True,
+    database=None,
 ) -> str | None:
     clean_title = _trim(title, 80)
     clean_body = _trim(body, 160)
     if not user_id or not type or not clean_title or not clean_body or not dedupe_key:
         return None
     scheduled = _as_utc(scheduled_for or datetime.now(UTC))
-    rows = await db.query_raw(
+    rows = await (database or db).query_raw(
         """
         INSERT INTO notification_events (
             user_id, agent_id, workspace_id, conversation_id, message_id,

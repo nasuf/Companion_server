@@ -64,10 +64,37 @@ async def test_notification_empty_profile_and_unknown_admin(monkeypatch):
     query=AsyncMock(side_effect=[[],[{'id':None},{'id':'admin'}]])
     monkeypatch.setattr(service.db,'query_raw',query)
     monkeypatch.setattr(notify,'enqueue_notification',AsyncMock())
+    from app.services.runtime.ws_manager import manager
+    monkeypatch.setattr(service,'_kick_notification_dispatch',lambda:None)
+    monkeypatch.setattr(manager,'send_to_admin',AsyncMock())
     await service._notify_admins_new_user('t','u')
-    assert notify.enqueue_notification.await_args.kwargs['body']=='新用户'
+    assert manager.send_to_admin.await_args.args[2]['body']=='新用户'
     await service._push_owner_message('a','t','c','m','')
     assert notify.enqueue_notification.await_args.kwargs['body']=='你收到了一条新消息'
+
+
+async def test_registration_fanout_continues_after_one_inbox_fails(monkeypatch):
+    from app.services.runtime.ws_manager import manager
+    monkeypatch.setattr(service.db,'query_raw',AsyncMock(side_effect=[
+        [{'displayName':'新昵称'}],[{'id':'first'},{'id':'second'}]]))
+    send=AsyncMock(side_effect=[ConnectionError('offline'),True])
+    monkeypatch.setattr(manager,'send_to_admin',send)
+    kick=MagicMock()
+    monkeypatch.setattr(service,'_kick_notification_dispatch',kick)
+    await service._notify_admins_new_user('case','user')
+    assert [call.args[0] for call in send.await_args_list]==['first','second']
+    kick.assert_called_once()
+
+
+def test_dispatch_kick_uses_bounded_existing_dispatcher(monkeypatch):
+    from app.services.notifications import dispatcher
+    calls=[]
+    async def dispatch_due_notifications(*,limit):
+        calls.append(limit)
+    monkeypatch.setattr(dispatcher,'dispatch_due_notifications',dispatch_due_notifications)
+    monkeypatch.setattr(service,'fire_background',lambda coro: asyncio.run(coro))
+    service._kick_notification_dispatch()
+    assert calls==[50]
 
 
 @pytest.mark.parametrize('error,status',[(ws_auth.TicketInvalid,401),(ws_auth.TicketRateLimited,429),(ws_auth.TicketUnavailable,503)])

@@ -7,6 +7,7 @@ import pytest
 from app.services.notifications import dispatcher
 from app.services.notifications.apns import ApnsClient, ApnsResult
 from app.services.notifications.devices import PushDevice
+from unittest.mock import AsyncMock
 
 
 def test_apns_base_url_can_follow_device_environment():
@@ -14,6 +15,30 @@ def test_apns_base_url_can_follow_device_environment():
 
     assert client._base_url_for("sandbox") == "https://api.sandbox.push.apple.com"
     assert client._base_url_for("production") == "https://api.push.apple.com"
+
+
+@pytest.mark.parametrize('kind',['admin_new_user','admin_takeover_message'])
+async def test_admin_alert_is_not_lost_to_foreground_presence_or_collapse(monkeypatch,kind):
+    from types import SimpleNamespace
+    send=AsyncMock(return_value=ApnsResult(ok=True,apns_id='synthetic'))
+    monkeypatch.setattr(dispatcher,'apns_client',SimpleNamespace(configured=True,send_alert=send))
+    presence=AsyncMock(return_value=True)
+    monkeypatch.setattr(dispatcher,'is_user_foreground',presence)
+    monkeypatch.setattr(dispatcher,'list_enabled_apns_devices',AsyncMock(return_value=[PushDevice('d','token','production',None)]))
+    monkeypatch.setattr(dispatcher.db,'execute_raw',AsyncMock())
+    monkeypatch.setattr(dispatcher.db,'query_raw',AsyncMock(return_value=[{'ok':1}]))
+    for ident in ['event-one','event-two']:
+        await dispatcher._dispatch_one({'id':ident,'userId':'admin','type':kind,'title':'用户姓名','body':'hello','payload':{}})
+    presence.assert_not_awaited()
+    assert [call.kwargs['collapse_id'] for call in send.await_args_list]==['event-one','event-two']
+
+
+async def test_revoked_admin_never_receives_queued_private_chat(monkeypatch):
+    monkeypatch.setattr(dispatcher.db,'query_raw',AsyncMock(return_value=[]))
+    mark=AsyncMock()
+    monkeypatch.setattr(dispatcher,'_mark_status',mark)
+    await dispatcher._dispatch_one({'id':'event','userId':'former-admin','type':'admin_takeover_message'})
+    mark.assert_awaited_once_with('event','suppressed','admin_access_revoked')
 
 
 @pytest.mark.asyncio

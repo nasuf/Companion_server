@@ -41,9 +41,10 @@ async def persist_user_message(*, conversation_id: str, user_id: str, text: str,
         raise ExecutionScopeUnavailable()
     async with scoped_transaction(scope, database=database) as tx:
         rows = await tx.query_raw(
-            "SELECT id,owner_admin_id AS \"ownerAdminId\",user_id AS \"userId\",agent_id AS \"agentId\" "
-            "FROM human_takeovers WHERE conversation_id=$1 AND user_id=$2 "
-            "AND status='active' FOR UPDATE", conversation_id, user_id,
+            "SELECT t.id,t.owner_admin_id AS \"ownerAdminId\",t.user_id AS \"userId\",t.agent_id AS \"agentId\", "
+            "t.user_message_seq,COALESCE(NULLIF(u.display_name,''),u.username) AS user_name "
+            "FROM human_takeovers t JOIN users u ON u.id=t.user_id WHERE t.conversation_id=$1 AND t.user_id=$2 "
+            "AND t.status='active' FOR UPDATE OF t", conversation_id, user_id,
         )
         if len(rows) != 1:
             raise ExecutionScopeUnavailable()
@@ -57,6 +58,7 @@ async def persist_user_message(*, conversation_id: str, user_id: str, text: str,
                 raise ChatRequestConflict()
             return {"created": False, "message_id": previous[0]['id']}
         prepared = {"human_takeover": True, "client_id": request.client_id,
+                    "takeover_sequence": row['user_message_seq'] + 1,
                     "takeover_request_key": request.request_key,
                     "takeover_input_fingerprint": request.fingerprint}
         ids = original['attachment_ids']
@@ -108,12 +110,19 @@ async def persist_user_message(*, conversation_id: str, user_id: str, text: str,
         prepared['ingress_effects'] = effects
         await tx.message.update(where={"id": message.id}, data={"metadata": Json(prepared)})
         result = await tx.query_raw(
-            "UPDATE human_takeovers SET unread_count=unread_count+1,last_user_message_at=CURRENT_TIMESTAMP, "
+            "UPDATE human_takeovers SET unread_count=unread_count+1,user_message_seq=user_message_seq+1,last_user_message_at=CURRENT_TIMESTAMP, "
             "last_message_preview=$2,updated_at=CURRENT_TIMESTAMP WHERE id=$1 "
             "RETURNING unread_count AS \"unreadCount\"", row['id'], ' '.join(text.split())[:80] or '［新消息］',
         )
         row.update(result[0])
-    return {"created": True, "message_id": message.id, "row": row}
+        # The alert and message commit together. A process death after COMMIT
+        # cannot lose the push; the existing dispatcher retries the outbox.
+        from app.services.admin_takeover.service import _push_owner_message
+        await _push_owner_message(row['ownerAdminId'], row['id'], conversation_id,
+            message.id, ' '.join(text.split())[:80] or '［新消息］',
+            user_name=row['user_name'], database=tx, dispatch_now=False)
+    return {"created": True, "message_id": message.id, "row": row,
+            "metadata": prepared, "created_at": message.createdAt.isoformat()}
 
 
 async def persist_admin_message(*, takeover_id: str, admin_id: str, text: str,
@@ -121,11 +130,13 @@ async def persist_admin_message(*, takeover_id: str, admin_id: str, text: str,
                                 client_id: str | None, database) -> dict:
     from app.services.admin_takeover.service import TakeoverClaimError
 
+    if component_card or attachments or not text.strip() or len(text) > 4000:
+        raise ValueError('Takeover replies support text only')
+
     request = parse_client_chat_input({
         'message': text, 'client_id': client_id or str(uuid.uuid4()),
         'attachments': attachments or [], 'component_card': component_card,
     }).request
-    original = json.loads(request.input_json)
     rows = await database.query_raw(
         "SELECT conversation_id FROM human_takeovers WHERE id=$1 AND owner_admin_id=$2 "
         "AND status='active'", takeover_id, admin_id,
@@ -155,25 +166,6 @@ async def persist_admin_message(*, takeover_id: str, admin_id: str, text: str,
             return {'message_id': previous[0]['id'], 'created': False, 'scope': scope}
         metadata = {'human_takeover': True, 'admin_id': admin_id, 'client_id': request.client_id,
                     'takeover_request_key': request.request_key, 'takeover_input_fingerprint': request.fingerprint}
-        if component_card:
-            metadata['component_card'] = component_card
-        ids = original['attachment_ids']
-        if ids:
-            rows = await tx.query_raw(
-                "SELECT * FROM chat_message_attachments WHERE id=ANY($1::text[]) "
-                "AND user_id=$2 AND conversation_id=$3 AND message_id IS NULL FOR UPDATE",
-                ids, scope.owner_user_id, scope.conversation_id,
-            )
-            by_id = {item['id']: item for item in rows}
-            if set(by_id) != set(ids):
-                raise ChatIngressResourceInvalid()
-            metadata['attachments'] = [attachment_to_metadata(_attachment_from_row(by_id[ident])) for ident in ids]
         message = await tx.message.create(data={'conversation': {'connect': {'id': scope.conversation_id}},
             'role': 'assistant', 'content': text, 'metadata': Json(metadata)})
-        if ids:
-            count = await tx.execute_raw("UPDATE chat_message_attachments SET message_id=$1,updated_at=clock_timestamp() "
-                "WHERE id=ANY($2::text[]) AND user_id=$3 AND conversation_id=$4 AND message_id IS NULL",
-                message.id, ids, scope.owner_user_id, scope.conversation_id)
-            if count != len(ids):
-                raise ChatIngressResourceInvalid()
     return {'message_id': message.id, 'created': True, 'scope': scope, 'metadata': metadata}

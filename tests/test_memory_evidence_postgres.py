@@ -62,6 +62,19 @@ async def origins(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_human_takeover_cannot_be_extracted_or_bound_as_memory_evidence(origins):
+    from prisma import Json
+    db,uid,wid,mid,msg,bind,detail,*_=origins
+    await db.message.update(where={"id":msg.id},data={"metadata":Json({"human_takeover":True})})
+    with pytest.raises(ValueError,match="scope_or_content_mismatch"):
+        await e.snapshot_message_sources(user_id=uid,workspace_id=wid,side="user",
+            message_ids=[msg.id],extraction_input=msg.content)
+    with pytest.raises(ValueError,match="source_not_found"):
+        await bind(e.EvidenceSource("message",msg.id,relation="extracted_from",expected_role="user"))
+    assert (await detail())["state"]=="historical_unknown"
+
+
+@pytest.mark.asyncio
 async def test_recorded_origins_replay_pagination_and_unknown_are_distinct(origins):
     db,uid,wid,mid,msg,bind,detail,*_=origins
     assert (await detail())["state"]=="historical_unknown"

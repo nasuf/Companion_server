@@ -52,7 +52,8 @@ async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Sid
         """SELECT m.id,m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id
            JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
            WHERE m.id=ANY($1::text[]) AND c.user_id=$2 AND c.workspace_id=$3
-           AND NOT c.is_deleted AND m.role=$4""", ids,user_id,workspace_id,role)
+           AND NOT c.is_deleted AND m.role=$4
+           AND COALESCE(m.metadata->>'human_takeover','false')<>'true'""", ids,user_id,workspace_id,role)
     by_id = {row["id"]: row["content"] for row in rows}
     if len(by_id) != len(ids) or any(not text.strip() or text.strip() not in extraction_input for text in by_id.values()):
         raise ValueError("evidence_input_scope_or_content_mismatch")
@@ -70,7 +71,8 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
     if kind == "message":
         query = """SELECT c.user_id, c.workspace_id, c.agent_id, m.role, m.content AS version_text,
                    'recorded' AS status FROM messages m JOIN conversations c ON c.id=m.conversation_id
-                   WHERE m.id=$1 AND NOT c.is_deleted FOR SHARE OF m,c"""
+                   WHERE m.id=$1 AND NOT c.is_deleted
+                   AND COALESCE(m.metadata->>'human_takeover','false')<>'true' FOR SHARE OF m,c"""
     elif kind == "memory":
         query = f"""SELECT m.user_id,m.workspace_id,w.agent_id,m.content AS version_text,
                     CASE WHEN m.is_archived THEN 'archived' ELSE 'active' END AS status

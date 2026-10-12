@@ -15,6 +15,27 @@ from app.services.chat.post_process import _pipeline_with_watermark
 from app.services.memory.recording.pipeline import MemoryExtractionError
 
 
+@pytest.mark.asyncio
+async def test_takeover_messages_are_excluded_from_backlog_and_window():
+    from types import SimpleNamespace
+    from app.services.chat import post_process as mod
+    now=datetime.now(timezone.utc)
+    human={"id":"human","role":"user","content":"人工会话不得抽取","createdAt":now,
+           "metadata":{"human_takeover":True}}
+    normal={"id":"normal","role":"user","content":"普通用户事实","createdAt":now,"metadata":{}}
+    with patch.object(mod,"db",SimpleNamespace(message=SimpleNamespace(
+            find_many=AsyncMock(return_value=[SimpleNamespace(**m) for m in [human,normal]])))):
+        backlog=await mod._fetch_new_side_messages("conv",now,"user")
+    assert [m["id"] for m in backlog]==["normal"]
+    pipeline=AsyncMock(return_value=[])
+    with patch.object(mod,"get_watermark",AsyncMock(return_value=None)), \
+         patch.object(mod,"process_memory_pipeline",pipeline), \
+         patch.object(mod,"set_watermark",AsyncMock()):
+        await mod._pipeline_with_watermark("user",[human,normal],"conv",side="user",workspace_id="space")
+    assert pipeline.await_args.kwargs['evidence_message_ids']==['normal']
+    assert '人工会话' not in pipeline.await_args.kwargs['new_conversation']
+
+
 def _msgs():
     return [
         {"id": "m1", "role": "user", "content": "我喜欢喝红茶",

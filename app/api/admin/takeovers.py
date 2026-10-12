@@ -14,6 +14,7 @@ from app.services.admin_takeover.service import (
     claim_takeover,
     dismiss_takeover,
     list_takeovers,
+    takeover_unread_summary,
     mark_takeover_read,
     review_takeover,
     send_admin_message,
@@ -54,6 +55,10 @@ class TakeoverMessageRequest(BaseModel):
 
 class TakeoverStatusRequest(BaseModel):
     status: str
+
+
+class TakeoverReadRequest(BaseModel):
+    message_id: str = Field(min_length=1, max_length=249)
 
 
 def _admin_id(claims: dict) -> str:
@@ -109,6 +114,11 @@ async def inbox_ticket(response: Response, claims: dict = Depends(require_takeov
         raise HTTPException(status_code=503, detail="Connection authentication unavailable") from None
 
 
+@router.get("/unread-summary")
+async def get_unread_summary(claims: dict = Depends(require_takeover_admin)):
+    return await takeover_unread_summary(_admin_id(claims))
+
+
 @router.get("/{takeover_id}")
 async def get_takeover(takeover_id: str, _: dict = Depends(require_takeover_admin)):
     detail = await review_takeover(takeover_id)
@@ -134,8 +144,8 @@ async def post_claim(takeover_id: str, claims: dict = Depends(require_takeover_a
 
 
 @router.post("/{takeover_id}/read")
-async def post_read(takeover_id: str, claims: dict = Depends(require_takeover_admin)):
-    ok = await mark_takeover_read(takeover_id, _admin_id(claims))
+async def post_read(takeover_id: str, body: TakeoverReadRequest, claims: dict = Depends(require_takeover_admin)):
+    ok = await mark_takeover_read(takeover_id, _admin_id(claims), body.message_id)
     if not ok:
         raise HTTPException(status_code=403, detail="Not the owning admin")
     return {"ok": True}
@@ -148,7 +158,9 @@ async def post_message(
     claims: dict = Depends(require_takeover_admin),
 ):
     text = body.normalized_text()
-    if not text and not body.component_card and not body.attachments:
+    if body.component_card or body.attachments:
+        raise HTTPException(status_code=400, detail="Takeover replies support text only")
+    if not text:
         raise HTTPException(status_code=400, detail="Empty message")
     if len(text) > 4000:
         raise HTTPException(status_code=400, detail="Message is too long")

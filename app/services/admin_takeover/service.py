@@ -166,12 +166,22 @@ async def open_takeover_case(user_id: str) -> None:
         takeover_id = str(uuid.uuid4())
         rows = await db.query_raw(
             """
-            INSERT INTO human_takeovers (
-                id, user_id, status, unread_count, created_at, updated_at
-            )
-            VALUES ($1, $2, 'pending', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) DO NOTHING
-            RETURNING id
+            WITH new_case AS (
+                INSERT INTO human_takeovers (id,user_id,status,unread_count,created_at,updated_at)
+                VALUES ($1,$2,'pending',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id) DO NOTHING RETURNING id
+            ), alerts AS (
+                INSERT INTO notification_events (user_id,type,title,body,payload,dedupe_key,scheduled_for,updated_at)
+                SELECT admin.id,'admin_new_user','新用户注册',
+                    LEFT(COALESCE(NULLIF(subject.display_name,''),subject.username,'新用户'),80),
+                    jsonb_build_object('type','admin_new_user','route','admin_takeover_review',
+                        'takeover_id',new_case.id,'user_id',$2,'title','新用户注册',
+                        'body',LEFT(COALESCE(NULLIF(subject.display_name,''),subject.username,'新用户'),80)),
+                    new_case.id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+                FROM new_case JOIN users subject ON subject.id=$2 CROSS JOIN users admin
+                WHERE admin.role='admin' AND admin.status='active' AND admin.archived_at IS NULL
+                ON CONFLICT (user_id,type,dedupe_key) DO NOTHING RETURNING id
+            ) SELECT id FROM new_case
             """,
             takeover_id,
             user_id,
@@ -224,8 +234,6 @@ async def attach_takeover_agent(
 
 
 async def _notify_admins_new_user(takeover_id: str, user_id: str) -> None:
-    from app.services.notifications.service import enqueue_notification
-
     user_rows = await db.query_raw(
         """
         SELECT username, display_name AS "displayName"
@@ -242,7 +250,7 @@ async def _notify_admins_new_user(takeover_id: str, user_id: str) -> None:
         """
         SELECT id
         FROM users
-        WHERE role = 'admin' AND status = 'active'
+        WHERE role = 'admin' AND status = 'active' AND archived_at IS NULL
         """
     )
     payload = {
@@ -251,18 +259,24 @@ async def _notify_admins_new_user(takeover_id: str, user_id: str) -> None:
         "takeover_id": takeover_id,
         "user_id": user_id,
     }
+    payload.update(title='新用户注册', body=body)
+    from app.services.runtime.ws_manager import manager
     for admin in admins or []:
         admin_id = str(_cell(admin, "id") or "")
         if not admin_id:
             continue
-        await enqueue_notification(
-            user_id=admin_id,
-            type="admin_new_user",
-            title="新用户注册",
-            body=body,
-            payload=payload,
-            dedupe_key=takeover_id,
-        )
+        try:
+            # SQL already persisted all recipients atomically with the case.
+            await manager.send_to_admin(admin_id, "admin_new_user", payload)
+        except Exception as exc:
+            logger.warning("new-user inbox delivery failed: %s", type(exc).__name__)
+    _kick_notification_dispatch()
+
+
+def _kick_notification_dispatch() -> None:
+    from app.services.notifications.dispatcher import dispatch_due_notifications
+    fire_background(dispatch_due_notifications(limit=50))
+
 
 
 async def list_takeovers(admin_id: str, *, scope: str) -> list[dict]:
@@ -582,19 +596,33 @@ async def set_status_override(takeover_id: str, admin_id: str, status: str) -> d
     }
 
 
-async def mark_takeover_read(takeover_id: str, admin_id: str) -> bool:
-    rows = await db.query_raw(
-        """
-        UPDATE human_takeovers
-        SET unread_count = 0,
-            admin_last_read_at = CURRENT_TIMESTAMP,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND owner_admin_id = $2 AND status = 'active'
-        RETURNING id
-        """,
-        takeover_id,
-        admin_id,
-    )
+async def takeover_unread_summary(admin_id: str) -> dict:
+    rows = await db.query_raw("""
+        SELECT COALESCE(sum(unread_count),0)::bigint AS unread_count,
+          count(*) FILTER (WHERE unread_count>0)::int AS unread_chats,
+          CURRENT_TIMESTAMP AS sampled_at
+        FROM human_takeovers WHERE owner_admin_id=$1 AND status='active'
+    """, admin_id)
+    row = rows[0]
+    return {"unread_count": int(row['unread_count']), "unread_chats": row['unread_chats'],
+            "sampled_at": str(row['sampled_at'])}
+
+
+async def mark_takeover_read(takeover_id: str, admin_id: str, message_id: str) -> bool:
+    # A receipt only acknowledges the delivered prefix, never messages that
+    # arrived after that snapshot. Monotonic positions serialize with ingress.
+    rows = await db.query_raw("""
+        UPDATE human_takeovers t
+        SET admin_read_seq=GREATEST(t.admin_read_seq,(m.metadata->>'takeover_sequence')::bigint),
+            unread_count=t.user_message_seq-GREATEST(t.admin_read_seq,(m.metadata->>'takeover_sequence')::bigint),
+            admin_last_read_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+        FROM messages m
+        WHERE t.id=$1 AND t.owner_admin_id=$2 AND t.status='active'
+          AND m.id=$3 AND m.conversation_id=t.conversation_id AND m.role='user'
+          AND m.metadata->>'human_takeover'='true'
+          AND (m.metadata->>'takeover_sequence')::bigint BETWEEN 1 AND t.user_message_seq
+        RETURNING t.id
+    """, takeover_id, admin_id, message_id)
     return bool(rows)
 
 
@@ -628,7 +656,11 @@ async def record_takeover_user_message(
         "conversation_id": conversation_id,
         "user_id": user_id,
         "message_id": message_id,
-        "text": preview,
+        "text": text,
+        "preview": preview,
+        "user_name": _cell(row, "user_name") or "用户",
+        "metadata": saved["metadata"],
+        "created_at": saved["created_at"],
         "role": "user",
         "unread_count": int(_cell(row, "unreadCount", "unread_count") or 0),
     }
@@ -647,9 +679,10 @@ async def record_takeover_user_message(
 
         try:
             await manager.send_to_admin(owner_id, "takeover_user_message", payload)
-            fire_background(_push_owner_message(owner_id, takeover_id, conversation_id, message_id, preview))
+
         except Exception as exc:
             logger.warning("takeover notification failed after commit: %s", type(exc).__name__)
+    _kick_notification_dispatch()
     return {"message_id": message_id, "owner_admin_id": owner_id, "takeover_id": takeover_id}
 
 
@@ -659,13 +692,14 @@ async def _push_owner_message(
     conversation_id: str,
     message_id: str,
     preview: str,
+    *, user_name: str = "用户", database=None, dispatch_now: bool = True,
 ) -> None:
     from app.services.notifications.service import enqueue_notification
 
     await enqueue_notification(
         user_id=admin_id,
         type="admin_takeover_message",
-        title="用户发来消息",
+        title=_trim(user_name, 80) or "用户",
         body=preview or "你收到了一条新消息",
         payload={
             "type": "admin_takeover_message",
@@ -673,7 +707,11 @@ async def _push_owner_message(
             "takeover_id": takeover_id,
             "conversation_id": conversation_id,
             "message_id": message_id,
+            "title": _trim(user_name,80) or "用户",
+            "body": preview or "你收到了一条新消息",
         },
+        database=database,
+        dispatch_now=dispatch_now,
         conversation_id=conversation_id,
         message_id=message_id,
         dedupe_key=message_id,

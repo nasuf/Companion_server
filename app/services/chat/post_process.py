@@ -437,9 +437,11 @@ async def _fetch_new_side_messages(
             "role": r.role,
             "content": r.content,
             "createdAt": getattr(r, "createdAt", None),
+            "metadata": getattr(r, "metadata", None),
         }
         for r in rows
         if (r.content or "").strip()
+        and not (getattr(r, "metadata", None) or {}).get("human_takeover")
     ]
 
 
@@ -459,6 +461,9 @@ async def _pipeline_with_watermark(
     旧的窗口切分行为. 调用方窗口里无时间戳的合成消息 (刚生成还未持久化的回复)
     仅在 DB 增量为空时作为抽取目标, 避免与已持久化的拆分回复重复抽取.
     """
+    # An older AI job can finish after an administrator claims the chat. Its
+    # backlog/context must never turn later human messages into AI memories.
+    recent = [m for m in recent if not (m.get("metadata") or {}).get("human_takeover")]
     wm = _ensure_aware(
         await get_watermark(conversation_id, side) if conversation_id else None
     )

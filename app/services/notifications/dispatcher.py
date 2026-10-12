@@ -94,7 +94,16 @@ async def _dispatch_one(row: Any) -> None:
     workspace_id = _field(row, "workspaceId")
     conversation_id = _field(row, "conversationId")
 
-    if await is_user_foreground(
+    # Admin alerts must reach every install. Presence describes the admin's
+    # own companion chat, not an acknowledgement of this takeover inbox.
+    admin_alert = _field(row, "type") in {"admin_new_user", "admin_takeover_message"}
+    if admin_alert:
+        admin = await db.query_raw("SELECT 1 FROM users WHERE id=$1 AND role='admin' "
+            "AND status='active' AND archived_at IS NULL", user_id)
+        if not admin:
+            await _mark_status(event_id, "suppressed", "admin_access_revoked")
+            return
+    if not admin_alert and await is_user_foreground(
         user_id=user_id,
         workspace_id=str(workspace_id) if workspace_id else None,
         conversation_id=str(conversation_id) if conversation_id else None,
@@ -118,7 +127,7 @@ async def _dispatch_one(row: Any) -> None:
         return
 
     payload = _json_dict(_field(row, "payload"))
-    collapse_id = f"{_field(row, 'type')}:{conversation_id or user_id}"
+    collapse_id = event_id if admin_alert else f"{_field(row, 'type')}:{conversation_id or user_id}"
     thread_id = str(workspace_id or conversation_id or user_id)
     successes = 0
     errors: list[str] = []

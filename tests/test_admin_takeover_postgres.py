@@ -47,7 +47,7 @@ async def human(flow, monkeypatch):
     monkeypatch.setattr(app.db, 'db', flow.db)
     monkeypatch.setattr(service, 'get_redis', AsyncMock(return_value=redis))
     monkeypatch.setattr(service, 'fire_background', pending.append)
-    monkeypatch.setattr(notifications, 'enqueue_notification', AsyncMock())
+    monkeypatch.setattr(service, '_kick_notification_dispatch', lambda: None)
     monkeypatch.setattr(notifications, 'notify_agent_message_created', AsyncMock())
     monkeypatch.setattr(manager, 'send_to_admin', AsyncMock(return_value=True))
     monkeypatch.setattr(manager, 'send_event', AsyncMock(return_value=True))
@@ -97,7 +97,8 @@ async def test_pending_attach_dismiss_review_and_notification(human):
     await service.open_takeover_case(f.ids['owner'])
     assert len(h.pending)==1
     await h.pending.pop()
-    assert h.notifications.enqueue_notification.await_count >= 2
+    alerts=await f.db.query_raw("SELECT user_id FROM notification_events WHERE type='admin_new_user' AND dedupe_key=$1",h.case)
+    assert {r['user_id'] for r in alerts} >= set(h.admins)
     assert (await service.review_takeover(h.case))['agent'] is None
     assert (await service.list_takeovers(h.admins[0],scope='pending'))[0]['can_claim'] is False
     await attach(h); await attach(h)
@@ -143,7 +144,7 @@ async def test_claim_cache_failure_still_routes_and_status_cache_loss_recovers(h
     assert result['ai_status']=='busy'
     await h.redis.delete(service.status_override_key(h.flow.ids['conversation']))
     assert await service.display_status_override(h.flow.ids['conversation'])=='busy'
-    assert not await service.mark_takeover_read(h.case,h.admins[1])
+    assert not await service.mark_takeover_read(h.case,h.admins[1],'missing')
     with pytest.raises(service.TakeoverClaimError):await service.set_status_override(h.case,h.admins[1],'idle')
     with pytest.raises(ValueError):await service.set_status_override(h.case,h.admins[0],'invalid')
     assert await service.display_status_override(None) is None
@@ -161,7 +162,7 @@ async def test_user_paid_parallel_retry_and_changed_identity(human):
     assert (await balances(h.flow))[1]==quota
     case=(await h.flow.db.query_raw('SELECT unread_count FROM human_takeovers WHERE id=$1',h.case))[0]
     assert case['unread_count']==1
-    assert await service.mark_takeover_read(h.case,h.admins[0])
+    assert await service.mark_takeover_read(h.case,h.admins[0],results[0]['message_id'])
     assert (await service.list_takeovers(h.admins[0],scope='mine'))[0]['read_state']=='read'
 
 
@@ -225,19 +226,20 @@ async def test_admin_message_resource_retry_and_non_owner_are_fenced(human):
     h=human;await activate(h)
     ident=await attachment(h.flow)
     kwargs=dict(takeover_id=h.case,admin_id=h.admins[0],text='人工回复',client_id='admin-1',
-        component_card={'type':'music','payload':{'title':'synthetic'}},attachments=[{'id':ident,'url':'forged'}])
+        component_card=None,attachments=[])
     first=await service.send_admin_message(**kwargs)
     second=await service.send_admin_message(**kwargs)
     assert first['message_id']==second['message_id'] and second['duplicate']
     assert h.manager.send_event.await_count==2
-    assert h.manager.send_event.await_args_list[0].args[2]['attachments'][0]['url']=='https://synthetic.invalid/image'
+    assert 'attachments' not in h.manager.send_event.await_args_list[0].args[2]
     h.notifications.notify_agent_message_created.assert_not_awaited()
     await h.pending.pop()
     h.notifications.notify_agent_message_created.assert_awaited_once()
     assert (await balances(h.flow))[1]==[]
     with pytest.raises(ChatRequestConflict):await service.send_admin_message(**{**kwargs,'text':'changed'})
     with pytest.raises(service.TakeoverClaimError):await service.send_admin_message(**{**kwargs,'admin_id':h.admins[1]})
-    with pytest.raises(ChatIngressResourceInvalid):await service.send_admin_message(**{**kwargs,'client_id':'another'})
+    for extra in [{'attachments':[{'id':ident}]},{'component_card':{'type':'gift'}}]:
+        with pytest.raises(ValueError):await service.send_admin_message(**{**kwargs,**extra,'client_id':'another'})
     assert await service.takeover_media_owner(h.admins[0],h.flow.ids['conversation'],is_admin=True)==h.flow.ids['owner']
     assert await service.takeover_media_owner(h.admins[1],h.flow.ids['conversation'],is_admin=True) is None
     assert await service.takeover_media_owner(h.admins[0],h.flow.ids['conversation'],is_admin=False) is None
@@ -252,8 +254,46 @@ async def test_record_notifies_once_after_commit_and_does_not_duplicate(human):
     retry=await service.record_takeover_user_message(**args)
     assert first['message_id']==retry['message_id'] and retry['duplicate']
     h.manager.send_to_admin.assert_awaited_once()
-    await h.pending.pop()
-    assert h.notifications.enqueue_notification.await_args.kwargs['dedupe_key']==first['message_id']
+    alerts=await h.flow.db.query_raw("SELECT dedupe_key FROM notification_events WHERE type='admin_takeover_message' AND message_id=$1",first['message_id'])
+    assert len(alerts)==1 and alerts[0]['dedupe_key']==first['message_id']
+
+
+async def test_read_cursor_keeps_newer_arrivals_unread_and_is_monotonic(human):
+    h=human;await activate(h)
+    first=await user_message(h,key='first')
+    newer=await user_message(h,key='newer')
+    assert await service.mark_takeover_read(h.case,h.admins[0],first['message_id'])
+    assert (await service.takeover_unread_summary(h.admins[0]))['unread_count']==1
+    assert (await service.takeover_unread_summary(h.admins[1]))['unread_count']==0
+    assert not await service.mark_takeover_read(h.case,h.admins[1],newer['message_id'])
+    assert not await service.mark_takeover_read(h.case,h.admins[0],'missing')
+    assert await service.mark_takeover_read(h.case,h.admins[0],newer['message_id'])
+    assert await service.mark_takeover_read(h.case,h.admins[0],first['message_id'])
+    assert (await service.takeover_unread_summary(h.admins[0]))['unread_count']==0
+
+
+async def test_message_and_owner_alert_rollback_together(human):
+    h=human;await activate(h)
+    with pytest.raises(RuntimeError,match='synthetic write failure'):
+        await user_message(h,database=ScopedFaultDatabase(h.flow.db,'INSERT INTO notification_events'))
+    assert await h.flow.db.message.count(where={'conversationId':h.flow.ids['conversation']})==0
+    assert (await service.takeover_unread_summary(h.admins[0]))['unread_count']==0
+
+
+async def test_complete_inbox_payload_and_named_durable_alert_survive_ws_failure(human):
+    h=human;await activate(h)
+    await h.flow.db.user.update(where={'id':h.flow.ids['owner']},data={'displayName':'测试昵称'})
+    h.manager.send_to_admin.side_effect=ConnectionError('synthetic disconnect')
+    ident=await attachment(h.flow)
+    text='完整消息'*100
+    result=await service.record_takeover_user_message(conversation_id=h.flow.ids['conversation'],
+        user_id=h.flow.ids['owner'],text=text,metadata={'client_id':'long','attachments':[{'id':ident}]})
+    payload=h.manager.send_to_admin.await_args.args[2]
+    assert payload['text']==text and len(payload['preview'])<=80 and payload['user_name']=='测试昵称'
+    assert payload['metadata']['attachments'][0]['url']=='https://synthetic.invalid/image'
+    alerts=await h.flow.db.query_raw('SELECT title,payload FROM notification_events WHERE message_id=$1',result['message_id'])
+    assert len(alerts)==1 and alerts[0]['title']=='测试昵称'
+    assert alerts[0]['payload']['title']=='测试昵称'
 
 
 async def test_admin_http_auth_bounds_claim_status_messages_and_read(human):
@@ -272,10 +312,16 @@ async def test_admin_http_auth_bounds_claim_status_messages_and_read(human):
     for body,status in [({'text':''},400),({'text':'x'*4001},400),({'text':'  hello  ','client_id':'http1'},200)]:
         assert (await c.post(base+'/'+h.case+'/messages',json=body,headers=auth(h))).status_code==status
     assert (await c.post(base+'/'+h.case+'/messages',json={'text':'changed','client_id':'http1'},headers=auth(h))).status_code==409
-    assert (await c.post(base+'/'+h.case+'/messages',json={'text':'hello','attachments':[{'id':'bad'}]},headers=auth(h))).status_code==422
+    assert (await c.post(base+'/'+h.case+'/messages',json={'text':'hello','attachments':[{'id':'bad'}]},headers=auth(h))).status_code==400
     assert (await c.post(base+'/'+h.case+'/messages',json={'text':'hello'},headers=auth(h,1))).status_code==403
-    assert (await c.post(base+'/'+h.case+'/read',headers=auth(h,1))).status_code==403
-    assert (await c.post(base+'/'+h.case+'/read',headers=auth(h))).status_code==200
+    incoming=await user_message(h)
+    assert (await c.get(base+'/unread-summary',headers=auth(h,role='user'))).status_code==403
+    summary=(await c.get(base+'/unread-summary',headers=auth(h))).json()
+    assert summary['unread_count']==1 and summary['unread_chats']==1 and summary['sampled_at']
+    read={'message_id':incoming['message_id']}
+    assert (await c.post(base+'/'+h.case+'/read',json=read,headers=auth(h,1))).status_code==403
+    assert (await c.post(base+'/'+h.case+'/read',json=read,headers=auth(h))).status_code==200
+    assert (await c.get(base+'/unread-summary',headers=auth(h))).json()['unread_count']==0
     assert (await c.patch(base+'/'+h.case+'/status',json={'status':'bad'},headers=auth(h))).status_code==400
     assert (await c.patch(base+'/'+h.case+'/status',json={'status':'sleep'},headers=auth(h,1))).status_code==403
     assert (await c.patch(base+'/'+h.case+'/status',json={'status':'sleep'},headers=auth(h))).status_code==200

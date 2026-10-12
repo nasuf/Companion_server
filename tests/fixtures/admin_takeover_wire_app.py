@@ -14,7 +14,7 @@ from redis.asyncio import Redis
 from app.config import settings
 from app.db import db
 from app.api import deps
-from app.api.public import chat
+from app.api.public import chat, conversations
 from app.api.realtime import admin_inbox, ws
 from app.api.admin import takeovers
 from app.services.admin_takeover import service
@@ -34,7 +34,6 @@ ws.send_first_greeting=AsyncMock(return_value=False)
 ws.record_ws_online=ws.remove_ws_online=AsyncMock()
 ws.fire_background=service.fire_background=lambda coro:coro.close()
 notifications.notify_agent_message_created=AsyncMock()
-notifications.enqueue_notification=AsyncMock()
 # Manual ingress uses the real wallet quota implementation too. Only mark
 # ordinary reply preparation, which a claimed message must never reach.
 ws.get_cached_schedule=AsyncMock(side_effect=AssertionError('schedule/model preparation entered'))
@@ -47,7 +46,7 @@ async def lifespan(_):
         await ws_manager.manager.stop_subscriber();await redis.aclose();await db.disconnect()
 
 app=FastAPI(lifespan=lifespan)
-for router in (chat.router,ws.router,takeovers.router,admin_inbox.router):app.include_router(router)
+for router in (chat.router,ws.router,takeovers.router,admin_inbox.router,conversations.router):app.include_router(router)
 
 @app.get('/health')
 async def health():return {'status':'ok'}
