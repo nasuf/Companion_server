@@ -32,13 +32,19 @@ keywords, which fall back to the neutral subject-prefix form.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from app.services.agent_template.document_import import (
     _section_heading,  # five-dimension heading detector (same package)
     extract_document_text,
 )
+
+from app.services.memory.input_evidence import InputOrigin, prepare_input_origin
+
+KNOWLEDGE_PARSER_VERSION = "knowledge-document-v1"
 
 # Hard cap per upload — protects the template memory bank (and the downstream
 # sync fan-out to every cloned agent) from an accidentally huge document.
@@ -110,7 +116,42 @@ def oversized_items(items: list[KnowledgeItem]) -> list[KnowledgeItem]:
 
 def parse_knowledge_document(data: bytes, filename: str | None = None) -> list[KnowledgeItem]:
     """Parse uploaded bytes into knowledge items ready for memory storage."""
+    return _parse_knowledge_text(extract_document_text(data, filename=filename))
+
+
+def parse_knowledge_document_snapshot(
+    data: bytes, filename: str | None = None,
+) -> tuple[list[KnowledgeItem], InputOrigin]:
+    """Freeze the actual decoded parser input and exact output, not a filename.
+
+    The byte digest identifies the upload; the receipt digest identifies the
+    whole parsing snapshot. Neither is a claim that the document is true.
+    """
     text = extract_document_text(data, filename=filename)
+    items = _parse_knowledge_text(text)
+    origin = prepare_input_origin(kind="knowledge_document", payload={
+        "upload_sha256": hashlib.sha256(data).hexdigest(),
+        "upload_size_bytes": len(data),
+        "parser_version": KNOWLEDGE_PARSER_VERSION,
+        "text": text,
+        "items": [asdict(item) for item in items],
+    })
+    return items, origin
+
+
+def validate_knowledge_snapshot(items: list[KnowledgeItem], origin: InputOrigin) -> None:
+    """Reject accidental mismatches between the parsed batch and its receipt."""
+    if origin.kind != "knowledge_document" or not 1 <= len(items) <= MAX_KNOWLEDGE_ITEMS:
+        raise ValueError("invalid_knowledge_input")
+    payload = json.loads(origin.payload).get("input", {})
+    if (payload.get("parser_version") != KNOWLEDGE_PARSER_VERSION
+            or payload.get("items") != [asdict(item) for item in items]
+            or not isinstance(payload.get("text"), str)
+            or _parse_knowledge_text(payload["text"]) != items):
+        raise ValueError("knowledge_input_snapshot_mismatch")
+
+
+def _parse_knowledge_text(text: str) -> list[KnowledgeItem]:
     _reject_profile_document(text)
     sections = _split_sections(text)
     items = _build_items(sections)

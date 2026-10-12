@@ -245,39 +245,25 @@ def test_admin_memory_repairs_update_endpoint(api_client):
 
 
 @pytest.mark.asyncio
-async def test_repair_action_edit_updates_embedding_changelog_and_resolves(monkeypatch):
+async def test_repair_action_edit_delegates_atomic_update_and_resolution(monkeypatch):
     from app.services.memory import repair_actions
 
-    repair = _repair_row()
-    memory = _memory_record()
+    repair, memory = _repair_row(), _memory_record()
+    resolved = _repair_row(status="resolved")
     monkeypatch.setattr(repair_actions, "get_memory_repair_item", AsyncMock(return_value=repair))
     monkeypatch.setattr(repair_actions.memory_repo, "find_unique", AsyncMock(return_value=memory))
-    monkeypatch.setattr(repair_actions.memory_repo, "update", AsyncMock())
-    monkeypatch.setattr(repair_actions, "generate_embedding", AsyncMock(return_value=[0.1, 0.2]))
-    monkeypatch.setattr(repair_actions, "store_embedding", AsyncMock())
-    changelog = AsyncMock()
-    monkeypatch.setattr(repair_actions, "log_memory_changelog", changelog)
-    resolve = AsyncMock(return_value=_repair_row(status="resolved"))
-    monkeypatch.setattr(repair_actions, "update_memory_repair_item_status", resolve)
-
+    edit = AsyncMock(return_value=(memory, resolved))
+    monkeypatch.setattr(repair_actions, "edit_memory_with_evidence", edit)
+    outside_resolve = AsyncMock()
+    monkeypatch.setattr(repair_actions, "update_memory_repair_item_status", outside_resolve)
     result = await repair_actions.apply_memory_repair_action(
-        "repair-1",
-        payload=repair_actions.MemoryRepairActionPayload(
-            action="edit_memory",
-            content="新内容",
-            reason="人工核对用户纠错",
-        ),
-        admin_id="admin-1",
-    )
-
-    assert result["action"] == "edit_memory"
-    repair_actions.store_embedding.assert_awaited_once()
-    repair_actions.memory_repo.update.assert_awaited_once()
-    assert repair_actions.memory_repo.update.await_args.kwargs["content"] == "新内容"
-    changelog.assert_awaited_once()
-    assert changelog.await_args.args[2] == "repair_edit"
-    resolve.assert_awaited_once()
-    assert resolve.await_args.kwargs["status"] == "resolved"
+        "repair-1", payload=repair_actions.MemoryRepairActionPayload(
+            action="edit_memory", content="新内容", reason="人工核对用户纠错"), admin_id="admin-1")
+    assert result == {"action": "edit_memory", "memory_id": "mem1", "repair_item": resolved}
+    edit.assert_awaited_once_with(record=memory, content="新内容",
+        actor={"sub": "admin-1", "role": "admin"}, importance=None, level=None,
+        repair_item=repair, resolution_note="edit_memory: 人工核对用户纠错", reason="人工核对用户纠错")
+    outside_resolve.assert_not_awaited()
 
 
 @pytest.mark.asyncio

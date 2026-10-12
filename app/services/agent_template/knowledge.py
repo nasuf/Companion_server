@@ -38,12 +38,16 @@ from typing import Any
 from app.db import db
 from app.redis_client import get_redis
 from app.services.agent_template.clone import _MEMORY_COPY_FIELDS
-from app.services.agent_template.knowledge_import import KnowledgeItem
+from app.services.agent_template.knowledge_import import KnowledgeItem, validate_knowledge_snapshot
 from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME, count_active_clones
 from app.services.memory.evidence import EvidenceSource, bind_memory_evidence, content_version
 from app.services.memory.provenance import KNOWLEDGE_SEED
-from app.services.memory.retrieval.knowledge_hits import knowledge_rows_cache_key
-from app.services.memory.storage.persistence import store_memory
+from app.services.memory.retrieval.knowledge_hits import invalidate_knowledge_rows
+from app.services.memory.input_evidence import InputOrigin, persist_input_origin
+from app.services.memory.storage import repo as memory_repo
+from app.services.memory.storage.embedding import generate_embedding, store_embedding
+from app.services.memory.storage.persistence import after_memory_changelog
+from app.services.schedule_domain.time_parser import resolve_occur_time
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     distributed_lock,
@@ -81,103 +85,120 @@ class KnowledgeSyncBusy(RuntimeError):
 
 
 async def append_knowledge_to_template(
-    *,
-    template_agent_id: str,
-    template_user_id: str,
-    items: list[KnowledgeItem],
-) -> dict[str, int]:
-    """Store parsed knowledge items into the template's memory bank.
+    *, template_agent_id: str, template_user_id: str,
+    items: list[KnowledgeItem], input_origin: InputOrigin,
+) -> dict[str, Any]:
+    """Append one bounded document atomically, including its original input.
 
-    Exact-duplicate summaries (vs existing knowledge rows) are skipped, so
-    re-uploading the same document is idempotent. Returns
-    ``{parsed, stored, skipped_duplicates}``.
+    Embedding calls run outside the transaction. A dedicated PostgreSQL advisory lock
+    serializes exact-content dedup even without Redis. The persona lock and
+    scope recheck prevent an import prepared for an old workspace from landing
+    in a newly generated persona. Archived knowledge still blocks duplicates.
     """
+    validate_knowledge_snapshot(items, input_origin)
     workspace = await get_active_workspace(agent_id=template_agent_id)
     if workspace is None:
         raise ValueError("模板没有可用的活跃 workspace")
+    # Bounded by the uploaded batch, not by the template's lifetime row count.
+    summaries = list(dict.fromkeys(item.summary for item in items))
+    existing_rows = await db.query_raw(
+        """SELECT DISTINCT content FROM memories_ai WHERE user_id=$1 AND workspace_id=$2
+           AND provenance='knowledge_seed' AND content=ANY($3::text[])""",
+        template_user_id, workspace.id, summaries,
+    )
+    existing = {row["content"] for row in existing_rows}
+    embeddings = {}
+    for item in items:
+        if not item.is_oversized and item.summary not in existing and item.summary not in embeddings:
+            embeddings[item.summary] = await generate_embedding(item.summary)
 
-    # Serialize concurrent appends to the same template: the exact-content
-    # dedup below is check-then-write, so two parallel uploads of overlapping
-    # documents would both pass the check and store duplicates. fail_open:
-    # without Redis we still append (an admin double-upload race is rare and
-    # only costs a duplicate row, never data loss).
-    async with distributed_lock(
-        f"template_knowledge_append:{template_agent_id}",
-        ttl_s=300,
-        wait_timeout_s=15,
-        fail_open=True,
-    ):
-        existing = await _knowledge_contents(workspace.id)
-        stored = 0
-        skipped = 0
-        oversized: list[str] = []
+    new_ids: list[str] = []
+    skipped = 0
+    oversized = []
+    async with db.tx(timeout=timedelta(seconds=30)) as tx:
+        # Only appenders contend on this lock. Avoid workspace UPDATE here:
+        # cloning holds workspace SHARE before acquiring its persona lock.
+        await tx.query_raw(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS held",
+            "knowledge-append:" + workspace.id,
+        )
+        await tx.query_raw(
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))::text AS held",
+            "persona-init:" + workspace.id,
+        )
+        scope = await tx.query_raw(
+            """SELECT w.id FROM chat_workspaces w
+               JOIN ai_agents a ON a.id=w.agent_id AND a.user_id=w.user_id
+               JOIN users u ON u.id=a.user_id
+               WHERE w.id=$1 AND w.agent_id=$2 AND w.user_id=$3
+                 AND u.username=$4 AND u.status='active' AND u.archived_at IS NULL
+                 AND a.status='active' AND a.archived_at IS NULL
+                 AND w.status='active' AND w.archived_at IS NULL
+               FOR SHARE OF w,a,u""",
+            workspace.id, template_agent_id, template_user_id, TEMPLATE_SYSTEM_USERNAME,
+        )
+        if len(scope) != 1:
+            raise ValueError("knowledge_template_scope_changed")
+        rows = await tx.query_raw(
+            """SELECT DISTINCT content FROM memories_ai WHERE user_id=$1 AND workspace_id=$2
+               AND provenance='knowledge_seed' AND content=ANY($3::text[])""", template_user_id, workspace.id, summaries,
+        )
+        existing = {row["content"] for row in rows}
+        source = None
         for item in items:
             if item.summary in existing:
                 skipped += 1
                 continue
-            # 超长的不存。存进去也会在检索时被整条跳过 —— 那样管理员看到"导入成功",
-            # 实际得到一条永远不会被用到的记忆, 比明确拒绝更糟。把原文回给他,
-            # 由他拆成几条再传 (系统擅自截断会让"我上传的"和"库里存的"对不上)。
             if item.is_oversized:
-                oversized.append(item.summary)
+                oversized.append(item.summary[:120])
                 continue
-            # skip_reconciliation: knowledge rows are admin-controlled
-            # standalone facts — they must never be merged into (or mutate)
-            # persona rows. Idempotency is the exact-content check above.
-            memory_id = await store_memory(
-                template_user_id,
-                item.summary,
-                level=1,
-                importance=KNOWLEDGE_IMPORTANCE,
-                memory_type="life",
-                main_category=KNOWLEDGE_MAIN_CATEGORY,
-                sub_category=KNOWLEDGE_SUB_CATEGORY,
-                source="ai",
-                workspace_id=workspace.id,
-                provenance=KNOWLEDGE_SEED,
-                skip_reconciliation=True,
+            if item.summary not in embeddings:
+                # It existed before the network call and was then deleted or
+                # edited. A retry must prepare its vector; never insert half a row.
+                raise ValueError("knowledge_existing_content_changed_retry")
+            if source is None:
+                source = await persist_input_origin(
+                    tx, user_id=template_user_id, workspace_id=workspace.id,
+                    agent_id=template_agent_id, origin=input_origin,
+                )
+            now = datetime.now(UTC)
+            occur_time = resolve_occur_time(
+                item.summary, statement_time=None, main_category=KNOWLEDGE_MAIN_CATEGORY,
+                sub_category=KNOWLEDGE_SUB_CATEGORY, provenance=KNOWLEDGE_SEED,
             )
-            if memory_id:
-                stored += 1
-                existing.add(item.summary)
-            else:
-                skipped += 1
-    await _bust_knowledge_rows_cache(workspace.id)
-    logger.info(
-        "[TEMPLATE-KNOWLEDGE] appended %d rows (%d dup, %d oversized) to template %s",
-        stored,
-        skipped,
-        len(oversized),
-        template_agent_id[:8],
-    )
-    return {
-        "parsed": len(items),
-        "stored": stored,
-        "skipped_duplicates": skipped,
-        # 回原文而不只是计数: 管理员要能直接看到是哪几条太长, 否则拿着一个数字
-        # 无从下手。截断到 120 字够他认出是哪一条。
-        "skipped_oversized": [s[:120] for s in oversized],
-    }
+            data = dict(userId=template_user_id, workspaceId=workspace.id,
+                        content=item.summary, type="life", level=1,
+                        importance=KNOWLEDGE_IMPORTANCE, mainCategory=KNOWLEDGE_MAIN_CATEGORY,
+                        subCategory=KNOWLEDGE_SUB_CATEGORY, provenance=KNOWLEDGE_SEED,
+                        valueUpdatedAt=now, statementTime=now)
+            if occur_time is not None:
+                data["occurTime"] = occur_time
+            memory = await memory_repo.create(
+                "ai", database=tx, evidence_sources=(source,),
+                extractor_version="knowledge-document-v1", **data,
+            )
+            await store_embedding(memory.id, embeddings[item.summary], database=tx)
+            await tx.memorychangelog.create(data={
+                "userId": template_user_id, "memoryId": memory.id, "operation": "insert",
+                "newValue": item.summary, "workspaceId": workspace.id,
+            })
+            existing.add(item.summary)
+            new_ids.append(memory.id)
+    if new_ids:
+        await memory_repo.invalidate_scope(template_user_id, workspace.id)
+        await _bust_knowledge_rows_cache(workspace.id)
+        for memory_id in new_ids:
+            await after_memory_changelog(user_id=template_user_id, memory_id=memory_id,
+                                         operation="insert", workspace_id=workspace.id)
+    logger.info("[TEMPLATE-KNOWLEDGE] appended %d rows (%d dup, %d oversized) to template %s",
+                len(new_ids), skipped, len(oversized), template_agent_id[:8])
+    return {"parsed": len(items), "stored": len(new_ids),
+            "skipped_duplicates": skipped, "skipped_oversized": oversized}
 
 
 async def _bust_knowledge_rows_cache(workspace_id: str) -> None:
-    """Invalidate the literal-hit probe's per-workspace row cache after
-    writes, so a canary chat test right after a sync sees fresh rows
-    (TTL alone would delay visibility by up to 3 minutes)."""
-    try:
-        redis = await get_redis()
-        await redis.delete(knowledge_rows_cache_key(workspace_id))
-    except Exception:
-        pass
-
-
-async def _knowledge_contents(workspace_id: str) -> set[str]:
-    """Contents of ALL knowledge rows in a workspace (archived included —
-    archiving expresses a deliberate removal that sync must not undo)."""
-    rows = await db.aimemory.find_many(
-        where={"workspaceId": workspace_id, "provenance": KNOWLEDGE_SEED}
-    )
-    return {row.content for row in rows if row.content}
+    """Keep existing callers on the shared post-commit invalidation path."""
+    await invalidate_knowledge_rows(workspace_id)
 
 
 # ── Status / overview ──────────────────────────────────────────────────
@@ -280,10 +301,11 @@ async def list_knowledge_items(template_agent_id: str, take: int = 200) -> list[
             "isArchived": False,
         },
         order={"createdAt": "desc"},
-        take=take,
+        take=max(1, min(int(take), 200)),
     )
     return [
-        {"id": row.id, "summary": row.content, "created_at": str(row.createdAt)}
+        {"id": row.id, "summary": row.content, "created_at": str(row.createdAt),
+         "evidence_scope": {"user_id": row.userId, "workspace_id": workspace.id, "source": "ai"}}
         for row in rows
     ]
 

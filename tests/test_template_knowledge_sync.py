@@ -95,50 +95,42 @@ def test_build_copy_rows_all_existing_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_append_stores_new_and_skips_existing():
-    fake_aimemory = MagicMock()
-    fake_aimemory.find_many = AsyncMock(
-        return_value=[SimpleNamespace(content="已有知识")]
+async def test_append_stores_new_and_skips_existing(monkeypatch):
+    from tests.knowledge_input_test_support import mock_append
+    from app.services.agent_template.knowledge_import import parse_knowledge_document_snapshot
+    text = "知识\n内容：已有知识\n内容：新知识"
+    parsed, _ = parse_knowledge_document_snapshot(text.encode())
+    items, origin, create, tx = mock_append(monkeypatch, text, existing=[parsed[0].summary])
+    result = await append_knowledge_to_template(
+        template_agent_id="tpl-1", template_user_id="sys-owner", items=items, input_origin=origin,
     )
-    store = AsyncMock(return_value="mem-1")
-    with (
-        patch.object(knowledge_mod, "get_active_workspace", AsyncMock(return_value=_ws("tpl-ws"))),
-        patch.object(knowledge_mod.db, "aimemory", fake_aimemory),
-        patch.object(knowledge_mod, "store_memory", store),
-        patch.object(knowledge_mod, "distributed_lock", _noop_lock),
-    ):
-        result = await append_knowledge_to_template(
-            template_agent_id="tpl-1",
-            template_user_id="sys-owner",
-            items=[_item("已有知识"), _item("新知识")],
-        )
-
-    # 只断言这个用例关心的计数, 不做全字典比对 —— 返回值加字段 (如
-    # skipped_oversized) 不该让这个测重复度重叠的用例失败。
     assert result["parsed"] == 2
     assert result["stored"] == 1
     assert result["skipped_duplicates"] == 1
-    store.assert_awaited_once()
-    args, kwargs = store.call_args
-    assert args == ("sys-owner", "新知识")
+    create.assert_awaited_once()
+    kwargs = create.call_args.kwargs
+    assert create.call_args.args == ("ai",)
+    assert kwargs["content"] == items[1].summary
     assert kwargs["level"] == 1
     assert kwargs["importance"] == KNOWLEDGE_IMPORTANCE
-    assert kwargs["main_category"] == KNOWLEDGE_MAIN_CATEGORY
-    assert kwargs["sub_category"] == KNOWLEDGE_SUB_CATEGORY
-    assert kwargs["source"] == "ai"
-    assert kwargs["workspace_id"] == "tpl-ws"
+    assert kwargs["mainCategory"] == KNOWLEDGE_MAIN_CATEGORY
+    assert kwargs["subCategory"] == KNOWLEDGE_SUB_CATEGORY
+    assert kwargs["workspaceId"] == "ws"
     assert kwargs["provenance"] == KNOWLEDGE_SEED
-    assert kwargs["skip_reconciliation"] is True
+    assert kwargs["database"] is tx
+    assert kwargs["evidence_sources"]
+    assert kwargs["valueUpdatedAt"] == kwargs["statementTime"]
+    assert kwargs["valueUpdatedAt"].tzinfo == UTC
 
 
 @pytest.mark.asyncio
 async def test_append_without_workspace_raises():
+    from app.services.agent_template.knowledge_import import parse_knowledge_document_snapshot
+    items, origin = parse_knowledge_document_snapshot("知识\n内容：测试".encode())
     with patch.object(knowledge_mod, "get_active_workspace", AsyncMock(return_value=None)):
         with pytest.raises(ValueError, match="活跃 workspace"):
             await append_knowledge_to_template(
-                template_agent_id="tpl-1",
-                template_user_id="sys-owner",
-                items=[_item("x")],
+                template_agent_id="tpl-1", template_user_id="sys-owner", items=items, input_origin=origin,
             )
 
 

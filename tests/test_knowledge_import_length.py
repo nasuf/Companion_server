@@ -64,73 +64,25 @@ class TestDetection:
 class TestStoragePath:
     @pytest.mark.asyncio
     async def test_oversized_items_are_not_stored_and_are_reported(self, monkeypatch):
-        """超长条目不入库, 且原文回给管理员 —— 只给个计数他无从下手."""
-        from unittest.mock import AsyncMock
-
-        import app.services.agent_template.knowledge as kn
-
-        workspace = type("W", (), {"id": "ws-1"})()
-        monkeypatch.setattr(kn, "get_active_workspace", AsyncMock(return_value=workspace))
-        monkeypatch.setattr(kn, "_knowledge_contents", AsyncMock(return_value=set()))
-        monkeypatch.setattr(kn, "_bust_knowledge_rows_cache", AsyncMock())
-
-        stored_texts: list[str] = []
-
-        async def _store(_user, text, **_kw):
-            stored_texts.append(text)
-            return "mem-id"
-
-        monkeypatch.setattr(kn, "store_memory", _store)
-
-        # 无锁环境: distributed_lock 在没有 Redis 时 fail_open, 这里直接放行。
-        class _NoLock:
-            async def __aenter__(self):
-                return True
-
-            async def __aexit__(self, *a):
-                return False
-
-        monkeypatch.setattr(kn, "distributed_lock", lambda *a, **k: _NoLock())
-
+        from tests.knowledge_input_test_support import mock_append
+        from app.services.agent_template import knowledge as kn
         long_text = "超长知识内容需要被挡下来。" * 30
+        items, origin, create, tx = mock_append(monkeypatch, "知识\n内容：正常的一条知识\n长内容：" + long_text)
         result = await kn.append_knowledge_to_template(
-            template_agent_id="agent-1",
-            template_user_id="user-1",
-            items=[_item("正常的一条知识"), _item(long_text)],
+            template_agent_id="agent", template_user_id="user", items=items, input_origin=origin,
         )
-
-        assert stored_texts == ["正常的一条知识"], "超长条目被存进去了"
+        create.assert_awaited_once()
+        assert create.call_args.kwargs["content"] == items[0].summary
+        assert create.call_args.kwargs["database"] is tx
         assert result["stored"] == 1
-        assert len(result["skipped_oversized"]) == 1
-        assert result["skipped_oversized"][0].startswith("超长知识内容"), (
-            "只回了计数没回原文, 管理员不知道是哪条"
-        )
+        assert result["skipped_oversized"] == [items[1].summary[:120]]
 
     @pytest.mark.asyncio
     async def test_report_is_present_even_when_nothing_is_oversized(self, monkeypatch):
-        """字段恒在, 前端不必判 key 是否存在."""
-        from unittest.mock import AsyncMock
-
-        import app.services.agent_template.knowledge as kn
-
-        monkeypatch.setattr(
-            kn, "get_active_workspace",
-            AsyncMock(return_value=type("W", (), {"id": "ws-1"})()),
-        )
-        monkeypatch.setattr(kn, "_knowledge_contents", AsyncMock(return_value=set()))
-        monkeypatch.setattr(kn, "_bust_knowledge_rows_cache", AsyncMock())
-        monkeypatch.setattr(kn, "store_memory", AsyncMock(return_value="mem"))
-
-        class _NoLock:
-            async def __aenter__(self):
-                return True
-
-            async def __aexit__(self, *a):
-                return False
-
-        monkeypatch.setattr(kn, "distributed_lock", lambda *a, **k: _NoLock())
-
+        from tests.knowledge_input_test_support import mock_append
+        from app.services.agent_template import knowledge as kn
+        items, origin, _, _ = mock_append(monkeypatch, "知识\n内容：短的")
         result = await kn.append_knowledge_to_template(
-            template_agent_id="a", template_user_id="u", items=[_item("短的")],
+            template_agent_id="agent", template_user_id="user", items=items, input_origin=origin,
         )
         assert result["skipped_oversized"] == []

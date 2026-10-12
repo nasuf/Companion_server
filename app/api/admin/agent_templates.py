@@ -54,7 +54,7 @@ from app.services.agent_template.knowledge import (
     list_knowledge_items,
     start_knowledge_sync,
 )
-from app.services.agent_template.knowledge_import import parse_knowledge_document
+from app.services.agent_template.knowledge_import import parse_knowledge_document_snapshot
 from app.services.life_story import get_progress
 from app.services.runtime.data_reset import hard_delete_agent_data
 
@@ -555,15 +555,17 @@ async def append_template_knowledge(
     if agent.status != "active":
         raise HTTPException(status_code=400, detail="模板尚未生成完成，无法补充记忆")
 
-    raw = await file.read()
-    await file.close()
+    try:
+        raw = await file.read(_MAX_TEMPLATE_DOCUMENT_BYTES + 1)
+    finally:
+        await file.close()
     if not raw:
         raise HTTPException(status_code=400, detail="上传文件为空")
     if len(raw) > _MAX_TEMPLATE_DOCUMENT_BYTES:
         raise HTTPException(status_code=413, detail="文档过大，请控制在 2MB 以内")
 
     try:
-        items = parse_knowledge_document(raw, filename=file.filename)
+        items, input_origin = parse_knowledge_document_snapshot(raw, filename=file.filename)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -572,6 +574,7 @@ async def append_template_knowledge(
             template_agent_id=agent_id,
             template_user_id=agent.userId,
             items=items,
+            input_origin=input_origin,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

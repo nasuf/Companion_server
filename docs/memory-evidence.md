@@ -42,7 +42,7 @@ GET /admin-api/memory-repairs/evidence-audit
 
 Detail limits are 1–50; audit limits are 1–500. Cursors are keyset-based. Audit
 counts refer only to the returned page and the current content/Agent scope:
-`linked` means a recorded message/parent/profile origin exists, including a subsequently
+`linked` means a recorded message/parent/profile/input origin exists, including a subsequently
 deleted origin. It does not mean the source is currently available or the claim
 is verified. `unknown` is the complement within `checked`. The response includes
 the denominator, definition and sampling time. Unknown scopes return 404 rather
@@ -75,9 +75,10 @@ performs no writes, backfill, retrieval changes or prompt changes.
 ## Remaining original roadmap work
 
 - M02.02.03: durable tool/business receipts and exact model/prompt snapshots.
-- M02.02.04: remaining clone, knowledge/import publishing, corrections, admin and
-  public edits, daily summaries, compression, location, offerings, offline/game
-  and reminder adapters. Their uncollected provenance must remain unknown.
+- M02.02.04: remaining corrections, repair merge/replacement actions, daily
+  summaries, compression, location, offerings, offline/game and reminder adapters.
+  Their uncollected provenance must remain unknown. Clone, knowledge publication,
+  document import and manual edit deliveries are described below.
 - M02.02.05: a multi-page audit controller with rate/stop limits. No inferred
   historical backfill is authorized by this first delivery.
 - M02.02.06: each remaining writer's independent regression qualification.
@@ -128,7 +129,7 @@ Failure preserves the previous memories and sources. This does not claim all
 Agent profile fields or the full initialization job share that transaction.
 
 Snapshots cascade on owner/workspace/Agent deletion; regenerations may retain
-previous snapshots. A global retention/capacity policy remains M02.18. Schema
+previous snapshots. A global retention/capacity policy remains M02.16. Schema
 rollback is unnecessary for application rollback; do not drop evidence tables.
 The initialized snapshot is provenance for the batch input, not a per-field
 explanation of deterministic fallbacks or the model's consistency repair.
@@ -173,7 +174,7 @@ Knowledge sync now records `memory/template_copy` with processing revision
 `knowledge-sync-v1`. Web shows **模板知识发布** separately from initial template
 cloning. This pins the copied template knowledge text version; it does not certify
 the original imported document or factual correctness. Old publications remain
-unknown; knowledge document/import snapshots and edit origins remain M02.02.
+unknown; the following INPUT01 delivery adds document and manual edit inputs.
 
 Each target batch commits memories, available vectors, changelogs and origins
 in one transaction. Any write failure rolls back that target and is reported by
@@ -198,3 +199,58 @@ remain on the original roadmap. No chat frame, prompt or schema changes are made
 A failed full-sync watermark write reports an explicit finalization error while
 retaining committed copy counts. It never reports the pending badge as cleared.
 Retry skips previously committed knowledge, and the watermark cannot move back.
+
+
+### Original knowledge documents and manual edits (M02.02 INPUT01)
+
+Prisma migration 158 adds immutable `memory_input_origins`, identified by a
+scope-bound SHA-256 receipt and linked through `source_kind=input`. Three kinds
+are distinguished: `knowledge_document`, `admin_edit`, and `user_edit`. These
+record submitted input; none asserts that its claims have been independently
+verified. Existing `import` placeholders remain unverified and are not backfilled.
+The raw payload is private and never returned by the administration evidence API.
+
+Knowledge upload freezes the actual decoded parser input, original byte digest,
+byte count, parser revision and exact parsed items. Limits remain 2 MiB per file,
+200 items per upload and the existing per-memory injection budget; receipts have
+an 8 MiB bound. Exact duplicates, including archived knowledge, and oversized
+items retain the existing skip/report behavior. No new receipt is stored for an
+all-skipped upload. Parsing and embedding happen before the transaction. Under a
+dedicated append advisory lock, shared persona lock and active template scope
+recheck, all new memories, vectors, changelogs and source links commit together.
+The original type/category/importance/provenance and both statement/decay clocks
+are preserved. An input prepared for a replaced workspace is rejected, not moved.
+
+The public memory PATCH and repair `edit_memory` share a transactional edit
+service. It rechecks the authenticated actor and the observed owner, workspace,
+Agent generation, content, timestamp and metadata before writing. Stale edits
+return 409; missing/archived targets and same-ID side collisions are rejected.
+The new content, vector, audit, input and link commit together. Repair resolution
+also commits in that transaction, with an open/unchanged queue-item check. A failed
+write leaves the prior version and an open repair item intact. Metadata-only
+changes do not manufacture a new text origin. Old content links remain historical;
+a source is not relabeled to certify different text. Cache invalidation and the
+existing optional quality/achievement hooks run after commit.
+
+The Web template knowledge dialog now offers the existing scoped source panel.
+Successful repair edits discard loaded pages and cursors, read the first page
+again, and ignore late responses from the prior content version. Failed edits do
+not display a successful refresh. A repair without a fixed memory target can
+show the actual edited target returned by the API, without rewriting the queue
+item's recorded scope. Flutter and the WeChat service entry need no request schema
+change; their general non-2xx handling remains applicable. The Mini Program is
+outside this batch's scope.
+
+Verification includes synthetic real PostgreSQL/Redis and authenticated HTTP
+flows, concurrent imports/edits, write-stage rollback, source/owner isolation,
+current-versus-old origins, and the template clone/import/initialization lock
+sequence. Separate production React tests use controlled API responses; this is
+not a claim that every client or every model response passed a production E2E.
+Production acceptance reads bounded existing data and checks the exact release,
+migration and health. A natural post-release new-input sample must be reported
+separately if none has yet occurred. Application rollback leaves the additive
+schema and historical receipts intact; do not delete the evidence tables.
+
+Original-document retention/capacity policy remains M02.16. Other memory writers,
+repair merge/replacement actions, exact model/prompt receipts, multipage auditing
+and derived-memory deletion barriers remain their existing roadmap tasks.

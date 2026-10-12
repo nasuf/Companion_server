@@ -3,6 +3,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.ownership import require_memory_owner, require_user_self
+from app.api.jwt_auth import require_user
 from app.db import db
 from app.models.memory import (
     MemoryBulkDeleteRequest,
@@ -19,7 +20,7 @@ from app.models.memory import (
     WorkspaceMemoryWipeResponse,
 )
 from app.services.memory.lifecycle.quality import derive_memory_quality, serialize_quality
-from app.services.memory.storage.embedding import generate_embedding, store_embedding
+from app.services.memory.manual_edit import MemoryEditError, edit_memory_with_evidence
 from app.services.memory.storage.persistence import log_memory_changelog
 from app.services.memory.lifecycle.hygiene import run_memory_hygiene
 from app.services.memory.storage import repo as memory_repo
@@ -225,40 +226,20 @@ async def run_memory_hygiene_now(
 async def update_memory(
     data: MemoryUpdateRequest,
     m=Depends(require_memory_owner),
+    actor: dict = Depends(require_user),
 ):
     if m.isArchived:
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    update_data: dict = {}
-    old_content = m.content
-    if data.content is not None:
-        # 超限的内容存进去也永远不会被检索到 —— 用户会看到"保存成功", 得到的却是一条
-        # AI 再也想不起来的记忆。跟 knowledge 导入 (agent_template/knowledge.py) 同样的
-        # 取舍: 明确拒绝并把原文留给用户自己拆, 好过系统擅自截断或静默收下。
-        if exceeds_injection_limit(data.content):
-            # detail 跟本文件其余错误一样用可读文案 (不是机器码): 这个接口的 detail
-            # 会直接透到用户面前, 而"内容太长"恰好是用户自己能处理的问题。
-            raise HTTPException(
-                status_code=400,
-                detail="Memory content is too long to be recalled; split it into shorter entries",
-            )
-        update_data["content"] = data.content
-        await store_embedding(m.id, await generate_embedding(data.content))
-    if not update_data:
+    if data.content is None:
         return _serialize_memory(m)
-
-    await memory_repo.update(m.id, source=m.source, record=m, **update_data)
-    await log_memory_changelog(
-        m.userId,
-        m.id,
-        "user_edit",
-        old_value=old_content,
-        new_value=update_data.get("content", m.content),
-        workspace_id=m.workspaceId,
-    )
-    updated = await memory_repo.find_unique(m.id)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Memory not found")
+    if exceeds_injection_limit(data.content):
+        raise HTTPException(status_code=400,
+            detail="Memory content is too long to be recalled; split it into shorter entries")
+    try:
+        updated, _ = await edit_memory_with_evidence(record=m, content=data.content, actor=actor)
+    except MemoryEditError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return _serialize_memory(updated)
 
 

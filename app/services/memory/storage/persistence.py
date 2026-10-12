@@ -105,6 +105,33 @@ def _normalize_singleton_text(text: str | None) -> str:
     return "".join(ch for ch in text if not ch.isspace() and ch not in "，。！？?~～,.、:：；;")
 
 
+async def after_memory_changelog(*, user_id: str, memory_id: str, operation: str,
+                                 workspace_id: str | None) -> None:
+    """Run optional derived-state hooks only after a changelog has committed."""
+    try:
+        from app.services.memory.lifecycle.quality_state import refresh_quality_state_for_changelog
+
+        # "access" can be emitted on every retrieval and should not turn the
+        # recall hot path into a full quality recomputation. Backfill and
+        # non-access writes keep the materialized state fresh enough for ops.
+        if operation != "access":
+            await refresh_quality_state_for_changelog(memory_id)
+    except Exception as state_err:
+        logger.debug(f"Memory quality state refresh skipped: {state_err}")
+    try:
+        if operation != "access":
+            from app.services.achievements.service import handle_memory_changelog_event
+
+            await handle_memory_changelog_event(
+                user_id=user_id,
+                memory_id=memory_id,
+                operation=operation,
+                workspace_id=workspace_id,
+            )
+    except Exception as achievement_err:
+        logger.debug(f"Achievement memory hook skipped: {achievement_err}")
+
+
 async def log_memory_changelog(
     user_id: str,
     memory_id: str,
@@ -126,28 +153,8 @@ async def log_memory_changelog(
                 "workspaceId": workspace_id,
             }
         )
-        try:
-            from app.services.memory.lifecycle.quality_state import refresh_quality_state_for_changelog
-
-            # "access" can be emitted on every retrieval and should not turn the
-            # recall hot path into a full quality recomputation. Backfill and
-            # non-access writes keep the materialized state fresh enough for ops.
-            if operation != "access":
-                await refresh_quality_state_for_changelog(memory_id)
-        except Exception as state_err:
-            logger.debug(f"Memory quality state refresh skipped: {state_err}")
-        try:
-            if operation != "access":
-                from app.services.achievements.service import handle_memory_changelog_event
-
-                await handle_memory_changelog_event(
-                    user_id=user_id,
-                    memory_id=memory_id,
-                    operation=operation,
-                    workspace_id=workspace_id,
-                )
-        except Exception as achievement_err:
-            logger.debug(f"Achievement memory hook skipped: {achievement_err}")
+        await after_memory_changelog(user_id=user_id, memory_id=memory_id,
+            operation=operation, workspace_id=workspace_id)
     except Exception as e:
         logger.warning(f"Failed to write changelog: {e}")
 

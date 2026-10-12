@@ -76,12 +76,14 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
                     CASE WHEN m.is_archived THEN 'archived' ELSE 'active' END AS status
                     FROM {_table(source.side)} m JOIN chat_workspaces w ON w.id=m.workspace_id
                     WHERE m.id=$1 FOR SHARE OF m,w"""
-    elif kind == "profile":
-        if source.side is not None or source.relation != "derived_from" or source.expected_role is not None:
-            raise ValueError("invalid_profile_evidence_relation")
+    elif kind in {"profile", "input"}:
+        relation = "derived_from" if kind == "profile" else "recorded_from"
+        if source.side is not None or source.relation != relation or source.expected_role is not None:
+            raise ValueError(f"invalid_{kind}_evidence_relation")
+        origin_table = "memory_profile_origins" if kind == "profile" else "memory_input_origins"
         rows = await database.query_raw(
-            """SELECT user_id,workspace_id,agent_id,source_version,source_status
-               FROM memory_profile_origins WHERE id=$1 FOR SHARE""", ref)
+            f"""SELECT user_id,workspace_id,agent_id,source_version,source_status
+                FROM {origin_table} WHERE id=$1 FOR SHARE""", ref)
         if not rows:
             raise ValueError("evidence_source_not_found")
         row = rows[0]
@@ -158,8 +160,8 @@ async def bind_memory_evidence(
                (id,memory_id,memory_source,user_memory_id,ai_memory_id,user_id,workspace_id,agent_id,
                 content_version,source_kind,source_ref,source_version,source_user_id,source_workspace_id,
                 source_role,source_status,source_message_id,parent_user_memory_id,parent_ai_memory_id,
-                relation,extractor_version,source_memory_side,source_profile_id)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+                relation,extractor_version,source_memory_side,source_profile_id,source_input_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
                ON CONFLICT (id) DO NOTHING""",
             eid, memory_id, side, memory_id if side == "user" else None,
             memory_id if side == "ai" else None, user_id, workspace_id, target["agent_id"], version,
@@ -170,5 +172,6 @@ async def bind_memory_evidence(
             source.ref if source.kind == "memory" and source.side == "ai" else None,
             source.relation, extractor_version, source.side if source.kind == "memory" else None,
             source.ref if source.kind == "profile" else None,
+            source.ref if source.kind == "input" else None,
         )
     return inserted

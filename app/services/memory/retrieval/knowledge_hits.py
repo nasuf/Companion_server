@@ -145,6 +145,16 @@ def knowledge_rows_cache_key(workspace_id: str) -> str:
     return f"{_CACHE_KEY_PREFIX}:{workspace_id}"
 
 
+async def invalidate_knowledge_rows(workspace_id: str) -> None:
+    """Invalidate this workspace's literal-hit cache after a committed write."""
+    try:
+        redis = await get_redis()
+        await redis.delete(knowledge_rows_cache_key(workspace_id))
+    except Exception as exc:
+        # The database is already committed. The existing TTL bounds outages.
+        logger.warning("[KNOWLEDGE-HIT] cache invalidation failed: %s", type(exc).__name__)
+
+
 async def load_knowledge_rows(workspace_id: str) -> list[dict[str, Any]]:
     """``[{id, content}]`` knowledge rows of a workspace, Redis-cached.
 

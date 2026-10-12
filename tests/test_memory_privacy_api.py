@@ -75,31 +75,24 @@ def test_list_memories_can_include_quality_signals(client):
     assert body[0]["quality"]["evidence_message_ids"] == ["msg-1"]
 
 
-def test_update_memory_edits_row_embedding_and_changelog(client):
+def test_update_memory_delegates_authenticated_content_to_atomic_editor(client):
+    # Row/vector/audit atomicity is exercised with real PG in
+    # test_memory_input_write_api_postgres; this verifies the public contract.
     old = _memory("m1")
     updated = _memory("m1")
     updated.content = "新内容"
-
     with (
         patch("app.services.memory.storage.repo.find_unique", AsyncMock(return_value=old)),
-        patch("app.api.public.memories.generate_embedding", AsyncMock(return_value=[0.1, 0.2])),
-        patch("app.api.public.memories.store_embedding", AsyncMock()) as store_embedding,
-        patch("app.api.public.memories.memory_repo.update", AsyncMock()) as update,
-        patch("app.api.public.memories.memory_repo.find_unique", AsyncMock(return_value=updated)),
-        patch("app.api.public.memories.log_memory_changelog", AsyncMock()) as changelog,
+        patch("app.api.public.memories.edit_memory_with_evidence",
+              AsyncMock(return_value=(updated, None))) as edit,
     ):
-        response = client.patch(
-            "/memories/m1",
-            headers=_hdr("u1"),
-            json={"content": "新内容"},
-        )
-
+        response = client.patch("/memories/m1", headers=_hdr("u1"), json={"content": "新内容"})
     assert response.status_code == 200
     assert response.json()["content"] == "新内容"
-    store_embedding.assert_awaited_once()
-    update.assert_awaited_once()
-    assert update.await_args.kwargs["content"] == "新内容"
-    changelog.assert_awaited_once()
+    edit.assert_awaited_once()
+    args = edit.await_args.kwargs
+    assert args["record"] is old and args["content"] == "新内容"
+    assert args["actor"]["sub"] == "u1" and args["actor"]["role"] == "user"
 
 
 def test_update_memory_rejects_taxonomy_and_level_edits(client):

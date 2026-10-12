@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from app.services.memory.storage import repo as memory_repo
+from app.services.memory.manual_edit import MemoryEditError, edit_memory_with_evidence
 from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.storage.persistence import log_memory_changelog, store_memory
 from app.services.memory.lifecycle.quality_state import mark_memory_superseded
@@ -66,7 +67,7 @@ async def apply_memory_repair_action(
     elif payload.action == "downgrade_memory":
         result = await _downgrade_memory(repair_item, payload, admin_id)
     elif payload.action == "edit_memory":
-        result = await _edit_memory(repair_item, payload, admin_id)
+        return await _edit_memory(repair_item, payload, admin_id)
     elif payload.action == "insert_replacement_memory":
         result = await _insert_replacement_memory(repair_item, payload, admin_id)
     elif payload.action == "mark_verified":
@@ -141,30 +142,16 @@ async def _edit_memory(
         raise MemoryRepairActionError(400, "edit_memory_requires_content")
     _assert_within_injection_limit(content)
 
-    update_data: dict[str, Any] = {"content": content}
-    await store_embedding(record.id, await generate_embedding(content))
-
-    if payload.importance is not None:
-        update_data["importance"] = _clamp_importance(payload.importance)
-    if payload.level is not None:
-        if payload.level not in {1, 2, 3}:
-            raise MemoryRepairActionError(400, "invalid_memory_level")
-        update_data["level"] = payload.level
-
-    await memory_repo.update(record.id, source=record.source, record=record, **update_data)
-    await _log_repair_changelog(
-        record=record,
-        operation="repair_edit",
-        admin_id=admin_id,
-        repair_item=repair_item,
-        payload=payload,
-        old_value=json.dumps(
-            {"content": record.content, "level": record.level, "importance": record.importance},
-            ensure_ascii=False,
-        ),
-        new_value=json.dumps(update_data, ensure_ascii=False),
-    )
-    return {"action": payload.action, "memory_id": record.id}
+    try:
+        _, resolved = await edit_memory_with_evidence(
+            record=record, content=content, actor={"sub": admin_id, "role": "admin"},
+            importance=_clamp_importance(payload.importance) if payload.importance is not None else None,
+            level=payload.level, repair_item=repair_item,
+            resolution_note=_resolution_note(payload), reason=payload.reason,
+        )
+    except MemoryEditError as exc:
+        raise MemoryRepairActionError(exc.status_code, exc.detail) from exc
+    return {"action": payload.action, "memory_id": record.id, "repair_item": resolved}
 
 
 async def _insert_replacement_memory(
