@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from fastapi import APIRouter, WebSocket
 
@@ -44,16 +45,36 @@ async def admin_inbox(websocket: WebSocket, admin_id: str):
         await websocket.close(code=4403, reason="admin_inbox_denied")
         return
 
+    from app.db import db
+    try:
+        rows = await db.query_raw("SELECT 1 FROM users WHERE id=$1 AND role='admin' "
+            "AND status='active' AND archived_at IS NULL", admin_id)
+    except Exception:
+        await websocket.close(code=1011, reason="authentication_unavailable")
+        return
+    if not rows:
+        await websocket.close(code=4403, reason="admin_inbox_denied")
+        return
+
     await websocket.accept(subprotocol=CHAT_PROTOCOL)
     await manager.connect_admin(admin_id, websocket)
     try:
         while True:
-            try:
-                raw = await asyncio.wait_for(websocket.receive_json(), timeout=_IDLE_TIMEOUT)
-            except asyncio.TimeoutError:
-                await websocket.close(code=4008, reason="Idle timeout")
+            remaining = principal.expires_at - time.time()
+            if remaining <= 0:
+                await websocket.close(code=4401, reason="authentication_required")
                 break
-            if (raw or {}).get("type") == "ping":
+            try:
+                raw = await asyncio.wait_for(websocket.receive_json(), timeout=min(_IDLE_TIMEOUT, remaining))
+            except asyncio.TimeoutError:
+                expired = principal.expires_at <= time.time()
+                await websocket.close(code=4401 if expired else 4008,
+                    reason="authentication_required" if expired else "Idle timeout")
+                break
+            if principal.expires_at <= time.time():
+                await websocket.close(code=4401, reason="authentication_required")
+                break
+            if isinstance(raw, dict) and raw.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
     except Exception as exc:
         logger.debug("admin inbox closed admin=%s: %s", admin_id[:8], exc)

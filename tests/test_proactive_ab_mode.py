@@ -231,6 +231,7 @@ async def test_followup_respects_quiet_hours(open_gates):
 
 
 async def test_window_gates_order_and_actions(monkeypatch):
+    monkeypatch.setattr("app.services.admin_takeover.service.is_user_taken_over", AsyncMock(return_value=False))
     monkeypatch.setattr(gates.db, "query_raw", AsyncMock(return_value=[{"status": "archived"}]))
     assert await gates.check_window_gates(_record(), now=NOW) == Gate("stop", "workspace_inactive")
 

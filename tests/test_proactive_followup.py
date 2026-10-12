@@ -66,6 +66,7 @@ class Harness:
 
 @pytest.fixture
 def harness(monkeypatch):
+    monkeypatch.setattr("app.services.admin_takeover.service.is_user_taken_over", AsyncMock(return_value=False))
     h = Harness(
         advance=AsyncMock(),
         stop=AsyncMock(),

@@ -247,27 +247,6 @@ def accepted_chat_events(receipt: AcceptedChatMessage) -> tuple[dict, ...]:
 
 async def handle_sql_chat_frame(websocket, actor_user_id: str, conversation_id: str,
                                 payload: Any, *, client_supports_voice: bool = False) -> None:
-    from app.services.admin_takeover.service import is_conversation_taken_over
-
-    try:
-        taken_over = await is_conversation_taken_over(conversation_id)
-    except Exception:
-        taken_over = False
-    if taken_over:
-        from app.api.realtime.ws import _handle_takeover_user_message, _sanitize_attachment_ids, _sanitize_component_card
-
-        data = payload if type(payload) is dict else {}
-        await _handle_takeover_user_message(
-            websocket,
-            conversation_id,
-            actor_user_id,
-            (data.get("message") or "").strip(),
-            client_id=data.get("client_id") if type(data.get("client_id")) is str else None,
-            component_card=_sanitize_component_card(data.get("component_card")),
-            attachment_ids=_sanitize_attachment_ids(data.get("attachments")),
-            paid_confirmed=data.get("paid_confirmed") is True,
-        )
-        return
     client_id = payload.get("client_id") if type(payload) is dict else None
     # Keep only a bounded valid string in diagnostics; never echo a raw envelope.
     client_id = client_id if type(client_id) is str and len(client_id) <= 249 else None

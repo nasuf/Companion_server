@@ -1,7 +1,7 @@
 """Human takeover records, exclusive claim, and the post-claim message gate.
 
-The Redis flag is written only after the conditional claim update succeeds.
-Until that write, chat, memory, and proactive keep their existing paths.
+SQL owns the conditional claim; Redis caches it only after the update succeeds.
+Cache misses recover from SQL before selecting the human or model path.
 """
 
 from __future__ import annotations
@@ -9,8 +9,6 @@ from __future__ import annotations
 import logging
 import uuid
 from typing import Any
-
-from prisma import Json
 
 from app.db import db
 from app.observability.events import (
@@ -27,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 STATUS_OVERRIDE_VALUES = frozenset({"idle", "busy", "very_busy", "sleep"})
 _PREVIEW_LIMIT = 80
-_LOG_PREVIEW_LIMIT = 40
 
 
 def active_conversation_key(conversation_id: str) -> str:
@@ -65,63 +62,41 @@ def _trim(text: str | None, limit: int) -> str:
     return f"{value[: max(0, limit - 1)]}…"
 
 
-async def is_conversation_taken_over(conversation_id: str | None) -> bool:
-    """True only after a successful claim wrote the Redis flag.
-
-    A missing key means the conversation is still on the model path. A Redis
-    outage falls back to the active row so a taken-over user is not sent back
-    to the model, and a normal user still proceeds when no row exists.
-    """
-    if not conversation_id:
+async def _active_flag(key: str, column: str, identity: str | None) -> bool:
+    if not identity:
         return False
     try:
         redis = await get_redis()
-        value = await redis.get(active_conversation_key(conversation_id))
-        return value == "1"
-    except Exception as exc:
-        logger.warning(
-            "takeover flag read failed; checking the active row",
-            extra={"event": EVT_TAKEOVER_MESSAGE, "error_type": type(exc).__name__},
-        )
+        value = await redis.get(key)
+        if value is not None:
+            return value != "0"
+    except Exception:
+        redis = None
+    # SQL owns the claim. Cache loss/restart or a partial flag write must not
+    # send a claimed user back to the model. Column is an internal allowlist.
+    assert column in {"conversation_id", "user_id"}
     try:
         rows = await db.query_raw(
-            """
-            SELECT 1
-            FROM human_takeovers
-            WHERE conversation_id = $1 AND status = 'active'
-            LIMIT 1
-            """,
-            conversation_id,
+            f"SELECT 1 FROM human_takeovers WHERE {column}=$1 AND status='active' LIMIT 1", identity,
         )
     except Exception as exc:
-        # The chat socket dies if this check raises. A lookup failure keeps
-        # the existing model path; a taken-over user may get one model reply
-        # until Redis and the table are readable again.
-        logger.warning(
-            "takeover flag fallback failed open: %s",
-            type(exc).__name__,
-            extra={"event": EVT_TAKEOVER_MESSAGE, "error_type": type(exc).__name__},
-        )
+        logger.warning("takeover lookup unavailable: %s", type(exc).__name__)
         return False
-    return bool(rows)
+    active = bool(rows)
+    if active and redis is not None:
+        try:
+            await redis.set(key, "1", ex=60, nx=True)
+        except Exception:
+            pass
+    return active
+
+
+async def is_conversation_taken_over(conversation_id: str | None) -> bool:
+    return await _active_flag(active_conversation_key(conversation_id), "conversation_id", conversation_id)
 
 
 async def is_user_taken_over(user_id: str | None) -> bool:
-    if not user_id:
-        return False
-    try:
-        redis = await get_redis()
-        value = await redis.get(active_user_key(user_id))
-        return bool(value)
-    except Exception as exc:
-        # Proactive scans call this for every due window. A Redis outage must
-        # leave those scans on their existing path instead of querying the
-        # takeover table with whatever database handle the caller mocked.
-        logger.warning(
-            "takeover user flag read failed; leaving the agent path in place: %s",
-            type(exc).__name__,
-        )
-        return False
+    return await _active_flag(active_user_key(user_id), "user_id", user_id)
 
 
 async def display_status_override(conversation_id: str | None) -> str | None:
@@ -131,6 +106,8 @@ async def display_status_override(conversation_id: str | None) -> str | None:
     try:
         redis = await get_redis()
         value = await redis.get(status_override_key(conversation_id))
+        if value is None:
+            raise LookupError("Status cache miss")
     except Exception:
         try:
             rows = await db.query_raw(
@@ -166,6 +143,8 @@ async def takeover_media_owner(
         WHERE conversation_id = $1
           AND status = 'active'
           AND owner_admin_id = $2
+          AND EXISTS (SELECT 1 FROM users admin WHERE admin.id=$2 AND admin.role='admin'
+                      AND admin.status='active' AND admin.archived_at IS NULL)
         LIMIT 1
         """,
         conversation_id,
@@ -482,6 +461,19 @@ async def claim_takeover(takeover_id: str, admin_id: str) -> dict:
         WHERE id = $2
           AND status = 'pending'
           AND conversation_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM users admin WHERE admin.id=$1
+                      AND admin.role='admin' AND admin.status='active' AND admin.archived_at IS NULL)
+          AND EXISTS (
+              SELECT 1 FROM conversations c
+              JOIN ai_agents a ON a.id=c.agent_id AND a.user_id=c.user_id
+              JOIN chat_workspaces w ON w.id=c.workspace_id AND w.agent_id=a.id AND w.user_id=c.user_id
+              JOIN users u ON u.id=c.user_id
+              WHERE c.id=human_takeovers.conversation_id AND c.user_id=human_takeovers.user_id
+                AND c.agent_id=human_takeovers.agent_id AND c.workspace_id=human_takeovers.workspace_id
+                AND NOT c.is_deleted AND c.archived_at IS NULL AND a.status='active'
+                AND a.archived_at IS NULL AND w.status='active' AND w.archived_at IS NULL
+                AND u.status='active' AND u.archived_at IS NULL
+          )
         RETURNING
             id, user_id AS "userId", conversation_id AS "conversationId",
             agent_id AS "agentId", workspace_id AS "workspaceId"
@@ -526,7 +518,11 @@ async def claim_takeover(takeover_id: str, admin_id: str) -> dict:
     row = rows[0]
     conversation_id = str(_cell(row, "conversationId", "conversation_id"))
     user_id = str(_cell(row, "userId", "user_id"))
-    await _write_active_flags(conversation_id, user_id)
+    try:
+        await _write_active_flags(conversation_id, user_id)
+    except Exception as exc:
+        # The committed SQL row is authoritative, including on Redis misses.
+        logger.warning("takeover cache publication failed: %s", type(exc).__name__)
     logger.info(
         "takeover claimed",
         extra={
@@ -543,8 +539,10 @@ async def claim_takeover(takeover_id: str, admin_id: str) -> dict:
 
 async def _write_active_flags(conversation_id: str, user_id: str) -> None:
     redis = await get_redis()
-    await redis.set(active_conversation_key(conversation_id), "1")
-    await redis.set(active_user_key(user_id), conversation_id)
+    async with redis.pipeline(transaction=True) as pipeline:
+        pipeline.set(active_conversation_key(conversation_id), "1")
+        pipeline.set(active_user_key(user_id), "1")
+        await pipeline.execute()
 
 
 async def set_status_override(takeover_id: str, admin_id: str, status: str) -> dict:
@@ -606,44 +604,30 @@ async def record_takeover_user_message(
     user_id: str,
     text: str,
     metadata: dict | None,
-) -> dict | None:
+    paid_confirmed: bool = False,
+) -> dict:
     """Persist one post-claim user message and notify the owning admin.
 
-    Returns None when the conversation is no longer an active takeover.
+    Invalid or no longer active scopes fail before committing a message.
     """
+    from app.services.admin_takeover.ingress import persist_user_message
+
+    saved = await persist_user_message(
+        conversation_id=conversation_id, user_id=user_id, text=text,
+        metadata=metadata or {}, paid_confirmed=paid_confirmed, database=db,
+    )
+    if not saved["created"]:
+        return {"message_id": saved["message_id"], "duplicate": True}
+    row = saved["row"]
+    message_id = saved["message_id"]
     preview = _trim(text, _PREVIEW_LIMIT) or "［新消息］"
-    message = await db.message.create(
-        data={
-            "conversation": {"connect": {"id": conversation_id}},
-            "role": "user",
-            "content": text,
-            "metadata": Json({**(metadata or {}), "human_takeover": True}),
-        }
-    )
-    rows = await db.query_raw(
-        """
-        UPDATE human_takeovers
-        SET unread_count = unread_count + 1,
-            last_user_message_at = CURRENT_TIMESTAMP,
-            last_message_preview = $2,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE conversation_id = $1 AND status = 'active'
-        RETURNING id, owner_admin_id AS "ownerAdminId", unread_count AS "unreadCount",
-                  user_id AS "userId", agent_id AS "agentId"
-        """,
-        conversation_id,
-        preview,
-    )
-    if not rows:
-        return {"message_id": message.id, "owner_admin_id": None}
-    row = rows[0]
     owner_id = str(_cell(row, "ownerAdminId", "owner_admin_id") or "")
     takeover_id = str(_cell(row, "id"))
     payload = {
         "takeover_id": takeover_id,
         "conversation_id": conversation_id,
         "user_id": user_id,
-        "message_id": message.id,
+        "message_id": message_id,
         "text": preview,
         "role": "user",
         "unread_count": int(_cell(row, "unreadCount", "unread_count") or 0),
@@ -654,16 +638,19 @@ async def record_takeover_user_message(
             "event": EVT_TAKEOVER_MESSAGE,
             "takeover_id": takeover_id,
             "conversation_id": conversation_id,
-            "message_id": message.id,
-            "preview": _trim(text, _LOG_PREVIEW_LIMIT),
+            "message_id": message_id,
+            "text_chars": len(text),
         },
     )
     if owner_id:
         from app.services.runtime.ws_manager import manager
 
-        await manager.send_to_admin(owner_id, "takeover_user_message", payload)
-        fire_background(_push_owner_message(owner_id, takeover_id, conversation_id, message.id, preview))
-    return {"message_id": message.id, "owner_admin_id": owner_id, "takeover_id": takeover_id}
+        try:
+            await manager.send_to_admin(owner_id, "takeover_user_message", payload)
+            fire_background(_push_owner_message(owner_id, takeover_id, conversation_id, message_id, preview))
+        except Exception as exc:
+            logger.warning("takeover notification failed after commit: %s", type(exc).__name__)
+    return {"message_id": message_id, "owner_admin_id": owner_id, "takeover_id": takeover_id}
 
 
 async def _push_owner_message(
@@ -700,42 +687,24 @@ async def send_admin_message(
     text: str,
     component_card: dict | None = None,
     attachments: list[dict] | None = None,
+    client_id: str | None = None,
 ) -> dict:
-    rows = await db.query_raw(
-        """
-        SELECT conversation_id AS "conversationId", user_id AS "userId",
-               agent_id AS "agentId", workspace_id AS "workspaceId"
-        FROM human_takeovers
-        WHERE id = $1 AND owner_admin_id = $2 AND status = 'active'
-        LIMIT 1
-        """,
-        takeover_id,
-        admin_id,
-    )
-    if not rows:
-        raise TakeoverClaimError("not_owner")
-    conversation_id = str(_cell(rows[0], "conversationId", "conversation_id"))
-    user_id = str(_cell(rows[0], "userId", "user_id"))
-    agent_id = _cell(rows[0], "agentId", "agent_id")
-    workspace_id = _cell(rows[0], "workspaceId", "workspace_id")
-    metadata: dict[str, Any] = {"human_takeover": True, "admin_id": admin_id}
-    if component_card:
-        metadata["component_card"] = component_card
-    if attachments:
-        metadata["attachments"] = attachments
-    message = await db.message.create(
-        data={
-            "conversation": {"connect": {"id": conversation_id}},
-            "role": "assistant",
-            "content": text,
-            "metadata": Json(metadata),
-        }
-    )
+    from app.services.admin_takeover.ingress import persist_admin_message
+
+    saved = await persist_admin_message(takeover_id=takeover_id, admin_id=admin_id, text=text,
+        component_card=component_card, attachments=attachments, client_id=client_id, database=db)
+    scope = saved["scope"]
+    conversation_id, user_id = scope.conversation_id, scope.owner_user_id
+    agent_id, workspace_id = scope.agent_id, scope.workspace_id
+    message_id = saved["message_id"]
+    if not saved["created"]:
+        return {"message_id": message_id, "conversation_id": conversation_id, "duplicate": True}
+    attachments = saved["metadata"].get("attachments", [])
     reply = {
         "text": text,
         "index": 0,
-        "assistant_message_id": message.id,
-        "message_id": message.id,
+        "assistant_message_id": message_id,
+        "message_id": message_id,
     }
     if component_card:
         reply["component_card"] = component_card
@@ -745,14 +714,14 @@ async def send_admin_message(
     from app.services.runtime.ws_manager import manager
 
     await manager.send_event(conversation_id, "reply", reply)
-    await manager.send_event(conversation_id, "done", {"message_id": message.id})
+    await manager.send_event(conversation_id, "done", {"message_id": message_id})
     await manager.send_to_admin(
         admin_id,
         "takeover_admin_message",
         {
             "takeover_id": takeover_id,
             "conversation_id": conversation_id,
-            "message_id": message.id,
+            "message_id": message_id,
             "text": text,
             "role": "assistant",
             "component_card": component_card,
@@ -762,7 +731,7 @@ async def send_admin_message(
     fire_background(
         notify_agent_message_created(
             conversation_id=conversation_id,
-            message_id=message.id,
+            message_id=message_id,
             text=text or "你收到了一条新消息",
             metadata={"human_takeover": True},
             user_id=user_id,
@@ -776,9 +745,9 @@ async def send_admin_message(
             "event": EVT_TAKEOVER_MESSAGE,
             "takeover_id": takeover_id,
             "conversation_id": conversation_id,
-            "message_id": message.id,
-            "preview": _trim(text, _LOG_PREVIEW_LIMIT),
+            "message_id": message_id,
+            "text_chars": len(text),
             "direction": "admin_to_user",
         },
     )
-    return {"message_id": message.id, "conversation_id": conversation_id}
+    return {"message_id": message_id, "conversation_id": conversation_id}

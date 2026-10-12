@@ -1111,6 +1111,7 @@ def test_criteria_synonym_is_part_of_hidden_target_guard():
 
 
 async def test_generic_proactive_is_deferred_during_arrived_activity(monkeypatch):
+    monkeypatch.setattr("app.services.admin_takeover.service.is_user_taken_over", AsyncMock(return_value=False))
     monkeypatch.setattr(
         proactive_orchestrator.db,
         "query_raw",

@@ -1240,101 +1240,35 @@ def _link_card_needs_refresh(link) -> bool:
 
 
 async def _handle_takeover_user_message(
-    ws: WebSocket,
-    conversation_id: str,
-    user_id: str,
-    text: str,
-    *,
-    client_id: str | None = None,
-    component_card: dict | None = None,
-    attachment_ids: list[str] | None = None,
-    paid_confirmed: bool = False,
+    ws: WebSocket, conversation_id: str, user_id: str, text: str, *,
+    client_id: str | None = None, component_card: dict | None = None,
+    attachment_ids: list[str] | None = None, paid_confirmed: bool = False,
 ) -> None:
-    """Post-claim user message: persist, ack, and notify the owning admin.
-
-    Quota stays. Aggregation, vision, memory, achievements, and the model
-    are not entered. Messages accepted before the claim keep the old path.
-    """
-    is_red_packet_or_gift = (
-        isinstance(component_card, dict)
-        and component_card.get("type") in {"red_packet", "gift"}
-    )
-    if not is_red_packet_or_gift:
-        try:
-            is_vip = await wallet.is_vip(user_id)
-            quota_result = await chat_quota.consume_one(
-                user_id, is_vip=is_vip, paid_confirmed=paid_confirmed
-            )
-        except Exception as exc:
-            logger.warning("takeover quota gate failed conv=%s: %s", conversation_id[:8], exc)
-            try:
-                await ws.send_json({
-                    "type": "error",
-                    "data": {"message": "额度检查失败，请重新发送"},
-                })
-            except Exception:
-                pass
-            return
-        if not quota_result["allowed"]:
-            await ws.send_json({
-                "type": "quota_blocked",
-                "data": {
-                    "reason": quota_result["reason"],
-                    "per_msg_cost": quota_result["per_msg_cost"],
-                    "spendable_tickets": quota_result["spendable_tickets"],
-                    "client_id": client_id,
-                },
-            })
-            return
-    attachments = await chat_media_repo.get_message_attachments(
-        attachment_ids=attachment_ids or [],
-        user_id=user_id,
-        conversation_id=conversation_id,
-    )
-    if attachment_ids and len(attachments) != len(set(attachment_ids)):
-        await ws.send_json({"type": "error", "data": {"message": "附件无效或已发送"}})
-        return
-    attachment_metadata = [
-        {
-            "id": item.id,
-            "kind": item.kind,
-            "name": item.name,
-            "mime": item.mime,
-            "size": item.size,
-            "width": item.width,
-            "height": item.height,
-            "duration_seconds": item.duration_seconds,
-            "url": item.url,
-            "vision_status": item.vision_status,
-            "transcription_status": item.transcription_status,
-            "transcription_text": item.transcription_text,
-        }
-        for item in attachments
-    ]
+    """Commit validation, quota, resources and message together before ACK."""
     from app.services.admin_takeover.service import record_takeover_user_message
+    from app.services.runtime.chat_ingress import ChatRequestConflict
+    from app.services.runtime.chat_ingress_effects import ChatIngressQuotaBlocked, ChatIngressResourceInvalid
+    from app.services.runtime.execution_scope import ExecutionScopeUnavailable
 
-    saved = await record_takeover_user_message(
-        conversation_id=conversation_id,
-        user_id=user_id,
-        text=text,
-        metadata=_message_metadata(
-            client_id=client_id,
-            component_card=component_card,
-            attachments=attachment_metadata or None,
-        ),
-    )
-    if saved and attachment_ids:
-        await chat_media_repo.bind_attachments_to_message(
-            attachment_ids=attachment_ids,
-            message_id=saved["message_id"],
-            user_id=user_id,
-            conversation_id=conversation_id,
+    try:
+        saved = await record_takeover_user_message(
+            conversation_id=conversation_id, user_id=user_id, text=text,
+            metadata=_message_metadata(client_id=client_id, component_card=component_card,
+                attachments=[{"id": ident} for ident in attachment_ids or []]),
+            paid_confirmed=paid_confirmed,
         )
-    await _send_ack(
-        ws,
-        message_id=(saved or {}).get("message_id") or "",
-        client_id=client_id,
-    )
+    except ChatIngressQuotaBlocked as error:
+        await ws.send_json({"type": "quota_blocked", "data": {
+            "reason": error.result["reason"], "per_msg_cost": error.result["per_msg_cost"],
+            "spendable_tickets": error.result["spendable_tickets"], "client_id": client_id,
+        }})
+        return
+    except (ValueError, ChatIngressResourceInvalid, ChatRequestConflict, ExecutionScopeUnavailable):
+        await ws.send_json({"type": "error", "data": {
+            "message": "消息或附件无效，请检查后重新发送", "client_id": client_id,
+        }})
+        return
+    await _send_ack(ws, message_id=saved["message_id"], client_id=client_id)
 
 
 async def _handle_message(

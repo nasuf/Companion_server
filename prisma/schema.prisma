@@ -91,9 +91,9 @@ model User {
   bugReportsResolved       BugReport[]                     @relation("BugReportsResolved")
   userFeedback             UserFeedback[]
   workspaceInteractionDays WorkspaceInteractionDay[]
-  takeoverSubject          HumanTakeover?                  @relation("TakeoverSubject")
-  ownedTakeovers           HumanTakeover[]                 @relation("TakeoverOwner")
-  takeoverDismissals       HumanTakeoverDismissal[]
+  takeoverSubject          HumanTakeover?                  @relation("TakeoverSubject") @ignore
+  ownedTakeovers           HumanTakeover[]                 @relation("TakeoverOwner") @ignore
+  takeoverDismissals       HumanTakeoverDismissal[] @ignore
 
   agentRunsOwned           AgentRun[] @relation("RunOwner") @ignore
   agentRunsActed           AgentRun[] @relation("RunActor") @ignore
@@ -2491,6 +2491,8 @@ model HumanTakeover {
   @@index([status, createdAt(sort: Desc)], map: "human_takeovers_status_created_idx")
   @@index([ownerAdminId, status], map: "human_takeovers_owner_status_idx")
   @@index([conversationId], map: "human_takeovers_conversation_idx")
+  // CAS and scoped transactions use parameterized SQL; omit unused client types.
+  @@ignore
   @@map("human_takeovers")
 }
 
@@ -2503,5 +2505,6 @@ model HumanTakeoverDismissal {
   createdAt  DateTime      @default(now()) @map("created_at")
 
   @@unique([takeoverId, adminId], map: "human_takeover_dismissals_takeover_admin_key")
+  @@ignore
   @@map("human_takeover_dismissals")
 }

@@ -17,20 +17,31 @@ class _Redis:
     async def get(self, key):
         return self.values.get(key)
 
-    async def set(self, key, value):
+    async def set(self, key, value, **kwargs):
         self.values[key] = value
         self.sets.append((key, value))
 
+    def pipeline(self, **kwargs):
+        parent = self
+        class Pipeline:
+            def __init__(self): self.ops=[]
+            async def __aenter__(self): return self
+            async def __aexit__(self,*args): pass
+            def set(self,*args): self.ops.append(args)
+            async def execute(self):
+                for args in self.ops: await parent.set(*args)
+        return Pipeline()
+
 
 @pytest.mark.asyncio
-async def test_missing_flag_does_not_query_the_database(monkeypatch):
+async def test_missing_flag_checks_authoritative_claim(monkeypatch):
     redis = _Redis()
-    queried = AsyncMock(side_effect=AssertionError("db should stay unused"))
+    queried = AsyncMock(return_value=[])
     monkeypatch.setattr(service, "get_redis", AsyncMock(return_value=redis))
     monkeypatch.setattr(service.db, "query_raw", queried)
 
     assert await service.is_conversation_taken_over("conv-1") is False
-    queried.assert_not_called()
+    queried.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -75,7 +86,7 @@ async def test_claim_writes_redis_only_after_the_row_updates(monkeypatch):
 
     assert detail["status"] == "active"
     assert redis.values[service.active_conversation_key("conv-1")] == "1"
-    assert redis.values[service.active_user_key("user-1")] == "conv-1"
+    assert redis.values[service.active_user_key("user-1")] == "1"
 
 
 @pytest.mark.asyncio

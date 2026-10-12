@@ -65,6 +65,7 @@ async def transcribe_chat_audio(
     except Exception:
         taken_over = False
     if taken_over:
+        await _enforce_rate_limit(user_id)
         return await _store_takeover_audio(data, user_id=user_id)
 
     mime = normalize_audio_mime(data.mime, data.name)

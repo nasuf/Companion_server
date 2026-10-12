@@ -137,6 +137,31 @@ async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(req
 
     user_id = conv.userId
 
+    from app.services.admin_takeover.service import is_conversation_taken_over, record_takeover_user_message
+    if await is_conversation_taken_over(conversation_id):
+        from app.services.runtime.chat_ingress import ChatRequestConflict
+        from app.services.runtime.chat_ingress_effects import ChatIngressQuotaBlocked, ChatIngressResourceInvalid
+        from app.services.runtime.execution_scope import ExecutionScopeUnavailable
+        try:
+            saved = await record_takeover_user_message(
+                conversation_id=conversation_id, user_id=user_id, text=data.message,
+                metadata={"client_id": data.client_id, "component_card": data.component_card,
+                          "attachments": data.attachments}, paid_confirmed=data.paid_confirmed,
+            )
+        except ChatIngressQuotaBlocked as error:
+            raise HTTPException(429, detail={"code": "quota_blocked", **error.result}) from None
+        except ChatRequestConflict:
+            raise HTTPException(409, detail={"code": "request_conflict"}) from None
+        except ExecutionScopeUnavailable:
+            raise HTTPException(403, detail={"code": "conversation_access_denied"}) from None
+        except (ValueError, ChatIngressResourceInvalid):
+            raise HTTPException(422, detail={"code": "invalid_resource"}) from None
+        async def accepted_takeover():
+            yield {"event": "ack", "data": json.dumps({"message_id": saved["message_id"],
+                "client_id": data.client_id, "duplicate": saved.get("duplicate", False)})}
+            yield {"event": "done", "data": json.dumps({"message_id": saved["message_id"], "acceptance_only": True})}
+        return EventSourceResponse(accepted_takeover(), headers={"Cache-Control": "no-store"})
+
     if sql_chat_ingress_enabled():
         from app.services.runtime.chat_entrypoint import ChatIngressInputInvalid, receive_client_chat
         from app.services.runtime.chat_ingress import ChatRequestConflict

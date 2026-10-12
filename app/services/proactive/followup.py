@@ -308,6 +308,11 @@ async def process_followup_window(
 ) -> None:
     """判定窗到期 (orchestrator 已 claim 为 processing)。任何路径都会离开 processing."""
     now_ts = now or datetime.now(UTC)
+    from app.services.admin_takeover.service import is_user_taken_over
+
+    if await is_user_taken_over(state.user_id):
+        await stop_proactive_state(state, reason="human_takeover", now=now)
+        return
     gate = await check_workspace(state)
     if gate:
         await stop_proactive_state(state, reason=gate.reason, now=now)
