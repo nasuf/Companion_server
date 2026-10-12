@@ -96,6 +96,7 @@ services:
       DB_CONNECTION_LIMIT_MAX: "${DB_CONNECTION_LIMIT_MAX:-15}"
       DB_MAX_CONCURRENT_QUERIES: "${DB_MAX_CONCURRENT_QUERIES:-10}"
       DB_QUERY_MAX_RETRIES: "${DB_QUERY_MAX_RETRIES:-4}"
+      COMPANION_BACKUP_DIR: /var/backups/companion
       OFFLINE_MEDIA_DIR: "${OFFLINE_MEDIA_DIR:-/data/offline_media}"
       OFFLINE_MEDIA_PUBLIC_PREFIX: "${OFFLINE_MEDIA_PUBLIC_PREFIX:-/offline/media}"
       USER_AVATAR_DIR: "${USER_AVATAR_DIR:-/data/user_avatar}"
@@ -118,9 +119,9 @@ services:
       - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/user_avatar:/data/user_avatar"
       - "/app/companion-secrets:/app/companion-secrets:ro"
       # 后台管理要能看/删/触发数据库备份, 所以给 server 读写宿主机备份目录。
-      # 定时备份仍由宿主机 cron 跑 —— 备份最需要生效的时刻正是应用出问题的时候,
+      # 定时备份仍由宿主机 systemd timer 跑 —— 备份最需要生效的时刻正是应用出问题的时候,
       # 挂进应用进程等于让它跟着一起死。这里只服务界面上的手动操作。
-      - "/var/backups/companion:/var/backups/companion"
+      - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/backups/postgres:/var/backups/companion"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s

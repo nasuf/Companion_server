@@ -93,7 +93,7 @@ jobs:
           # compose/source and before the next step rewrites .env or stops server.
           ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" -o BatchMode=yes \
             "$VPS_USER@$VPS_HOST" \
-            "set -eu; ARCHIVE_DOCKER=docker; if command -v docker >/dev/null && ! docker ps >/dev/null 2>&1; then ARCHIVE_DOCKER='sudo docker'; fi; python3 - server --root /app/companion-release-archives/server --source /app/companion-server --docker \"\$ARCHIVE_DOCKER\" --incoming-commit '$RELEASE_SHA' --allow-first-deploy" \
+            "set -eu; ARCHIVE_DOCKER=docker; if command -v docker >/dev/null && ! docker ps >/dev/null 2>&1; then ARCHIVE_DOCKER='sudo docker'; fi; python3 - server --root /app/companion-release-archives/server --source /app/companion-server --docker \"\$ARCHIVE_DOCKER\" --incoming-commit '$RELEASE_SHA' --allow-first-deploy --max-archives 5 --max-bytes 4294967296" \
             < scripts/release_archive.py
 
           # --checksum 是增量能不能成立的关键, 不是可选优化: git 不存 mtime, 每次

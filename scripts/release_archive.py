@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -429,10 +430,120 @@ def release_verified_read_cache(path, manifest):
             os.close(descriptor)
 
 
-def prune(root, keep_days=14, minimum=3):
+def archive_inventory(path):
+    """Read only metadata for expiry; never follow links or recurse outside a bundle."""
+    if path.is_symlink() or not path.is_dir():
+        raise ArchiveError("Invalid archive directory")
+    files = list(path.iterdir())
+    if any(not stat.S_ISREG(p.lstat().st_mode) for p in files):
+        raise ArchiveError("Archive inventory contains links or directories")
+    manifest = json.loads((path / "manifest.json").read_text())
+    required = ({"image.tar.gz", "container.json", "image.json", ".env", "docker-compose.deploy.yml"}
+                if manifest["kind"] == "server" else {"dist.tar.gz", "apple-app-site-association"})
+    if (manifest["version"] != 1 or manifest["kind"] not in {"server", "web"}
+            or set(manifest["files"]) != required
+            or {p.name for p in files} != required | {"manifest.json"}):
+        raise ArchiveError("Archive inventory is incomplete or unsupported")
+    created = dt.datetime.fromisoformat(manifest["created_at"])
+    if created.tzinfo is None:
+        raise ArchiveError("Archive timestamp must include a timezone")
+    return created, sum(max(p.stat().st_size, p.stat().st_blocks * 512) for p in files), manifest
+
+
+def write_retention_status(root, report):
+    temporary = root / (".retention-status-" + uuid.uuid4().hex)
+    try:
+        write_json(temporary, report)
+        os.replace(temporary, root / ".retention-status.json")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def capacity_prune_locked(root, minimum, max_archives, max_bytes, dry_run):
+    """Verify ALL retained rollback images before deleting any expired bundle.
+
+    Discarded bundles need a valid, flat inventory, but do not need expensive
+    image/layer revalidation. A corrupt retained backup blocks every deletion.
+    The caller holds the same lock as archive creation and pointer publication.
+    """
+    archives = []
+    for path in root.iterdir():
+        # Historical hot/cold relocation index is metadata, not a backup bundle.
+        if path.name == "cold-archive-locations.json":
+            if not stat.S_ISREG(path.lstat().st_mode) or path.stat().st_size > 1024**2:
+                raise ArchiveError("Invalid cold archive location index")
+            continue
+        if path.name.startswith(".partial-"):
+            raise ArchiveError("Incomplete archive found; manual inspection required before rotation")
+        if path.name.startswith(".") or path.name == "latest":
+            continue
+        created, size, manifest = archive_inventory(path)
+        archives.append((created, path.name, path, size, manifest))
+    archives.sort(reverse=True)
+    pointer = root / "latest"
+    if pointer.is_symlink():
+        raise ArchiveError("Invalid latest archive pointer")
+    latest = pointer.read_text().strip() if pointer.exists() else None
+    names = {a[1] for a in archives}
+    if (archives or latest is not None) and latest not in names:
+        raise ArchiveError("Latest archive pointer is missing or invalid")
+    protected = {a[1] for a in archives[:minimum]}
+    if latest:
+        protected.add(latest)
+    kept = [a for a in archives if a[1] in protected]
+    retained_bytes = sum(a[3] for a in kept)
+    if len(kept) > max_archives or retained_bytes > max_bytes:
+        raise ArchiveError("Protected rollback archives exceed capacity; no archives removed")
+    for archive in archives:
+        if archive[1] not in protected and len(kept) < max_archives and retained_bytes + archive[3] <= max_bytes:
+            kept.append(archive)
+            retained_bytes += archive[3]
+    keep_names = {a[1] for a in kept}
+    removed = [a for a in archives if a[1] not in keep_names]
+    # Hourly no-op checks must not reread gigabytes or evict live worker pages.
+    # Full rollback verification is mandatory whenever any deletion is planned.
+    to_verify = kept if removed else []
+    for index, (_, _, path, _, _) in enumerate(to_verify, 1):
+        print(f"Validating retained rollback artifact {index}/{len(kept)}", file=sys.stderr, flush=True)
+        manifest = verify(path)
+        release_verified_read_cache(path, manifest)
+    report = {"sampled_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+              "status": "dry_run" if dry_run else "ok", "minimum": minimum,
+              "max_archives": max_archives, "max_bytes": max_bytes,
+              "before_count": len(archives), "before_bytes": sum(a[3] for a in archives),
+              "retained_count": len(kept), "retained_bytes": retained_bytes,
+              "removed_count": 0 if dry_run else len(removed),
+              "planned_removed_count": len(removed),
+              "planned_freed_bytes": sum(a[3] for a in removed),
+              "verified_count": len(to_verify),
+              "verification": "all_retained" if removed else "not_required_no_deletions",
+              "latest": latest, "retained": sorted(keep_names)}
+    if not dry_run:
+        for _, _, path, _, _ in removed:
+            shutil.rmtree(path)
+        write_retention_status(root, report)
+    return report
+
+
+def prune(root, keep_days=14, minimum=3, max_archives=None, max_bytes=None, dry_run=False):
     if keep_days < 14 or minimum < 3:
         raise ArchiveError("Retention must keep at least 14 days and 3 archives")
     with locked(root):
+        if max_archives is not None or max_bytes is not None:
+            if (max_archives is None or max_bytes is None
+                    or max_archives < minimum or max_bytes <= 0):
+                raise ArchiveError("Both capacity limits are required; keep at least three archives")
+            try:
+                return capacity_prune_locked(root, minimum, max_archives, max_bytes, dry_run)
+            except Exception as error:
+                if not dry_run:
+                    write_retention_status(root, {
+                        "sampled_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                        "status": "failed", "max_archives": max_archives,
+                        "max_bytes": max_bytes, "retained_count": None,
+                        "retained_bytes": None, "reason": str(error) if isinstance(error, ArchiveError)
+                        else "Archive retention failed: " + type(error).__name__})
+                raise
         archives = []
         for path in root.iterdir():
             if path.is_dir() and not path.name.startswith("."):
@@ -444,7 +555,8 @@ def prune(root, keep_days=14, minimum=3):
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=keep_days)
         for created, path in archives[minimum:]:
             if created < cutoff and path.name != latest:
-                shutil.rmtree(path)
+                if not dry_run:
+                    shutil.rmtree(path)
 
 
 def main():
@@ -459,6 +571,9 @@ def main():
     parser.add_argument("--container", default="companion-server")
     parser.add_argument("--incoming-commit", default="unknown")
     parser.add_argument("--allow-first-deploy", action="store_true")
+    parser.add_argument("--max-archives", type=int)
+    parser.add_argument("--max-bytes", type=int)
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     required = {"server": ("root", "source"), "web": ("root", "source", "association"),
                 "verify": ("archive",), "load-image": ("archive",),
@@ -467,6 +582,12 @@ def main():
         if getattr(args, name) is None:
             parser.error("--" + name + " is required for " + args.action)
     try:
+        capacity = {"max_archives": args.max_archives, "max_bytes": args.max_bytes}
+        has_capacity = any(value is not None for value in capacity.values())
+        if args.dry_run and args.action != "prune":
+            raise ArchiveError("Dry-run is supported only for prune")
+        if has_capacity and args.action in {"server", "web"}:
+            prune(args.root, **capacity)
         if args.action == "server":
             path = archive_server(args.root, args.source, args.docker, args.container,
                                   args.incoming_commit, args.allow_first_deploy)
@@ -474,7 +595,9 @@ def main():
             path = archive_web(args.root, args.source, args.association,
                                args.incoming_commit, args.allow_first_deploy)
         elif args.action == "prune":
-            prune(args.root)
+            report = prune(args.root, **capacity, dry_run=args.dry_run)
+            if report is not None:
+                print(json.dumps(report, sort_keys=True))
             path = args.root
         else:
             if args.action == "verify":
@@ -484,7 +607,9 @@ def main():
             else:
                 restore_web(args.archive, args.source, args.association)
             path = args.archive
-        print("Release archive verified: " + str(path) if path else "First deployment: no previous artifact")
+        if has_capacity and args.action in {"server", "web"} and path:
+            print(json.dumps(prune(args.root, **capacity), sort_keys=True))
+        print("Release archive operation completed: " + str(path) if path else "First deployment: no previous artifact")
         return 0
     except (ArchiveError, OSError, ValueError, KeyError, TypeError, tarfile.TarError,
             subprocess.SubprocessError) as error:
