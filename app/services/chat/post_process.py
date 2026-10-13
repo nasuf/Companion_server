@@ -441,7 +441,6 @@ async def _fetch_new_side_messages(
         }
         for r in rows
         if (r.content or "").strip()
-        and not (getattr(r, "metadata", None) or {}).get("human_takeover")
     ]
 
 
@@ -463,7 +462,8 @@ async def _pipeline_with_watermark(
     """
     # An older AI job can finish after an administrator claims the chat. Its
     # backlog/context must never turn later human messages into AI memories.
-    recent = [m for m in recent if not (m.get("metadata") or {}).get("human_takeover")]
+    recent = [m for m in recent if not (m.get("metadata") or {}).get("human_takeover")
+              and not (m.get("metadata") or {}).get("memory_confirmation")]
     wm = _ensure_aware(
         await get_watermark(conversation_id, side) if conversation_id else None
     )
@@ -487,7 +487,9 @@ async def _pipeline_with_watermark(
 
     def _add_target(m: dict) -> None:
         nonlocal max_side_ts
-        new_target_msgs.append(m)
+        excluded = (m.get("metadata") or {}).get("human_takeover") or (m.get("metadata") or {}).get("memory_confirmation")
+        if not excluded:
+            new_target_msgs.append(m)
         ts = _parse_ts(m)
         effective = ts if ts is not None else fallback_now
         if max_side_ts is None or effective > max_side_ts:
@@ -521,6 +523,12 @@ async def _pipeline_with_watermark(
 
     if max_side_ts is None:
         return 0  # 该 side 无新消息, 跳过 LLM
+    if not new_target_msgs:
+        # A bounded page of reserved messages must not starve later messages.
+        # These rows were intentionally handled outside generic extraction.
+        if conversation_id and (wm is None or max_side_ts > wm):
+            await set_watermark(conversation_id, side, max_side_ts)
+        return 0
     evidence_message_ids = [
         str(m.get("id"))
         for m in new_target_msgs

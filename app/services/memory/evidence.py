@@ -53,7 +53,8 @@ async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Sid
            JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
            WHERE m.id=ANY($1::text[]) AND c.user_id=$2 AND c.workspace_id=$3
            AND NOT c.is_deleted AND m.role=$4
-           AND COALESCE(m.metadata->>'human_takeover','false')<>'true'""", ids,user_id,workspace_id,role)
+           AND COALESCE(m.metadata->>'human_takeover','false')<>'true'
+           AND COALESCE(m.metadata->>'memory_confirmation','false')<>'true'""", ids,user_id,workspace_id,role)
     by_id = {row["id"]: row["content"] for row in rows}
     if len(by_id) != len(ids) or any(not text.strip() or text.strip() not in extraction_input for text in by_id.values()):
         raise ValueError("evidence_input_scope_or_content_mismatch")
@@ -70,7 +71,7 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
     params = [ref]
     if kind == "message":
         query = """SELECT c.user_id, c.workspace_id, c.agent_id, m.role, m.content AS version_text,
-                   'recorded' AS status FROM messages m JOIN conversations c ON c.id=m.conversation_id
+                   'recorded' AS status, m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id
                    WHERE m.id=$1 AND NOT c.is_deleted
                    AND COALESCE(m.metadata->>'human_takeover','false')<>'true' FOR SHARE OF m,c"""
     elif kind == "memory":
@@ -106,6 +107,8 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
     if not rows:
         raise ValueError("evidence_source_not_found")
     row = rows[0]
+    if kind == "message" and source.relation == "extracted_from" and (row.get("metadata") or {}).get("memory_confirmation"):
+        raise ValueError("evidence_message_reserved_for_confirmation")
     if source.expected_role and row.get("role") != source.expected_role:
         raise ValueError("evidence_source_role_mismatch")
     same_scope = (row["user_id"], row["workspace_id"], row["agent_id"]) == (

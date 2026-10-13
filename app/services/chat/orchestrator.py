@@ -541,6 +541,7 @@ async def _stream_legacy_response(
             {
                 "id": getattr(m, "id", None),  # 给 format_recent_context 排除当前消息用
                 "role": m.role,
+                "metadata": m.metadata if isinstance(m.metadata, dict) else None,
                 "content": render_message_content_for_prompt(
                     m.content,
                     m.metadata if isinstance(m.metadata, dict) else None,
@@ -657,6 +658,7 @@ async def _stream_legacy_response(
             await discard_pending_states_for_crisis(conversation_id)
         if not sub_intent_mode and not crisis_care_turn:
             preflight_ctx = PreflightCtx(
+                workspace_id=workspace_id, message_ids=tuple(sorted(current_turn_ids)),
                 conversation_id=conversation_id,
                 agent_id=agent_id,
                 user_id=user_id,
@@ -1303,8 +1305,10 @@ async def _stream_legacy_response(
                 conflict = await detect_l1_contradiction(user_message, user_id, workspace_id=workspace_id)
                 if conflict:
                     inquiry = await generate_contradiction_inquiry(conflict, agent_name=agent.name if agent else "AI")
+                    await save_pending_contradiction(conversation_id, conflict,
+                        user_id=user_id, workspace_id=workspace_id, agent_id=agent_id,
+                        message_ids=sorted(current_turn_ids), user_message=aggregated_turn_text)
                     contradiction_inquiry = inquiry
-                    await save_pending_contradiction(conversation_id, conflict)
                     logger.info(
                         f"L1 contradiction detected: {conflict.get('conflict_description', '')}",
                         extra={
@@ -1732,6 +1736,9 @@ async def _stream_legacy_response(
                     }
                     if retrieval_analysis:
                         emitted_replies[0]["memory_retrieval_analysis"] = retrieval_analysis
+        if contradiction_inquiry:
+            emitted_replies = [{**r, 'memory_confirmation': True} if isinstance(r, dict)
+                               else {'text': r, 'memory_confirmation': True} for r in emitted_replies]
         first_assistant_message_id = await _save_replies(
             conversation_id,
             emitted_replies,
@@ -1876,7 +1883,7 @@ async def _stream_legacy_response(
             messages_dicts=messages_dicts,
             user_emotion=prompt_user_emotion,
             skip_ai_memory=False,
-            skip_memory=bool(offering_context) or location_share_context,
+            skip_memory=bool(offering_context) or location_share_context or bool(contradiction_inquiry),
             workspace_id=workspace_id,
         ))
         post_process_fired = True
@@ -1975,6 +1982,7 @@ async def _stream_legacy_response(
                 user_message=user_message,
                 user_message_id=user_message_id,
                 full_response=sc_reply,
+                skip_memory=bool(preflight_ctx and preflight_ctx.memory_confirmation),
                 messages_dicts=messages_dicts,
                 user_emotion=prompt_user_emotion,
                 skip_ai_memory=(

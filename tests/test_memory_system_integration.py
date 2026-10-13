@@ -125,7 +125,10 @@ class TestContradictionStateMachine:
     """Spec §4: 5-step contradiction flow with cross-message state."""
 
     @pytest.mark.asyncio
-    async def test_save_load_clear_cycle(self, fake_redis):
+    async def test_save_load_clear_cycle(self, fake_redis, monkeypatch):
+        from app.services.memory.interaction import contradiction_state
+        monkeypatch.setattr(contradiction_state, "prepare_pending", AsyncMock(return_value={"old_content":"住北京", "_confirmation":{"id":"ticket"}}))
+        monkeypatch.setattr(contradiction_state, "exclude_messages", AsyncMock())
         with patch("app.services.memory.interaction.contradiction.get_redis",
                    AsyncMock(return_value=fake_redis)):
             from app.services.memory.interaction.contradiction import (
@@ -135,7 +138,8 @@ class TestContradictionStateMachine:
             )
 
             conflict = {"old_content": "住北京", "new_info": "住上海"}
-            await save_pending_contradiction("conv-1", conflict)
+            await save_pending_contradiction("conv-1", conflict, user_id="u", workspace_id="w",
+                agent_id="a", message_ids=["msg"], user_message="住上海")
 
             loaded = await load_pending_contradiction("conv-1")
             assert loaded is not None

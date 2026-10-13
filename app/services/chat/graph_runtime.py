@@ -207,6 +207,8 @@ class ChatFrame:
                 checkpoint_enabled=False,
             )
             payload["response_diagnostics"] = diagnostics
+            if self.contradiction_inquiry or (self.preflight_ctx and self.preflight_ctx.memory_confirmation):
+                payload["memory_confirmation"] = True
             payloads.append(payload)
         replies = payloads
         kwargs["achievement_turn_final"] = False
@@ -399,7 +401,8 @@ class ChatGraphContext:
                     user_emotion=parent.prompt_user_emotion,
                     skip_ai_memory=not self.allow_ai_memory,
                     skip_memory=bool(parent.offering_context)
-                    or parent.location_share_context,
+                    or parent.location_share_context or bool(parent.contradiction_inquiry)
+                    or bool(parent.preflight_ctx and parent.preflight_ctx.memory_confirmation),
                     workspace_id=parent.workspace_id,
                 )
             )

@@ -16,7 +16,8 @@ from app.services.memory.recording.pipeline import MemoryExtractionError
 
 
 @pytest.mark.asyncio
-async def test_takeover_messages_are_excluded_from_backlog_and_window():
+@pytest.mark.parametrize("backlog_mode", [False, True])
+async def test_takeover_messages_are_excluded_from_backlog_and_window(backlog_mode):
     from types import SimpleNamespace
     from app.services.chat import post_process as mod
     now=datetime.now(timezone.utc)
@@ -26,9 +27,12 @@ async def test_takeover_messages_are_excluded_from_backlog_and_window():
     with patch.object(mod,"db",SimpleNamespace(message=SimpleNamespace(
             find_many=AsyncMock(return_value=[SimpleNamespace(**m) for m in [human,normal]])))):
         backlog=await mod._fetch_new_side_messages("conv",now,"user")
-    assert [m["id"] for m in backlog]==["normal"]
+    # Excluded rows retain their timestamps for bounded backlog progress;
+    # they must never reach model input in either backlog or window mode.
+    assert [m["id"] for m in backlog]==["human","normal"]
     pipeline=AsyncMock(return_value=[])
-    with patch.object(mod,"get_watermark",AsyncMock(return_value=None)), \
+    with patch.object(mod,"get_watermark",AsyncMock(return_value=now if backlog_mode else None)), \
+         patch.object(mod,"_fetch_new_side_messages",AsyncMock(return_value=backlog)), \
          patch.object(mod,"process_memory_pipeline",pipeline), \
          patch.object(mod,"set_watermark",AsyncMock()):
         await mod._pipeline_with_watermark("user",[human,normal],"conv",side="user",workspace_id="space")

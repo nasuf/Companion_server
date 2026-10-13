@@ -22,6 +22,7 @@ async def load_turn(ctx):
         {
             "id": getattr(m, "id", None),
             "role": m.role,
+            "metadata": m.metadata if isinstance(m.metadata, dict) else None,
             "content": services.render_message_content_for_prompt(
                 m.content, m.metadata if isinstance(m.metadata, dict) else None
             ),
@@ -130,6 +131,7 @@ async def pending(ctx):
         await services.discard_pending_states_for_crisis(ctx.conversation_id)
     if not ctx.sub_intent_mode and (not ctx.crisis_care_turn):
         ctx.preflight_ctx = services.PreflightCtx(
+            workspace_id=ctx.workspace_id, message_ids=tuple(sorted(ctx.current_turn_ids)),
             conversation_id=ctx.conversation_id,
             agent_id=ctx.agent_id,
             user_id=ctx.user_id,
@@ -769,8 +771,10 @@ async def prepare_reply(ctx):
                 inquiry = await services.generate_contradiction_inquiry(
                     conflict, agent_name=ctx.agent.name if ctx.agent else "AI"
                 )
+                await services.save_pending_contradiction(ctx.conversation_id, conflict,
+                    user_id=ctx.user_id, workspace_id=ctx.workspace_id, agent_id=ctx.agent_id,
+                    message_ids=sorted(ctx.current_turn_ids), user_message=ctx.aggregated_turn_text)
                 ctx.contradiction_inquiry = inquiry
-                await services.save_pending_contradiction(ctx.conversation_id, conflict)
                 services.logger.info(
                     f"L1 contradiction detected: {conflict.get('conflict_description', '')}",
                     extra={

@@ -134,7 +134,7 @@ async def test_resolve_retrieval_feedback_correction_short_circuits(monkeypatch)
         return events
 
     ctx = SimpleNamespace(
-        conversation_id="c1",
+        conversation_id="c1", message_ids=("current-user-message",),
         agent_id="agent1",
         user_id="u1",
         agent=SimpleNamespace(name="Hillow"),

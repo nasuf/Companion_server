@@ -28,8 +28,6 @@ from app.services.llm.models import (
     invoke_text,
 )
 from app.services.memory.storage import repo as memory_repo
-from app.services.memory.storage.persistence import log_memory_changelog, store_memory
-from app.services.memory.repair_queue import best_effort_create_memory_repair_item
 from app.services.prompting.store import get_prompt_text
 from app.services.prompting.utils import SafeDict
 
@@ -124,6 +122,10 @@ async def detect_l1_contradiction(
         }))
         result = await invoke_json(get_utility_model(), prompt)
         if isinstance(result, dict) and result.get("has_conflict"):
+            selected = next((m for m in l1_user if m.id == result.get("conflicting_memory_id")), None)
+            if selected is None:
+                return None
+            result["old_content"] = selected.content
             if not _conflict_new_info_grounded(result, user_message):
                 logger.info(
                     "contradiction.detect: discarded ungrounded conflict",
@@ -296,284 +298,26 @@ def _resolve_new_importance(change_type: str, old_importance: float) -> float:
     return base
 
 
-async def apply_contradiction_resolution(
-    conflict: dict,
-    analysis: dict,
-) -> None:
-    """Spec §4.4 + Phase 0.3 修复: differentiate importance by change_type.
-
-    - 变化: archive 老条目 + 写新 L1 (importance ≈ old_imp, 接受演进)
-    - 错误: archive 老条目 + 写 L2 (importance=0.70, 不直接 L1, 防口误污染)
-    - 新增: 老条目不动 + 写新 L1 (importance=0.85, 新维度无冲突)
-
-    新条目入库走 store_memory 正常路径 (embedding + dedup + taxonomy).
-    """
-    change_type = analysis.get("change_type", "新增")
-    old_id = conflict.get("conflicting_memory_id")
-    # Prompt schema has both:
-    # - updated_memory: replacement value for the original conflicting fact
-    # - new_memory: additional fact to insert
-    #
-    # For 变化/错误, the replacement is the new current memory. Older code only
-    # read new_memory, so traces like "用户改名字了" archived the old name but
-    # dropped updated_memory="用户叫馒头".
-    new_memory_text = (analysis.get("new_memory") or "").strip()
-    if not new_memory_text and change_type in ("变化", "错误"):
-        new_memory_text = (analysis.get("updated_memory") or "").strip()
-    new_main = (analysis.get("new_memory_main_category") or "").strip()
-    new_sub = (analysis.get("new_memory_sub_category") or "").strip()
-
-    # Step 1: 处理老条目 — archive (变化/错误) 或保留 (新增)
-    # old_archived 追踪是否已归档: 若后续写新条目失败/被拦, 必须 un-archive
-    # 补偿, 否则"旧 L1 已归档 + 新事实未写入" = 检索空洞 (数据丢失)。
-    old_mem = None
-    old_archived = False
-    if change_type in ("变化", "错误") and old_id:
-        old_mem = await memory_repo.find_unique(old_id)
-        if not old_mem:
-            await best_effort_create_memory_repair_item(
-                source_type="contradiction_missing_old_memory",
-                source_id=f"{old_id}:missing",
-                severity="high",
-                memory_id=old_id,
-                reason="Contradiction resolution could not find the old memory to update.",
-                suggested_action="inspect_contradiction_pending_state_and_memory_lifecycle",
-                evidence={
-                    "conflict": conflict,
-                    "analysis": analysis,
-                    "change_type": change_type,
-                },
-            )
-            return  # 老条目已被删/找不到, 静默退出
-
-        # archive 而非 demote — 防止旧错事实留在检索通路造成"双重事实"污染
-        await memory_repo.update(
-            old_id,
-            source=getattr(old_mem, "source", "user"),
-            record=old_mem,
-            isArchived=True,
-        )
-        old_archived = True
-        # audit log: 记录 contradiction-driven archive (跟正常 archive 区分)
-        try:
-            await log_memory_changelog(
-                old_mem.userId, old_id,
-                operation="contradiction_archived",
-                old_value=old_mem.content,
-                new_value=f"superseded by user correction (change_type={change_type})",
-                workspace_id=getattr(old_mem, "workspaceId", None),
-            )
-        except Exception:
-            pass  # audit 失败不阻塞主流程
-        logger.info(
-            f"contradiction.apply: archived {old_id[:8]} ({change_type}); "
-            f"old content was '{(old_mem.content or '')[:40]}'",
-            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                   "change_type": change_type, "old_memory_id": old_id,
-                   "outcome": "archived"},
-        )
-    elif change_type == "新增" and old_id:
-        # 新增 case: 不动老条目, 但需要老条目作 user/workspace/source 上下文
-        old_mem = await memory_repo.find_unique(old_id)
-
-    # Step 2: 写新条目 (3 个 change_type 都可能产生 new_memory)
-    if not new_memory_text:
-        logger.debug(
-            f"contradiction.apply: no new_memory to write (change_type={change_type})",
-            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                   "change_type": change_type, "outcome": "no_new"},
-        )
-        await best_effort_create_memory_repair_item(
-            source_type="contradiction_no_new_memory",
-            source_id=f"{old_id or 'unknown'}:{change_type}:no_new",
-            severity="high" if change_type in ("变化", "错误") else "medium",
-            user_id=getattr(old_mem, "userId", None) if old_mem else None,
-            workspace_id=getattr(old_mem, "workspaceId", None) if old_mem else None,
-            memory_id=old_id,
-            memory_source=getattr(old_mem, "source", None) if old_mem else None,
-            reason="Contradiction analysis produced no replacement memory text.",
-            suggested_action="review_archived_memory_and_user_confirmation",
-            evidence={
-                "conflict": conflict,
-                "analysis": analysis,
-                "change_type": change_type,
-                "old_memory_content": getattr(old_mem, "content", None) if old_mem else None,
-            },
-        )
-        return
-
-    if not old_mem:
-        logger.warning(
-            f"contradiction.apply: cannot write new_memory without old_mem context "
-            f"(change_type={change_type}, old_id={old_id})",
-            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                   "change_type": change_type, "outcome": "no_old_context"},
-        )
-        await best_effort_create_memory_repair_item(
-            source_type="contradiction_no_old_context",
-            source_id=f"{old_id or 'unknown'}:{change_type}:no_old_context",
-            severity="high",
-            memory_id=old_id,
-            reason="Contradiction resolution had replacement text but no old memory context for user/workspace.",
-            suggested_action="manually_verify_user_scope_and_insert_or_dismiss_replacement",
-            evidence={
-                "conflict": conflict,
-                "analysis": analysis,
-                "change_type": change_type,
-                "new_memory_text": new_memory_text,
-            },
-        )
-        return
-
-    # 类目策略 (沿用之前):
-    # - 变化/错误: 优先 LLM 给的类目, fallback 复用老条目 (同一属性, 老的肯定对)
-    # - 新增: 用 LLM 给的类目 (新维度, 老的可能完全不适用); 没给就 fallback 老的
-    main_category = new_main or getattr(old_mem, "mainCategory", None)
-    sub_category = new_sub or getattr(old_mem, "subCategory", None)
-
-    # Phase 0.3: importance 按 change_type 分级 (不再硬编 0.95)
-    new_imp = _resolve_new_importance(
-        change_type, old_importance=getattr(old_mem, "importance", 0.5) or 0.5,
-    )
-    # level 跟 importance 同步: imp >= 0.85 → L1, >= 0.5 → L2, else L3
-    new_level = 1 if new_imp >= 0.85 else 2 if new_imp >= 0.50 else 3
-
-    async def _unarchive_old_on_failure() -> None:
-        """补偿: 新条目未成功入库时, 撤销老条目的 archive, 避免检索空洞。
-
-        旧事实留下比"旧的没了新的也没写"更安全 — 后者会让用户核心事实凭空
-        消失。撤销失败才落 memory_repair 兜底。
-        """
-        if not (old_archived and old_mem and old_id):
-            return
-        try:
-            await memory_repo.update(
-                old_id,
-                source=getattr(old_mem, "source", "user"),
-                record=old_mem,
-                isArchived=False,
-            )
-            logger.info(
-                f"contradiction.apply: un-archived {old_id[:8]} after new-memory "
-                f"write failed (compensation)",
-                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                       "outcome": "old_unarchived_compensation", "old_memory_id": old_id},
-            )
-        except Exception as unarchive_err:
-            logger.error(
-                f"contradiction.apply: failed to un-archive {old_id[:8]}: {unarchive_err}",
-                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                       "outcome": "old_unarchive_failed", "old_memory_id": old_id},
-            )
-
-    try:
-        new_id = await store_memory(
-            user_id=old_mem.userId,
-            content=new_memory_text,
-            level=new_level,
-            importance=new_imp,
-            main_category=main_category,
-            sub_category=sub_category,
-            source=getattr(old_mem, "source", "user"),
-            workspace_id=getattr(old_mem, "workspaceId", None),
-            # The user explicitly confirmed this fact in the contradiction flow.
-            provenance="user_stated",
-        )
-        if new_id:
-            # audit log: 记录 contradiction-derived 新条目 (跟普通 insert 区分)
-            try:
-                await log_memory_changelog(
-                    old_mem.userId, new_id,
-                    operation="contradiction_new",
-                    new_value=(
-                        f"change_type={change_type} imp={new_imp:.2f} L{new_level}; "
-                        f"replaces old={old_id}"
-                    ),
-                    workspace_id=getattr(old_mem, "workspaceId", None),
-                )
-            except Exception:
-                pass
-            logger.info(
-                f"contradiction.apply: wrote new L{new_level} {new_id[:8]} "
-                f"({change_type}, imp={new_imp:.2f}) "
-                f"cat={main_category}/{sub_category} text='{new_memory_text[:40]}'",
-                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                       "change_type": change_type, "new_memory_id": new_id,
-                       "new_main": main_category, "new_sub": sub_category,
-                       "new_importance": new_imp, "new_level": new_level,
-                       "new_memory_text_len": len(new_memory_text)},
-            )
-        else:
-            logger.warning(
-                f"contradiction.apply: store_memory returned None for "
-                f"new_memory='{new_memory_text[:40]}' (likely dedup or "
-                f"taxonomy block); 新条目未入库",
-                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                       "change_type": change_type, "outcome": "new_blocked",
-                       "new_main": main_category, "new_sub": sub_category,
-                       "new_memory_text_len": len(new_memory_text)},
-            )
-            # 新条目被 dedup/taxonomy 拦下 → 撤销老条目 archive 防丢失
-            await _unarchive_old_on_failure()
-            await best_effort_create_memory_repair_item(
-                source_type="contradiction_new_memory_blocked",
-                source_id=f"{old_id or 'unknown'}:{change_type}:new_blocked",
-                severity="high",
-                user_id=getattr(old_mem, "userId", None),
-                workspace_id=getattr(old_mem, "workspaceId", None),
-                memory_id=old_id,
-                memory_source=getattr(old_mem, "source", None),
-                reason="Contradiction archived or reviewed an old memory, but replacement memory was not stored.",
-                suggested_action="review_taxonomy_dedup_result_and_insert_replacement_if_needed",
-                evidence={
-                    "conflict": conflict,
-                    "analysis": analysis,
-                    "change_type": change_type,
-                    "new_memory_text": new_memory_text,
-                    "new_main": main_category,
-                    "new_sub": sub_category,
-                },
-            )
-    except Exception as e:
-        # 写新条目抛异常 → 撤销老条目 archive 防"旧没了新也没写"
-        await _unarchive_old_on_failure()
-        logger.warning(
-            f"contradiction.apply: failed to write new memory: {e}",
-            extra={"event": EVT_LLM_FAIL, "stage": "contradiction_apply_new",
-                   "change_type": change_type, "error_type": type(e).__name__},
-        )
-        await best_effort_create_memory_repair_item(
-            source_type="contradiction_new_memory_failed",
-            source_id=f"{old_id or 'unknown'}:{change_type}:write_failed",
-            severity="critical",
-            user_id=getattr(old_mem, "userId", None),
-            workspace_id=getattr(old_mem, "workspaceId", None),
-            memory_id=old_id,
-            memory_source=getattr(old_mem, "source", None),
-            reason="Contradiction replacement memory write raised an exception.",
-            suggested_action="inspect_exception_and_replay_or_manually_insert_replacement",
-            evidence={
-                "conflict": conflict,
-                "analysis": analysis,
-                "change_type": change_type,
-                "new_memory_text": new_memory_text,
-                "error_type": type(e).__name__,
-                "error": str(e)[:500],
-            },
-        )
+async def apply_contradiction_resolution(conflict: dict, analysis: dict, **context) -> dict:
+    from .contradiction_write import apply_confirmed_change
+    return await apply_confirmed_change(conflict, analysis, **context)
 
 
 # ── Conversation-level state management ──────────────────────────────────
 # Stores a pending contradiction in Redis so the next user message can
 # trigger steps 3-5. Expires after _PENDING_TTL (10 min).
 
-async def save_pending_contradiction(conversation_id: str, conflict: dict) -> None:
+async def save_pending_contradiction(conversation_id: str, conflict: dict, **context) -> None:
+    from .contradiction_state import prepare_pending, exclude_messages, db
+    pending = await prepare_pending(conflict, conversation_id=conversation_id, **context)
     redis = await get_redis()
-    await redis.set(
-        f"{_PENDING_KEY_PREFIX}{conversation_id}",
-        json.dumps(conflict, ensure_ascii=False),
-        ex=_PENDING_TTL,
-    )
+    await redis.set(f"{_PENDING_KEY_PREFIX}{conversation_id}",
+                    json.dumps(pending, ensure_ascii=False), ex=_PENDING_TTL)
+    try:
+        await exclude_messages(db, conversation_id, context['message_ids'])
+    except Exception:
+        await clear_pending_contradiction(conversation_id, expected=pending)
+        raise
 
 
 async def load_pending_contradiction(conversation_id: str) -> dict | None:
@@ -588,6 +332,18 @@ async def load_pending_contradiction(conversation_id: str) -> dict | None:
         return None
 
 
-async def clear_pending_contradiction(conversation_id: str) -> None:
+async def clear_pending_contradiction(conversation_id: str, *, expected: dict | None = None) -> None:
     redis = await get_redis()
-    await redis.delete(f"{_PENDING_KEY_PREFIX}{conversation_id}")
+    key = f"{_PENDING_KEY_PREFIX}{conversation_id}"
+    if expected is None:  # crisis cleanup explicitly discards any pending ticket
+        await redis.delete(key)
+    else:
+        await redis.eval("""local raw=redis.call('GET',KEYS[1])
+            if not raw then return 0 end
+            local ok,data=pcall(cjson.decode,raw)
+            if not ok then return 0 end
+            local expected=cjson.decode(ARGV[1])
+            if data._confirmation and expected._confirmation then
+                if data._confirmation.id~=expected._confirmation.id then return 0 end
+            elseif raw~=ARGV[1] then return 0 end
+            return redis.call('DEL',KEYS[1])""",1,key,json.dumps(expected,ensure_ascii=False))

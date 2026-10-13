@@ -121,7 +121,10 @@ async def resolve_retrieval_feedback_correction(
     conflict, feedback = result
 
     await _patch_previous_feedback(previous_assistant, feedback)
-    await save_pending_contradiction(ctx.conversation_id, conflict)
+    await save_pending_contradiction(ctx.conversation_id, conflict,
+        user_id=ctx.user_id, workspace_id=workspace_id, agent_id=ctx.agent_id,
+        message_ids=list(ctx.message_ids), user_message=user_message)
+    ctx.memory_confirmation = True
     personality_brief = ctx.agent.name if ctx.agent else "AI"
     reply = await generate_contradiction_inquiry(
         conflict,
@@ -139,7 +142,7 @@ async def resolve_retrieval_feedback_correction(
     )
     for evt in await ctx.short_circuit_fn(
         reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
-        trace_id=ctx.tracer.safe_trace_id,
+        trace_id=ctx.tracer.safe_trace_id, extra_metadata={"memory_confirmation":True},
     ):
         yield evt
     ctx.tracer.close()

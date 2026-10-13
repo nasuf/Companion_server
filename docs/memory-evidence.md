@@ -278,3 +278,47 @@ best-effort effects; a receipt is not a proof of global cache convergence.
 Migration `20261013010000_memory_repair_origins` only expands the input-kind
 constraint. A code rollback leaves this additive migration and all snapshots
 intact; do not delete receipts or rewrite migration history.
+
+## Confirmed contradictions (CONFIRM01)
+
+A user correction now pins a server-validated conversation/workspace/agent scope,
+its execution generations, semantic old-memory version, and persisted user-message
+versions before model analysis. Normal retrieval score changes do not expire the
+question. Edited/deleted messages, replaced/archived memories and changed scopes
+cannot authorize an overwrite. Legacy pending questions lacking these receipts
+expire safely; they never write based on model-provided memory IDs alone.
+
+After confirmation, the replacement, vector, old-memory archive (change/error),
+audit and evidence links commit in one PostgreSQL transaction. The existing
+importance policy remains: change inherits at least .85, error .70, addition .85.
+Additions retain the old fact; duplicate/singleton/reminder conflicts fail without
+archiving it. No generic model reconciliation can merge an unrelated row.
+
+`contradiction_confirmation` input origins store private immutable command and
+message-version snapshots. Their scoped unique pending-ticket index is a durable
+receipt: retry never creates another fact, including after deletion of the result.
+Redis cleanup compares ticket identity so it cannot delete a newer question.
+Success replies require a committed write; no-change, replay and failure are
+explicit outcomes. Failure details reuse the scoped administrator repair queue.
+
+User turns reserved for the confirmation flow and its system replies carry
+`memory_confirmation` metadata. Generic extraction excludes these messages,
+including later watermark backlog scans; evidence binding rejects stale jobs
+trying to extract them. Reserved-only bounded pages advance their watermark so
+later ordinary messages still receive extraction. The full original chat remains
+stored; this special flow records the selected confirmed fact rather than treating
+every sentence in a clarification turn as a new independent fact.
+
+The existing Web source panel displays the change kind, pinned user-message links
+and parent memory, without returning private text or claiming factual verification.
+Read permissions, default 20 / maximum 50 source-page limits and unknown/deleted/
+changed states remain unchanged. Both LangGraph and the retained legacy executor
+use the same confirmation service; Flutter/service-account message event contracts
+are unchanged. Checkpoint replay is not enabled by this batch.
+
+The new Prisma migration adds only an origin kind, ticket validation and a partial
+unique index; it does not rewrite existing memory or prompt content. Old code can
+ignore the additive origin kind after rollback. Model judgement can still be wrong;
+this batch guarantees write consistency and provenance, not semantic infallibility.
+No historical evidence is fabricated, no production test memory is inserted, and
+all unrelated lifecycle/load, deletion-barrier and source-entry tasks remain open.

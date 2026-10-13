@@ -62,6 +62,9 @@ class PreflightCtx:
     agent: Any
     tracer: "ChatTracer"
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
+    workspace_id: str | None = None
+    message_ids: tuple[str, ...] = ()
+    memory_confirmation: bool = False
     stopped: bool = False
     # 短路 reply 文本回写: orchestrator finally 兜底 fire post_process 用
     last_short_circuit_reply: str | None = None
@@ -177,46 +180,107 @@ async def resolve_pending_contradiction(
     """spec §4 step 3-5：若有待解决矛盾，分析用户回答 → 应用解析 → 生成矛盾回复。
 
     调用链：memory.contradiction_analysis（§4.3）→ apply_contradiction_resolution
-    （§4.4 降级原 L1 → L2）→ memory.contradiction_reply（§4.5 自然拉回话题）。
+    （确认后原子保存新事实、归档被替代事实及来源）→ memory.contradiction_reply。
     """
     pending = await load_pending_contradiction(ctx.conversation_id)
     if not pending:
         return
+    from app.services.memory.interaction.contradiction_state import prepare_confirmation
+    from app.services.memory.manual_write import MemoryWriteError
+    from app.services.memory.repair_queue import best_effort_create_memory_repair_item
+
+    ctx.memory_confirmation = True
+    context = dict(
+        conversation_id=ctx.conversation_id,
+        user_id=ctx.user_id,
+        workspace_id=ctx.workspace_id,
+        agent_id=ctx.agent_id,
+    )
+    outcome = "failed"
     try:
-        analysis = await analyze_contradiction_response(user_message, pending)
-        await apply_contradiction_resolution(pending, analysis)
-        await clear_pending_contradiction(ctx.conversation_id)
-        personality_brief = ctx.agent.name if ctx.agent else "AI"
-        reply = await generate_contradiction_reply(
+        sources = await prepare_confirmation(
+            pending,
+            **context,
+            message_ids=list(ctx.message_ids),
             user_message=user_message,
-            conflict=pending,
-            analysis=analysis,
-            personality_brief=personality_brief,
         )
-        ctx.last_short_circuit_reply = reply
-        logger.info(
-            f"[PREFLIGHT] contradiction resolved change_type={analysis.get('change_type')}",
-            extra={
-                "event": EVT_PREFLIGHT_RESOLVED,
-                "kind": "contradiction",
-                "change_type": analysis.get("change_type"),
-                "reply_text_len": len(reply),
-            },
+        analysis = await analyze_contradiction_response(user_message, pending)
+        result = await apply_contradiction_resolution(
+            pending, analysis, **context, confirmation_sources=sources
         )
-        for evt in await ctx.short_circuit_fn(
-            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
-            trace_id=ctx.tracer.safe_trace_id,
-        ):
-            yield evt
-        ctx.tracer.close()
-        ctx.stopped = True
+        outcome = result["status"]
+        if outcome == "applied":
+            try:
+                reply = await generate_contradiction_reply(
+                    user_message=user_message,
+                    conflict=pending,
+                    analysis=analysis,
+                    personality_brief=ctx.agent.name if ctx.agent else "AI",
+                )
+            except Exception:
+                reply = "好的，这条更正已经保存了。"
+        elif outcome == "already_applied":
+            reply = "这条更正已经处理过了，不会重复修改。"
+        else:
+            reply = "这次先保留原来的记录；如果要更正，可以再告诉我准确的信息。"
     except Exception as e:
         logger.warning(
-            f"Contradiction resolution failed: {e}",
-            extra={"event": EVT_PREFLIGHT_FAILED, "kind": "contradiction",
-                   "error_type": type(e).__name__},
+            "Contradiction confirmation failed: %s",
+            type(e).__name__,
+            extra={
+                "event": EVT_PREFLIGHT_FAILED,
+                "kind": "contradiction",
+                "error_type": type(e).__name__,
+            },
         )
-        await clear_pending_contradiction(ctx.conversation_id)
+        # Explicit failure cannot fall through into a reply claiming it was saved.
+        reply = "这次更正没能保存成功，原来的记录没有因此改动。你可以再告诉我一次要更正的信息。"
+        await best_effort_create_memory_repair_item(
+            source_type="contradiction_confirmation_failed",
+            source_id=(pending.get("_confirmation") or {}).get("id"),
+            severity="high",
+            user_id=ctx.user_id,
+            workspace_id=ctx.workspace_id,
+            agent_id=ctx.agent_id,
+            conversation_id=ctx.conversation_id,
+            reason="User confirmation did not commit; original memory was preserved.",
+            suggested_action="inspect_confirmation_scope_version_or_write_failure",
+            evidence={
+                "error_code": (
+                    e.detail if isinstance(e, MemoryWriteError) else type(e).__name__
+                )
+            },
+        )
+    try:
+        await clear_pending_contradiction(ctx.conversation_id, expected=pending)
+    except Exception:
+        logger.warning(
+            "Contradiction pending cleanup failed; durable receipt prevents reapply",
+            exc_info=True,
+        )
+    logger.info(
+        "Contradiction confirmation finished",
+        extra={
+            "event": EVT_PREFLIGHT_RESOLVED,
+            "kind": "contradiction",
+            "outcome": outcome,
+        },
+    )
+    ctx.last_short_circuit_reply = reply
+    for evt in await ctx.short_circuit_fn(
+        reply,
+        ctx.conversation_id,
+        ctx.agent_id,
+        ctx.user_id,
+        trace_id=ctx.tracer.safe_trace_id,
+        extra_metadata={
+            "memory_confirmation": True,
+            "memory_confirmation_outcome": outcome,
+        },
+    ):
+        yield evt
+    ctx.tracer.close()
+    ctx.stopped = True
 
 
 async def resolve_pending_deletion(

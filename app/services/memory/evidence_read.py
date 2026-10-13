@@ -72,6 +72,8 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
              o.format_version AS profile_format_version,
              i.source_status AS input_kind, i.format_version AS input_format_version,
              CASE WHEN i.source_status='admin_repair' THEN i.payload_text::jsonb->'input'->>'action' END AS repair_action,
+             CASE WHEN i.source_status='contradiction_confirmation'
+               THEN i.payload_text::jsonb->'input'->>'change_type' END AS confirmation_change,
              p.is_archived AS parent_archived
            FROM memory_evidence_links e
            LEFT JOIN messages m ON m.id=e.source_message_id
@@ -99,6 +101,8 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
             "conversation_id":row["conversation_id"] if accessible and row["source_kind"]=="message" else None,
             "source_archived":row["parent_archived"] if accessible and row["source_kind"]=="memory" else None,
             "repair_action":row["repair_action"] if accessible and row["source_kind"]=="input" and row["repair_action"] in {"merge_memories","insert_replacement_memory","archive_memory","downgrade_memory","mark_verified"} else None,
+            "confirmation_change": row["confirmation_change"] if accessible and row["source_kind"]=="input"
+                and row["confirmation_change"] in {"变化","错误","新增"} else None,
             "profile": {"input_status":row["profile_input_status"], "format_version":row["profile_format_version"]}
                 if accessible and row["source_kind"]=="profile" else None,
             "input": {"kind":row["input_kind"], "format_version":row["input_format_version"]}

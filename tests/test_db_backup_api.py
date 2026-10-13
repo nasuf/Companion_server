@@ -80,7 +80,12 @@ def test_missing_partial_legacy_and_pagination_are_distinct(root):
     assert report["total"]==26 and len(report["backups"])==20 and report["has_more"]
     page2=db_backup.list_report(offset=20)
     assert len(page2["backups"])==6 and not page2["has_more"]
-    assert page2["backups"][-1]["integrity"]=="not_checked"  # legacy is not silently qualified
+    # Listing uses file timestamps; creating this legacy-named file now does
+    # not guarantee it is the oldest item on every filesystem.
+    rows = report["backups"] + page2["backups"]
+    assert len({row["name"] for row in rows}) == 26
+    legacy = next(row for row in rows if row["name"] == "companion_20260901T000000Z.dump")
+    assert legacy["integrity"] == "not_checked"  # legacy is not silently qualified
     assert len(report["summary"]["warnings"])>=2
     assert "not_configured"==report["summary"]["offsite"]
 

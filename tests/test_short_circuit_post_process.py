@@ -1119,8 +1119,12 @@ async def test_preflight_resolve_pending_contradiction_captures_reply():
             new_callable=AsyncMock, return_value={"resolution": "update"},
         ),
         patch(
+            "app.services.memory.interaction.contradiction_state.prepare_confirmation",
+            new_callable=AsyncMock, return_value=[{"ref":"current-message"}],
+        ),
+        patch(
             "app.services.chat.preflight.apply_contradiction_resolution",
-            new_callable=AsyncMock,
+            new_callable=AsyncMock, return_value={"status":"applied"},
         ),
         patch(
             "app.services.chat.preflight.clear_pending_contradiction",

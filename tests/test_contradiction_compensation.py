@@ -1,104 +1,51 @@
-"""Contradiction resolution must not leave a memory hole.
-
-Phase 4 fix: if the old L1 is archived but the replacement write fails or is
-blocked (dedup/taxonomy), un-archive the old memory so the user's core fact
-doesn't silently vanish.
-"""
-
-from __future__ import annotations
-
-from unittest.mock import AsyncMock, MagicMock, call, patch
+"""No best-effort unarchive: the old fact survives every rejected replacement."""
 
 import pytest
+from app.services.memory.manual_write import MemoryWriteError
+from app.services.memory.storage import repo
+from tests.test_memory_evidence_postgres import origins
+from tests.test_contradiction_write_postgres import confirming
 
-from app.services.memory.interaction.contradiction import apply_contradiction_resolution
+
+async def test_embedding_failure_never_archives_old(confirming):
+    f = confirming
+    f.embedding.side_effect = RuntimeError("embedding unavailable")
+    with pytest.raises(RuntimeError, match="embedding unavailable"):
+        await f.apply()
+    assert not (await f.db.usermemory.find_unique(where={"id": f.old.id})).isArchived
 
 
-def _old_mem():
-    return MagicMock(
-        id="old-id",
-        userId="u1",
-        importance=0.95,
-        content="用户今年 28 岁",
+async def test_duplicate_rejection_preserves_old_without_compensation(confirming):
+    f = confirming
+    await repo.create(userId=f.uid, workspaceId=f.wid, content="用户住在乙城", level=2)
+    with pytest.raises(MemoryWriteError, match="duplicate_fact"):
+        await f.apply()
+    assert not (await f.db.usermemory.find_unique(where={"id": f.old.id})).isArchived
+
+
+async def test_other_singleton_blocks_replacement_without_archiving_old(confirming):
+    f = confirming
+    await repo.create(
+        userId=f.uid,
+        workspaceId=f.wid,
+        content="用户现居丙城",
+        level=1,
         mainCategory="身份",
-        subCategory="年龄",
-        source="user",
-        workspaceId="ws1",
+        subCategory="现居地",
     )
+    with pytest.raises(MemoryWriteError, match="singleton_conflict"):
+        await f.apply()
+    assert not (await f.db.usermemory.find_unique(where={"id": f.old.id})).isArchived
 
 
-@pytest.mark.asyncio
-async def test_unarchive_when_new_memory_blocked():
-    """store_memory 返回 None (dedup/taxonomy 拦截) → 老条目 archive 被撤销."""
-    with (
-        patch("app.services.memory.interaction.contradiction.memory_repo.find_unique",
-              new_callable=AsyncMock, return_value=_old_mem()),
-        patch("app.services.memory.interaction.contradiction.memory_repo.update",
-              new_callable=AsyncMock) as mock_update,
-        patch("app.services.memory.interaction.contradiction.store_memory",
-              new_callable=AsyncMock, return_value=None),
-        patch("app.services.memory.interaction.contradiction.log_memory_changelog",
-              new_callable=AsyncMock),
-        patch("app.services.memory.interaction.contradiction.best_effort_create_memory_repair_item",
-              new_callable=AsyncMock),
-    ):
-        await apply_contradiction_resolution(
-            conflict={"conflicting_memory_id": "old-id"},
-            analysis={"change_type": "错误", "new_memory": "用户今年 29 岁"},
+async def test_reminder_cannot_skip_schedule_workflow(confirming):
+    f = confirming
+    with pytest.raises(MemoryWriteError, match="taxonomy_not_allowed"):
+        await f.apply(
+            analysis={
+                **f.analysis,
+                "new_memory_main_category": "生活",
+                "new_memory_sub_category": "提醒",
+            }
         )
-
-    # 先 archive=True, 失败后 archive=False (补偿) → 两次 update
-    archived_calls = [c for c in mock_update.call_args_list
-                      if c.kwargs.get("isArchived") is True]
-    unarchived_calls = [c for c in mock_update.call_args_list
-                        if c.kwargs.get("isArchived") is False]
-    assert len(archived_calls) == 1
-    assert len(unarchived_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_unarchive_when_new_memory_write_raises():
-    """store_memory 抛异常 → 老条目 archive 被撤销."""
-    with (
-        patch("app.services.memory.interaction.contradiction.memory_repo.find_unique",
-              new_callable=AsyncMock, return_value=_old_mem()),
-        patch("app.services.memory.interaction.contradiction.memory_repo.update",
-              new_callable=AsyncMock) as mock_update,
-        patch("app.services.memory.interaction.contradiction.store_memory",
-              new_callable=AsyncMock, side_effect=Exception("db down")),
-        patch("app.services.memory.interaction.contradiction.log_memory_changelog",
-              new_callable=AsyncMock),
-        patch("app.services.memory.interaction.contradiction.best_effort_create_memory_repair_item",
-              new_callable=AsyncMock),
-    ):
-        await apply_contradiction_resolution(
-            conflict={"conflicting_memory_id": "old-id"},
-            analysis={"change_type": "错误", "new_memory": "用户今年 29 岁"},
-        )
-
-    unarchived = [c for c in mock_update.call_args_list
-                  if c.kwargs.get("isArchived") is False]
-    assert len(unarchived) == 1
-
-
-@pytest.mark.asyncio
-async def test_no_unarchive_on_success():
-    """新条目成功写入 → 不撤销 archive (老条目保持归档)."""
-    with (
-        patch("app.services.memory.interaction.contradiction.memory_repo.find_unique",
-              new_callable=AsyncMock, return_value=_old_mem()),
-        patch("app.services.memory.interaction.contradiction.memory_repo.update",
-              new_callable=AsyncMock) as mock_update,
-        patch("app.services.memory.interaction.contradiction.store_memory",
-              new_callable=AsyncMock, return_value="new-id"),
-        patch("app.services.memory.interaction.contradiction.log_memory_changelog",
-              new_callable=AsyncMock),
-    ):
-        await apply_contradiction_resolution(
-            conflict={"conflicting_memory_id": "old-id"},
-            analysis={"change_type": "错误", "new_memory": "用户今年 29 岁"},
-        )
-
-    unarchived = [c for c in mock_update.call_args_list
-                  if c.kwargs.get("isArchived") is False]
-    assert len(unarchived) == 0
+    assert not (await f.db.usermemory.find_unique(where={"id": f.old.id})).isArchived

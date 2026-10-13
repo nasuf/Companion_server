@@ -399,3 +399,33 @@ async def test_activity_emit_notifies_after_the_message_is_stored(monkeypatch):
 
     assert result == "m1"
     notified.assert_awaited_once_with("c1", "m1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row", [{"id": "t1"}, {"owner_admin_id": "admin-1"}])
+async def test_transcript_notify_missing_owner_or_takeover_never_broadcasts(monkeypatch, row):
+    from app.services.runtime.ws_manager import manager
+    sent = AsyncMock()
+    monkeypatch.setattr(service.db, "query_raw", AsyncMock(return_value=[row]))
+    monkeypatch.setattr(manager, "send_to_admin", sent)
+    await service.notify_takeover_transcript("c1", "m1")
+    sent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transcript_delivery_failure_does_not_fail_stored_message(monkeypatch):
+    from app.services.runtime.ws_manager import manager
+    from app.services.offline import chat_emit, repository
+    sent = AsyncMock(side_effect=RuntimeError("synthetic websocket outage"))
+    monkeypatch.setattr(service.db, "query_raw", AsyncMock(return_value=[{"id": "t1", "owner_admin_id": "admin-1"}]))
+    monkeypatch.setattr(manager, "send_to_admin", sent)
+    await service.notify_takeover_transcript("c1", "m1")
+    sent.assert_awaited_once()
+    notify = AsyncMock(side_effect=RuntimeError("synthetic notification outage"))
+    monkeypatch.setattr(service, "notify_takeover_transcript", notify)
+    await chat_emit._notify_takeover_transcript(None, "m1")
+    notify.assert_not_awaited()
+    await chat_emit._notify_takeover_transcript("c1", "m1")
+    monkeypatch.setattr(repository.db, "query_raw", AsyncMock(return_value=[{"conversation_id": "c1"}]))
+    await repository.mark_message_recognized("m1", "gold")
+    assert notify.await_count == 2
