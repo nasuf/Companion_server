@@ -117,7 +117,9 @@ async def test_ws_commit_errors_are_not_acked_or_fed_to_model(monkeypatch):
     monkeypatch.setattr(service,'record_takeover_user_message',AsyncMock(return_value={'message_id':'saved'}))
     monkeypatch.setattr(ws,'_send_ack',AsyncMock())
     await ws._handle_takeover_user_message(socket,'c','u','hi',client_id='m')
-    ws._send_ack.assert_awaited_once_with(socket,message_id='saved',client_id='m')
+    ws._send_ack.assert_awaited_once_with(
+        socket, message_id='saved', client_id='m', human_takeover=True, takeover_sequence=None,
+    )
 
 
 async def test_ws_gate_and_handler_fault_keep_socket_alive(monkeypatch):
