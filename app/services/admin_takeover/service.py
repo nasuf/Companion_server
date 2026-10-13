@@ -7,6 +7,7 @@ Cache misses recover from SQL before selecting the human or model path.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -774,6 +775,7 @@ async def notify_takeover_transcript(
 
 async def publish_takeover_typing(
     takeover_id: str, admin_id: str, active: bool, *, revision: int = 0,
+    session_id: str | None = None,
 ) -> bool:
     """Forward the owning admin's composer state to the user's chat socket."""
     if type(active) is not bool or type(revision) is not int or revision < 0:
@@ -795,9 +797,77 @@ async def publish_takeover_typing(
         return False
     from app.services.runtime.ws_manager import manager
 
+    sequence = await _typing_sequence(conversation_id, "admin", active, revision, session_id)
+    if sequence is None:
+        return True
     await manager.send_event(conversation_id, "takeover_typing", {
         "active": active,
-        "revision": revision,
+        "revision": sequence,
+    })
+    return True
+
+
+_TYPING_SEQUENCE_LUA = """
+if ARGV[1] ~= '' then
+    local previous = redis.call('GET', KEYS[1])
+    if previous and tonumber(previous) >= tonumber(ARGV[1]) then return 0 end
+    redis.call('SET', KEYS[1], ARGV[1], 'EX', 120)
+end
+local last = redis.call('GET', KEYS[3])
+local active = redis.call('GET', KEYS[4])
+if ARGV[2] == '1' and active == '1' and last and tonumber(ARGV[3]) - tonumber(last) < 500 then return 0 end
+redis.call('SET', KEYS[3], ARGV[3], 'PX', 8000)
+redis.call('SET', KEYS[4], ARGV[2], 'PX', 8000)
+local sequence = math.max(tonumber(redis.call('GET', KEYS[2]) or '0') + 1, tonumber(ARGV[3]))
+redis.call('SET', KEYS[2], sequence)
+return sequence
+"""
+
+
+async def _typing_sequence(
+    conversation_id: str, direction: str, active: bool, revision: int,
+    session_id: str | None,
+) -> int | None:
+    """Order across workers/pages, above legacy client counters; retain no text."""
+    redis = await get_redis()
+    prefix = f"takeover:typing:{{{conversation_id}}}:{direction}"
+    value = await redis.eval(
+        _TYPING_SEQUENCE_LUA, 4,
+        f"{prefix}:session:{session_id or 'legacy'}", f"{prefix}:sequence", f"{prefix}:sent",
+        f"{prefix}:active",
+        str(revision) if session_id else "", "1" if active else "0", int(time.time() * 1000),
+    )
+    return int(value) if value else None
+
+
+async def publish_user_typing(
+    conversation_id: str, user_id: str, active: bool, *, revision: int,
+    session_id: str,
+) -> bool:
+    """Only the conversation's actual user may notify its current owning admin."""
+    if type(active) is not bool or type(revision) is not int or revision < 0:
+        raise ValueError("invalid_typing")
+    rows = await db.query_raw(
+        """
+        SELECT id, owner_admin_id AS "ownerAdminId"
+        FROM human_takeovers
+        WHERE conversation_id=$1 AND user_id=$2 AND status='active'
+          AND owner_admin_id IS NOT NULL
+        LIMIT 1
+        """,
+        conversation_id, user_id,
+    )
+    if not rows:
+        return False
+    sequence = await _typing_sequence(conversation_id, "user", active, revision, session_id)
+    if sequence is None:
+        return True
+    from app.services.runtime.ws_manager import manager
+    await manager.send_to_admin(str(_cell(rows[0], "ownerAdminId", "owner_admin_id")), "takeover_user_typing", {
+        "takeover_id": str(_cell(rows[0], "id")),
+        "conversation_id": conversation_id,
+        "active": active,
+        "revision": sequence,
     })
     return True
 

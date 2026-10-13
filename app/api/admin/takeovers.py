@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from app.api.jwt_auth import require_admin_jwt
 from app.models.offline import OfflineActivityItem, OfflineActivityReviewResponse
@@ -71,8 +71,9 @@ class TakeoverReadRequest(BaseModel):
 
 
 class TakeoverTypingRequest(BaseModel):
-    active: bool
-    revision: int = Field(default=0, ge=0, le=2_147_483_647)
+    active: StrictBool
+    revision: int = Field(default=0, ge=0, le=2_147_483_647, strict=True)
+    session_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 def _admin_id(claims: dict) -> str:
@@ -230,6 +231,7 @@ async def post_publish_activity_preview(
 async def post_typing(takeover_id: str, body: TakeoverTypingRequest, claims: dict = Depends(require_takeover_admin)):
     ok = await publish_takeover_typing(
         takeover_id, _admin_id(claims), body.active, revision=body.revision,
+        session_id=body.session_id,
     )
     if not ok:
         raise HTTPException(status_code=403, detail="Not the owning admin")

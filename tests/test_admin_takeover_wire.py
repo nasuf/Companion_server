@@ -76,6 +76,35 @@ async def test_claim_user_ack_admin_reply_reconnect_cross_process(human,tmp_path
                 peer=await stack.enter_async_context(connect(urls[0].replace('http','ws')+f'/ws/{conv}?client=flutter',
                     subprotocols=[CHAT_PROTOCOL,TICKET_PROTOCOL_PREFIX+ticket],proxy=None))
                 await operator.send(json.dumps({'type':'ping'}));assert await event(operator,'pong')=={}
+                # Presence crosses workers without messages, quota or model work.
+                typing_path=f'/conversations/{conv}/typing'
+                last_user_revision=last_admin_revision=0
+                for active,revision in ((True,1),(False,2)):
+                    response=await client.post(urls[1]+typing_path,headers=user,
+                        json={'active':active,'revision':revision,'session_id':'wire-user'})
+                    assert response.status_code==200,response.text
+                    presence=await event(operator,'takeover_user_typing')
+                    assert presence=={'takeover_id':h.case,'conversation_id':conv,
+                        'active':active,'revision':presence['revision']}
+                    assert presence['revision'] > max(last_user_revision,2_147_483_647)
+                    last_user_revision=presence['revision']
+                    response=await client.post(urls[1]+base+'/typing',headers=admin,
+                        json={'active':active,'revision':revision,'session_id':'wire-admin'})
+                    assert response.status_code==200,response.text
+                    presence=await event(peer,'takeover_typing')
+                    assert presence=={'active':active,'revision':presence['revision']}
+                    assert presence['revision'] > max(last_admin_revision,2_147_483_647)
+                    last_admin_revision=presence['revision']
+                outsider={'Authorization':'Bearer '+create_jwt(h.admins[1],'user')}
+                assert (await client.post(urls[1]+typing_path,headers=outsider,
+                    json={'active':True,'revision':1,'session_id':'foreign'})).status_code==200
+                await operator.send(json.dumps({'type':'ping'}))
+                # The next inbox frame must be pong; another user's presence was not published.
+                assert json.loads(await operator.recv())['type']=='pong'
+                assert (await client.post(urls[1]+base+'/typing',headers=other,
+                    json={'active':True,'revision':1,'session_id':'foreign'})).status_code==403
+                assert await h.flow.db.message.count(where={'conversationId':conv})==0
+                assert await h.flow.db.agentrun.count(where={'conversationId':conv})==0
                 long_text='wire user message '*30
                 await peer.send(json.dumps({'type':'message','data':{'message':long_text,'client_id':'wire-1'}}))
                 ack=await event(peer,'ack');assert ack['message_id']

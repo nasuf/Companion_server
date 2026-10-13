@@ -3,6 +3,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, StrictBool
 
 from app.config import settings
 from app.api.jwt_auth import require_user
@@ -24,6 +25,26 @@ from app.services.schedule_domain.schedule import (
 from app.services.workspace.workspaces import ensure_workspace, get_workspace_by_id
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+
+
+class UserTypingRequest(BaseModel):
+    active: StrictBool
+    revision: int = Field(ge=0, le=2_147_483_647, strict=True)
+    session_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+@router.post("/{conversation_id}/typing")
+async def post_user_typing(
+    conversation_id: str, body: UserTypingRequest,
+    user: dict = Depends(require_user),
+):
+    from app.services.admin_takeover.service import publish_user_typing
+    # Absence of an active owned claim is a normal no-op, with no resource details.
+    await publish_user_typing(
+        conversation_id, str(user["sub"]), body.active,
+        revision=body.revision, session_id=body.session_id,
+    )
+    return {"ok": True}
 
 
 async def _interaction_days(workspace_id: str | None) -> int:
