@@ -356,8 +356,11 @@ maximum 5 outputs and the 2000-row lifetime scope budget remain enforced.
 The admin source panel exposes only a validated projection: review date,
 timezone, input collection time and bounded category counts. It never returns
 private input text, prompts, model outputs, or other users' source IDs. Missing
-or inaccessible details are not shown as zero. Existing scheduler health carries
-failed attempts; per-workspace review aggregate dashboards remain in M02.06/O01.
+or inaccessible details are not shown as zero. Failed attempts retain
+`memory_daily_reviews.status` and structured
+`agent_failed` logs. The existing top-level Redis cron health does not prove that
+every Agent succeeded; per-workspace outcome/reason dashboards remain in
+M02.06/O01.
 Deleting the source makes its detail unavailable while preserving link history.
 Old reviews keep their historical unknown status. This batch proves transaction
 and scope behavior, not semantic accuracy of every generated summary or a
