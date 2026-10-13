@@ -13,10 +13,14 @@ import random
 import uuid
 from typing import Any
 
+from fastapi import HTTPException
+
 from app.config import settings
 from app.db import db
+from app.models.offline import OfflineActivityItem, OfflineActivityReviewResponse
 from app.redis_client import get_redis
 from app.services.admin_takeover.service import _cell
+from app.services.offline import activity_service
 from app.services.offline import repository as repo
 from app.services.offline.activity_generation import (
     _fallback_card,
@@ -136,6 +140,40 @@ async def _owned_subject(takeover_id: str, admin_id: str) -> dict | None:
     if not rows:
         return None
     return rows[0]
+
+
+async def _read_owned_activity(takeover_id: str, admin_id: str, activity_id: str) -> dict:
+    # One bounded read binds the resource to the active claim, user and chat.
+    # Do not use repo.get_activity: its event-expiry refresh writes user state.
+    rows = await db.query_raw(
+        """
+        SELECT a.* FROM offline_activity_recommendations a
+        JOIN human_takeovers t ON t.user_id = a.user_id
+          AND t.conversation_id = a.conversation_id
+          AND t.workspace_id IS NOT DISTINCT FROM a.workspace_id
+        WHERE t.id=$1 AND t.owner_admin_id=$2 AND t.status='active'
+          AND a.id=$3
+        LIMIT 1
+        """,
+        takeover_id, admin_id, activity_id,
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="活动不存在或已无权查看")
+    return repo.activity_from_row(rows[0], reveal_task=True)
+
+
+async def read_takeover_activity(
+    takeover_id: str, admin_id: str, activity_id: str,
+) -> OfflineActivityItem:
+    activity = await _read_owned_activity(takeover_id, admin_id, activity_id)
+    return OfflineActivityItem(**(await activity_service._with_completion_feedback(activity)))
+
+
+async def read_takeover_activity_review(
+    takeover_id: str, admin_id: str, activity_id: str,
+) -> OfflineActivityReviewResponse:
+    activity = await _read_owned_activity(takeover_id, admin_id, activity_id)
+    return await activity_service.build_activity_review(activity, generate_note=False)
 
 
 async def _candidate_pool(user_id: str, ctx: dict, city: str, anchor: str) -> list[dict]:

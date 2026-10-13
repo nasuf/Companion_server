@@ -724,6 +724,14 @@ async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewRes
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
+    return await build_activity_review(activity)
+
+
+async def build_activity_review(
+    activity: dict, *, generate_note: bool = True,
+) -> OfflineActivityReviewResponse:
+    """Render a review; takeover reads use only an already saved journey note."""
+    activity_id = activity["id"]
     if activity["status"] != "completed":
         raise HTTPException(status_code=409, detail="旅途还在进行中，收好后再来回顾")
     fragments = await repo.list_fragments(activity_id)
@@ -732,7 +740,11 @@ async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewRes
         activity_id, activity.get("conversation_id")
     )
     evidence = await repo.journey_evidence(activity)
-    note = await _ensure_journey_note(activity, evidence)
+    note = (
+        await _ensure_journey_note(activity, evidence)
+        if generate_note
+        else activity.get("travel_note")
+    )
     return OfflineActivityReviewResponse(
         id=activity["id"],
         title=activity["title"],
@@ -742,8 +754,12 @@ async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewRes
         image_urls=activity.get("image_urls") or [],
         started_at=activity.get("arrival_confirmed_at") or activity.get("created_at"),
         ended_at=activity.get("completed_at") or activity.get("archived_at"),
-        story=note or _arrival_only_story(activity),
-        can_generate_memory_note=activity["status"] == "completed" and _has_journey_evidence(evidence),
+        story=note or (
+            "这次旅途已收好，还没有生成旅途故事。可以查看已有素材与思绪碎片。"
+            if not generate_note and _has_journey_evidence(evidence)
+            else _arrival_only_story(activity)
+        ),
+        can_generate_memory_note=generate_note and activity["status"] == "completed" and _has_journey_evidence(evidence),
         gallery=gallery,
         fragments=[
             OfflineActivityFragmentItem(

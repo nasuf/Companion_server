@@ -8,9 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
+from app.models.offline import OfflineActivityItem, OfflineActivityReviewResponse
 from app.services.admin_takeover.activities import (
     list_activity_previews,
     publish_activity_preview,
+    read_takeover_activity,
+    read_takeover_activity_review,
 )
 from app.services.admin_takeover.service import (
     STATUS_OVERRIDE_VALUES,
@@ -175,6 +178,27 @@ async def post_activity_previews(takeover_id: str, claims: dict = Depends(requir
     if items is None:
         raise HTTPException(403, detail="Not the owning admin")
     return {"items": items}
+
+
+@router.get("/{takeover_id}/activities/{activity_id}", response_model=OfflineActivityItem)
+async def get_takeover_activity(
+    takeover_id: str, activity_id: str, response: Response,
+    claims: dict = Depends(require_takeover_admin),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return await read_takeover_activity(takeover_id, _admin_id(claims), activity_id)
+
+
+@router.get(
+    "/{takeover_id}/activities/{activity_id}/review",
+    response_model=OfflineActivityReviewResponse,
+)
+async def get_takeover_activity_review(
+    takeover_id: str, activity_id: str, response: Response,
+    claims: dict = Depends(require_takeover_admin),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return await read_takeover_activity_review(takeover_id, _admin_id(claims), activity_id)
 
 
 @router.post("/{takeover_id}/activity-previews/{preview_id}/publish")
