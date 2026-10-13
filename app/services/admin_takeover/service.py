@@ -10,6 +10,8 @@ import logging
 import uuid
 from typing import Any
 
+from fastapi import HTTPException
+
 from app.db import db
 from app.observability.events import (
     EVT_TAKEOVER_CLAIM_CONFLICT,
@@ -18,8 +20,10 @@ from app.observability.events import (
     EVT_TAKEOVER_MESSAGE,
 )
 from app.redis_client import get_redis
+from app.services.agent_avatars import build_avatar_url as build_agent_avatar_url
 from app.services.runtime.tasks import fire_background
 from app.services.schedule_domain.schedule import status_label
+from app.services.user_avatars import build_avatar_url as build_user_avatar_url
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +286,7 @@ def _kick_notification_dispatch() -> None:
 async def list_takeovers(admin_id: str, *, scope: str) -> list[dict]:
     if scope == "mine":
         rows = await db.query_raw(
-            """
+            f"""
             SELECT
                 t.id, t.user_id AS "userId", t.conversation_id AS "conversationId",
                 t.agent_id AS "agentId", t.status, t.unread_count AS "unreadCount",
@@ -291,7 +295,8 @@ async def list_takeovers(admin_id: str, *, scope: str) -> list[dict]:
                 t.admin_last_read_at AS "adminLastReadAt",
                 t.claimed_at AS "claimedAt", t.status_override AS "statusOverride",
                 u.username, u.display_name AS "displayName",
-                a.name AS "agentName"
+                a.name AS "agentName",
+                {_AVATAR_COLUMNS}
             FROM human_takeovers t
             JOIN users u ON u.id = t.user_id
             LEFT JOIN ai_agents a ON a.id = t.agent_id
@@ -303,13 +308,14 @@ async def list_takeovers(admin_id: str, *, scope: str) -> list[dict]:
         )
     else:
         rows = await db.query_raw(
-            """
+            f"""
             SELECT
                 t.id, t.user_id AS "userId", t.conversation_id AS "conversationId",
                 t.agent_id AS "agentId", t.status, t.unread_count AS "unreadCount",
                 t.created_at AS "createdAt",
                 u.username, u.display_name AS "displayName", u.created_at AS "userCreatedAt",
-                a.name AS "agentName"
+                a.name AS "agentName",
+                {_AVATAR_COLUMNS}
             FROM human_takeovers t
             JOIN users u ON u.id = t.user_id
             LEFT JOIN ai_agents a ON a.id = t.agent_id
@@ -328,6 +334,7 @@ async def list_takeovers(admin_id: str, *, scope: str) -> list[dict]:
 
 def _list_item(row: Any) -> dict:
     unread = int(_cell(row, "unreadCount", "unread_count") or 0)
+    user_avatar_url, agent_avatar_url = avatar_urls_from_row(row)
     return {
         "id": str(_cell(row, "id")),
         "user_id": str(_cell(row, "userId", "user_id") or ""),
@@ -345,6 +352,8 @@ def _list_item(row: Any) -> dict:
         "created_at": _iso(_cell(row, "createdAt", "created_at") or _cell(row, "userCreatedAt")),
         "status_override": _cell(row, "statusOverride", "status_override"),
         "can_claim": bool(_cell(row, "conversationId", "conversation_id")),
+        "user_avatar_url": user_avatar_url,
+        "agent_avatar_url": agent_avatar_url,
     }
 
 
@@ -354,9 +363,55 @@ def _iso(value: Any) -> str | None:
     return str(value)
 
 
+def _https_url(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("http://"):
+        return "https://" + text[len("http://") :]
+    return text
+
+
+def _agent_avatar_from_key(key: Any) -> str | None:
+    text = str(key or "").strip()
+    if not text:
+        return None
+    try:
+        return build_agent_avatar_url(text)
+    except HTTPException:
+        return None
+
+
+def avatar_urls_from_row(row: Any) -> tuple[str | None, str | None]:
+    """Public user and agent portrait URLs for a takeover list or review row."""
+    local_user = build_user_avatar_url(_cell(row, "userAvatarKey", "user_avatar_key"))
+    wechat = _https_url(_cell(row, "wechatAvatarUrl", "wechat_avatar_url"))
+    agent = _agent_avatar_from_key(_cell(row, "agentAvatarKey", "agent_avatar_key"))
+    if agent is None:
+        agent = _https_url(
+            _cell(row, "agentAvatarUrl", "agent_avatar_url")
+            or _cell(row, "avatarUrl", "avatar_url")
+        )
+    return local_user or wechat, agent
+
+
+_AVATAR_COLUMNS = """
+                u.avatar_key AS "userAvatarKey",
+                (
+                    SELECT ai.raw_profile->>'headimgurl'
+                    FROM auth_identities ai
+                    WHERE ai.user_id = u.id AND ai.provider = 'wechat'
+                    ORDER BY ai.updated_at DESC
+                    LIMIT 1
+                ) AS "wechatAvatarUrl",
+                a.avatar_key AS "agentAvatarKey",
+                a.avatar_url AS "agentAvatarUrl"
+"""
+
+
 async def review_takeover(takeover_id: str) -> dict | None:
     rows = await db.query_raw(
-        """
+        f"""
         SELECT
             t.id, t.user_id AS "userId", t.conversation_id AS "conversationId",
             t.agent_id AS "agentId", t.workspace_id AS "workspaceId",
@@ -365,7 +420,7 @@ async def review_takeover(takeover_id: str) -> dict | None:
             u.signup_source AS "signupSource", u.created_at AS "userCreatedAt",
             a.name AS "agentName", a.gender, a.age, a.city, a.occupation,
             a.background, a.life_overview AS "lifeOverview", a.mbti, a.values,
-            a.avatar_url AS "avatarUrl",
+            {_AVATAR_COLUMNS},
             owner.username AS "ownerUsername",
             owner.display_name AS "ownerDisplayName"
         FROM human_takeovers t
@@ -384,6 +439,7 @@ async def review_takeover(takeover_id: str) -> dict | None:
     phone = await _masked_phone(user_id)
     mbti = _cell(row, "mbti")
     values = _cell(row, "values")
+    user_avatar_url, agent_avatar_url = avatar_urls_from_row(row)
     return {
         "id": str(_cell(row, "id")),
         "status": _cell(row, "status"),
@@ -398,6 +454,7 @@ async def review_takeover(takeover_id: str) -> dict | None:
             "signup_source": _cell(row, "signupSource", "signup_source"),
             "created_at": _iso(_cell(row, "userCreatedAt", "user_created_at")),
             "phone_masked": phone,
+            "avatar_url": user_avatar_url,
         },
         "agent": None if not _cell(row, "agentId", "agent_id") else {
             "id": _cell(row, "agentId", "agent_id"),
@@ -410,7 +467,7 @@ async def review_takeover(takeover_id: str) -> dict | None:
             "life_overview": _cell(row, "lifeOverview", "life_overview"),
             "mbti": mbti,
             "values": values,
-            "avatar_url": _cell(row, "avatarUrl", "avatar_url"),
+            "avatar_url": agent_avatar_url,
             "conversation_id": _cell(row, "conversationId", "conversation_id"),
             "workspace_id": _cell(row, "workspaceId", "workspace_id"),
         },

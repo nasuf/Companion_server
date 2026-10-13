@@ -211,3 +211,25 @@ async def test_flagged_message_returns_before_the_model(monkeypatch):
         "你好",
     )
     assert called == {"takeover": True}
+
+
+def test_avatar_urls_prefer_stored_portraits_over_wechat():
+    user_url, agent_url = service.avatar_urls_from_row({
+        "userAvatarKey": "subject_abc.jpg",
+        "wechatAvatarUrl": "http://thirdwx.qlogo.cn/mmopen/a",
+        "agentAvatarKey": "companion-female-01",
+        "agentAvatarUrl": "/agents/avatar/stale.png",
+    })
+
+    assert user_url == "/users/avatar/subject_abc.jpg"
+    assert agent_url == "/agents/avatar/companion-female-01.png"
+
+
+def test_avatar_urls_fall_back_when_local_portraits_are_missing():
+    user_url, agent_url = service.avatar_urls_from_row({
+        "wechatAvatarUrl": "http://thirdwx.qlogo.cn/mmopen/a",
+        "avatarUrl": "https://cdn.example/agent.png",
+    })
+
+    assert user_url == "https://thirdwx.qlogo.cn/mmopen/a"
+    assert agent_url == "https://cdn.example/agent.png"
