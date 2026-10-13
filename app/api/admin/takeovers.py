@@ -14,6 +14,7 @@ from app.services.admin_takeover.activities import (
     publish_activity_preview,
     read_takeover_activity,
     read_takeover_activity_review,
+    recommend_takeover_activity,
 )
 from app.services.admin_takeover.service import (
     STATUS_OVERRIDE_VALUES,
@@ -187,6 +188,15 @@ async def get_takeover_activity(
 ):
     response.headers["Cache-Control"] = "no-store"
     return await read_takeover_activity(takeover_id, _admin_id(claims), activity_id)
+
+
+@router.post("/{takeover_id}/activities/recommend", response_model=OfflineActivityItem)
+async def post_takeover_activity_recommendation(
+    takeover_id: str, response: Response,
+    claims: dict = Depends(require_takeover_admin),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return await recommend_takeover_activity(takeover_id, _admin_id(claims))
 
 
 @router.get(

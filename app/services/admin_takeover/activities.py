@@ -1,8 +1,7 @@
-"""Admin-picked activity previews for a taken-over user.
+"""Activity generation, read-only details and photo handling for takeover chat.
 
-Previews stay off the user's chat until the admin publishes one. Publishing
-uses the same invite and card the agent would send. Later photo recognition
-still runs through the vision model.
+The current client generates and sends through the complete user activity
+pipeline. Preview APIs remain compatible with previously released clients.
 """
 
 from __future__ import annotations
@@ -129,7 +128,7 @@ async def _owned_subject(takeover_id: str, admin_id: str) -> dict | None:
     rows = await db.query_raw(
         """
         SELECT user_id AS "userId", workspace_id AS "workspaceId",
-               conversation_id AS "conversationId"
+               conversation_id AS "conversationId", agent_id AS "agentId"
         FROM human_takeovers
         WHERE id=$1 AND owner_admin_id=$2 AND status='active'
         LIMIT 1
@@ -174,6 +173,48 @@ async def read_takeover_activity_review(
 ) -> OfflineActivityReviewResponse:
     activity = await _read_owned_activity(takeover_id, admin_id, activity_id)
     return await activity_service.build_activity_review(activity, generate_note=False)
+
+
+async def recommend_takeover_activity(
+    takeover_id: str, admin_id: str,
+) -> dict:
+    """Run the same complete generation/publication used by the activity test page."""
+    subject = await _owned_subject(takeover_id, admin_id)
+    if subject is None:
+        raise HTTPException(status_code=403, detail="Not the owning admin")
+    user_id = str(_cell(subject, "userId", "user_id"))
+    workspace_id = _cell(subject, "workspaceId", "workspace_id")
+    conversation_id = _cell(subject, "conversationId", "conversation_id")
+    agent_id = _cell(subject, "agentId", "agent_id")
+    if not conversation_id or not agent_id:
+        raise HTTPException(status_code=422, detail="这个用户还没有可用的会话")
+
+    async def guard(ctx: dict) -> None:
+        current = await _owned_subject(takeover_id, admin_id)
+        if current is None or (
+            str(_cell(current, "userId", "user_id")) != user_id
+            or _cell(current, "workspaceId", "workspace_id") != workspace_id
+            or _cell(current, "conversationId", "conversation_id") != conversation_id
+            or _cell(current, "agentId", "agent_id") != agent_id
+        ):
+            raise HTTPException(status_code=403, detail="接管状态已变化，无法发送活动")
+        if (ctx.get("conversation_id") != conversation_id
+                or ctx.get("workspace_id") != workspace_id
+                or ctx.get("agent_id") != agent_id):
+            raise HTTPException(status_code=409, detail="用户会话已变化，请重新进入接管聊天")
+
+    from app.services.offline.module_settings import is_activity_enabled
+    if not await is_activity_enabled():
+        raise HTTPException(status_code=403, detail={
+            "reason": "activity_disabled", "message": "活动推荐暂未开放。",
+        })
+    activity = await activity_service.create_recommendation_for_user(
+        user_id=user_id, workspace_id=workspace_id, source="manual",
+        publication_guard=guard,
+    )
+    if activity is None:
+        raise HTTPException(status_code=503, detail="暂时没找到合适的新去处，请稍后再试")
+    return activity
 
 
 async def _candidate_pool(user_id: str, ctx: dict, city: str, anchor: str) -> list[dict]:
