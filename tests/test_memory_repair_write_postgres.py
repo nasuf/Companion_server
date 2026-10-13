@@ -23,6 +23,33 @@ async def repairing(editing, monkeypatch):
     yield (*editing, submit)
 
 
+@pytest.mark.parametrize('change_during_embedding', [False, True])
+async def test_real_prisma_timestamp_only_change_rejects_stale_repair(repairing, change_during_embedding):
+    o, target, queue, client, embedding, admin, submit = repairing
+    db, uid, wid, *_ = o
+    row = await target()
+    item = await queue(row)
+    assert isinstance(item['updated_at'], str) and item['updated_at']
+    listed = await client.get('/admin-api/memory-repairs', headers=auth(admin, 'admin'),
+                             params={'user_id': uid, 'workspace_id': wid, 'limit': 2})
+    assert listed.status_code == 200
+    assert listed.json()['items'][0]['updated_at'] == item['updated_at']
+
+    async def change_version(*_args, **_kwargs):
+        await db.execute_raw("UPDATE memory_repair_items SET updated_at=updated_at+INTERVAL '1 second' WHERE id=$1", item['id'])
+        return VECTOR
+
+    if change_during_embedding:
+        embedding.side_effect = change_version
+    else:
+        await change_version()
+    response = await submit(item, 'insert_replacement_memory', content='合成替代事实')
+    assert response.status_code == 409, response.text
+    assert not (await db.usermemory.find_unique(where={'id': row.id})).isArchived
+    assert (await repair_queue.get_memory_repair_item(item['id']))['status'] == 'open'
+    assert await db.query_raw('SELECT id FROM memory_input_origins WHERE workspace_id=$1', wid) == []
+
+
 @pytest.mark.parametrize('side',['user','ai'])
 @pytest.mark.parametrize('action',['merge_memories','insert_replacement_memory','archive_memory','downgrade_memory','mark_verified'])
 async def test_success_is_atomic_scoped_and_auditable(repairing,side,action):

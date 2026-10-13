@@ -61,6 +61,20 @@ def _memory_record(memory_id="mem1", **overrides):
     return SimpleNamespace(**row)
 
 
+@pytest.mark.parametrize("value, expected", [
+    (datetime(2026, 10, 13, 1, 2, 3, 456000), "2026-10-13T01:02:03.456000"),
+    ("2026-10-13T01:02:03.456+00:00", "2026-10-13T01:02:03.456000+00:00"),
+    ("2026-10-13T01:02:03.456Z", "2026-10-13T01:02:03.456000+00:00"),
+    (None, None),
+    ("invalid", None),
+])
+def test_repair_timestamps_support_prisma_raw_strings(value, expected):
+    from app.services.memory.repair_queue import serialize_repair_item
+
+    item = serialize_repair_item(_repair_row(created_at=value, updated_at=value, resolved_at=value))
+    assert all(item[key] == expected for key in ("created_at", "updated_at", "resolved_at"))
+
+
 @pytest.mark.asyncio
 async def test_create_memory_repair_item_dedupes_existing_source(monkeypatch):
     from app.services.memory import repair_queue

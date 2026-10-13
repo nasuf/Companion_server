@@ -26,6 +26,14 @@ VALID_SEVERITIES = {"low", "medium", "high", "critical"}
 
 def serialize_repair_item(row: dict[str, Any]) -> dict[str, Any]:
     def _iso(value: Any) -> str | None:
+        # Prisma query_raw returns timestamps as ISO strings, while model and
+        # test callers may supply datetime objects. Preserve the version token
+        # for both so an unchanged body with a newer timestamp is still stale.
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return None
         return value.isoformat() if isinstance(value, datetime) else None
 
     evidence = row.get("evidence")
