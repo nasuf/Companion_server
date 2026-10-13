@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from app.services.memory.manual_write import MemoryWriteError
+from app.services.memory.repair_write import OPERATIONS, apply_atomic_repair
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.manual_edit import MemoryEditError, edit_memory_with_evidence
-from app.services.memory.storage.embedding import generate_embedding, store_embedding
-from app.services.memory.storage.persistence import log_memory_changelog, store_memory
-from app.services.memory.lifecycle.quality_state import mark_memory_superseded
 from app.services.memory.repair_queue import (
     get_memory_repair_item,
-    update_memory_repair_item_status,
 )
 
 RepairAction = Literal[
@@ -48,87 +46,38 @@ class MemoryRepairActionPayload:
     main_category: str | None = None
     sub_category: str | None = None
     reason: str | None = None
+    expected_updated_at: str | None = None
 
 
-async def apply_memory_repair_action(
-    item_id: str,
-    *,
-    payload: MemoryRepairActionPayload,
-    admin_id: str | None,
-) -> dict[str, Any]:
+async def apply_memory_repair_action(item_id: str, *, payload: MemoryRepairActionPayload,
+                                     admin_id: str | None) -> dict[str, Any]:
     repair_item = await get_memory_repair_item(item_id)
     if repair_item is None:
         raise MemoryRepairActionError(404, "memory_repair_item_not_found")
     if repair_item.get("status") != "open":
         raise MemoryRepairActionError(409, "memory_repair_item_is_not_open")
-
-    if payload.action == "archive_memory":
-        result = await _archive_memory(repair_item, payload, admin_id)
-    elif payload.action == "downgrade_memory":
-        result = await _downgrade_memory(repair_item, payload, admin_id)
-    elif payload.action == "edit_memory":
-        return await _edit_memory(repair_item, payload, admin_id)
-    elif payload.action == "insert_replacement_memory":
-        result = await _insert_replacement_memory(repair_item, payload, admin_id)
-    elif payload.action == "mark_verified":
-        result = await _mark_verified(repair_item, payload, admin_id)
-    elif payload.action == "merge_memories":
-        result = await _merge_memories(repair_item, payload, admin_id)
-    else:
+    if payload.expected_updated_at is not None and payload.expected_updated_at != repair_item.get("updated_at"):
+        raise MemoryRepairActionError(409, "memory_repair_item_changed_refresh_and_retry")
+    if payload.action not in {*OPERATIONS, "edit_memory"}:
         raise MemoryRepairActionError(400, "unsupported_memory_repair_action")
-
-    resolved = await update_memory_repair_item_status(
-        item_id,
-        status="resolved",
-        resolution_note=_resolution_note(payload),
-        resolved_by_id=admin_id,
-    )
-    result["repair_item"] = resolved
-    return result
-
-
-async def _archive_memory(
-    repair_item: dict[str, Any],
-    payload: MemoryRepairActionPayload,
-    admin_id: str | None,
-) -> dict[str, Any]:
-    record = await _load_target_memory(repair_item, payload.memory_id)
-    await memory_repo.update(record.id, source=record.source, record=record, isArchived=True)
-    await _log_repair_changelog(
-        record=record,
-        operation="repair_archive",
-        admin_id=admin_id,
-        repair_item=repair_item,
-        payload=payload,
-        old_value=record.content,
-        new_value=None,
-    )
-    return {"action": payload.action, "memory_id": record.id}
-
-
-async def _downgrade_memory(
-    repair_item: dict[str, Any],
-    payload: MemoryRepairActionPayload,
-    admin_id: str | None,
-) -> dict[str, Any]:
-    record = await _load_target_memory(repair_item, payload.memory_id)
-    target_level = payload.level if payload.level is not None else 3
-    if target_level not in {2, 3}:
-        raise MemoryRepairActionError(400, "downgrade_level_must_be_2_or_3")
-    if target_level < record.level:
-        raise MemoryRepairActionError(400, "downgrade_cannot_increase_memory_level")
-
-    await memory_repo.update(record.id, source=record.source, record=record, level=target_level)
-    await _log_repair_changelog(
-        record=record,
-        operation="repair_downgrade",
-        admin_id=admin_id,
-        repair_item=repair_item,
-        payload=payload,
-        old_value=json.dumps({"level": record.level}, ensure_ascii=False),
-        new_value=json.dumps({"level": target_level}, ensure_ascii=False),
-    )
-    return {"action": payload.action, "memory_id": record.id, "level": target_level}
+    if payload.level is not None and payload.level not in {1,2,3}:
+        raise MemoryRepairActionError(400, "invalid_memory_level")
+    if payload.importance is not None and (not math.isfinite(payload.importance) or not .1 <= payload.importance <= .99):
+        raise MemoryRepairActionError(400, "invalid_memory_importance")
+    if payload.action in {"edit_memory","merge_memories","insert_replacement_memory"}:
+        content = _clean_text(payload.content)
+        if not content:
+            raise MemoryRepairActionError(400, f"{payload.action}_requires_content")
+        _assert_within_injection_limit(content)
+    if payload.action == "edit_memory":
+        return await _edit_memory(repair_item,payload,admin_id)
+    replacement = payload.action == "insert_replacement_memory"
+    record = await _load_target_memory(repair_item,payload.memory_id,allow_archived=replacement) \
+        if not replacement or payload.memory_id or repair_item.get("memory_id") else None
+    try:
+        return await apply_atomic_repair(repair_item=repair_item,payload=payload,admin_id=admin_id,record=record)
+    except MemoryWriteError as exc:
+        raise MemoryRepairActionError(exc.status_code,exc.detail) from exc
 
 
 async def _edit_memory(
@@ -152,143 +101,6 @@ async def _edit_memory(
     except MemoryEditError as exc:
         raise MemoryRepairActionError(exc.status_code, exc.detail) from exc
     return {"action": payload.action, "memory_id": record.id, "repair_item": resolved}
-
-
-async def _insert_replacement_memory(
-    repair_item: dict[str, Any],
-    payload: MemoryRepairActionPayload,
-    admin_id: str | None,
-) -> dict[str, Any]:
-    content = _clean_text(payload.content)
-    if not content:
-        raise MemoryRepairActionError(400, "insert_replacement_memory_requires_content")
-
-    old_record = None
-    if payload.memory_id or repair_item.get("memory_id"):
-        old_record = await _load_target_memory(
-            repair_item,
-            payload.memory_id,
-            allow_archived=True,
-        )
-
-    user_id = payload.user_id or (old_record.userId if old_record else repair_item.get("user_id"))
-    workspace_id = payload.workspace_id or (old_record.workspaceId if old_record else repair_item.get("workspace_id"))
-    source = _coerce_source(payload.source or (old_record.source if old_record else repair_item.get("memory_source")) or "user")
-    if not user_id:
-        raise MemoryRepairActionError(400, "insert_replacement_memory_requires_user_id")
-
-    level = payload.level if payload.level is not None else (old_record.level if old_record else 2)
-    if level not in {1, 2, 3}:
-        raise MemoryRepairActionError(400, "invalid_memory_level")
-
-    new_id = await store_memory(
-        user_id=user_id,
-        content=content,
-        level=level,
-        importance=_clamp_importance(payload.importance if payload.importance is not None else (old_record.importance if old_record else 0.7)),
-        memory_type=payload.memory_type or (old_record.type if old_record else None),
-        main_category=payload.main_category or (old_record.mainCategory if old_record else None),
-        sub_category=payload.sub_category or (old_record.subCategory if old_record else None),
-        source=source,
-        workspace_id=workspace_id,
-    )
-    if not new_id:
-        raise MemoryRepairActionError(409, "replacement_memory_was_deduped_or_blocked")
-
-    await log_memory_changelog(
-        user_id,
-        new_id,
-        "repair_insert_replacement",
-        old_value=None,
-        new_value=_audit_json(admin_id=admin_id, repair_item=repair_item, payload=payload, after={"content": content}),
-        workspace_id=workspace_id,
-    )
-    if old_record is not None:
-        try:
-            await mark_memory_superseded(
-                memory_id=old_record.id,
-                source=old_record.source,
-                superseded_by_memory_id=new_id,
-                repair_item_id=repair_item.get("id"),
-            )
-        except Exception:
-            pass
-    return {"action": payload.action, "memory_id": new_id}
-
-
-async def _mark_verified(
-    repair_item: dict[str, Any],
-    payload: MemoryRepairActionPayload,
-    admin_id: str | None,
-) -> dict[str, Any]:
-    record = await _load_target_memory(repair_item, payload.memory_id)
-    await _log_repair_changelog(
-        record=record,
-        operation="admin_verified",
-        admin_id=admin_id,
-        repair_item=repair_item,
-        payload=payload,
-        old_value=None,
-        new_value=json.dumps({"verified": True}, ensure_ascii=False),
-    )
-    return {"action": payload.action, "memory_id": record.id}
-
-
-async def _merge_memories(
-    repair_item: dict[str, Any],
-    payload: MemoryRepairActionPayload,
-    admin_id: str | None,
-) -> dict[str, Any]:
-    content = _clean_text(payload.content)
-    if not content:
-        raise MemoryRepairActionError(400, "merge_memories_requires_content")
-    _assert_within_injection_limit(content)
-    target = await _load_target_memory(repair_item, payload.memory_id)
-    merge_ids = list(dict.fromkeys(mid for mid in payload.memory_ids if mid and mid != target.id))
-    if not merge_ids:
-        raise MemoryRepairActionError(400, "merge_memories_requires_memory_ids")
-
-    absorbed: list[str] = []
-    for memory_id in merge_ids:
-        record = await memory_repo.find_unique(memory_id)
-        if not record or record.isArchived:
-            raise MemoryRepairActionError(404, f"merge_memory_not_found:{memory_id}")
-        _assert_same_scope(target, record)
-        absorbed.append(record.id)
-
-    await store_embedding(target.id, await generate_embedding(content))
-    await memory_repo.update(
-        target.id,
-        source=target.source,
-        record=target,
-        content=content,
-        importance=_clamp_importance(payload.importance if payload.importance is not None else target.importance),
-    )
-    await _log_repair_changelog(
-        record=target,
-        operation="repair_merge",
-        admin_id=admin_id,
-        repair_item=repair_item,
-        payload=payload,
-        old_value=json.dumps({"content": target.content, "absorbed": absorbed}, ensure_ascii=False),
-        new_value=json.dumps({"content": content}, ensure_ascii=False),
-    )
-
-    for memory_id in absorbed:
-        record = await memory_repo.find_unique(memory_id)
-        if not record:
-            continue
-        await memory_repo.update(record.id, source=record.source, record=record, isArchived=True)
-        await _log_repair_changelog(
-            record=record,
-            operation="repair_merge_archived",
-            admin_id=admin_id,
-            repair_item=repair_item,
-            payload=payload,
-            old_value=record.content,
-            new_value=json.dumps({"merged_into": target.id}, ensure_ascii=False),
-        )
-    return {"action": payload.action, "memory_id": target.id, "absorbed_memory_ids": absorbed}
 
 
 async def _load_target_memory(
@@ -317,55 +129,6 @@ def _assert_repair_scope(repair_item: dict[str, Any], record) -> None:
         raise MemoryRepairActionError(403, "memory_workspace_does_not_match_repair_item")
     if repair_item.get("memory_source") and repair_item["memory_source"] != record.source:
         raise MemoryRepairActionError(403, "memory_source_does_not_match_repair_item")
-
-
-def _assert_same_scope(left, right) -> None:
-    if left.source != right.source or left.userId != right.userId or left.workspaceId != right.workspaceId:
-        raise MemoryRepairActionError(403, "merge_memories_must_share_source_user_workspace")
-
-
-async def _log_repair_changelog(
-    *,
-    record,
-    operation: str,
-    admin_id: str | None,
-    repair_item: dict[str, Any],
-    payload: MemoryRepairActionPayload,
-    old_value: str | None,
-    new_value: str | None,
-) -> None:
-    await log_memory_changelog(
-        record.userId,
-        record.id,
-        operation,
-        old_value=old_value,
-        new_value=_audit_json(
-            admin_id=admin_id,
-            repair_item=repair_item,
-            payload=payload,
-            after=new_value,
-        ),
-        workspace_id=record.workspaceId,
-    )
-
-
-def _audit_json(
-    *,
-    admin_id: str | None,
-    repair_item: dict[str, Any],
-    payload: MemoryRepairActionPayload,
-    after: Any,
-) -> str:
-    return json.dumps(
-        {
-            "repair_item_id": repair_item.get("id"),
-            "admin_id": admin_id,
-            "action": payload.action,
-            "reason": payload.reason,
-            "after": after,
-        },
-        ensure_ascii=False,
-    )
 
 
 def _resolution_note(payload: MemoryRepairActionPayload) -> str:
@@ -399,9 +162,3 @@ def _assert_within_injection_limit(content: str) -> None:
 
 def _clamp_importance(value: float) -> float:
     return max(0.1, min(float(value), 0.99))
-
-
-def _coerce_source(value: str) -> str:
-    if value not in {"user", "ai"}:
-        raise MemoryRepairActionError(400, "invalid_memory_source")
-    return value
