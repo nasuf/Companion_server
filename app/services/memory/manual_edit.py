@@ -12,7 +12,6 @@ import math
 from app.db import db
 from app.services.memory.evidence import bind_memory_evidence, content_version
 from app.services.memory.input_evidence import prepare_input_origin, persist_input_origin
-from app.services.memory.repair_queue import serialize_repair_item
 from app.services.memory.provenance import KNOWLEDGE_SEED
 from app.services.memory.retrieval.knowledge_hits import invalidate_knowledge_rows
 from app.services.memory.storage import repo as memory_repo
@@ -20,27 +19,11 @@ from app.services.memory.storage.embedding import generate_embedding, store_embe
 from app.services.memory.storage.persistence import after_memory_changelog
 
 
-class MemoryEditError(Exception):
-    def __init__(self, status_code: int, detail: str) -> None:
-        super().__init__(detail)
-        self.status_code = status_code
-        self.detail = detail
-
-
-async def _scope(database, record, *, lock: bool = False) -> dict:
-    rows = await database.query_raw(
-        """SELECT w.agent_id, w.execution_generation AS workspace_generation,
-                  a.execution_generation AS agent_generation, u.execution_generation AS user_generation
-           FROM chat_workspaces w JOIN ai_agents a ON a.id=w.agent_id AND a.user_id=w.user_id
-             JOIN users u ON u.id=w.user_id
-           WHERE w.id=$1 AND w.user_id=$2 AND w.status='active' AND a.status='active'
-             AND u.status='active' AND w.archived_at IS NULL AND a.archived_at IS NULL
-             AND u.archived_at IS NULL""" + (" FOR SHARE OF w,a,u" if lock else ""),
-        record.workspaceId, record.userId,
-    )
-    if not rows:
-        raise MemoryEditError(409, "memory_scope_changed_or_inactive")
-    return rows[0]
+from app.services.memory.manual_write import (
+    MemoryWriteError as MemoryEditError, memory_scope as _scope,
+    lock_actor, lock_repair, lock_memories, resolve_repair,
+)
+from app.services.memory.lifecycle.lazy_update import scope_lock_key
 
 
 async def edit_memory_with_evidence(*, record: memory_repo.MemoryRecord, content: str,
@@ -82,41 +65,14 @@ async def edit_memory_with_evidence(*, record: memory_repo.MemoryRecord, content
     }) if changed_content else None
     resolved = None
     async with db.tx(timeout=timedelta(seconds=30)) as tx:
+        await tx.execute_raw("SELECT pg_advisory_xact_lock($1::bigint)", scope_lock_key(record.source, record.userId, record.workspaceId))
         if await _scope(tx, record, lock=True) != expected_scope:
             raise MemoryEditError(409, "memory_scope_changed_or_inactive")
-        actors = await tx.query_raw("SELECT role,status,archived_at FROM users WHERE id=$1 FOR SHARE", actor_id)
-        if not actors or actors[0]["role"] != actor_role or actors[0]["status"] != "active" or actors[0]["archived_at"] is not None:
-            raise MemoryEditError(403, "memory_edit_actor_invalid")
+        await lock_actor(tx, actor_id, actor_role)
         if repair_item is not None:
-            items = await tx.query_raw("SELECT * FROM memory_repair_items WHERE id=$1 FOR UPDATE", repair_item.get("id"))
-            if not items:
-                raise MemoryEditError(404, "memory_repair_item_not_found")
-            item = items[0]
-            if item["status"] != "open":
-                raise MemoryEditError(409, "memory_repair_item_is_not_open")
-            if serialize_repair_item(item) != repair_item:
-                raise MemoryEditError(409, "memory_repair_item_changed_refresh_and_retry")
-            # A queue entry with no scope is permitted only when every populated
-            # field agrees. Its target cannot change while embedding runs.
-            for key, expected in (("memory_id", record.id), ("memory_source", record.source),
-                                  ("user_id", record.userId), ("workspace_id", record.workspaceId),
-                                  ("agent_id", expected_scope["agent_id"])):
-                if item.get(key) != repair_item.get(key) or (item.get(key) is not None and item[key] != expected):
-                    raise MemoryEditError(409, "memory_repair_scope_changed")
-        # Both tables share the vector key. Refuse ambiguous historical IDs
-        # rather than overwrite another side's vector or evidence.
-        user_rows = await tx.query_raw("SELECT id FROM memories_user WHERE id=$1 FOR UPDATE", record.id)
-        ai_rows = await tx.query_raw("SELECT id FROM memories_ai WHERE id=$1 FOR UPDATE", record.id)
-        if user_rows and ai_rows:
-            raise MemoryEditError(409, "memory_id_is_ambiguous")
+            await lock_repair(tx, repair_item, record, expected_scope)
+        await lock_memories(tx, [record])
         model = tx.aimemory if record.source == "ai" else tx.usermemory
-        current = await model.find_unique(where={"id": record.id})
-        if not current or current.isArchived:
-            raise MemoryEditError(404, "Memory not found")
-        if (current.userId != record.userId or current.workspaceId != record.workspaceId
-                or current.content != record.content or current.updatedAt != record.updatedAt
-                or current.level != record.level or current.importance != record.importance):
-            raise MemoryEditError(409, "memory_changed_refresh_and_retry")
         if update_data:
             await memory_repo.update(record.id, source=record.source, record=record,
                                      database=tx, **update_data)
@@ -139,12 +95,10 @@ async def edit_memory_with_evidence(*, record: memory_repo.MemoryRecord, content
             await tx.memorychangelog.create(data={"userId": record.userId, "workspaceId": record.workspaceId,
                 "memoryId": record.id, "operation": operation, "oldValue": old_value, "newValue": new_value})
         if repair_item is not None:
-            rows = await tx.query_raw("""UPDATE memory_repair_items SET status='resolved',resolution_note=$2,
-                resolved_by_id=$3,resolved_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
-                WHERE id=$1 AND status='open' RETURNING *""", repair_item["id"],resolution_note,actor_id)
-            if not rows:
-                raise MemoryEditError(409, "memory_repair_item_is_not_open")
-            resolved = serialize_repair_item(rows[0])
+            resolved = await resolve_repair(tx, repair_item, actor_id, resolution_note, {
+                "action": "edit_memory", "memory_id": record.id, "memory_source": record.source,
+                "user_id": record.userId, "workspace_id": record.workspaceId,
+            })
         updated = memory_repo._to_record(await model.find_unique(where={"id": record.id}), record.source)
     if update_data:
         await memory_repo.invalidate_scope(record.userId, record.workspaceId)

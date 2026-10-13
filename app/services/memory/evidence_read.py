@@ -70,16 +70,18 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
              ELSE 'recorded_snapshot' END AS availability,
              c.id AS conversation_id, o.input_status AS profile_input_status,
              o.format_version AS profile_format_version,
-             i.source_status AS input_kind, i.format_version AS input_format_version
+             i.source_status AS input_kind, i.format_version AS input_format_version,
+             CASE WHEN i.source_status='admin_repair' THEN i.payload_text::jsonb->'input'->>'action' END AS repair_action,
+             p.is_archived AS parent_archived
            FROM memory_evidence_links e
            LEFT JOIN messages m ON m.id=e.source_message_id
            LEFT JOIN conversations c ON c.id=m.conversation_id
            LEFT JOIN memory_profile_origins o ON o.id=e.source_profile_id
            LEFT JOIN memory_input_origins i ON i.id=e.source_input_id
            LEFT JOIN LATERAL (
-             SELECT id,user_id,workspace_id,content FROM memories_user WHERE id=e.parent_user_memory_id
+             SELECT id,user_id,workspace_id,content,is_archived FROM memories_user WHERE id=e.parent_user_memory_id
              UNION ALL
-             SELECT id,user_id,workspace_id,content FROM memories_ai WHERE id=e.parent_ai_memory_id
+             SELECT id,user_id,workspace_id,content,is_archived FROM memories_ai WHERE id=e.parent_ai_memory_id
            ) p ON true
            WHERE e.memory_id=$1 AND e.memory_source=$2 AND e.user_id=$3 AND e.workspace_id=$4 AND e.id>$5
            ORDER BY e.id LIMIT $6""", memory_id,side,user_id,workspace_id,after,limit+1,targets[0]["agent_id"])
@@ -95,6 +97,8 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
             "extractor_version":row["extractor_version"],"relation":row["relation"],
             "availability":row["availability"],"created_at":row["created_at"],
             "conversation_id":row["conversation_id"] if accessible and row["source_kind"]=="message" else None,
+            "source_archived":row["parent_archived"] if accessible and row["source_kind"]=="memory" else None,
+            "repair_action":row["repair_action"] if accessible and row["source_kind"]=="input" and row["repair_action"] in {"merge_memories","insert_replacement_memory","archive_memory","downgrade_memory","mark_verified"} else None,
             "profile": {"input_status":row["profile_input_status"], "format_version":row["profile_format_version"]}
                 if accessible and row["source_kind"]=="profile" else None,
             "input": {"kind":row["input_kind"], "format_version":row["input_format_version"]}

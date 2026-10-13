@@ -254,3 +254,27 @@ schema and historical receipts intact; do not delete the evidence tables.
 Original-document retention/capacity policy remains M02.16. Other memory writers,
 repair merge/replacement actions, exact model/prompt receipts, multipage auditing
 and derived-memory deletion barriers remain their existing roadmap tasks.
+
+
+## Administrator repair receipts
+
+Manual edits and all repair commands share scope/generation, actor, repair-item
+and memory-version guards. Merge and replacement commit the memory/vector,
+immutable `admin_repair` input, parent links, audit and resolved queue state in
+one PostgreSQL transaction. Model reconciliation is intentionally excluded from
+an explicit human replacement: it cannot silently overwrite an unrelated row.
+The replaced/absorbed originals remain archived, with their historical origins.
+A conflicting concurrent command returns 409 (or 404 for an archived/deleted
+merge target); refresh before retrying. Repeated completed commands do not write.
+
+The admin source panel displays the repair action and current parent archive
+state. The queue retains the last result scope, so reopening a replacement shows
+the new memory. Origin linkage records provenance, not independently verified
+truth. Historical inputs are not guessed or backfilled. Merge/replacement of
+reminder memories is rejected until the scheduled-trigger workflow can be
+updated together. Cache and materialized-quality refresh remain postcommit,
+best-effort effects; a receipt is not a proof of global cache convergence.
+
+Migration `20261013010000_memory_repair_origins` only expands the input-kind
+constraint. A code rollback leaves this additive migration and all snapshots
+intact; do not delete receipts or rewrite migration history.

@@ -64,6 +64,7 @@ class UpdateMemoryRepairRequest(BaseModel):
 
 
 class MemoryRepairActionRequest(BaseModel):
+    expected_updated_at: str | None = Field(default=None, max_length=64)
     action: str = Field(
         pattern="^(archive_memory|downgrade_memory|edit_memory|insert_replacement_memory|mark_verified|merge_memories)$"
     )
