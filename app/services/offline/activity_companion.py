@@ -567,6 +567,20 @@ async def _process_activity(activity: dict[str, Any]) -> bool:
     claim_token = str(activity.get("companion_claim_token") or "")
     if not claim_token:
         return False
+    # A taken-over chat keeps the activity itself, but the admin sends the
+    # proactive lines. Photo recognition stays on the model path separately.
+    from app.services.admin_takeover.service import is_user_taken_over
+
+    if await is_user_taken_over(str(activity.get("user_id") or "")):
+        await repo.save_companion_decision(
+            activity["id"],
+            claim_token=claim_token,
+            state=state,
+            next_companion_at=_now() + timedelta(hours=6),
+            sent=False,
+        )
+        _log_decision(activity, "silent", "human_takeover")
+        return False
     if state.get("phase") not in _PHASES:
         new_state, due = begin_opening(_now())
         await repo.save_companion_decision(

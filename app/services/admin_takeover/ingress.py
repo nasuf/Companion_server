@@ -11,7 +11,7 @@ import uuid
 from prisma import Json
 from dataclasses import replace
 
-from app.services.runtime.chat_ingress_contracts import canonical_object
+from app.services.runtime.chat_ingress_contracts import ChatRequestInput, canonical_object
 
 from app.services.chat_media.prompt import attachment_to_metadata
 from app.services.chat_media.repo import _attachment_from_row
@@ -22,6 +22,21 @@ from app.services.runtime.chat_ingress_effects import ChatIngressEffects, ChatIn
 from app.services.runtime.execution_scope import (
     ExecutionScopeUnavailable, bind_conversation_scope, scoped_transaction,
 )
+
+# ChatRequestInput rejects a turn that has no text, attachments, or card.
+# Music invites and other share cards often have an empty body. The stored
+# message keeps that body; this stand-in exists only on the quota request
+# after the card has been removed.
+_QUOTA_STANDIN_TEXT = "［分享］"
+
+
+def quota_request_without_card(request: ChatRequestInput, original: dict) -> ChatRequestInput:
+    """Quota adapter sees an ordinary text turn, not the shared card."""
+    stripped = {**original, "component_card": None}
+    text = stripped.get("text")
+    if (type(text) is not str or not text.strip()) and not stripped.get("attachment_ids"):
+        stripped["text"] = _QUOTA_STANDIN_TEXT
+    return replace(request, input_json=canonical_object(stripped))
 
 
 async def persist_user_message(*, conversation_id: str, user_id: str, text: str,
@@ -98,7 +113,7 @@ async def persist_user_message(*, conversation_id: str, user_id: str, text: str,
                 # Nonfinancial sharing is delivered to the human without AI
                 # automation, and pays ordinary quota. Preserve original retry
                 # identity; only the trusted effects adapter sees no offering.
-                effect_request = replace(request, input_json=canonical_object({**original, 'component_card': None}))
+                effect_request = quota_request_without_card(request, original)
         message = await tx.message.create(data={
             "conversation": {"connect": {"id": conversation_id}}, "role": "user",
             "content": text.strip(), "metadata": Json(prepared),

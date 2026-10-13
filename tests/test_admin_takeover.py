@@ -1,5 +1,6 @@
 """Human takeover stays off the model path until a claim writes the Redis flag."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -211,6 +212,85 @@ async def test_flagged_message_returns_before_the_model(monkeypatch):
         "你好",
     )
     assert called == {"takeover": True}
+
+
+def test_activity_previews_keep_distinct_places():
+    from app.services.admin_takeover.activities import public_preview, select_preview_cards
+
+    cards = select_preview_cards([
+        {"location_name": "甲", "title": "甲"},
+        {"location_name": "甲", "title": "甲的分店"},
+        {"location_name": "乙", "title": "乙"},
+        {"title": ""},
+        {"location_name": "丙", "title": "丙"},
+        {"location_name": "丁", "title": "丁"},
+        {"location_name": "戊", "title": "戊"},
+        {"location_name": "己", "title": "己"},
+    ])
+    names = [item["location_name"] for item in cards]
+    assert len(names) == 5
+    assert len(set(names)) == 5
+    view = public_preview("abc", {
+        "title": "甲", "summary": "看看", "description": "详细",
+        "location_name": "甲", "address": "路 1 号", "city": "苏州",
+        "suitable": "走走", "category": "公园", "image_urls": ["https://img.example/a.jpg"],
+    })
+    assert view["preview_id"] == "abc"
+    assert view["image_url"] == "https://img.example/a.jpg"
+
+
+def test_takeover_read_cursor_only_covers_human_messages():
+    assert service.takeover_message_read("assistant", {"human_takeover": True, "takeover_sequence": 1}, 5) is None
+    assert service.takeover_message_read("user", {"human_takeover": True, "takeover_sequence": 2}, 2) is True
+    assert service.takeover_message_read("user", {"human_takeover": True, "takeover_sequence": 3}, 2) is False
+    assert service.takeover_message_read("user", {"takeover_sequence": 1}, 5) is None
+
+
+def test_empty_music_invite_remains_a_valid_quota_turn():
+    from app.services.admin_takeover.ingress import quota_request_without_card
+    from app.services.runtime.chat_entrypoint import parse_client_chat_input
+
+    card = {
+        "version": 1,
+        "type": "music_track",
+        "title": "歌",
+        "subtitle": "歌手",
+        "body": "频道",
+        "footer": "邀请一起听",
+        "accent": "#1f6fff",
+        "payload": {
+            "intent": "invite",
+            "source": "music_page",
+            "track": {"id": "t1", "title": "歌"},
+        },
+    }
+    incoming = parse_client_chat_input({
+        "message": "",
+        "client_id": "music-invite-1",
+        "attachments": [],
+        "component_card": card,
+    })
+    original = json.loads(incoming.request.input_json)
+    quota_request = quota_request_without_card(incoming.request, original)
+    quota_input = json.loads(quota_request.input_json)
+
+    assert incoming.request.fingerprint != quota_request.fingerprint
+    assert incoming.request.request_key == quota_request.request_key
+    assert json.loads(incoming.request.input_json)["component_card"]["type"] == "music_track"
+    assert quota_input["component_card"] is None
+    assert quota_input["text"] == "［分享］"
+    assert quota_input["attachment_ids"] == []
+
+    written = parse_client_chat_input({
+        "message": "一起听这首",
+        "client_id": "music-invite-2",
+        "attachments": [],
+        "component_card": card,
+    })
+    kept = quota_request_without_card(
+        written.request, json.loads(written.request.input_json),
+    )
+    assert json.loads(kept.input_json)["text"] == "一起听这首"
 
 
 def test_avatar_urls_prefer_stored_portraits_over_wechat():

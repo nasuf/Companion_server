@@ -158,7 +158,8 @@ async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(req
             raise HTTPException(422, detail={"code": "invalid_resource"}) from None
         async def accepted_takeover():
             yield {"event": "ack", "data": json.dumps({"message_id": saved["message_id"],
-                "client_id": data.client_id, "duplicate": saved.get("duplicate", False)})}
+                "client_id": data.client_id, "duplicate": saved.get("duplicate", False),
+                "human_takeover": True})}
             yield {"event": "done", "data": json.dumps({"message_id": saved["message_id"], "acceptance_only": True})}
         return EventSourceResponse(accepted_takeover(), headers={"Cache-Control": "no-store"})
 

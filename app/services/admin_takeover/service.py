@@ -665,6 +665,42 @@ async def takeover_unread_summary(admin_id: str) -> dict:
             "sampled_at": str(row['sampled_at'])}
 
 
+def takeover_message_read(role: str, metadata: Any, admin_read_seq: int) -> bool | None:
+    """Whether this human-takeover user message is within the admin read cursor.
+
+    Other messages return None so clients keep the agent-delivery receipt.
+    """
+    if role != "user" or not isinstance(metadata, dict):
+        return None
+    if metadata.get("human_takeover") not in (True, "true"):
+        return None
+    try:
+        sequence = int(metadata.get("takeover_sequence"))
+    except (TypeError, ValueError):
+        return None
+    if sequence < 1:
+        return None
+    return sequence <= int(admin_read_seq)
+
+
+async def takeover_read_cursor(conversation_id: str) -> int | None:
+    rows = await db.query_raw(
+        """
+        SELECT admin_read_seq AS "adminReadSeq"
+        FROM human_takeovers
+        WHERE conversation_id=$1 AND status='active'
+        LIMIT 1
+        """,
+        conversation_id,
+    )
+    if not rows:
+        return None
+    try:
+        return int(_cell(rows[0], "adminReadSeq", "admin_read_seq") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
 async def mark_takeover_read(takeover_id: str, admin_id: str, message_id: str) -> bool:
     # A receipt only acknowledges the delivered prefix, never messages that
     # arrived after that snapshot. Monotonic positions serialize with ingress.
@@ -678,9 +714,55 @@ async def mark_takeover_read(takeover_id: str, admin_id: str, message_id: str) -
           AND m.id=$3 AND m.conversation_id=t.conversation_id AND m.role='user'
           AND m.metadata->>'human_takeover'='true'
           AND (m.metadata->>'takeover_sequence')::bigint BETWEEN 1 AND t.user_message_seq
-        RETURNING t.id
+        RETURNING t.conversation_id AS "conversationId", t.admin_read_seq AS "adminReadSeq"
     """, takeover_id, admin_id, message_id)
-    return bool(rows)
+    if not rows:
+        return False
+    conversation_id = str(_cell(rows[0], "conversationId", "conversation_id") or "")
+    try:
+        read_through = int(_cell(rows[0], "adminReadSeq", "admin_read_seq") or 0)
+    except (TypeError, ValueError):
+        read_through = 0
+    if conversation_id and read_through > 0:
+        from app.services.runtime.ws_manager import manager
+
+        try:
+            await manager.send_event(conversation_id, "takeover_read", {
+                "read_through_sequence": read_through,
+            })
+        except Exception as exc:
+            logger.warning("takeover read receipt failed: %s", type(exc).__name__)
+    return True
+
+
+async def publish_takeover_typing(
+    takeover_id: str, admin_id: str, active: bool, *, revision: int = 0,
+) -> bool:
+    """Forward the owning admin's composer state to the user's chat socket."""
+    if type(active) is not bool or type(revision) is not int or revision < 0:
+        raise ValueError("invalid_typing")
+    rows = await db.query_raw(
+        """
+        SELECT conversation_id AS "conversationId"
+        FROM human_takeovers
+        WHERE id=$1 AND owner_admin_id=$2 AND status='active'
+        LIMIT 1
+        """,
+        takeover_id,
+        admin_id,
+    )
+    if not rows:
+        return False
+    conversation_id = str(_cell(rows[0], "conversationId", "conversation_id") or "")
+    if not conversation_id:
+        return False
+    from app.services.runtime.ws_manager import manager
+
+    await manager.send_event(conversation_id, "takeover_typing", {
+        "active": active,
+        "revision": revision,
+    })
+    return True
 
 
 async def record_takeover_user_message(
@@ -703,6 +785,16 @@ async def record_takeover_user_message(
     )
     if not saved["created"]:
         return {"message_id": saved["message_id"], "duplicate": True}
+    attachments = (saved.get("metadata") or {}).get("attachments") or []
+    if any(isinstance(item, dict) and item.get("kind") == "image" for item in attachments):
+        from app.services.admin_takeover.activities import recognize_takeover_activity_photos
+
+        fire_background(recognize_takeover_activity_photos(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            message_id=saved["message_id"],
+            user_text=text,
+        ))
     row = saved["row"]
     message_id = saved["message_id"]
     preview = _trim(text, _PREVIEW_LIMIT) or "［新消息］"
@@ -740,7 +832,12 @@ async def record_takeover_user_message(
         except Exception as exc:
             logger.warning("takeover notification failed after commit: %s", type(exc).__name__)
     _kick_notification_dispatch()
-    return {"message_id": message_id, "owner_admin_id": owner_id, "takeover_id": takeover_id}
+    return {
+        "message_id": message_id,
+        "owner_admin_id": owner_id,
+        "takeover_id": takeover_id,
+        "takeover_sequence": saved["metadata"].get("takeover_sequence"),
+    }
 
 
 async def _push_owner_message(

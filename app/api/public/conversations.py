@@ -268,6 +268,19 @@ async def list_messages(
         )
         for m in messages
     ]
+    if include_metadata and any(
+        isinstance(item.metadata, dict) and item.metadata.get("human_takeover") in (True, "true")
+        for item in items
+    ):
+        from app.services.admin_takeover.service import (
+            takeover_message_read,
+            takeover_read_cursor,
+        )
+
+        cursor = await takeover_read_cursor(conversation_id)
+        if cursor is not None:
+            for item in items:
+                item.read = takeover_message_read(item.role, item.metadata, cursor)
     # admin 显式请求时给带 trace_id 的回复消息附本轮 LLM 用量 (tokens/缓存/
     # 费用), 展示在 Trace 按钮旁. 仅 admin: 成本数据属运营信息, 普通用户
     # 的消息列表保持原 payload.

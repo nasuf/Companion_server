@@ -1113,6 +1113,8 @@ async def _send_ack(
     client_id: str | None,
     plan: UserMessageAggregationPlan | None = None,
     reply_context: dict | None = None,
+    human_takeover: bool = False,
+    takeover_sequence: int | None = None,
 ) -> None:
     """spec 之外的工程扩展: persist 落库后立刻发 ack 给前端.
 
@@ -1132,6 +1134,16 @@ async def _send_ack(
                 "client_id": client_id,
                 "received_at": _now_corrected().isoformat(),
                 **ui_timing,
+                # Stored for a human admin. The client must not treat this as
+                # a read receipt or as the agent starting to type.
+                **(
+                    {
+                        "human_takeover": True,
+                        "takeover_sequence": takeover_sequence,
+                    }
+                    if human_takeover
+                    else {}
+                ),
             },
         })
     except Exception as e:
@@ -1268,7 +1280,14 @@ async def _handle_takeover_user_message(
             "message": "消息或附件无效，请检查后重新发送", "client_id": client_id,
         }})
         return
-    await _send_ack(ws, message_id=saved["message_id"], client_id=client_id)
+    sequence = saved.get("takeover_sequence")
+    await _send_ack(
+        ws,
+        message_id=saved["message_id"],
+        client_id=client_id,
+        human_takeover=True,
+        takeover_sequence=sequence if type(sequence) is int else None,
+    )
 
 
 async def _handle_message(

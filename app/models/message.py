@@ -16,6 +16,9 @@ class MessageResponse(BaseModel):
     content: str
     metadata: dict | None = None
     created_at: str | None = None
+    # None keeps the historical "delivered to the agent" receipt. A bool is
+    # only set for messages a human admin has or has not actually read.
+    read: bool | None = None
 
 
 class ChatRequest(BaseModel):

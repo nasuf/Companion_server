@@ -8,6 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
+from app.services.admin_takeover.activities import (
+    list_activity_previews,
+    publish_activity_preview,
+)
 from app.services.admin_takeover.service import (
     STATUS_OVERRIDE_VALUES,
     TakeoverClaimError,
@@ -16,6 +20,7 @@ from app.services.admin_takeover.service import (
     list_takeovers,
     takeover_unread_summary,
     mark_takeover_read,
+    publish_takeover_typing,
     review_takeover,
     send_admin_message,
     set_status_override,
@@ -59,6 +64,11 @@ class TakeoverStatusRequest(BaseModel):
 
 class TakeoverReadRequest(BaseModel):
     message_id: str = Field(min_length=1, max_length=249)
+
+
+class TakeoverTypingRequest(BaseModel):
+    active: bool
+    revision: int = Field(default=0, ge=0, le=2_147_483_647)
 
 
 def _admin_id(claims: dict) -> str:
@@ -146,6 +156,47 @@ async def post_claim(takeover_id: str, claims: dict = Depends(require_takeover_a
 @router.post("/{takeover_id}/read")
 async def post_read(takeover_id: str, body: TakeoverReadRequest, claims: dict = Depends(require_takeover_admin)):
     ok = await mark_takeover_read(takeover_id, _admin_id(claims), body.message_id)
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not the owning admin")
+    return {"ok": True}
+
+
+@router.post("/{takeover_id}/activity-previews")
+async def post_activity_previews(takeover_id: str, claims: dict = Depends(require_takeover_admin)):
+    try:
+        items = await list_activity_previews(takeover_id, _admin_id(claims))
+    except ValueError as error:
+        code = str(error)
+        if code == "location_required":
+            raise HTTPException(422, detail="还没有这个用户的所在城市，暂时不能生成活动") from None
+        if code == "conversation_required":
+            raise HTTPException(422, detail="这个用户还没有可用的会话") from None
+        raise HTTPException(503, detail="暂时没找到合适的新去处，请稍后再试") from None
+    if items is None:
+        raise HTTPException(403, detail="Not the owning admin")
+    return {"items": items}
+
+
+@router.post("/{takeover_id}/activity-previews/{preview_id}/publish")
+async def post_publish_activity_preview(
+    takeover_id: str, preview_id: str, claims: dict = Depends(require_takeover_admin),
+):
+    try:
+        published = await publish_activity_preview(takeover_id, _admin_id(claims), preview_id)
+    except ValueError as error:
+        if str(error) == "preview_expired":
+            raise HTTPException(404, detail="这批推荐已过期，请重新生成") from None
+        raise HTTPException(422, detail="暂时不能推送这个活动") from None
+    if published is None:
+        raise HTTPException(403, detail="Not the owning admin")
+    return published
+
+
+@router.post("/{takeover_id}/typing")
+async def post_typing(takeover_id: str, body: TakeoverTypingRequest, claims: dict = Depends(require_takeover_admin)):
+    ok = await publish_takeover_typing(
+        takeover_id, _admin_id(claims), body.active, revision=body.revision,
+    )
     if not ok:
         raise HTTPException(status_code=403, detail="Not the owning admin")
     return {"ok": True}
