@@ -74,18 +74,19 @@ def test_failed_candidate_does_not_count_as_valid_copy(root):
 def test_missing_partial_legacy_and_pagination_are_distinct(root):
     for i in range(1,26): complete(root,i)
     (root/".unfinished.tmp").write_bytes(b"x")
-    (root/"companion_20260901T000000Z.dump").write_bytes(b"old")
+    legacy = root / "companion_20260901T000000Z.dump"
+    legacy.write_bytes(b"old")
+    # Filename age is not the sort key. Pin mtime so the legacy dump stays last
+    # even when writing the validated copies takes more than one second.
+    old = (engine.now() - timedelta(days=40)).timestamp()
+    os.utime(legacy, (old, old))
     (root/"companion_20261012T230000Z_aabbccdd.dump").write_bytes(b"incomplete")
     report=db_backup.list_report(limit=20)
     assert report["total"]==26 and len(report["backups"])==20 and report["has_more"]
     page2=db_backup.list_report(offset=20)
     assert len(page2["backups"])==6 and not page2["has_more"]
-    # Listing uses file timestamps; creating this legacy-named file now does
-    # not guarantee it is the oldest item on every filesystem.
-    rows = report["backups"] + page2["backups"]
-    assert len({row["name"] for row in rows}) == 26
-    legacy = next(row for row in rows if row["name"] == "companion_20260901T000000Z.dump")
-    assert legacy["integrity"] == "not_checked"  # legacy is not silently qualified
+    assert page2["backups"][-1]["name"] == legacy.name
+    assert page2["backups"][-1]["integrity"]=="not_checked"  # legacy is not silently qualified
     assert len(report["summary"]["warnings"])>=2
     assert "not_configured"==report["summary"]["offsite"]
 
