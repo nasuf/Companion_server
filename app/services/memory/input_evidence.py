@@ -10,7 +10,7 @@ from app.services.memory.evidence import EvidenceSource, content_version
 
 INPUT_FORMAT = "memory-input-v1"
 INPUT_MAX_BYTES = 8 * 1024 * 1024
-INPUT_KINDS = frozenset({"knowledge_document", "admin_edit", "user_edit", "admin_repair", "contradiction_confirmation"})
+INPUT_KINDS = frozenset({"knowledge_document", "admin_edit", "user_edit", "admin_repair", "contradiction_confirmation", "daily_summary"})
 
 
 @dataclass(frozen=True)

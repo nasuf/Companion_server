@@ -322,3 +322,43 @@ ignore the additive origin kind after rollback. Model judgement can still be wro
 this batch guarantees write consistency and provenance, not semantic infallibility.
 No historical evidence is fabricated, no production test memory is inserted, and
 all unrelated lifecycle/load, deletion-barrier and source-entry tasks remain open.
+
+
+## Daily reviews (daily-review-v1)
+
+New daily-summary memories bind one immutable, private `daily_summary` input
+origin to every output. The snapshot records the Asia/Shanghai day window,
+workspace and owner/Agent generations, canonical persona fields, source IDs and
+versions, rendered summary/classification prompts, decoded model outputs and the
+configured model name when available. These are generation inputs, not a truth
+verdict or proof of delivery, execution, or model-provider response identity.
+Registry prompt text and existing historical sources are not rewritten.
+
+Input collection is bounded to 96 schedule slots, 100 adjustment rows, the latest
+5 proactive utterances (with an explicit sampling flag), and 200 game records.
+Queries fail closed instead of substituting an empty result. Plans, generated
+utterances and settled/unsettled game records remain semantically distinct;
+conversation summaries are explicitly uncollected. No user-location memory is
+injected into the Agent review. Input overflow fails the attempt; it does not
+silently produce a partial daily summary.
+
+After model and embedding work, the transaction rechecks active scope,
+execution generations, source versions and human takeover. It commits all new
+L3 memories, vectors, immutable input, evidence links, changelogs and the daily
+completion marker together. Faults leave no partial memories; the existing
+single-attempt daily claim is marked failed. A crash can still leave a running
+claim for operator diagnosis; automatic retry of an unknown outcome is not
+introduced here. A unique scope/day receipt prevents recreating deleted results.
+Existing factual memories are neither merged nor overwritten by generated
+summaries. Persona grounding, category restrictions, same-side semantic dedup,
+maximum 5 outputs and the 2000-row lifetime scope budget remain enforced.
+
+The admin source panel exposes only a validated projection: review date,
+timezone, input collection time and bounded category counts. It never returns
+private input text, prompts, model outputs, or other users' source IDs. Missing
+or inaccessible details are not shown as zero. Existing scheduler health carries
+failed attempts; per-workspace review aggregate dashboards remain in M02.06/O01.
+Deleting the source makes its detail unavailable while preserving link history.
+Old reviews keep their historical unknown status. This batch proves transaction
+and scope behavior, not semantic accuracy of every generated summary or a
+complete lifecycle deletion barrier (M02.04).

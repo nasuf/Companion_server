@@ -1566,6 +1566,7 @@ model ScheduleAdjustLog {
   reason     String?
   createdAt  DateTime @default(now()) @map("created_at")
 
+  @@index([agentId, createdAt], map: "schedule_adjust_logs_agent_created_idx")
   @@map("schedule_adjust_logs")
 }
 

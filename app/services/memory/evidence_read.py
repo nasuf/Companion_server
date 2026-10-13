@@ -3,10 +3,56 @@ from __future__ import annotations
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import datetime, timezone
+import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.db import db
 from app.services.memory.evidence import _table, content_version
 from app.services.memory.legacy_evidence_read import legacy_evidence_preview
+
+
+def daily_summary_details(value):
+    """Only a fixed non-content projection of the private snapshot reaches admins."""
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("timezone"), str)
+        or len(value["timezone"]) > 64
+    ):
+        return None
+    if not isinstance(value.get("local_date"), str) or not re.fullmatch(
+        r"20[0-9]{2}-[0-9]{2}-[0-9]{2}", value["local_date"]
+    ):
+        return None
+    try:
+        ZoneInfo(value["timezone"])
+        datetime.strptime(value["local_date"], "%Y-%m-%d")
+        if datetime.fromisoformat(value["sampled_at"]).tzinfo is None:
+            return None
+    except (ValueError, TypeError, KeyError, ZoneInfoNotFoundError):
+        return None
+    bounds = {
+        "schedule_slots": 96,
+        "adjustments": 100,
+        "proactive_messages": 5,
+        "games": 200,
+    }
+    if any(
+        type(value.get(k)) is not int or not 0 <= value[k] <= limit
+        for k, limit in bounds.items()
+    ):
+        return None
+    if type(value.get("proactive_truncated")) is not bool:
+        return None
+    return {
+        key: value[key]
+        for key in (
+            *bounds,
+            "local_date",
+            "timezone",
+            "sampled_at",
+            "proactive_truncated",
+        )
+    }
 
 
 def _cursor(value: str | None) -> str:
@@ -74,6 +120,7 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
              CASE WHEN i.source_status='admin_repair' THEN i.payload_text::jsonb->'input'->>'action' END AS repair_action,
              CASE WHEN i.source_status='contradiction_confirmation'
                THEN i.payload_text::jsonb->'input'->>'change_type' END AS confirmation_change,
+             CASE WHEN i.source_status='daily_summary' THEN i.payload_text::jsonb->'input'->'summary' END AS daily_summary,
              p.is_archived AS parent_archived
            FROM memory_evidence_links e
            LEFT JOIN messages m ON m.id=e.source_message_id
@@ -101,6 +148,7 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
             "conversation_id":row["conversation_id"] if accessible and row["source_kind"]=="message" else None,
             "source_archived":row["parent_archived"] if accessible and row["source_kind"]=="memory" else None,
             "repair_action":row["repair_action"] if accessible and row["source_kind"]=="input" and row["repair_action"] in {"merge_memories","insert_replacement_memory","archive_memory","downgrade_memory","mark_verified"} else None,
+            "daily_summary": daily_summary_details(row["daily_summary"]) if accessible and row["source_kind"]=="input" else None,
             "confirmation_change": row["confirmation_change"] if accessible and row["source_kind"]=="input"
                 and row["confirmation_change"] in {"变化","错误","新增"} else None,
             "profile": {"input_status":row["profile_input_status"], "format_version":row["profile_format_version"]}
