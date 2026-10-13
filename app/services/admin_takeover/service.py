@@ -735,6 +735,43 @@ async def mark_takeover_read(takeover_id: str, admin_id: str, message_id: str) -
     return True
 
 
+async def notify_takeover_transcript(
+    conversation_id: str | None, message_id: str | None,
+) -> None:
+    """Tell the owning admin that the taken-over transcript changed."""
+    if not conversation_id or not message_id:
+        return
+    try:
+        rows = await db.query_raw(
+            """
+            SELECT id, owner_admin_id AS "ownerAdminId"
+            FROM human_takeovers
+            WHERE conversation_id=$1 AND status='active' AND owner_admin_id IS NOT NULL
+            LIMIT 1
+            """,
+            conversation_id,
+        )
+    except Exception as exc:
+        logger.warning("takeover transcript lookup failed: %s", type(exc).__name__)
+        return
+    if not rows:
+        return
+    owner_id = str(_cell(rows[0], "ownerAdminId", "owner_admin_id") or "")
+    takeover_id = str(_cell(rows[0], "id") or "")
+    if not owner_id or not takeover_id:
+        return
+    from app.services.runtime.ws_manager import manager
+
+    try:
+        await manager.send_to_admin(owner_id, "takeover_transcript", {
+            "takeover_id": takeover_id,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+        })
+    except Exception as exc:
+        logger.warning("takeover transcript notify failed: %s", type(exc).__name__)
+
+
 async def publish_takeover_typing(
     takeover_id: str, admin_id: str, active: bool, *, revision: int = 0,
 ) -> bool:

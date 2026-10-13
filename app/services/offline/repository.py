@@ -1905,7 +1905,7 @@ async def mark_message_recognized(message_id: str | None, tier: str) -> None:
     （否则该标记只存在于实时 WS 的内存态，重载即丢）。metadata 用 jsonb 合并，不覆盖其他键。"""
     if not message_id:
         return
-    await db.execute_raw(
+    rows = await db.query_raw(
         """
         UPDATE messages
         SET metadata = COALESCE(metadata, '{}'::jsonb)
@@ -1914,10 +1914,24 @@ async def mark_message_recognized(message_id: str | None, tier: str) -> None:
                               'offline_fragment_tier', $2::text
                           )
         WHERE id = $1
+        RETURNING conversation_id
         """,
         message_id,
         tier,
     )
+    conversation_id = None
+    if rows:
+        raw_conversation = _field(rows[0], "conversation_id", "conversationId")
+        conversation_id = str(raw_conversation) if raw_conversation else None
+    try:
+        from app.services.admin_takeover.service import notify_takeover_transcript
+
+        await notify_takeover_transcript(conversation_id, message_id)
+    except Exception as exc:
+        logger.warning(
+            "takeover recognition transcript notify failed: %s",
+            type(exc).__name__,
+        )
 
 
 async def claim_activity_followup(message_id: str | None) -> bool:

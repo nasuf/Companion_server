@@ -313,3 +313,89 @@ def test_avatar_urls_fall_back_when_local_portraits_are_missing():
 
     assert user_url == "https://thirdwx.qlogo.cn/mmopen/a"
     assert agent_url == "https://cdn.example/agent.png"
+
+
+@pytest.mark.asyncio
+async def test_transcript_notify_reaches_the_owning_admin(monkeypatch):
+    from app.services.runtime.ws_manager import manager
+
+    sent = AsyncMock()
+    monkeypatch.setattr(
+        service.db, "query_raw",
+        AsyncMock(return_value=[{"id": "t1", "ownerAdminId": "admin-1"}]),
+    )
+    monkeypatch.setattr(manager, "send_to_admin", sent)
+
+    await service.notify_takeover_transcript("c1", "m1")
+
+    sent.assert_awaited_once_with("admin-1", "takeover_transcript", {
+        "takeover_id": "t1",
+        "conversation_id": "c1",
+        "message_id": "m1",
+    })
+
+
+@pytest.mark.asyncio
+async def test_transcript_notify_skips_when_the_chat_is_not_taken_over(monkeypatch):
+    from app.services.runtime.ws_manager import manager
+
+    sent = AsyncMock()
+    queried = AsyncMock(return_value=[])
+    monkeypatch.setattr(service.db, "query_raw", queried)
+    monkeypatch.setattr(manager, "send_to_admin", sent)
+
+    await service.notify_takeover_transcript("c1", "m1")
+    await service.notify_takeover_transcript("", "m1")
+
+    queried.assert_awaited_once()
+    sent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transcript_notify_swallows_lookup_failure(monkeypatch):
+    async def down(*_args, **_kwargs):
+        raise RuntimeError("db")
+
+    monkeypatch.setattr(service.db, "query_raw", down)
+
+    await service.notify_takeover_transcript("c1", "m1")
+
+
+@pytest.mark.asyncio
+async def test_recognition_mark_keeps_the_sql_column_and_notifies(monkeypatch):
+    from app.services.offline import repository
+
+    queried = AsyncMock(return_value=[{"conversation_id": "c1"}])
+    notified = AsyncMock()
+    monkeypatch.setattr(repository.db, "query_raw", queried)
+    monkeypatch.setattr(service, "notify_takeover_transcript", notified)
+
+    await repository.mark_message_recognized("m1", "gold")
+
+    sql, message_id, tier = queried.await_args.args
+    assert "RETURNING conversation_id" in sql
+    assert '"conversationId"' not in sql
+    assert message_id == "m1"
+    assert tier == "gold"
+    notified.assert_awaited_once_with("c1", "m1")
+
+
+@pytest.mark.asyncio
+async def test_activity_emit_notifies_after_the_message_is_stored(monkeypatch):
+    from app.services.offline import chat_emit
+
+    notified = AsyncMock()
+    monkeypatch.setattr(
+        chat_emit, "emit_proactive_message", AsyncMock(return_value="m1"),
+    )
+    monkeypatch.setattr(chat_emit, "_notify_takeover_transcript", notified)
+
+    result = await chat_emit.emit_assistant(
+        conversation_id="c1", user_id="u1", agent_id="a1",
+        workspace_id="w1", message="一起去看看",
+        real_world_type="activity", source_id="act1",
+        trigger_type="offline_activity_recommendation",
+    )
+
+    assert result == "m1"
+    notified.assert_awaited_once_with("c1", "m1")

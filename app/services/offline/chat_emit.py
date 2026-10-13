@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from prisma import Json
 
@@ -54,7 +57,7 @@ async def emit_assistant(
         "source_id": source_id,
         **(extra_metadata or {}),
     }
-    return await emit_proactive_message(
+    message_id = await emit_proactive_message(
         conversation_id=conversation_id,
         user_id=user_id,
         agent_id=agent_id,
@@ -67,6 +70,8 @@ async def emit_assistant(
         guard_activity_id=source_id if guard_delivery_key else None,
         guard_delivery_key=guard_delivery_key,
     )
+    await _notify_takeover_transcript(conversation_id, message_id)
+    return message_id
 
 
 def build_activity_component_card(activity: dict[str, Any], *, status_label: str) -> dict[str, Any]:
@@ -159,7 +164,7 @@ async def emit_activity_card(
         "source_id": activity.get("id"),
         "component_card": card,
     }
-    return await emit_proactive_message(
+    message_id = await emit_proactive_message(
         conversation_id=conversation_id,
         user_id=user_id,
         agent_id=agent_id,
@@ -169,6 +174,8 @@ async def emit_activity_card(
         extra_metadata=metadata,
         ws_payload_extra={"component_card": card},
     )
+    await _notify_takeover_transcript(conversation_id, message_id)
+    return message_id
 
 
 async def emit_thought_fragment(
@@ -192,7 +199,7 @@ async def emit_thought_fragment(
         "lead_in": fragment.get("lead_in") or "",
         "source_message_id": source_message_id,
     }
-    return await emit_proactive_message(
+    message_id = await emit_proactive_message(
         conversation_id=conversation_id,
         user_id=user_id,
         agent_id=agent_id,
@@ -209,6 +216,8 @@ async def emit_thought_fragment(
         voice_eligible=False,
         trace_id=trace_id,
     )
+    await _notify_takeover_transcript(conversation_id, message_id)
+    return message_id
 
 
 async def emit_gift_card(
@@ -302,4 +311,16 @@ async def insert_user_component_message(
             **metadata,
         },
     )
+    await _notify_takeover_transcript(conversation_id, created.id)
     return created.id
+
+
+async def _notify_takeover_transcript(conversation_id: str | None, message_id: str | None) -> None:
+    if not conversation_id or not message_id:
+        return
+    try:
+        from app.services.admin_takeover.service import notify_takeover_transcript
+
+        await notify_takeover_transcript(conversation_id, message_id)
+    except Exception as exc:
+        logger.warning("takeover activity transcript notify failed: %s", type(exc).__name__)
