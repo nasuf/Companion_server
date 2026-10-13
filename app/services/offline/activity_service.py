@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
@@ -181,6 +182,7 @@ async def create_recommendation_for_user(
     user_id: str,
     workspace_id: str | None = None,
     source: str = "manual",
+    publication_guard: Callable[[dict], Awaitable[None]] | None = None,
 ) -> dict | None:
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     if not ctx or not ctx.get("conversation_id"):
@@ -189,6 +191,8 @@ async def create_recommendation_for_user(
                 "reason": "conversation_required", "message": "请先创建或打开一个聊天会话，再生成活动。",
             })
         return None
+    if publication_guard is not None:
+        await publication_guard(ctx)
     city, search_anchor, match_terms = _location_for_activity(ctx)
     if not city:
         if source == "manual":
@@ -228,6 +232,17 @@ async def create_recommendation_for_user(
             coords = await geocode_address(card.get("address"), card.get("city") or city)
             place_lat, place_lng = coords if coords else (None, None)
             place_key = make_place_key(card.get("location_name"), card.get("address"), card.get("city") or city)
+        message: str | None = None
+        if publication_guard is not None:
+            await publication_guard(ctx)
+            # Finish the remaining model call before persistence. Losing the
+            # claim during invitation generation must not leave an unsent plan.
+            message = await generate_activity_invite_message(
+                activity=card,
+                user_id=user_id,
+                workspace_id=ctx["workspace_id"],
+            )
+            await publication_guard(ctx)
         activity = await repo.create_activity(
             {
                 **card,
@@ -241,11 +256,14 @@ async def create_recommendation_for_user(
                 "place_key": place_key,
             }
         )
-        message = await generate_activity_invite_message(
-            activity=activity,
-            user_id=user_id,
-            workspace_id=ctx["workspace_id"],
-        )
+        if message is None:
+            message = await generate_activity_invite_message(
+                activity=activity,
+                user_id=user_id,
+                workspace_id=ctx["workspace_id"],
+            )
+        if publication_guard is not None:
+            await publication_guard(ctx)
         await emit_assistant(
             conversation_id=ctx["conversation_id"],
             user_id=user_id,
