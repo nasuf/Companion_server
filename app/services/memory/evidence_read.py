@@ -55,6 +55,19 @@ def daily_summary_details(value):
     }
 
 
+def consolidation_details(value):
+    """A bounded public projection; private parents/prompts never leave storage."""
+    if (not isinstance(value, dict) or value.get("side") not in ("user", "ai")
+            or type(value.get("parents")) is not int or not 5 <= value["parents"] <= 300):
+        return None
+    try:
+        if datetime.fromisoformat(value["sampled_at"]).tzinfo is None:
+            return None
+    except (ValueError, TypeError, KeyError):
+        return None
+    return {key: value[key] for key in ("side", "parents", "sampled_at")}
+
+
 def _cursor(value: str | None) -> str:
     if value is None:
         return ""
@@ -121,6 +134,7 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
              CASE WHEN i.source_status='contradiction_confirmation'
                THEN i.payload_text::jsonb->'input'->>'change_type' END AS confirmation_change,
              CASE WHEN i.source_status='daily_summary' THEN i.payload_text::jsonb->'input'->'summary' END AS daily_summary,
+             CASE WHEN i.source_status='consolidation' THEN i.payload_text::jsonb->'input'->'summary' END AS consolidation,
              p.is_archived AS parent_archived
            FROM memory_evidence_links e
            LEFT JOIN messages m ON m.id=e.source_message_id
@@ -148,6 +162,7 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
             "conversation_id":row["conversation_id"] if accessible and row["source_kind"]=="message" else None,
             "source_archived":row["parent_archived"] if accessible and row["source_kind"]=="memory" else None,
             "repair_action":row["repair_action"] if accessible and row["source_kind"]=="input" and row["repair_action"] in {"merge_memories","insert_replacement_memory","archive_memory","downgrade_memory","mark_verified"} else None,
+            "consolidation": consolidation_details(row.get("consolidation")) if accessible and row["source_kind"]=="input" else None,
             "daily_summary": daily_summary_details(row["daily_summary"]) if accessible and row["source_kind"]=="input" else None,
             "confirmation_change": row["confirmation_change"] if accessible and row["source_kind"]=="input"
                 and row["confirmation_change"] in {"变化","错误","新增"} else None,

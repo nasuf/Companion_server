@@ -31,71 +31,6 @@ def _row(mid: str, content: str = "早上七点起床") -> dict:
     }
 
 
-class TestArchivalIsAllOrNothing:
-    @pytest.mark.asyncio
-    async def test_failed_staged_cleanup_is_reported_without_masking_archive_error(self, monkeypatch, caplog):
-        from contextlib import asynccontextmanager
-        from types import SimpleNamespace
-        @asynccontextmanager
-        async def transaction(**kwargs):
-            yield SimpleNamespace(query_raw=AsyncMock(side_effect=RuntimeError("cleanup unavailable")))
-        monkeypatch.setattr(consolidation.db, "tx", transaction)
-        await consolidation._rollback_digest(source="ai", digest_id="staged-only")
-        assert "digest rollback failed for staged-only" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_partial_archive_rolls_back_the_staged_digest(self):
-        rows = [_row(f"m{i}") for i in range(5)]
-        with (
-            patch.object(consolidation, "store_memory", AsyncMock(return_value="digest-1")) as store,
-            patch.object(consolidation, "get_prompt_text", AsyncMock(return_value="{memory_items}")),
-            patch.object(consolidation, "invoke_json", AsyncMock(return_value={"summary": "那段时间作息一直很规律"})),
-            patch.object(consolidation, "get_utility_model", lambda: object()),
-            patch.object(consolidation, "_archive_originals", AsyncMock(side_effect=RuntimeError("originals changed"))),
-            patch.object(consolidation, "_rollback_digest", AsyncMock()) as rollback,
-        ):
-            result = await consolidation._compress_cluster(source="ai", user_id="u1", workspace_id="w1", cluster=rows)
-        assert result is None
-        assert store.await_args.kwargs["_consolidation_staged"] is True
-        rollback.assert_awaited_once_with(source="ai", digest_id="digest-1")
-
-    @pytest.mark.asyncio
-    async def test_locked_originals_audit_archive_and_publish_share_one_transaction(self, monkeypatch):
-        from contextlib import asynccontextmanager
-        from types import SimpleNamespace
-        rows = [_row(f"m{i}", f"第 {i} 天午休听播客") for i in range(5)]
-        tx = SimpleNamespace(query_raw=AsyncMock(side_effect=[[{"id": "digest-1"}], rows]), execute_raw=AsyncMock())
-        events = []
-        @asynccontextmanager
-        async def transaction(**kwargs):
-            events.append("begin")
-            yield tx
-            events.append("commit")
-        async def invalidate(*args): events.append("invalidate")
-        monkeypatch.setattr(consolidation.db, "tx", transaction)
-        monkeypatch.setattr(consolidation.memory_repo, "invalidate_scope", invalidate)
-        await consolidation._archive_originals(source="ai", user_id="u1", workspace_id="w1", originals=rows, digest_id="digest-1")
-        assert events == ["begin", "commit", "invalidate"]
-        assert all("FOR UPDATE" in c.args[0] for c in tx.query_raw.await_args_list)
-        audit, archive, publish = tx.execute_raw.await_args_list
-        assert "old_value" in audit.args[0] and "第 0 天午休听播客" in audit.args[5]
-        assert "is_archived=true" in archive.args[0] and "ANY($1::text[])" in archive.args[0]
-        assert "is_archived=false" in publish.args[0] and publish.args[1] == "digest-1"
-
-    @pytest.mark.asyncio
-    async def test_changed_original_aborts_before_audit_or_archive(self, monkeypatch):
-        from contextlib import asynccontextmanager
-        from types import SimpleNamespace
-        rows = [_row(f"m{i}") for i in range(5)]
-        tx = SimpleNamespace(query_raw=AsyncMock(side_effect=[[{"id": "digest-1"}], rows[:-1]]), execute_raw=AsyncMock())
-        @asynccontextmanager
-        async def transaction(**kwargs): yield tx
-        monkeypatch.setattr(consolidation.db, "tx", transaction)
-        with pytest.raises(RuntimeError, match="originals changed"):
-            await consolidation._archive_originals(source="ai", user_id="u1", workspace_id="w1", originals=rows, digest_id="digest-1")
-        tx.execute_raw.assert_not_awaited()
-
-
 class TestDigestsStayInTheColdTier:
     def test_consolidation_candidates_exclude_the_exempt_provenances(self):
         """候选白名单目前本就把它们挡在外面, 显式排除是为了以后放宽白名单时
@@ -145,12 +80,6 @@ class TestDigestsStayInTheColdTier:
         assert set(exempt) == set(COMPRESSION_EXEMPT)
         assert CONSOLIDATED in exempt and REFLECTED in exempt
 
-    def test_digests_are_clamped_to_the_cold_tier(self):
-        import inspect
-
-        source = inspect.getsource(consolidation._compress_cluster)
-        assert "level=3" in source
-        assert "min(0.49" in source
 
 
 class TestEnabledByDefault:

@@ -1,6 +1,6 @@
 """L3 cluster compression (Phase 2 记忆整合).
 
-The daily-life summary cron adds 5-10 trivial L3 self-memories per agent per
+The daily-life summary cron adds up to five L3 self-memories per agent per
 day ("早上七点起床…"), and chat extraction adds more. L3 rows are only read by
 L3 awakening, but they grow linearly and drown retrieval signal. This job
 compresses same-topic L3 clusters into ONE summary memory and archives the
@@ -11,7 +11,7 @@ pairs via reconciliation; this job merges *many related-but-distinct* episodic
 rows (5+ per cluster) into a digest.
 
 Safety posture:
-- Gated behind settings.memory_consolidation_enabled (default OFF).
+- Gated behind settings.memory_consolidation_enabled (currently default ON).
 - Originals are archived with a `consolidated_into:<id>` changelog trail.
 - Only L3, only rows older than _MIN_AGE_DAYS. Candidate set = daily_summary
   rows (regardless of access history — trivia that has been injected before is
@@ -35,13 +35,15 @@ from app.services.memory.provenance import (
     CONSOLIDATED,
     DAILY_SUMMARY,
 )
-from app.services.memory.storage import repo as memory_repo
-from app.services.memory.storage.persistence import store_memory
+from app.services.memory.storage.persistence import _generated_self_memory_allowed
+from app.services.memory.storage.embedding import generate_embedding
+from app.services.memory.lifecycle.consolidation_write import (
+    prepare_cluster, commit_cluster, MIN_AGE_DAYS as _MIN_AGE_DAYS, MAX_PARENTS as _CANDIDATE_LIMIT,
+)
 from app.services.prompting.store import PromptDisabledError, get_prompt_text
 
 logger = logging.getLogger(__name__)
 
-_MIN_AGE_DAYS = 30
 _MIN_CLUSTER_SIZE = 5
 
 # 聚类阈值随嵌入模型走。0.75 是 bge-m3 时代定的, 换到 qwen3-embedding 后同题记忆
@@ -54,7 +56,6 @@ _MIN_CLUSTER_SIZE = 5
 # 重新标定: scripts/calibrate_cluster_threshold.py
 _CLUSTER_SIMILARITY = 0.55
 _MAX_CLUSTERS_PER_WORKSPACE = 10
-_CANDIDATE_LIMIT = 300
 
 
 async def _load_candidates(
@@ -153,10 +154,13 @@ async def _compress_cluster(
     *, source: str, user_id: str, workspace_id: str | None, cluster: list[dict],
 ) -> str | None:
     """LLM-compress one cluster into a digest memory; archive the originals."""
-    items = "\n".join(
-        f"- {(c.get('content') or '').strip()}"
-        for c in cluster
-    )
+    try:
+        inputs = await prepare_cluster(db, source=source, user_id=user_id,
+                                       workspace_id=workspace_id, cluster=cluster)
+    except Exception as exc:
+        logger.warning("Consolidation input rejected: %s", type(exc).__name__)
+        return None
+    items = "\n".join(f"- {p['content'].strip()}" for p in inputs["parents"])
     try:
         tpl = await get_prompt_text("memory.consolidation")
     except PromptDisabledError:
@@ -164,126 +168,34 @@ async def _compress_cluster(
         return None
     prompt = tpl.format(
         owner="我" if source == "ai" else "用户",
-        main_category=cluster[0].get("main_category") or "生活",
-        sub_category=cluster[0].get("sub_category") or "其他",
+        main_category=inputs["parents"][0].get("main_category") or "生活",
+        sub_category=inputs["parents"][0].get("sub_category") or "其他",
         memory_items=items,
     )
+    model = get_utility_model()
     try:
-        result = await invoke_json(get_utility_model(), prompt)
-    except Exception as e:
-        logger.warning(f"consolidation LLM failed: {e}")
+        result = await invoke_json(model, prompt)
+        digest = result.get("summary") if isinstance(result, dict) else None
+        if not isinstance(digest, str) or len(digest.strip()) < 8:
+            return None
+        digest = digest.strip()
+        from app.services.memory.retrieval.context_selector import estimate_tokens
+        if estimate_tokens(digest) > 180:
+            logger.warning("Consolidation digest exceeds per-memory context budget")
+            return None
+        if source == "ai" and not await _generated_self_memory_allowed(
+                user_id, workspace_id, digest, CONSOLIDATED):
+            return None
+        embedding = await generate_embedding(digest)
+        model_name = getattr(model, "model_name", None) or getattr(model, "model", None)
+        return await commit_cluster(db, source=source, user_id=user_id, workspace_id=workspace_id,
+            inputs=inputs, digest=digest, embedding=embedding, prompt=prompt,
+            model_name=model_name if isinstance(model_name, str) else None, output=result)
+    except Exception as exc:
+        # A lost COMMIT acknowledgment can leave a committed digest. The receipt
+        # and archived parents fence replay; never compensate by deleting it.
+        logger.warning("Consolidation cluster failed: %s", type(exc).__name__, exc_info=True)
         return None
-    digest = str((result or {}).get("summary") or "").strip()
-    if len(digest) < 8:
-        return None
-
-    importance = max(float(c.get("importance") or 0.3) for c in cluster)
-    # query_raw returns timestamps as ISO strings — parse defensively.
-    occur_times: list[datetime] = []
-    for c in cluster:
-        raw = c.get("occur_time")
-        if isinstance(raw, datetime):
-            occur_times.append(raw)
-        elif isinstance(raw, str):
-            try:
-                occur_times.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
-            except ValueError:
-                pass
-    occur_mid = sorted(occur_times)[len(occur_times) // 2] if occur_times else None
-
-    from app.services.memory.retrieval.context_selector import estimate_tokens
-    if estimate_tokens(digest) > 180:
-        logger.warning("Consolidation digest exceeds per-memory context budget")
-        return None
-
-    new_id = await store_memory(
-        user_id=user_id,
-        content=digest,
-        level=3,
-        importance=min(0.49, importance),  # digests stay L3
-        main_category=cluster[0].get("main_category"),
-        sub_category=cluster[0].get("sub_category"),
-        source=source,
-        occur_time=occur_mid,
-        workspace_id=workspace_id,
-        provenance=CONSOLIDATED,
-        # 强制插入独立行: 不走 reconciliation. 否则 digest 可能被 update_existing
-        # 并进一条**非簇**同类记忆 (含 L2), 连带覆盖那条行内容并把它当作归档目标 —
-        # 一次整合意外改写了不该动的记忆. digest 内容本就是新摘要, 无需去重.
-        skip_reconciliation=True,
-        _consolidation_staged=True,
-        _split_done=True,
-    )
-    if not new_id:
-        return None
-
-    # skip_reconciliation 保证 new_id 是全新行, 不会等于任何簇内既有 id;
-    # 这条防御仍保留以防未来 store_memory 语义变化.
-    originals = [c for c in cluster if c["id"] != new_id]
-    try:
-        await _archive_originals(
-            source=source, user_id=user_id, workspace_id=workspace_id,
-            originals=originals, digest_id=new_id,
-        )
-    except Exception as e:
-        # 归档没成 → 摘要必须撤销。留着它就等于"摘要已生成但原行还在", 下一轮
-        # 同一簇会被再压一次, 产出重复摘要 —— 旧实现逐条归档 + 吞异常正是这个
-        # 半失败状态的来源。
-        logger.error(f"consolidation archive failed, rolling back digest {new_id}: {e}")
-        await _rollback_digest(source=source, digest_id=new_id)
-        return None
-    return new_id
-
-
-async def _archive_originals(
-    *, source: str, user_id: str, workspace_id: str | None,
-    originals: list[dict], digest_id: str,
-) -> None:
-    """Lock scope/content; archive, audit and publish the staged digest atomically."""
-    if not originals or len(originals) > _CANDIDATE_LIMIT:
-        raise ValueError("Invalid consolidation cluster size")
-    table = "memories_ai" if source == "ai" else "memories_user"
-    ids = sorted(c["id"] for c in originals)
-    snapshots = {c["id"]: c["content"] for c in originals}
-    async with db.tx(timeout=timedelta(seconds=15)) as tx:
-        digest = await tx.query_raw(
-            f"SELECT id FROM {table} WHERE id=$1 AND user_id=$2 "
-            "AND workspace_id IS NOT DISTINCT FROM $3::text AND is_archived "
-            "AND level=3 AND provenance='consolidated' FOR UPDATE",
-            digest_id, user_id, workspace_id,
-        )
-        rows = await tx.query_raw(
-            f"SELECT id,content FROM {table} WHERE id=ANY($1::text[]) AND user_id=$2 "
-            "AND workspace_id IS NOT DISTINCT FROM $3::text AND NOT is_archived "
-            "AND level=3 ORDER BY id FOR UPDATE", ids, user_id, workspace_id,
-        )
-        if not digest or len(rows) != len(ids) or any(snapshots[r["id"]] != r["content"] for r in rows):
-            raise RuntimeError("Consolidation scope or originals changed")
-        await tx.execute_raw(
-            "INSERT INTO memory_changelogs(id,user_id,workspace_id,memory_id,operation,old_value,new_value) "
-            "SELECT unnest($1::text[]),$2,$3,unnest($4::text[]),'consolidated_into',unnest($5::text[]),$6",
-            [str(uuid.uuid4()) for _ in ids], user_id, workspace_id, ids,
-            [snapshots[mid][:200] for mid in ids], digest_id,
-        )
-        await tx.execute_raw(f"UPDATE {table} SET is_archived=true WHERE id=ANY($1::text[])", ids)
-        await tx.execute_raw(f"UPDATE {table} SET is_archived=false WHERE id=$1", digest_id)
-    await memory_repo.invalidate_scope(user_id, workspace_id)
-
-
-async def _rollback_digest(*, source: str, digest_id: str) -> None:
-    """Remove only an unpublished staged digest; preserve ambiguous commits."""
-    try:
-        table = "memories_ai" if source == "ai" else "memories_user"
-        async with db.tx(timeout=timedelta(seconds=15)) as tx:
-            deleted = await tx.query_raw(
-                f"DELETE FROM {table} WHERE id=$1 AND is_archived AND provenance='consolidated' "
-                "AND NOT EXISTS (SELECT 1 FROM memory_changelogs WHERE operation='consolidated_into' AND new_value=$1) RETURNING id",
-                digest_id,
-            )
-            if deleted:
-                await tx.execute_raw("DELETE FROM memory_embeddings WHERE memory_id=$1", digest_id)
-    except Exception as e:
-        logger.error(f"digest rollback failed for {digest_id}: {e}")
 
 
 async def compress_l3_clusters_for_workspace(
@@ -296,6 +208,8 @@ async def compress_l3_clusters_for_workspace(
     dry_run 只做聚簇和统计, 不调 LLM 也不写库 —— 开 flag 前先看它会动多少东西,
     比开了再后悔便宜。
     """
+    if type(max_clusters) is not int or not 1 <= max_clusters <= _MAX_CLUSTERS_PER_WORKSPACE:
+        raise ValueError("Invalid consolidation cluster limit")
     stats: dict = {
         "clusters": 0, "compressed_rows": 0, "digests": 0,
         "failed": 0, "digest_ids": [], "dry_run": dry_run,
@@ -306,7 +220,8 @@ async def compress_l3_clusters_for_workspace(
                 source=source, user_id=user_id, workspace_id=workspace_id,
             )
         except Exception as e:
-            logger.warning(f"consolidation candidate load failed ({source}): {e}")
+            logger.warning("Consolidation candidate load failed (%s): %s", source, type(e).__name__)
+            stats["failed"] += 1
             continue
         if len(candidates) < _MIN_CLUSTER_SIZE:
             continue

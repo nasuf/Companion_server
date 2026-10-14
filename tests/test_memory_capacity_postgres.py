@@ -7,7 +7,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.services.memory.lifecycle import capacity, consolidation
+from app.services.memory.lifecycle import capacity, consolidation, consolidation_write
+from app.services.memory.storage import repo
+from types import SimpleNamespace
 from app.services.memory.storage import embedding
 from tests.test_memory_lifecycle_postgres import memory_flow, memory, row
 from tests.test_runtime_execution_foundation import flow
@@ -21,15 +23,21 @@ async def vector(f, mid):
 async def cluster(f, monkeypatch, side="ai"):
     monkeypatch.setattr(capacity,"db",f.db)
     monkeypatch.setattr(consolidation,"db",f.db)
-    originals=[await memory(f,side,level=3,provenance="daily_summary") for _ in range(5)]
-    digest=await memory(f,side,level=3,provenance="consolidated",isArchived=True)
+    monkeypatch.setattr(consolidation_write,"after_memory_changelog",AsyncMock())
+    monkeypatch.setattr(repo,"invalidate_scope",AsyncMock())
+    originals=[await memory(f,side,level=3,provenance="daily_summary",
+        createdAt=datetime.now(UTC)-timedelta(days=40)) for _ in range(5)]
     for m in originals:await vector(f,m.id)
-    return originals,digest
+    inputs=await consolidation_write.prepare_cluster(f.db,source=side,user_id=f.ids["owner"],
+        workspace_id=f.ids["workspace"],cluster=[{"id":m.id,"content":m.content} for m in originals])
+    return originals,SimpleNamespace(id=str(uuid4()),inputs=inputs)
 
 
 async def archive(f, originals, digest, side="ai"):
-    await consolidation._archive_originals(source=side,user_id=f.ids["owner"],workspace_id=f.ids["workspace"],
-        originals=[{"id":m.id,"content":m.content} for m in originals],digest_id=digest.id)
+    digest.id=await consolidation_write.commit_cluster(f.db,source=side,user_id=f.ids["owner"],
+        workspace_id=f.ids["workspace"],inputs=digest.inputs,digest="Synthetic compressed memory",
+        embedding=[.01]*1024,prompt="Synthetic compression prompt",model_name="synthetic",
+        output={"summary":"Synthetic compressed memory"})
 
 
 @pytest.mark.parametrize("side",["user","ai"])
@@ -76,10 +84,10 @@ async def test_archive_conflict_never_partially_archives_or_publishes(memory_flo
     f=memory_flow;originals,digest=await cluster(f,monkeypatch)
     data={"workspaceId":None} if change=="scope" else {"content":"changed"} if change=="content" else {"level":2}
     await f.db.aimemory.update(where={"id":originals[-1].id},data=data)
-    with pytest.raises(RuntimeError):await archive(f,originals,digest)
+    with pytest.raises(consolidation_write.MemoryWriteError):await archive(f,originals,digest)
     rows=[await row(f,m.id,"ai") for m in originals]
     assert not any(r["is_archived"] for r in rows)
-    assert (await row(f,digest.id,"ai"))["is_archived"]
+    assert await f.db.aimemory.find_unique(where={"id":digest.id}) is None
     assert await f.db.memorychangelog.count(where={"userId":f.ids["owner"],"operation":"consolidated_into"})==0
 
 
@@ -130,23 +138,13 @@ async def test_archive_write_failure_rolls_back_audit_and_every_original(memory_
         with pytest.raises(Exception):await archive(f,originals,digest)
         rows=[await row(f,m.id,"ai") for m in originals]
         assert not any(r["is_archived"] for r in rows)
-        assert (await row(f,digest.id,"ai"))["is_archived"]
+        assert await f.db.aimemory.find_unique(where={"id":digest.id}) is None
         assert await f.db.memorychangelog.count(where={"userId":f.ids["owner"],"operation":"consolidated_into"})==0
     finally:
         await f.db.execute_raw(f"DROP TRIGGER {name} ON memories_ai")
         await f.db.execute_raw(f"DROP FUNCTION {name}()")
 
 
-async def test_failed_unpublished_digest_is_removed_but_successful_commit_is_preserved(memory_flow,monkeypatch):
-    f=memory_flow;originals,digest=await cluster(f,monkeypatch)
-    await vector(f,digest.id)
-    await consolidation._rollback_digest(source="ai",digest_id=digest.id)
-    assert await f.db.aimemory.find_unique(where={"id":digest.id}) is None
-    assert not await f.db.query_raw("SELECT memory_id FROM memory_embeddings WHERE memory_id=$1",digest.id)
-    originals,published=await cluster(f,monkeypatch)
-    await archive(f,originals,published)
-    await consolidation._rollback_digest(source="ai",digest_id=published.id)
-    assert not (await row(f,published.id,"ai"))["is_archived"]
 
 
 async def test_abandoned_output_cleanup_preserves_original_text_and_recent_stages(memory_flow,monkeypatch):

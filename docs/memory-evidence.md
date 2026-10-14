@@ -365,3 +365,35 @@ Deleting the source makes its detail unavailable while preserving link history.
 Old reviews keep their historical unknown status. This batch proves transaction
 and scope behavior, not semantic accuracy of every generated summary or a
 complete lifecycle deletion barrier (M02.04).
+
+### L3 compression inputs and parents (2026-10-14)
+
+New compressions pin the exact same-side, same-workspace eligible parent rows
+and execution generations before calling the existing compression prompt. The
+final transaction rechecks parent row versions, ownership, lifecycle eligibility,
+Agent identity fields and human takeover. It inserts the digest, vector, private
+input receipt, versioned parent links and archive audit, then archives originals.
+A failed transaction leaves neither a visible digest nor an orphan staged digest.
+A lost COMMIT acknowledgment is treated as ambiguous; no compensating deletion
+runs. A durable scoped cluster-version receipt blocks recreation of a deleted
+digest even if original rows are later restored. This is a local compression
+replay guard, not the complete M02.04 deletion barrier.
+
+The candidate policy remains L3, older than 30 days, daily summaries or never-used
+legacy rows; at most 300 candidates and 10 clusters per side/workspace/run. Model
+and embedding calls run outside transactions. Digests remain L3, at most 0.49;
+their initial utility score is the same bounded value. Parent text remains
+recoverable; the existing cold-vector reclamation and restore path still apply.
+
+Administration returns only side, parent count and input sampling time. Each
+source page defaults to 20 and is capped at 50. Parent content, vectors, rendered
+prompts and model output stay private. Input snapshot size is capped at 8 MiB,
+with parent input capped at 512 KiB. The model name is the configured wrapper
+name, not an independently verified provider response receipt. A lossy summary
+and its recorded sources do not establish factual truth. Historic summaries are
+not backfilled by text similarity. Missing, changed, deleted and archived parents
+retain distinct semantics.
+
+Per-run consolidation auditing and postcommit quality/achievement/cache hooks
+remain best effort; they cannot undo a committed digest. Aggregate maintenance
+results and source retention/deletion remain under M02.06/O01/M02.04/M02.16.
