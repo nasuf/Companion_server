@@ -381,8 +381,9 @@ replay guard, not the complete M02.04 deletion barrier.
 
 The candidate policy remains L3, older than 30 days, daily summaries or never-used
 legacy rows; at most 300 candidates and 10 clusters per side/workspace/run. Model
-and embedding calls run outside transactions. Digests remain L3, at most 0.49;
-their initial utility score is the same bounded value. Parent text remains
+and embedding calls run outside transactions. New digests start at L3, with importance at most 0.49 and the same bounded
+initial utility score. Existing usage-driven lifecycle rules can later change
+the tier; a separate derived-confidence/promotion policy remains under M02.03. Parent text remains
 recoverable; the existing cold-vector reclamation and restore path still apply.
 
 Administration returns only side, parent count and input sampling time. Each
