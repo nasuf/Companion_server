@@ -172,8 +172,8 @@ async def _compress_cluster(
         sub_category=inputs["parents"][0].get("sub_category") or "其他",
         memory_items=items,
     )
-    model = get_utility_model()
     try:
+        model = get_utility_model()
         result = await invoke_json(model, prompt)
         digest = result.get("summary") if isinstance(result, dict) else None
         if not isinstance(digest, str) or len(digest.strip()) < 8:

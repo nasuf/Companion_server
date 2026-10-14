@@ -56,7 +56,7 @@ def test_candidate_query_skips_already_consolidated_rows():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [None, "prepare", "model", "embedding", "commit", "short", "invalid", "long", "identity"])
+@pytest.mark.parametrize("failure", [None, "prepare", "model", "embedding", "commit", "short", "invalid", "long", "identity", "model_config"])
 async def test_compression_prepares_before_model_and_commits_once(monkeypatch, failure):
     rows = [_cand(f"m{i}", [1.0, 0.0], summary=f"第{i}天午休听了一段音乐") for i in range(5)]
     prepared = {"parents": rows, "side": "ai"}
@@ -71,7 +71,10 @@ async def test_compression_prepares_before_model_and_commits_once(monkeypatch, f
                        "commit_cluster":commit,"_generated_self_memory_allowed":AsyncMock(return_value=failure!="identity"),
                        "get_prompt_text":AsyncMock(return_value="{owner}{main_category}{sub_category}{memory_items}")}.items():
         monkeypatch.setattr(cons,name,value)
-    monkeypatch.setattr(cons,"get_utility_model",lambda:object())
+    def utility():
+        if failure=="model_config":raise ValueError("synthetic invalid model configuration")
+        return object()
+    monkeypatch.setattr(cons,"get_utility_model",utility)
     result=await cons._compress_cluster(source="ai",user_id="u",workspace_id="w",cluster=rows)
     assert result==("digest" if failure is None else None)
     if failure=="prepare":model.assert_not_awaited()
