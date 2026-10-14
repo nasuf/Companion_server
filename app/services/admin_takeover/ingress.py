@@ -5,11 +5,13 @@ message commit together. A lost ACK can safely recover the same client ID.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
+from dataclasses import replace
 
 from prisma import Json
-from dataclasses import replace
+from prisma.errors import RawQueryError
 
 from app.services.runtime.chat_ingress_contracts import ChatRequestInput, canonical_object
 
@@ -40,6 +42,21 @@ def quota_request_without_card(request: ChatRequestInput, original: dict) -> Cha
 
 
 async def persist_user_message(*, conversation_id: str, user_id: str, text: str,
+                               metadata: dict, paid_confirmed: bool, database) -> dict:
+    # Concurrent retries can wait behind the case's short SQL commit. A lock
+    # timeout aborts the transaction before COMMIT, so retrying this exact input
+    # is safe; canonical IDs still prevent a second message or quota charge.
+    for attempt in range(3):
+        try:
+            return await _persist_user_message(conversation_id=conversation_id, user_id=user_id,
+                text=text, metadata=metadata, paid_confirmed=paid_confirmed, database=database)
+        except RawQueryError as exc:
+            if 'canceling statement due to lock timeout' not in str(exc) or attempt == 2:
+                raise
+            await asyncio.sleep(0.05 * (attempt + 1))
+
+
+async def _persist_user_message(*, conversation_id: str, user_id: str, text: str,
                                metadata: dict, paid_confirmed: bool, database) -> dict:
     # Old SSE callers may omit an ID. Keep them usable with a server identity;
     # retry deduplication requires the stable ID sent by Web/Flutter clients.
@@ -145,8 +162,9 @@ async def persist_admin_message(*, takeover_id: str, admin_id: str, text: str,
                                 client_id: str | None, database) -> dict:
     from app.services.admin_takeover.service import TakeoverClaimError
 
-    if component_card or attachments or not text.strip() or len(text) > 4000:
-        raise ValueError('Takeover replies support text only')
+    if (component_card or len(attachments or []) > 1
+            or (not text.strip() and not attachments) or len(text) > 4000):
+        raise ValueError('Takeover replies support text and one audio attachment')
 
     request = parse_client_chat_input({
         'message': text, 'client_id': client_id or str(uuid.uuid4()),
@@ -181,6 +199,27 @@ async def persist_admin_message(*, takeover_id: str, admin_id: str, text: str,
             return {'message_id': previous[0]['id'], 'created': False, 'scope': scope}
         metadata = {'human_takeover': True, 'admin_id': admin_id, 'client_id': request.client_id,
                     'takeover_request_key': request.request_key, 'takeover_input_fingerprint': request.fingerprint}
+        ids = json.loads(request.input_json)['attachment_ids']
+        if ids:
+            # Trust server metadata only. Lock the unbound resource so a user
+            # send cannot bind the same recording while this commit is pending.
+            rows = await tx.query_raw(
+                "SELECT * FROM chat_message_attachments WHERE id=ANY($1::text[]) "
+                "AND user_id=$2 AND conversation_id=$3 AND message_id IS NULL "
+                "AND kind='audio' FOR UPDATE",
+                ids, scope.owner_user_id, scope.conversation_id,
+            )
+            if len(rows) != len(ids):
+                raise ChatIngressResourceInvalid()
+            metadata['attachments'] = [attachment_to_metadata(_attachment_from_row(row)) for row in rows]
         message = await tx.message.create(data={'conversation': {'connect': {'id': scope.conversation_id}},
             'role': 'assistant', 'content': text, 'metadata': Json(metadata)})
+        if ids:
+            bound = await tx.execute_raw(
+                "UPDATE chat_message_attachments SET message_id=$1,updated_at=NOW() "
+                "WHERE id=ANY($2::text[]) AND user_id=$3 AND conversation_id=$4 AND message_id IS NULL",
+                message.id, ids, scope.owner_user_id, scope.conversation_id,
+            )
+            if bound != len(ids):
+                raise ChatIngressResourceInvalid()
     return {'message_id': message.id, 'created': True, 'scope': scope, 'metadata': metadata}

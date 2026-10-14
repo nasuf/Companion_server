@@ -461,10 +461,14 @@ async def test_transcribe_chat_audio_deletes_saved_file_when_db_insert_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("taken_over", [False, True])
 async def test_text_send_transcribes_without_persisting_audio(
     monkeypatch,
     tmp_path,
+    taken_over,
 ):
+    from app.services.admin_takeover import service
+    monkeypatch.setattr(service, "is_conversation_taken_over", AsyncMock(return_value=taken_over))
     monkeypatch.setattr(speech, "_enforce_rate_limit", AsyncMock())
     monkeypatch.setattr(
         speech.chat_media_repo,

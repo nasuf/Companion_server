@@ -64,7 +64,7 @@ async def transcribe_chat_audio(
         taken_over = await is_conversation_taken_over(data.conversation_id)
     except Exception:
         taken_over = False
-    if taken_over:
+    if taken_over and data.display_mode == "voice":
         await _enforce_rate_limit(user_id)
         return await _store_takeover_audio(data, user_id=user_id)
 

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -644,6 +645,51 @@ async def generate_activity_card(
     center: tuple[float, float] | None = None,
     conversation_id: str | None = None,
 ) -> dict[str, Any] | None:
+    cards = await _generate_activity_cards(user_id=user_id, workspace_id=workspace_id, city=city, source=source,
+        search_location=search_location, location_terms=location_terms, center=center,
+        conversation_id=conversation_id)
+    return cards[0] if cards else None
+
+
+async def _complete_preview_batch(tasks) -> list[dict[str, Any]]:
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    cards = [item for item in results if isinstance(item, dict)]
+    failures = [type(item).__name__ for item in results if isinstance(item, BaseException)]
+    if failures:
+        logger.warning('[offline] preview completion failed valid=%s failures=%s', len(cards), failures)
+    return cards
+
+
+async def generate_activity_preview_cards(
+    *,
+    user_id: str,
+    workspace_id: str | None,
+    city: str,
+    source: str,
+    search_location: str | None = None,
+    location_terms: list[str] | None = None,
+    center: tuple[float, float] | None = None,
+    conversation_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Five complete candidates, without persistence or chat delivery."""
+    async with asyncio.timeout(150):
+        return await _generate_activity_cards(limit=5, user_id=user_id, workspace_id=workspace_id, city=city, source=source,
+            search_location=search_location, location_terms=location_terms, center=center,
+            conversation_id=conversation_id)
+
+
+async def _generate_activity_cards(
+    *,
+    limit: int = 1,
+    user_id: str,
+    workspace_id: str | None,
+    city: str,
+    source: str,
+    search_location: str | None = None,
+    location_terms: list[str] | None = None,
+    center: tuple[float, float] | None = None,
+    conversation_id: str | None = None,
+) -> list[dict[str, Any]]:
     tags = await repo.list_user_tags(user_id, workspace_id, limit=9)
     evidence, source_statuses = await evidence_inputs(
         user_id=user_id, workspace_id=workspace_id, conversation_id=conversation_id, tags=tags,
@@ -662,12 +708,29 @@ async def generate_activity_card(
         candidates = await discover(city=native_city, search_anchor=search_anchor, tags=tags,
                                     recent=recent_activities, center=center)
         if candidates:
-            card = await _native_card(candidates, user_id=user_id, city=native_city,
-                search_anchor=search_anchor, tags=tags, memory=memory, recent=recent_activities,
-                dialogue_context=dialogue)
-            return await attach_recommendation_message(card, evidence, source_statuses)
+            if limit == 1:
+                card = await _native_card(candidates, user_id=user_id, city=native_city,
+                    search_anchor=search_anchor, tags=tags, memory=memory, recent=recent_activities,
+                    dialogue_context=dialogue)
+                return [await attach_recommendation_message(card, evidence, source_statuses)]
+            random.shuffle(candidates)
+            selected, seen = [], set()
+            for candidate in candidates:
+                place = _normalize_fingerprint(candidate.get('location_name') or candidate.get('title') or '')
+                if place and place not in seen:
+                    selected.append(candidate)
+                    seen.add(place)
+                if len(selected) >= limit:
+                    break
+            async def complete(candidate):
+                card = await _native_card([candidate], user_id=user_id, city=native_city,
+                    search_anchor=search_anchor, tags=tags, memory=memory, recent=recent_activities,
+                    dialogue_context=dialogue)
+                return await attach_recommendation_message(card, evidence, source_statuses)
+            # At most five complete, independently place-bound candidates.
+            return await _complete_preview_batch([complete(c) for c in selected])
         if not settings.offline_tavily_fallback:
-            return None
+            return []
     filtered_results, all_usable_results, query = await _search_activity_candidates(
         search_anchor,
         tags,
@@ -730,6 +793,9 @@ async def generate_activity_card(
     candidates = sorted(verified + fallback_cards,
                         key=lambda c: _candidate_rank(c, recent_activities, tags, region))
     card = None
+    previews = []
+    if limit > 1:
+        random.shuffle(candidates)
     unillustrated = None
     now = datetime.now(UTC)
     seen_places: set[str] = set()
@@ -757,7 +823,7 @@ async def generate_activity_card(
                         candidate['expires_at'] = min(end, now + timedelta(days=30))
                     except ValueError:
                         continue
-                if len(seen_places) >= 3:
+                if len(seen_places) >= (3 if limit == 1 else limit):
                     break
                 seen_places.add(identity)
                 # Image availability ranks valid destinations; it must not
@@ -768,6 +834,11 @@ async def generate_activity_card(
                 candidate["image_urls"] = await persist_activity_images(
                     user_id=user_id, card=candidate, city=city, search_results=results, limit=3,
                 )
+                if limit > 1:
+                    previews.append(candidate)
+                    if len(previews) >= limit:
+                        break
+                    continue
                 if candidate["image_urls"]:
                     if card is None or len(candidate['image_urls']) > len(card['image_urls']):
                         card = candidate
@@ -776,26 +847,30 @@ async def generate_activity_card(
                 logger.info("[offline] retained image-free fallback place=%r", candidate.get("location_name"))
     except TimeoutError:
         logger.info("[offline] candidate/gallery budget exhausted")
-    card = card or unillustrated
-    if not card:
+    selected = previews if limit > 1 else [card or unillustrated]
+    if not any(selected):
         logger.warning("[offline] no concrete activity card generated query=%r", query)
-        return None
+        return []
 
-    for field in ("title", "summary", "description", "vibe", "suitable"):
-        card[field] = plain_text(card.get(field))
-    card.pop('_image_evidence_count', None)
-    chosen_sources = [dict(title=r.title, url=r.url, content=source_text(r)[:2200]) for r in results
-                      if _source_supports_place(card, r)]
-    card["search_sources"] = chosen_sources + [{"kind": "image", **image} for image in card.pop("image_provenance", [])]
-    card["city"] = _display_city(city)
-    card["source"] = source
-    card.setdefault("expires_at", now + timedelta(days=14))
-    copy = await _recommendation_copy(card)
-    if copy:
-        card["description"] = plain_text(copy)
-    if not useful_detail(card["description"]):
-        card["description"] = fallback_detail(card)
-    return await attach_recommendation_message(card, evidence, source_statuses)
+    async def complete(card):
+        for field in ("title", "summary", "description", "vibe", "suitable"):
+            card[field] = plain_text(card.get(field))
+        card.pop('_image_evidence_count', None)
+        chosen_sources = [dict(title=r.title, url=r.url, content=source_text(r)[:2200]) for r in results
+                          if _source_supports_place(card, r)]
+        card["search_sources"] = chosen_sources + [{"kind": "image", **image} for image in card.pop("image_provenance", [])]
+        card["city"] = _display_city(city)
+        card["source"] = source
+        card.setdefault("expires_at", now + timedelta(days=14))
+        copy = await _recommendation_copy(card)
+        if copy:
+            card["description"] = plain_text(copy)
+        if not useful_detail(card["description"]):
+            card["description"] = fallback_detail(card)
+        return await attach_recommendation_message(card, evidence, source_statuses)
+    if limit == 1:
+        return [await complete(selected[0])]
+    return await _complete_preview_batch([complete(c) for c in selected if c])
 
 
 async def _native_card(

@@ -22,6 +22,7 @@ from app.services.auth import create_jwt
 from app.services.runtime.ws_auth import CHAT_PROTOCOL, TICKET_PROTOCOL_PREFIX
 from tests.test_admin_takeover_postgres import human, attach
 from tests.test_runtime_execution_foundation import flow
+from tests.test_chat_ingress_effects_postgres import attachment
 
 
 def port():
@@ -126,14 +127,41 @@ async def test_claim_user_ack_admin_reply_reconnect_cross_process(human,tmp_path
                 assert delivered['assistant_message_id']==response.json()['message_id']
                 assert (await event(peer,'done'))['message_id']==response.json()['message_id']
                 assert (await event(operator,'takeover_admin_message'))['message_id']==response.json()['message_id']
+                # Delivery is not a read receipt; only the actual user may acknowledge visibility.
+                message_id=response.json()['message_id']
+                history=(await client.get(urls[1]+f'/conversations/{conv}/messages?include_metadata=true',headers=admin)).json()
+                assert next(m for m in history if m['id']==message_id)['read'] is False
+                read_path=f'/conversations/{conv}/read'
+                assert (await client.post(urls[1]+read_path,headers=outsider,json={'message_ids':[message_id]})).status_code==200
+                assert (await h.flow.db.message.find_unique(where={'id':message_id})).metadata.get('takeover_user_read_at') is None
+                assert (await client.post(urls[1]+read_path,headers=user,json={'message_ids':[message_id]})).status_code==200
+                receipt=await event(operator,'takeover_user_read')
+                assert receipt['message_ids']==[message_id] and receipt['client_ids']==['reply-1']
+                history=(await client.get(urls[1]+f'/conversations/{conv}/messages?include_metadata=true',headers=admin)).json()
+                assert next(m for m in history if m['id']==message_id)['read'] is True
+
                 again=await client.post(urls[0]+base+'/messages',headers=admin,json=reply)
                 assert again.json()['message_id']==response.json()['message_id'] and again.json()['duplicate']
+                audio_id=await attachment(h.flow)
+                await h.flow.db.execute_raw("UPDATE chat_message_attachments SET kind='audio',mime='audio/mp4', "
+                    "duration_seconds=3,url='/chat/media/wire.m4a' WHERE id=$1",audio_id)
+                voice={'text':'［语音］','client_id':'voice-1','attachments':[{'id':audio_id}]}
+                response=await client.post(urls[1]+base+'/messages',headers=admin,json=voice)
+                assert response.status_code==200,response.text
+                delivered=await event(peer,'reply')
+                assert delivered['human_takeover'] and delivered['attachments'][0]['id']==audio_id
+                assert delivered['attachments'][0]['duration_seconds']==3
+                await event(peer,'done');await event(operator,'takeover_admin_message')
+                history=(await client.get(urls[0]+f'/conversations/{conv}/messages?include_metadata=true',headers=user)).json()
+                saved=next(m for m in history if m['id']==response.json()['message_id'])
+                assert saved['metadata']['attachments']==delivered['attachments'] and saved['read'] is False
             # Reconnect with a freshly minted single-use credential.
             ticket=(await client.post(urls[1]+f'/chat/{conv}/ws-ticket',headers=user)).json()['ticket']
             async with connect(urls[1].replace('http','ws')+f'/ws/{conv}',subprotocols=[CHAT_PROTOCOL,TICKET_PROTOCOL_PREFIX+ticket],proxy=None) as peer:
                 await peer.send(json.dumps({'type':'ping'}));assert await event(peer,'pong')=={}
             rows=await h.flow.db.query_raw('SELECT role,content FROM messages WHERE conversation_id=$1 ORDER BY created_at',conv)
-            assert rows==[{'role':'user','content':long_text.strip()},{'role':'assistant','content':'wire human reply'}]
+            assert rows==[{'role':'user','content':long_text.strip()},{'role':'assistant','content':'wire human reply'},
+                {'role':'assistant','content':'［语音］'}]
             assert (await h.flow.db.query_raw('SELECT used FROM user_message_quota WHERE user_id=$1',h.flow.ids['owner']))==[{'used':1}]
             assert await h.flow.db.agentrun.count(where={'conversationId':conv})==0
     finally:

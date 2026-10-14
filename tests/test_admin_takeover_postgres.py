@@ -239,7 +239,7 @@ async def test_admin_message_resource_retry_and_non_owner_are_fenced(human):
     with pytest.raises(ChatRequestConflict):await service.send_admin_message(**{**kwargs,'text':'changed'})
     with pytest.raises(service.TakeoverClaimError):await service.send_admin_message(**{**kwargs,'admin_id':h.admins[1]})
     for extra in [{'attachments':[{'id':ident}]},{'component_card':{'type':'gift'}}]:
-        with pytest.raises(ValueError):await service.send_admin_message(**{**kwargs,**extra,'client_id':'another'})
+        with pytest.raises((ValueError, ChatIngressResourceInvalid)):await service.send_admin_message(**{**kwargs,**extra,'client_id':'another'})
     assert await service.takeover_media_owner(h.admins[0],h.flow.ids['conversation'],is_admin=True)==h.flow.ids['owner']
     assert await service.takeover_media_owner(h.admins[1],h.flow.ids['conversation'],is_admin=True) is None
     assert await service.takeover_media_owner(h.admins[0],h.flow.ids['conversation'],is_admin=False) is None
@@ -312,7 +312,7 @@ async def test_admin_http_auth_bounds_claim_status_messages_and_read(human):
     for body,status in [({'text':''},400),({'text':'x'*4001},400),({'text':'  hello  ','client_id':'http1'},200)]:
         assert (await c.post(base+'/'+h.case+'/messages',json=body,headers=auth(h))).status_code==status
     assert (await c.post(base+'/'+h.case+'/messages',json={'text':'changed','client_id':'http1'},headers=auth(h))).status_code==409
-    assert (await c.post(base+'/'+h.case+'/messages',json={'text':'hello','attachments':[{'id':'bad'}]},headers=auth(h))).status_code==400
+    assert (await c.post(base+'/'+h.case+'/messages',json={'text':'hello','attachments':[{'id':'bad'}]},headers=auth(h))).status_code==422
     assert (await c.post(base+'/'+h.case+'/messages',json={'text':'hello'},headers=auth(h,1))).status_code==403
     incoming=await user_message(h)
     assert (await c.get(base+'/unread-summary',headers=auth(h,role='user'))).status_code==403

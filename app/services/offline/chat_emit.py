@@ -66,6 +66,7 @@ async def emit_assistant(
         trigger_type=trigger_type,
         extra_metadata=metadata,
         trace_id=trace_id,
+        **({'ws_payload_extra': {'human_takeover': True}} if metadata.get('human_takeover') else {}),
         voice_eligible=guard_delivery_key is None,
         guard_activity_id=source_id if guard_delivery_key else None,
         guard_delivery_key=guard_delivery_key,
@@ -155,11 +156,13 @@ async def emit_activity_card(
     activity: dict[str, Any],
     trigger_type: str,
     status_label: str,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> str | None:
     if not conversation_id:
         return None
     card = build_activity_component_card(activity, status_label=status_label)
     metadata = {
+        **(extra_metadata or {}),
         "real_world_type": "activity",
         "source_id": activity.get("id"),
         "component_card": card,
@@ -172,7 +175,7 @@ async def emit_activity_card(
         message=f"活动卡片：{activity.get('title') or '线下活动'}",
         trigger_type=trigger_type,
         extra_metadata=metadata,
-        ws_payload_extra={"component_card": card},
+        ws_payload_extra={"component_card": card, **(extra_metadata or {})},
     )
     await _notify_takeover_transcript(conversation_id, message_id)
     return message_id

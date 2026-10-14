@@ -666,11 +666,51 @@ async def takeover_unread_summary(admin_id: str) -> dict:
             "sampled_at": str(row['sampled_at'])}
 
 
-def takeover_message_read(role: str, metadata: Any, admin_read_seq: int) -> bool | None:
-    """Whether this human-takeover user message is within the admin read cursor.
+def needs_user_read_receipt(role: str, metadata: Any) -> bool:
+    if role != 'assistant' or not isinstance(metadata, dict):
+        return False
+    return metadata.get('human_takeover') in (True, 'true') or (
+        metadata.get('real_world_type') == 'activity'
+        and str(metadata.get('trigger_type') or '').startswith('offline_activity_recommendation'))
 
-    Other messages return None so clients keep the agent-delivery receipt.
-    """
+
+async def mark_takeover_user_read(conversation_id: str, user_id: str, message_ids: list[str]) -> None:
+    """Visible-message receipts, scoped to the actual user and active human chat."""
+    rows = await db.query_raw(
+        """
+        UPDATE messages m SET metadata=COALESCE(m.metadata,'{}'::jsonb) ||
+          jsonb_build_object('takeover_user_read_at',CURRENT_TIMESTAMP)
+        FROM human_takeovers t
+        JOIN conversations c ON c.id=t.conversation_id AND c.user_id=t.user_id
+          AND c.is_deleted=FALSE AND c.archived_at IS NULL
+        JOIN users u ON u.id=t.user_id AND u.status='active' AND u.archived_at IS NULL
+        WHERE t.conversation_id=$1 AND t.user_id=$2 AND t.status='active'
+          AND t.owner_admin_id IS NOT NULL AND m.conversation_id=t.conversation_id
+          AND m.id=ANY($3::text[]) AND m.role='assistant'
+          AND (m.metadata->>'human_takeover'='true' OR
+            (m.metadata->>'real_world_type'='activity' AND
+             m.metadata->>'trigger_type' LIKE 'offline_activity_recommendation%'))
+          AND m.metadata->>'takeover_user_read_at' IS NULL
+        RETURNING m.id, m.metadata->>'client_id' AS client_id, t.id AS takeover_id, t.owner_admin_id
+        """, conversation_id, user_id, list(dict.fromkeys(message_ids))[:100],
+    )
+    if not rows:
+        return
+    from app.services.runtime.ws_manager import manager
+    try:
+        await manager.send_to_admin(rows[0]['owner_admin_id'], 'takeover_user_read', {
+            'takeover_id': rows[0]['takeover_id'], 'conversation_id': conversation_id,
+            'message_ids': [r['id'] for r in rows],
+            'client_ids': [r['client_id'] for r in rows if r.get('client_id')],
+        })
+    except Exception as exc:
+        logger.warning('takeover user read notification failed: %s', type(exc).__name__)
+
+
+def takeover_message_read(role: str, metadata: Any, admin_read_seq: int) -> bool | None:
+    """Human messages use the recipient's receipt; ordinary agent messages keep their existing behavior."""
+    if needs_user_read_receipt(role, metadata):
+        return bool(metadata.get('takeover_user_read_at'))
     if role != "user" or not isinstance(metadata, dict):
         return None
     if metadata.get("human_takeover") not in (True, "true"):
@@ -1004,6 +1044,7 @@ async def send_admin_message(
         "index": 0,
         "assistant_message_id": message_id,
         "message_id": message_id,
+        "human_takeover": True,
     }
     if component_card:
         reply["component_card"] = component_card

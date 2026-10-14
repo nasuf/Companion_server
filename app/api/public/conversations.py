@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -45,6 +45,17 @@ async def post_user_typing(
         revision=body.revision, session_id=body.session_id,
     )
     return {"ok": True}
+
+
+class UserReadRequest(BaseModel):
+    message_ids: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(min_length=1, max_length=100)
+
+
+@router.post('/{conversation_id}/read')
+async def post_user_read(conversation_id: str, body: UserReadRequest, user: dict = Depends(require_user)):
+    from app.services.admin_takeover.service import mark_takeover_user_read
+    await mark_takeover_user_read(conversation_id, str(user['sub']), body.message_ids)
+    return {'ok': True}
 
 
 async def _interaction_days(workspace_id: str | None) -> int:
@@ -290,18 +301,24 @@ async def list_messages(
         for m in messages
     ]
     if include_metadata and any(
-        isinstance(item.metadata, dict) and item.metadata.get("human_takeover") in (True, "true")
+        isinstance(item.metadata, dict) and (
+            item.metadata.get('human_takeover') in (True, 'true') or
+            (item.role == 'assistant' and item.metadata.get('real_world_type') == 'activity'
+             and str(item.metadata.get('trigger_type') or '').startswith('offline_activity_recommendation')))
         for item in items
     ):
         from app.services.admin_takeover.service import (
             takeover_message_read,
             takeover_read_cursor,
+            needs_user_read_receipt,
         )
 
         cursor = await takeover_read_cursor(conversation_id)
         if cursor is not None:
             for item in items:
                 item.read = takeover_message_read(item.role, item.metadata, cursor)
+                if needs_user_read_receipt(item.role, item.metadata):
+                    item.metadata = {**item.metadata, 'takeover_receipt_required': True}
     # admin 显式请求时给带 trace_id 的回复消息附本轮 LLM 用量 (tokens/缓存/
     # 费用), 展示在 Trace 按钮旁. 仅 admin: 成本数据属运营信息, 普通用户
     # 的消息列表保持原 payload.

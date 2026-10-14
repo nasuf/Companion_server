@@ -240,7 +240,8 @@ def test_activity_previews_keep_distinct_places():
 
 
 def test_takeover_read_cursor_only_covers_human_messages():
-    assert service.takeover_message_read("assistant", {"human_takeover": True, "takeover_sequence": 1}, 5) is None
+    assert service.takeover_message_read("assistant", {"human_takeover": True, "takeover_sequence": 1}, 5) is False
+    assert service.takeover_message_read("assistant", {"human_takeover": True, "takeover_user_read_at": "seen"}, 5) is True
     assert service.takeover_message_read("user", {"human_takeover": True, "takeover_sequence": 2}, 2) is True
     assert service.takeover_message_read("user", {"human_takeover": True, "takeover_sequence": 3}, 2) is False
     assert service.takeover_message_read("user", {"takeover_sequence": 1}, 5) is None

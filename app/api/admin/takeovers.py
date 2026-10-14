@@ -56,7 +56,7 @@ class TakeoverMessageRequest(BaseModel):
     text: str = ""
     client_id: str | None = Field(default=None, max_length=249)
     component_card: dict[str, Any] | None = None
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
 
     def normalized_text(self) -> str:
         return self.text.strip()
@@ -170,6 +170,8 @@ async def post_read(takeover_id: str, body: TakeoverReadRequest, claims: dict = 
 async def post_activity_previews(takeover_id: str, claims: dict = Depends(require_takeover_admin)):
     try:
         items = await list_activity_previews(takeover_id, _admin_id(claims))
+    except TimeoutError:
+        raise HTTPException(503, detail='活动生成超时，请重新尝试') from None
     except ValueError as error:
         code = str(error)
         if code == "location_required":
@@ -245,9 +247,9 @@ async def post_message(
     claims: dict = Depends(require_takeover_admin),
 ):
     text = body.normalized_text()
-    if body.component_card or body.attachments:
-        raise HTTPException(status_code=400, detail="Takeover replies support text only")
-    if not text:
+    if body.component_card:
+        raise HTTPException(status_code=400, detail="Unsupported takeover card")
+    if not text and not body.attachments:
         raise HTTPException(status_code=400, detail="Empty message")
     if len(text) > 4000:
         raise HTTPException(status_code=400, detail="Message is too long")

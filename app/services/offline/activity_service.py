@@ -183,6 +183,9 @@ async def create_recommendation_for_user(
     workspace_id: str | None = None,
     source: str = "manual",
     publication_guard: Callable[[dict], Awaitable[None]] | None = None,
+    prepared_card: dict | None = None,
+    message_metadata: dict | None = None,
+    publication_started: Callable[[], None] | None = None,
 ) -> dict | None:
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     if not ctx or not ctx.get("conversation_id"):
@@ -205,7 +208,7 @@ async def create_recommendation_for_user(
         conversation_id=ctx["conversation_id"],
         agent_id=ctx.get("agent_id"), user_id=user_id,
     ) as tracer:
-        card = await generate_activity_card(
+        card = dict(prepared_card) if prepared_card is not None else await generate_activity_card(
             user_id=user_id,
             workspace_id=ctx["workspace_id"],
             city=city,
@@ -243,6 +246,8 @@ async def create_recommendation_for_user(
                 workspace_id=ctx["workspace_id"],
             )
             await publication_guard(ctx)
+        if publication_started is not None:
+            publication_started()
         activity = await repo.create_activity(
             {
                 **card,
@@ -275,6 +280,7 @@ async def create_recommendation_for_user(
             trigger_type="offline_activity_recommendation",
             trace_id=tracer.safe_trace_id,
             extra_metadata={
+                **(message_metadata or {}),
                 "recommendation_message_status": (activity.get("discovery_metadata") or {}).get("recommendation_message_status", "not_generated"),
                 "user_relevance_count": (activity.get("discovery_metadata") or {}).get("user_relevance_count", 0),
                 "recommendation_evidence_status": (activity.get("discovery_metadata") or {}).get("recommendation_evidence_status", {}),
@@ -288,6 +294,7 @@ async def create_recommendation_for_user(
             activity=activity,
             trigger_type="offline_activity_recommendation_card",
             status_label="待确定",
+            **({'extra_metadata': message_metadata} if message_metadata else {}),
         )
         await repo.update_next_activity_due(
             user_id,
