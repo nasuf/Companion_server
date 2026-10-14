@@ -435,7 +435,7 @@ model ChatLinkCard {
   conversationId String       @map("conversation_id")
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   messageId      String?      @map("message_id")
-  message        Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  message        Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
   role           String       @default("user")
   sourceApp      String?      @map("source_app")
   sourceUrl      String       @map("source_url")
@@ -454,12 +454,25 @@ model ChatLinkCard {
   createdAt      DateTime     @default(now()) @map("created_at")
   updatedAt      DateTime     @updatedAt @map("updated_at")
 
+  snapshots      ChatLinkSnapshot[]
+
   @@unique([userId, conversationId, finalUrl, role], map: "chat_link_cards_user_conv_final_role_unique")
   @@index([conversationId, createdAt(sort: Desc)], map: "chat_link_cards_conversation_created_idx")
   @@index([userId, createdAt(sort: Desc)], map: "chat_link_cards_user_created_idx")
   @@index([messageId], map: "chat_link_cards_message_idx")
   @@index([platform, createdAt(sort: Desc)], map: "chat_link_cards_platform_created_idx")
   @@map("chat_link_cards")
+}
+
+model ChatLinkSnapshot {
+  id         String       @id @default(uuid())
+  linkCardId String       @map("link_card_id")
+  linkCard   ChatLinkCard @relation(fields: [linkCardId], references: [id], onDelete: Cascade)
+  payload    Json
+  recordedAt DateTime     @default(now()) @map("recorded_at")
+
+  @@index([linkCardId, recordedAt(sort: Desc), id], map: "chat_link_snapshots_cache_recorded_idx")
+  @@map("chat_link_snapshots")
 }
 
 model GameSession {

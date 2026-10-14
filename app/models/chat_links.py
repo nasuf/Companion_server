@@ -33,6 +33,7 @@ class ChatLinkCardResponse(BaseModel):
 
 class DailyShareLink(BaseModel):
     id: str
+    occurrence_id: str | None = None
     message_id: str | None = None
     conversation_id: str
     role: str

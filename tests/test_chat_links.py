@@ -241,7 +241,8 @@ async def test_daily_link_groups_ignore_unbound_preview_cards(monkeypatch):
     groups = await repo_mod.list_user_link_groups("user-1")
 
     assert groups == []
-    assert "l.message_id IS NOT NULL" in captured["query"]
+    assert "JOIN messages m" in captured["query"]
+    assert captured["args"] == ("user-1", 1000)
 
 
 def test_component_card_for_link_has_openable_payload():
@@ -1034,7 +1035,7 @@ async def test_cache_link_cover_skips_non_remote_images(monkeypatch):
     assert result.extra_metadata == {}
 
 
-async def test_create_link_card_removes_cached_cover_when_db_write_fails(monkeypatch, tmp_path):
+async def test_create_link_card_retains_cached_cover_when_commit_outcome_is_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr(repo_mod.chat_media_storage, "_MEDIA_DIR", tmp_path)
     storage_key = "user-id_cached.jpg"
     (tmp_path / storage_key).write_bytes(b"image-bytes")
@@ -1066,7 +1067,7 @@ async def test_create_link_card_removes_cached_cover_when_db_write_fails(monkeyp
             metadata=metadata,
         )
 
-    assert not (tmp_path / storage_key).exists()
+    assert (tmp_path / storage_key).exists()
 
 
 # ─── V3 消息-卡片硬耦合守卫 (preselected_item, 2026-09-14) ───────────────────

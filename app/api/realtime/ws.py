@@ -213,6 +213,7 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
         payload = {}
         for key, limit in (
             ("link_id", 80),
+            ("snapshot_id", 80),
             ("app_url", 2000),
             ("source_url", 2000),
             ("final_url", 2000),
@@ -1164,13 +1165,18 @@ async def _ensure_link_card_for_turn(
         payload = component_card.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         link_id = str(payload.get("link_id") or "").strip()
+        if payload.get("snapshot_id") and not link_id:
+            raise ValueError("Link snapshot requires its cache identity")
         if link_id:
             link = await find_link_card(
                 link_id=link_id,
                 user_id=user_id,
                 conversation_id=conversation_id,
+                snapshot_id=str(payload.get("snapshot_id") or "").strip() or None,
             )
-            if link and _link_card_needs_refresh(link):
+            if payload.get("snapshot_id") and link is None:
+                raise ValueError("Link snapshot is unavailable in this conversation")
+            if link and not payload.get("snapshot_id") and _link_card_needs_refresh(link):
                 source_url = str(link.source_url or link.final_url or "").strip()
                 shared_text = "\n".join(
                     part
@@ -1445,12 +1451,18 @@ async def _handle_message(
             user_text=text,
         )
     prompt_text = render_user_message_with_attachments(text, attachment_metadata)
-    component_card, link_card_metadata = await _ensure_link_card_for_turn(
-        user_id=user_id,
-        conversation_id=conversation_id,
-        text=text,
-        component_card=component_card,
-    )
+    try:
+        component_card, link_card_metadata = await _ensure_link_card_for_turn(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            text=text,
+            component_card=component_card,
+        )
+    except ValueError:
+        await ws.send_json({"type": "error", "data": {
+            "message": "链接预览已不可用，请重新预览后发送", "client_id": client_id,
+        }})
+        return
     prompt_text = render_user_message_with_link(prompt_text, link_card_metadata)
 
     schedule = await get_cached_schedule(agent.id)

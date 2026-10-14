@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from typing import Any
+from uuid import uuid4
+
+from prisma.errors import DataError, RawQueryError
 
 from app.db import db
 from app.models.chat_links import DailyShareLink, DailyShareLinkGroup
@@ -37,6 +40,8 @@ class ChatLinkCard:
     metadata: dict[str, Any] | None
     created_at: Any = None
     updated_at: Any = None
+    snapshot_id: str | None = None
+    snapshot_recorded_at: Any = None
 
 
 async def create_or_update_link_card(
@@ -59,21 +64,23 @@ async def create_or_update_link_card(
         **cover.extra_metadata,
         **(extra_metadata or {}),
     }
+    snapshot_id = str(uuid4())
     try:
         rows = await db.query_raw(
             """
-            INSERT INTO chat_link_cards (
+            WITH cached AS (INSERT INTO chat_link_cards (
                 user_id, conversation_id, message_id, role, source_app,
                 source_url, final_url, platform, title, description, author,
                 image_url, content_text, original_text, summary, status, error,
                 metadata
             )
-            VALUES (
-                $1, $2, $3, $4, $5,
+            SELECT $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10, $11,
-                $12, $13, $14, $15, $16, $17,
-                $18::jsonb
-            )
+                $12, $13, $14, $15, $16, $17, $18::jsonb
+            FROM conversations c WHERE c.id=$2 AND c.user_id=$1 AND NOT c.is_deleted
+              AND ($3::text IS NULL OR EXISTS (
+                  SELECT 1 FROM messages m WHERE m.id=$3 AND m.conversation_id=c.id AND m.role=$4
+              ))
             ON CONFLICT (user_id, conversation_id, final_url, role)
             DO UPDATE SET
                 message_id = COALESCE(EXCLUDED.message_id, chat_link_cards.message_id),
@@ -92,7 +99,14 @@ async def create_or_update_link_card(
                 metadata = COALESCE(chat_link_cards.metadata, '{}'::jsonb)
                     || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
                 updated_at = NOW()
-            RETURNING *
+            RETURNING *), frozen AS (
+                INSERT INTO chat_link_snapshots(id, link_card_id, payload)
+                SELECT $19, id, to_jsonb(cached) - 'message_id' - 'created_at' - 'updated_at'
+                FROM cached
+                RETURNING id, recorded_at
+            )
+            SELECT cached.*, frozen.id AS snapshot_id,
+                   frozen.recorded_at AT TIME ZONE 'UTC' AS snapshot_recorded_at FROM cached, frozen
             """,
             user_id,
             conversation_id,
@@ -112,10 +126,21 @@ async def create_or_update_link_card(
             metadata.status[:40],
             _clean_optional(metadata.error, 300),
             json.dumps(merged_extra_metadata, ensure_ascii=False),
+            snapshot_id,
         )
-    except Exception:
-        chat_media_storage.delete_media_file(cover.extra_metadata.get("cover_storage_key"))
+    except (DataError, RawQueryError):
+        # Only an explicit SQL rejection proves rollback. A network timeout may
+        # leave a COMMIT in flight: even a later absent SELECT cannot prove it
+        # will not commit, so transport failures deliberately retain the cover.
+        chat_media_storage.delete_media_file(
+            cover.extra_metadata.get("cover_storage_key")
+        )
         raise
+    if not rows:
+        chat_media_storage.delete_media_file(
+            cover.extra_metadata.get("cover_storage_key")
+        )
+        raise ValueError("Link conversation or message is unavailable")
     return _link_from_row(rows[0])
 
 
@@ -125,18 +150,47 @@ async def find_link_card(
     user_id: str,
     conversation_id: str,
     require_unbound: bool = False,
+    snapshot_id: str | None = None,
 ) -> ChatLinkCard | None:
-    where = """
-        id = $1
-        AND user_id = $2
-        AND conversation_id = $3
-    """
-    if require_unbound:
-        where += "\n        AND message_id IS NULL"
-    rows = await db.query_raw(f"SELECT * FROM chat_link_cards WHERE {where} LIMIT 1", link_id, user_id, conversation_id)
+    # A supplied version is authoritative: never silently replace a missing
+    # or foreign snapshot with the mutable cache's latest content.
+    rows = await db.query_raw(
+        """
+        SELECT l.*, s.id AS snapshot_id, s.recorded_at AT TIME ZONE 'UTC' AS snapshot_recorded_at,
+               s.payload AS snapshot_payload
+        FROM chat_link_cards l
+        JOIN conversations c ON c.id=l.conversation_id AND c.user_id=l.user_id
+        LEFT JOIN LATERAL (
+            SELECT id, payload, recorded_at FROM chat_link_snapshots
+            WHERE link_card_id=l.id AND (
+                ($4::text IS NOT NULL AND id=$4)
+                OR ($4::text IS NULL AND payload=
+                    to_jsonb(l)-'message_id'-'created_at'-'updated_at')
+            ) ORDER BY recorded_at DESC, id DESC LIMIT 1
+        ) s ON TRUE
+        WHERE l.id=$1 AND l.user_id=$2 AND l.conversation_id=$3
+          AND c.is_deleted=FALSE AND (NOT $5::boolean OR l.message_id IS NULL)
+          AND ($4::text IS NULL OR s.id IS NOT NULL)
+        LIMIT 1
+        """,
+        link_id,
+        user_id,
+        conversation_id,
+        snapshot_id,
+        require_unbound,
+    )
     if not rows:
         return None
-    return _link_from_row(rows[0])
+    row = rows[0]
+    frozen = _json_or_none(row.get("snapshot_payload"))
+    return _link_from_row(
+        {
+            **row,
+            **(frozen or {}),
+            "snapshot_id": row.get("snapshot_id"),
+            "snapshot_recorded_at": row.get("snapshot_recorded_at"),
+        }
+    )
 
 
 async def bind_link_card_to_message(
@@ -148,12 +202,13 @@ async def bind_link_card_to_message(
 ) -> None:
     await db.execute_raw(
         """
-        UPDATE chat_link_cards
+        UPDATE chat_link_cards l
         SET message_id = $1, updated_at = NOW()
-        WHERE id = $2
-          AND user_id = $3
-          AND conversation_id = $4
-          AND (message_id IS NULL OR message_id = $1)
+        WHERE l.id = $2 AND l.user_id = $3 AND l.conversation_id = $4
+          AND (l.message_id IS NULL OR l.message_id = $1)
+          AND EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id
+              WHERE m.id=$1 AND m.conversation_id=$4 AND m.role=l.role
+                AND c.user_id=$3 AND NOT c.is_deleted)
         """,
         message_id,
         link_id,
@@ -167,24 +222,54 @@ async def list_user_link_groups(
     *,
     limit: int | None = None,
 ) -> list[DailyShareLinkGroup]:
-    query = """
-    SELECT
-      l.*,
-      COALESCE(m.created_at, l.created_at) AS timeline_at
-    FROM chat_link_cards l
-    JOIN conversations c ON c.id = l.conversation_id
-    LEFT JOIN messages m ON m.id = l.message_id
-    WHERE l.user_id = $1
-      AND c.user_id = $1
-      AND c.is_deleted = FALSE
-      AND l.message_id IS NOT NULL
-    ORDER BY COALESCE(m.created_at, l.created_at) DESC, l.created_at DESC
-    """
-    if limit is None:
-        rows = await db.query_raw(query, user_id)
-    else:
-        rows = await db.query_raw(f"{query}\nLIMIT $2", user_id, max(1, min(limit, 1000)))
-    links = [_daily_link_from_row(row) for row in rows or []]
+    # Message snapshots are historical truth. The URL cache is only a fallback
+    # for old bound rows that never recorded a message projection.
+    rows = await db.query_raw(
+        """
+        WITH history AS (
+            SELECT m.id AS occurrence_id, m.conversation_id, m.role,
+                   m.created_at AS timeline_at, m.metadata->'link_card' AS link_payload
+            FROM conversations c JOIN messages m ON m.conversation_id=c.id
+            WHERE c.user_id=$1 AND NOT c.is_deleted
+              AND jsonb_typeof(m.metadata->'link_card')='object'
+            UNION ALL
+            SELECT * FROM (SELECT DISTINCT ON (m.id) m.id, m.conversation_id, m.role, m.created_at, to_jsonb(l)
+            FROM chat_link_cards l JOIN conversations c ON c.id=l.conversation_id
+            JOIN messages m ON m.id=l.message_id AND m.conversation_id=c.id AND m.role=l.role
+            WHERE l.user_id=$1 AND c.user_id=$1 AND NOT c.is_deleted
+              AND jsonb_typeof(m.metadata->'link_card') IS DISTINCT FROM 'object'
+            ORDER BY m.id, l.updated_at DESC, l.id DESC) legacy
+        )
+        SELECT * FROM history ORDER BY timeline_at DESC, occurrence_id DESC
+        LIMIT $2
+        """,
+        user_id,
+        max(1, min(limit if limit is not None else 1000, 1000)),
+    )
+    links = []
+    for row in rows:
+        payload = _json_or_none(row.get("link_payload"))
+        if not payload or not all(
+            isinstance(payload.get(k), str) and payload[k]
+            for k in ("id", "source_url", "final_url")
+        ):
+            continue
+        # Existing link_card metadata embeds the actual component-card body.
+        # Do not replace it with the current cache or another message's text.
+        card = payload.get("component_card")
+        item = _daily_link_from_row(
+            {
+                **payload,
+                "conversation_id": row["conversation_id"],
+                "role": row["role"],
+                "message_id": row["occurrence_id"],
+                "timeline_at": row["timeline_at"],
+            }
+        )
+        if isinstance(card, dict) and card.get("type") == "external_link":
+            item.component_card = card
+        item.occurrence_id = row["occurrence_id"]
+        links.append(item)
     return _group_links_by_day(links)
 
 
@@ -259,6 +344,8 @@ def _link_from_row(row: Any) -> ChatLinkCard:
         metadata=_json_or_none(_value(row, "metadata")),
         created_at=_value(row, "created_at", "createdAt"),
         updated_at=_value(row, "updated_at", "updatedAt"),
+        snapshot_id=_value(row, "snapshot_id"),
+        snapshot_recorded_at=_value(row, "snapshot_recorded_at"),
     )
 
 

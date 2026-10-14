@@ -5,7 +5,9 @@ from typing import Any
 from app.services.chat_links.extraction import accent_for_platform, app_url_for_link
 
 
-def component_card_for_link(link: Any, *, recommendation: bool = False) -> dict[str, Any]:
+def component_card_for_link(
+    link: Any, *, recommendation: bool = False
+) -> dict[str, Any]:
     payload = {
         "link_id": link.id,
         "source_url": link.source_url,
@@ -13,6 +15,8 @@ def component_card_for_link(link: Any, *, recommendation: bool = False) -> dict[
         "platform": link.platform,
         "status": link.status,
     }
+    if getattr(link, "snapshot_id", None):
+        payload["snapshot_id"] = link.snapshot_id
     if link.author:
         payload["author"] = link.author
     if link.image_url:
@@ -50,6 +54,12 @@ def component_card_for_link(link: Any, *, recommendation: bool = False) -> dict[
 def metadata_for_link_card(link: Any) -> dict[str, Any]:
     return {
         "id": link.id,
+        "snapshot_id": getattr(link, "snapshot_id", None),
+        "snapshot_recorded_at": (
+            str(link.snapshot_recorded_at)
+            if getattr(link, "snapshot_recorded_at", None)
+            else None
+        ),
         "role": link.role,
         "source_app": link.source_app,
         "source_url": link.source_url,

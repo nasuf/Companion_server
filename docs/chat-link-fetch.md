@@ -65,3 +65,49 @@ runtime role E2E, two reviews and staged hygiene. Production acceptance uses
 serial standard-library/source and native read-only SQL probes as described
 in `production-verification.md`; it must not import the application or run
 untrusted URL/fault/load tests inside the serving API container.
+
+## Immutable prepared versions and share history (R01.03.8.3.2.2)
+
+The existing `chat_link_cards.id` remains the URL-cache identity. Each successful
+preparation now commits an append-only `chat_link_snapshots` row in the same SQL
+statement as the cache update. Snapshot JSON is capped at 128 KiB; its recorded
+UTC time means preparation was stored, not that the website is factually true.
+A failed snapshot insert rolls back the cache update too. An uncertain commit
+acknowledgement never causes deletion of a cover known to be committed.
+
+Cards carry an optional `payload.snapshot_id`. Sending it resolves that exact
+version within the authenticated owner and conversation, without refetching the
+page or trusting client-supplied body text. Missing/foreign versions produce a
+correlated retry error. Clients that omit the key still resolve the existing
+cache ID and retain the legacy refresh behavior. Flutter and the service-account
+Web entry pass the card payload through unchanged; no required wire field changed.
+
+Each persisted message already owns its `metadata.link_card` projection. Daily
+share history now reads those message projections, so repeat shares of one URL
+remain separate occurrences with their original content and timestamp. `id`
+stays the cache ID; additive `occurrence_id` and existing `message_id` identify
+the individual share. Reads return at most 1,000 items, or the requested smaller
+limit; `total` is the number returned, not an all-time count. Legacy cache-only
+rows are a fallback only where the bound message has no link projection; they
+are not reconstructed or assigned a fabricated snapshot timestamp. Deleting a
+message clears the cache's legacy pointer rather than cascading into versions
+still used by other messages. Conversation/account deletion still cascades.
+
+Web admin Agent conversation history displays the selected version, cache ID,
+recorded UTC time and ready/partial/unrecorded state. It exposes no URL, body,
+provider exception, query token or additional fetch request in this panel.
+Detailed fetch failure categories and aggregate diagnostics remain O01.01.V01;
+partial does not mean all content was read or no error occurred.
+
+SQL ingress activation, execution-generation validation at atomic message
+acceptance, quota/resource atomicity and durable recovery remain
+R01.03.8.3.2.3/2.4. This slice does not enable checkpoints or the SQL link adapter.
+Unused preview retention and total snapshot storage budgets remain an explicit
+follow-up in that preparation/cleanup work; this batch performs no historical
+purge or fabricated backfill. Cover cleanup on uncertain database availability
+retains the file for later conversation/account cleanup.
+
+Verification includes real PostgreSQL concurrency, rollback, lost commit ACK,
+repeat sharing, legacy records, deleted-message retention and ownership tests;
+real Chromium HTTP/JWT/history checks; existing Flutter daily-share tests and
+payload round-trip checks; the production React admin overview at desktop sizes.
