@@ -1,10 +1,12 @@
 """Complete candidates stay private until explicit selection; publishing is scoped and deduplicated."""
 import asyncio
+import json
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 import httpx
 import pytest
-from tests.test_takeover_activity_generation import pipeline, app, SUBJECT, CARD
+from tests.test_takeover_activity_generation import pipeline, app, SUBJECT, CTX, CARD
 from tests.test_proactive_activity_e2e import flow  # noqa: F401
 from tests.test_offline_quality_e2e import journey  # noqa: F401
 from app.services.admin_takeover import activities
@@ -246,3 +248,102 @@ async def test_overlapping_preview_requests_do_not_generate_or_overwrite_twice(p
         gate.set()
         assert (await first).status_code == 200
     assert generate.await_count == 1 and p['events'] == []
+
+
+@pytest.mark.parametrize('failure,status', [
+    ('disabled', 403), ('no_conversation', 422), ('wrong_user', 409),
+    ('wrong_agent', 409), ('wrong_workspace', 409), ('no_cards', 503),
+    ('timed_out', 503), ('lost_generation_lock', 409),
+])
+async def test_preview_rejects_stale_or_incomplete_generation_without_sending(previews, failure, status):
+    p, generate, cache = previews
+    if failure == 'disabled': p['enabled'].return_value = False
+    if failure == 'no_conversation': p['context'].return_value = {**CTX, 'conversation_id': None}
+    if failure == 'wrong_user': p['context'].return_value = {**CTX, 'user_id': 'another-user'}
+    if failure == 'wrong_agent': p['context'].return_value = {**CTX, 'agent_id': 'another-agent'}
+    if failure == 'wrong_workspace': p['context'].return_value = {**CTX, 'workspace_id': 'another-workspace'}
+    if failure == 'no_cards': generate.return_value = []
+    if failure == 'timed_out': generate.side_effect = TimeoutError('generation budget')
+    if failure == 'lost_generation_lock':
+        cards = generate.return_value
+        async def steal_lock(**kwargs):
+            cache.items[activities._preview_key('case', 'admin') + ':generating'] = 'another-request'
+            return cards
+        generate.side_effect = steal_lock
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app()), base_url='http://test') as client:
+        response = await client.post('/admin-api/takeovers/case/activity-previews')
+    assert response.status_code == status, response.text
+    assert p['events'] == [] and p['create'].await_count == 0
+    assert activities._preview_key('case', 'admin') not in cache.items
+
+
+async def test_preview_release_failure_does_not_discard_completed_candidates(previews, monkeypatch):
+    p, _, cache = previews
+    monkeypatch.setattr(cache, 'eval', AsyncMock(side_effect=ConnectionError('redis lock release')))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app()), base_url='http://test') as client:
+        assert len(await load(client)) == 5
+    assert p['create'].await_count == 0
+
+
+@pytest.mark.parametrize('failure,status', [
+    ('disabled', 403), ('missing_batch', 404), ('changed_subject', 404),
+    ('expired_aware', 409), ('expired_naive', 409),
+    ('no_conversation', 422), ('wrong_user', 409), ('wrong_agent', 409),
+])
+async def test_publish_rechecks_candidate_and_recipient_before_persistence(previews, failure, status):
+    p, _, cache = previews
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app()), base_url='http://test') as client:
+        items = await load(client)
+        key = activities._preview_key('case', 'admin')
+        if failure == 'disabled': p['enabled'].return_value = False
+        if failure == 'missing_batch': cache.items.pop(key)
+        if failure == 'changed_subject':
+            batch = json.loads(cache.items[key]); batch['subject']['agentId'] = 'another-agent'
+            cache.items[key] = json.dumps(batch)
+        if failure.startswith('expired_'):
+            batch = json.loads(cache.items[key])
+            expired = datetime.now(UTC) - timedelta(minutes=1)
+            if failure == 'expired_naive': expired = expired.replace(tzinfo=None)
+            batch['items'][0]['card']['expires_at'] = expired.isoformat()
+            cache.items[key] = json.dumps(batch)
+        if failure == 'no_conversation': p['context'].return_value = {**CTX, 'conversation_id': None}
+        if failure == 'wrong_user': p['context'].return_value = {**CTX, 'user_id': 'another-user'}
+        if failure == 'wrong_agent': p['context'].return_value = {**CTX, 'agent_id': 'another-agent'}
+        response = await client.post(f"/admin-api/takeovers/case/activity-previews/{items[0]['preview_id']}/publish")
+    assert response.status_code == status, response.text
+    assert p['create'].await_count == 0 and p['events'] == []
+
+
+async def test_future_naive_expiry_can_publish_and_failed_attempt_can_retry(previews):
+    p, _, cache = previews
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app()), base_url='http://test') as client:
+        items = await load(client)
+        key = activities._preview_key('case', 'admin')
+        batch = json.loads(cache.items[key])
+        batch['items'][0]['card']['ends_at'] = (datetime.now(UTC) + timedelta(days=1)).replace(tzinfo=None).isoformat()
+        cache.items[key] = json.dumps(batch)
+        url = f"/admin-api/takeovers/case/activity-previews/{items[0]['preview_id']}/publish"
+        p['context'].return_value = {**CTX, 'agent_id': 'another-agent'}
+        assert (await client.post(url)).status_code == 409
+        p['context'].return_value = CTX
+        assert (await client.post(url)).status_code == 200
+    assert p['create'].await_count == 1
+
+
+async def test_parallel_completion_keeps_other_valid_candidates(monkeypatch):
+    from app.config import settings
+    from app.services.offline import cleversee_discovery
+    monkeypatch.setattr(settings, 'offline_search_provider', 'cleversee')
+    monkeypatch.setattr(gen.repo, 'list_user_tags', AsyncMock(return_value=[]))
+    monkeypatch.setattr(gen.repo, 'list_recent_activity_fingerprints', AsyncMock(return_value=[]))
+    monkeypatch.setattr(gen, 'evidence_inputs', AsyncMock(return_value=({'memory': [], 'dialogue': []}, {})))
+    candidates = [{'location_name': '地点一'}, {'location_name': '地点一'},
+                  {'location_name': '地点二'}, {'location_name': '地点三'}]
+    monkeypatch.setattr(cleversee_discovery, 'discover', AsyncMock(return_value=candidates))
+    async def native(items, **kwargs):
+        if items[0]['location_name'] == '地点二': raise RuntimeError('one provider completion failed')
+        return {**deepcopy(CARD), **items[0]}
+    monkeypatch.setattr(gen, '_native_card', AsyncMock(side_effect=native))
+    monkeypatch.setattr(gen, 'attach_recommendation_message', AsyncMock(side_effect=lambda card, *_: card))
+    cards = await gen.generate_activity_preview_cards(user_id='user', workspace_id=None, city='镇江市', source='manual')
+    assert {card['location_name'] for card in cards} == {'地点一', '地点三'}

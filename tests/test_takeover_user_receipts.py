@@ -40,6 +40,40 @@ async def test_missing_or_already_read_messages_are_a_noop(receipts):
     manager.send_to_admin.assert_not_awaited()
 
 
+async def test_database_read_receipt_survives_admin_notification_failure(receipts):
+    app, query = receipts
+    manager.send_to_admin.side_effect = ConnectionError('admin websocket unavailable')
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/conversations/conv/read', json={'message_ids': ['message']})
+    assert response.status_code == 200 and query.await_count == 1
+
+
+async def test_history_marks_only_recipient_receipt_messages(monkeypatch):
+    def row(message_id, role, metadata):
+        return SimpleNamespace(id=message_id, conversationId='conv', role=role,
+                               content='content', metadata=metadata, createdAt='2026-10-14T00:00:00Z')
+    messages = [
+        row('human', 'assistant', {'human_takeover': True}),
+        row('ordinary', 'assistant', {}),
+        row('activity', 'assistant', {'real_world_type': 'activity',
+             'trigger_type': 'offline_activity_recommendation_card'}),
+        row('user', 'user', {'human_takeover': True}),
+    ]
+    monkeypatch.setattr(conversations, 'db', SimpleNamespace(
+        message=SimpleNamespace(find_many=AsyncMock(return_value=messages))))
+    monkeypatch.setattr(service, 'takeover_read_cursor', AsyncMock(return_value=0))
+    items = await conversations.list_messages(
+        conversation_id='conv', limit=100, offset=0, include_metadata=True,
+        include_achievements=False, include_usage=False, conv=SimpleNamespace(userId='user', agentId='agent'),
+        user={'sub': 'user', 'role': 'user'},
+    )
+    by_id = {item.id: item for item in items}
+    assert by_id['human'].read is False and by_id['human'].metadata['takeover_receipt_required'] is True
+    assert by_id['activity'].read is False and by_id['activity'].metadata['takeover_receipt_required'] is True
+    assert 'takeover_receipt_required' not in by_id['ordinary'].metadata
+    assert 'takeover_receipt_required' not in by_id['user'].metadata
+
+
 @pytest.mark.parametrize('ids', [[], ['id'] * 101, ['x' * 81], [True], ['']])
 async def test_invalid_or_unbounded_receipts_are_rejected_before_lookup(receipts, ids):
     app, query = receipts

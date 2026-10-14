@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketState
 
 from app.services.admin_takeover import service
+from app.services.admin_takeover import ingress
 from app.services.runtime import ws_auth, ws_manager
 from app.api.admin import takeovers
 from app.api.realtime import admin_inbox, ws
@@ -27,6 +28,28 @@ def test_nullable_row_aliases_preview_and_list_contract():
     assert takeovers._claim_http(service.TakeoverClaimError('not_pending')).status_code==409
     with pytest.raises(Exception) as error:takeovers._admin_id({})
     assert error.value.status_code==401
+
+
+@pytest.mark.parametrize('failure_count,lock_timeout', [(1, True), (3, True), (1, False)])
+async def test_manual_message_retries_only_aborted_lock_timeouts(monkeypatch, failure_count, lock_timeout):
+    from prisma.errors import RawQueryError
+    message = 'canceling statement due to lock timeout' if lock_timeout else 'constraint violation'
+    failure = RawQueryError({'user_facing_error': {'meta': {'message': message}}})
+    persist = AsyncMock(side_effect=[failure] * failure_count + [{'id': 'saved'}])
+    sleep = AsyncMock()
+    monkeypatch.setattr(ingress, '_persist_user_message', persist)
+    monkeypatch.setattr(ingress.asyncio, 'sleep', sleep)
+    arguments = dict(conversation_id='conv', user_id='user', text='hello', metadata={},
+                     paid_confirmed=False, database=object())
+    if failure_count == 1 and lock_timeout:
+        assert await ingress.persist_user_message(**arguments) == {'id': 'saved'}
+        assert persist.await_count == 2 and sleep.await_count == 1
+    else:
+        with pytest.raises(RawQueryError) as caught:
+            await ingress.persist_user_message(**arguments)
+        assert caught.value is failure
+        assert persist.await_count == (3 if lock_timeout else 1)
+        assert sleep.await_count == (2 if lock_timeout else 0)
 
 
 async def test_registration_and_attach_failure_are_isolated(monkeypatch):
