@@ -128,13 +128,15 @@ async def create_or_update_link_card(
             json.dumps(merged_extra_metadata, ensure_ascii=False),
             snapshot_id,
         )
-    except (DataError, RawQueryError):
-        # Only an explicit SQL rejection proves rollback. A network timeout may
-        # leave a COMMIT in flight: even a later absent SELECT cannot prove it
-        # will not commit, so transport failures deliberately retain the cover.
-        chat_media_storage.delete_media_file(
-            cover.extra_metadata.get("cover_storage_key")
-        )
+    except (DataError, RawQueryError) as exc:
+        # Prisma can wrap a connection/unknown-commit failure as DataError too.
+        # Only known statement-rejection SQLSTATEs prove that this implicit
+        # transaction rolled back; an absent later SELECT cannot prove it.
+        sqlstate = str((exc.meta or {}).get("code", ""))
+        if sqlstate.startswith(("22", "23", "42")) or sqlstate == "P0001":
+            chat_media_storage.delete_media_file(
+                cover.extra_metadata.get("cover_storage_key")
+            )
         raise
     if not rows:
         chat_media_storage.delete_media_file(

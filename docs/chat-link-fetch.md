@@ -72,6 +72,9 @@ The existing `chat_link_cards.id` remains the URL-cache identity. Each successfu
 preparation now commits an append-only `chat_link_snapshots` row in the same SQL
 statement as the cache update. Snapshot JSON is capped at 128 KiB; its recorded
 UTC time means preparation was stored, not that the website is factually true.
+The snapshot model stays in Prisma migration schema but is excluded from generic
+client CRUD generation; preparation uses the typed repository and atomic SQL.
+This avoids growing the worker import graph with unused recursive relation types.
 A failed snapshot insert rolls back the cache update too. An uncertain commit
 acknowledgement never causes deletion of a cover known to be committed.
 

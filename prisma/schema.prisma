@@ -454,7 +454,7 @@ model ChatLinkCard {
   createdAt      DateTime     @default(now()) @map("created_at")
   updatedAt      DateTime     @updatedAt @map("updated_at")
 
-  snapshots      ChatLinkSnapshot[]
+  snapshots      ChatLinkSnapshot[] @ignore
 
   @@unique([userId, conversationId, finalUrl, role], map: "chat_link_cards_user_conv_final_role_unique")
   @@index([conversationId, createdAt(sort: Desc)], map: "chat_link_cards_conversation_created_idx")
@@ -473,6 +473,9 @@ model ChatLinkSnapshot {
 
   @@index([linkCardId, recordedAt(sort: Desc), id], map: "chat_link_snapshots_cache_recorded_idx")
   @@map("chat_link_snapshots")
+  // Written with the cache in one SQL statement, never through generic CRUD.
+  // Keep the migration model without adding unused recursive client types.
+  @@ignore
 }
 
 model GameSession {

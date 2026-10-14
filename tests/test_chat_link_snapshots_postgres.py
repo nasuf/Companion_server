@@ -215,6 +215,8 @@ async def test_snapshot_failure_rolls_back_cache_and_lost_ack_keeps_cover(
 ):
     db, uid, _, convs, prepare, _ = links
     first = await prepare()
+    delete = Mock()
+    monkeypatch.setattr(repo.chat_media_storage, "delete_media_file", delete)
     # The whole single SQL statement rolls back if its snapshot cannot commit.
     await db.execute_raw(
         "CREATE FUNCTION fail_link_snapshot_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic_snapshot_failure'; END; $$"
@@ -230,13 +232,13 @@ async def test_snapshot_failure_rolls_back_cache_and_lost_ack_keeps_cover(
             "DROP TRIGGER fail_link_snapshot_test ON chat_link_snapshots"
         )
         await db.execute_raw("DROP FUNCTION fail_link_snapshot_test()")
+    delete.assert_called_once()
+    delete.reset_mock()
     assert (
         await repo.find_link_card(
             link_id=first.id, user_id=uid, conversation_id=convs[0]
         )
     ).title == "first"
-    delete = Mock()
-    monkeypatch.setattr(repo.chat_media_storage, "delete_media_file", delete)
 
     class LostAck:
         async def query_raw(self, sql, *args):
@@ -255,6 +257,27 @@ async def test_snapshot_failure_rolls_back_cache_and_lost_ack_keeps_cover(
             link_id=first.id, user_id=uid, conversation_id=convs[0]
         )
     ).title == "committed"
+
+
+@pytest.mark.parametrize("sqlstate", ["08007", "08006", "N/A", None])
+async def test_prisma_wrapped_uncertain_commit_never_deletes_cover(
+    links, monkeypatch, sqlstate
+):
+    _, _, _, _, prepare, _ = links
+    delete = Mock()
+    monkeypatch.setattr(repo.chat_media_storage, "delete_media_file", delete)
+
+    class UncertainCommit:
+        async def query_raw(self, *args):
+            raise RawQueryError({"user_facing_error": {
+                "error_code": "P2010",
+                "meta": {"code": sqlstate, "message": "uncertain commit"},
+            }})
+
+    monkeypatch.setattr(repo, "db", UncertainCommit())
+    with pytest.raises(RawQueryError, match="uncertain commit"):
+        await prepare()
+    delete.assert_not_called()
 
 
 async def test_invalid_scope_and_old_client_writer_do_not_invent_snapshots(links):
