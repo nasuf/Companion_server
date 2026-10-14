@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -15,6 +16,9 @@ from app.services.chat_links.cards import component_card_for_link
 from app.services.chat_links.covers import cache_link_cover
 from app.services.chat_links.extraction import LinkMetadata
 from app.services.chat_media import storage as chat_media_storage
+from app.services.runtime.execution_scope import (
+    ExecutionScope, ExecutionScopeUnavailable, revalidate_scope, scoped_transaction,
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +57,16 @@ async def create_or_update_link_card(
     source_app: str | None = None,
     message_id: str | None = None,
     extra_metadata: dict[str, Any] | None = None,
+    execution_scope: ExecutionScope | None = None,
+    database: Any = None,
 ) -> ChatLinkCard:
+    client = db if database is None else database
+    if execution_scope is not None:
+        if (user_id, conversation_id, role) != (
+            execution_scope.owner_user_id, execution_scope.conversation_id, "user"
+        ):
+            raise ExecutionScopeUnavailable()
+        await revalidate_scope(execution_scope, database=client)
     cover = await cache_link_cover(
         user_id=user_id,
         conversation_id=conversation_id,
@@ -66,68 +79,75 @@ async def create_or_update_link_card(
     }
     snapshot_id = str(uuid4())
     try:
-        rows = await db.query_raw(
-            """
-            WITH cached AS (INSERT INTO chat_link_cards (
-                user_id, conversation_id, message_id, role, source_app,
-                source_url, final_url, platform, title, description, author,
-                image_url, content_text, original_text, summary, status, error,
-                metadata
+        # Provider and cover IO has finished; only the short SQL write is fenced.
+        context = (scoped_transaction(execution_scope, database=client)
+                   if execution_scope is not None else nullcontext(client))
+        async with context as tx:
+            rows = await tx.query_raw(
+                """
+                WITH cached AS (INSERT INTO chat_link_cards (
+                    user_id, conversation_id, message_id, role, source_app,
+                    source_url, final_url, platform, title, description, author,
+                    image_url, content_text, original_text, summary, status, error,
+                    metadata
+                )
+                SELECT $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10, $11,
+                    $12, $13, $14, $15, $16, $17, $18::jsonb
+                FROM conversations c WHERE c.id=$2 AND c.user_id=$1 AND NOT c.is_deleted
+                  AND ($3::text IS NULL OR EXISTS (
+                      SELECT 1 FROM messages m WHERE m.id=$3 AND m.conversation_id=c.id AND m.role=$4
+                  ))
+                ON CONFLICT (user_id, conversation_id, final_url, role)
+                DO UPDATE SET
+                    message_id = COALESCE(EXCLUDED.message_id, chat_link_cards.message_id),
+                    source_app = COALESCE(EXCLUDED.source_app, chat_link_cards.source_app),
+                    source_url = EXCLUDED.source_url,
+                    platform = EXCLUDED.platform,
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    author = EXCLUDED.author,
+                    image_url = EXCLUDED.image_url,
+                    content_text = EXCLUDED.content_text,
+                    original_text = EXCLUDED.original_text,
+                    summary = EXCLUDED.summary,
+                    status = EXCLUDED.status,
+                    error = EXCLUDED.error,
+                    metadata = COALESCE(chat_link_cards.metadata, '{}'::jsonb)
+                        || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
+                    updated_at = NOW()
+                RETURNING *), frozen AS (
+                    INSERT INTO chat_link_snapshots(id, link_card_id, payload)
+                    SELECT $19, id, to_jsonb(cached) - 'message_id' - 'created_at' - 'updated_at'
+                    FROM cached
+                    RETURNING id, recorded_at
+                )
+                SELECT cached.*, frozen.id AS snapshot_id,
+                       frozen.recorded_at AT TIME ZONE 'UTC' AS snapshot_recorded_at FROM cached, frozen
+                """,
+                user_id,
+                conversation_id,
+                message_id,
+                role,
+                _clean_optional(source_app, 120),
+                metadata.source_url[:2000],
+                metadata.final_url[:2000],
+                metadata.platform[:40],
+                (metadata.title or "未命名链接")[:240],
+                (metadata.description or "")[:1000],
+                _clean_optional(metadata.author, 120),
+                _clean_optional(metadata.image_url, 2000),
+                (metadata.content_text or "")[:6000],
+                (metadata.original_text or "")[:6000],
+                (metadata.summary or "")[:1000],
+                metadata.status[:40],
+                _clean_optional(metadata.error, 300),
+                json.dumps(merged_extra_metadata, ensure_ascii=False),
+                snapshot_id,
             )
-            SELECT $1, $2, $3, $4, $5,
-                $6, $7, $8, $9, $10, $11,
-                $12, $13, $14, $15, $16, $17, $18::jsonb
-            FROM conversations c WHERE c.id=$2 AND c.user_id=$1 AND NOT c.is_deleted
-              AND ($3::text IS NULL OR EXISTS (
-                  SELECT 1 FROM messages m WHERE m.id=$3 AND m.conversation_id=c.id AND m.role=$4
-              ))
-            ON CONFLICT (user_id, conversation_id, final_url, role)
-            DO UPDATE SET
-                message_id = COALESCE(EXCLUDED.message_id, chat_link_cards.message_id),
-                source_app = COALESCE(EXCLUDED.source_app, chat_link_cards.source_app),
-                source_url = EXCLUDED.source_url,
-                platform = EXCLUDED.platform,
-                title = EXCLUDED.title,
-                description = EXCLUDED.description,
-                author = EXCLUDED.author,
-                image_url = EXCLUDED.image_url,
-                content_text = EXCLUDED.content_text,
-                original_text = EXCLUDED.original_text,
-                summary = EXCLUDED.summary,
-                status = EXCLUDED.status,
-                error = EXCLUDED.error,
-                metadata = COALESCE(chat_link_cards.metadata, '{}'::jsonb)
-                    || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
-                updated_at = NOW()
-            RETURNING *), frozen AS (
-                INSERT INTO chat_link_snapshots(id, link_card_id, payload)
-                SELECT $19, id, to_jsonb(cached) - 'message_id' - 'created_at' - 'updated_at'
-                FROM cached
-                RETURNING id, recorded_at
-            )
-            SELECT cached.*, frozen.id AS snapshot_id,
-                   frozen.recorded_at AT TIME ZONE 'UTC' AS snapshot_recorded_at FROM cached, frozen
-            """,
-            user_id,
-            conversation_id,
-            message_id,
-            role,
-            _clean_optional(source_app, 120),
-            metadata.source_url[:2000],
-            metadata.final_url[:2000],
-            metadata.platform[:40],
-            (metadata.title or "未命名链接")[:240],
-            (metadata.description or "")[:1000],
-            _clean_optional(metadata.author, 120),
-            _clean_optional(metadata.image_url, 2000),
-            (metadata.content_text or "")[:6000],
-            (metadata.original_text or "")[:6000],
-            (metadata.summary or "")[:1000],
-            metadata.status[:40],
-            _clean_optional(metadata.error, 300),
-            json.dumps(merged_extra_metadata, ensure_ascii=False),
-            snapshot_id,
-        )
+    except ExecutionScopeUnavailable:
+        chat_media_storage.delete_media_file(cover.extra_metadata.get("cover_storage_key"))
+        raise
     except (DataError, RawQueryError) as exc:
         # Prisma can wrap a connection/unknown-commit failure as DataError too.
         # Only known statement-rejection SQLSTATEs prove that this implicit
@@ -153,10 +173,11 @@ async def find_link_card(
     conversation_id: str,
     require_unbound: bool = False,
     snapshot_id: str | None = None,
+    database: Any = None,
 ) -> ChatLinkCard | None:
     # A supplied version is authoritative: never silently replace a missing
     # or foreign snapshot with the mutable cache's latest content.
-    rows = await db.query_raw(
+    rows = await (db if database is None else database).query_raw(
         """
         SELECT l.*, s.id AS snapshot_id, s.recorded_at AT TIME ZONE 'UTC' AS snapshot_recorded_at,
                s.payload AS snapshot_payload

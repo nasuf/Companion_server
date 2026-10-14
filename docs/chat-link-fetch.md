@@ -114,3 +114,34 @@ Verification includes real PostgreSQL concurrency, rollback, lost commit ACK,
 repeat sharing, legacy records, deleted-message retention and ownership tests;
 real Chromium HTTP/JWT/history checks; existing Flutter daily-share tests and
 payload round-trip checks; the production React admin overview at desktop sizes.
+
+## SQL admission binding (R01.03.8.3.2.3)
+
+The staged SQL preparer now accepts URL text and external-link cards. Fetch and
+cover work finishes before admission locks. New previews are saved in a short
+execution-scope transaction; a reset/archive/generation change invalidates the
+save. A supplied snapshot must belong to the same owner, conversation and user
+role. Client body text never replaces stored content. A legacy cache without a
+version is captured as a new current snapshot, not reconstructed historical data.
+
+Admission revalidates the scope and exact prepared projection, then inserts
+`chat_link_message_bindings` in the existing message/quota/receipt/Run/Job
+transaction. Every message has at most one immutable binding; multiple messages
+may share a version. An already committed request returns its existing receipt
+before fetching or charging again. A failed write rolls the whole admission back;
+uncertain commit results must retry the same client ID. A binding protects its
+snapshot from deletion. The existing lifecycle deletion order removes messages
+before their conversation; deferred snapshot constraints allow the related rows
+to be removed together. No old messages are backfilled.
+
+Web admin link details show `已原子绑定` only when the version-1 effect record
+matches the message snapshot. Old records, unsupported versions and inconsistent
+records remain distinct. This is per-message admission evidence, not successful
+model execution or delivery, and uses the already authorized history response.
+Flutter and service-account request/ACK/card contracts are unchanged.
+
+SQL ingress and checkpoint activation remain disabled. Consumer, durable delivery
+and domain follow-up qualification remains R01.03.8.3.2.4 and its dependent tasks.
+A rejected/racing preparation can leave an unused preview; bounded retention,
+cover cleanup and total storage budgets remain separate, unresolved work. This
+batch neither deletes production history nor changes prompt content.

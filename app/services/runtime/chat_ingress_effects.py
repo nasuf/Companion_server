@@ -13,6 +13,7 @@ from typing import Any
 from app.services import wallet
 from app.services.offerings import _offering_from_row, build_offering_card
 from app.services.runtime.chat_ingress_contracts import ChatRequestInput
+from app.services.runtime.chat_link_binding import bind_ingress_link
 from app.services.runtime.execution_scope import ExecutionScope
 from app.services.vip.chat_quota import consume_one_in_transaction
 
@@ -46,11 +47,12 @@ class ChatIngressEffects:
         # Other cards have additional state mutations, providers or follow-ups.
         # Fail closed until their adapters are implemented; never pretend they
         # are ordinary chat or silently exempt their quota.
-        if (card is not None and card_type not in {"gift", "red_packet"}) or metadata.get("link_card"):
+        if card is not None and card_type not in {"gift", "red_packet", "external_link"}:
             raise ChatIngressResourceInvalid()
+        link_version = await bind_ingress_link(tx, scope, original, message_id, metadata)
         prepared_card = metadata.get("component_card")
         if ((prepared_card is not None and type(prepared_card) is not dict)
-                or (prepared_card or {}).get("type") != card_type):
+                or (prepared_card or {}).get("type") != ("external_link" if link_version else card_type)):
             raise ChatIngressResourceInvalid()
 
         attachments = metadata.get("attachments", [])
@@ -75,7 +77,7 @@ class ChatIngressEffects:
                 raise ChatIngressResourceInvalid()
 
         offering_id = None
-        if card_type:
+        if card_type in {"gift", "red_packet"}:
             payload = card.get("payload")
             offering_id = payload.get("offering_id") if isinstance(payload, dict) else None
             if type(offering_id) is not str or not offering_id:
@@ -105,4 +107,7 @@ class ChatIngressEffects:
             )
             if not quota["allowed"]:
                 raise ChatIngressQuotaBlocked(quota)
-        return {"version": 1, "quota": quota, "attachment_ids": ids, "offering_id": offering_id}
+        result = {"version": 1, "quota": quota, "attachment_ids": ids, "offering_id": offering_id}
+        if link_version:
+            result["link"] = {"snapshot_id": link_version, "binding": "atomic"}
+        return result

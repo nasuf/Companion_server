@@ -317,6 +317,8 @@ model Message {
 
   chatIngressReceipts ChatIngressReceipt[] @ignore
 
+  linkBinding ChatLinkMessageBinding? @ignore
+
   @@index([conversationId, createdAt(sort: Desc)])
   // admin 监控聚合 (分时段/每日活跃/句子区间/DAU-WAU-MAU) 都按 role='user' +
   // created_at 范围扫全表, 加此索引避免顺序扫.
@@ -470,6 +472,8 @@ model ChatLinkSnapshot {
   linkCard   ChatLinkCard @relation(fields: [linkCardId], references: [id], onDelete: Cascade)
   payload    Json
   recordedAt DateTime     @default(now()) @map("recorded_at")
+
+  messageBindings ChatLinkMessageBinding[]
 
   @@index([linkCardId, recordedAt(sort: Desc), id], map: "chat_link_snapshots_cache_recorded_idx")
   @@map("chat_link_snapshots")
@@ -2526,4 +2530,17 @@ model HumanTakeoverDismissal {
   @@unique([takeoverId, adminId], map: "human_takeover_dismissals_takeover_admin_key")
   @@ignore
   @@map("human_takeover_dismissals")
+}
+
+// Admission uses parameterized SQL; no generic recursive client types needed.
+model ChatLinkMessageBinding {
+  messageId String @id @map("message_id")
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  snapshotId String @map("snapshot_id")
+  snapshot ChatLinkSnapshot @relation(fields: [snapshotId], references: [id], onDelete: NoAction, onUpdate: Restrict)
+  boundAt DateTime @default(now()) @map("bound_at") @db.Timestamptz(6)
+
+  @@index([snapshotId], map: "chat_link_message_bindings_snapshot_idx")
+  @@ignore
+  @@map("chat_link_message_bindings")
 }

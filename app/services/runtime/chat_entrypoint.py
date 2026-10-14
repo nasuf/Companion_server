@@ -107,7 +107,9 @@ async def prepare_sql_chat_message(
 ) -> PreparedChatAcceptance:
     from app.db import db
     from app.services import offerings
-    from app.services.chat_links import extract_first_url
+    from app.services.chat_links.cards import component_card_for_link, metadata_for_link_card
+    from app.services.chat_links.prompt import render_user_message_with_link
+    from app.services.runtime.chat_link_preparation import prepare_ingress_link
     from app.services.chat_media import repo
     from app.services.chat_media.prompt import render_user_message_with_attachments
     from app.services.chat_media.vision import ensure_vision_summaries
@@ -126,9 +128,8 @@ async def prepare_sql_chat_message(
     text = original["text"].strip()
     card = original["component_card"]
     card_type = card.get("type") if card else None
-    # R01.03.8.3 must provide their own binding/follow-up adapters. Reject before
-    # link provider fetches, mutations or ordinary-message quota exemptions.
-    if (card is not None and card_type not in {"gift", "red_packet"}) or extract_first_url(text):
+    # Unsupported cards still need their own binding/follow-up adapters.
+    if card is not None and card_type not in {"gift", "red_packet", "external_link"}:
         raise ChatIngressResourceInvalid()
     agent = await db.aiagent.find_unique(where={"id": scope.agent_id})
     if not agent or agent.userId != scope.owner_user_id or agent.status != "active":
@@ -146,7 +147,7 @@ async def prepare_sql_chat_message(
             raise ChatIngressResourceInvalid()
         attachments = [by_id[ident] for ident in original["attachment_ids"]]
         offering = None
-        if card_type:
+        if card_type in {"gift", "red_packet"}:
             authorize = offerings.authorize_gift_card if card_type == "gift" else offerings.authorize_red_packet_card
             try:
                 card = await authorize(card, user_id=scope.owner_user_id, agent_id=scope.agent_id,
@@ -156,11 +157,16 @@ async def prepare_sql_chat_message(
             card = dict(card)
             offering = card.pop("_offering")
         metadata = {}
+        link = await prepare_ingress_link(scope, request)
+        if link is not None:
+            metadata.update(component_card=component_card_for_link(link),
+                            link_card=metadata_for_link_card(link))
         if attachments:
             async with usage_session(scope="chat_media", conversation_id=scope.conversation_id,
                                      agent_id=scope.agent_id, user_id=scope.owner_user_id):
                 metadata["attachments"] = await ensure_vision_summaries(attachments, user_text=text)
         prompt_text = render_user_message_with_attachments(text, metadata.get("attachments", []))
+        prompt_text = render_user_message_with_link(prompt_text, metadata.get("link_card"))
         schedule = await get_cached_schedule(scope.agent_id)
         if not schedule:
             schedule = await generate_daily_schedule(

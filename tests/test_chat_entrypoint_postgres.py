@@ -255,7 +255,6 @@ async def test_real_offering_authorization_is_canonical_and_quota_exempt(flow,re
 
 
 @pytest.mark.parametrize("body",[
-    {"message":"https://synthetic.invalid/link"},
     {"component_card":{"type":"location","payload":{"latitude":1,"longitude":1}}},
     {"component_card":{"type":"music_track","payload":{}}},
 ])
