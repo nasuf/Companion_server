@@ -190,6 +190,7 @@ async def test_details_update_status_corrections_and_cancel_rules(sql):
     })
     assert updated["gift_note"] == "新寄语" and updated["carrier"] is None and updated["paid_amount_cents"] == 100
     assert updated["gift_name"] == "桂花乌龙茶"
+    assert (await admin_repo.update_gift_details(gift["id"], {}))["gift_note"] == "新寄语"  # 无字段即原样返回
 
     assert await admin_repo.set_transit_status(gift["id"], "shipping") is True
     assert (await admin_repo.get_gift(gift["id"]))["shipped_at"] is not None
@@ -243,4 +244,5 @@ async def test_user_context_queries(sql):
         "workspace_id": space, "agent_id": sql["agents"][0], "agent_name": "伙伴0", "conversation_id": sql["convs"][0],
     }]
     assert (await admin_repo.get_user(user))["nickname"] == "微信昵称"
+    assert await admin_repo.get_user("missing-" + sql["tag"]) is None
     assert await admin_repo.gift_names_for_user(user) == ["桂花乌龙茶"]
