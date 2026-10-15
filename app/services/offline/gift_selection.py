@@ -75,7 +75,7 @@ async def _llm_pick_index(
 def _parse_index(text: str, count: int) -> int | None:
     if not text:
         return None
-    obj = _json_object(text)
+    obj = parse_json_object(text)
     if obj is not None and "index" in obj:
         try:
             value = int(obj["index"])
@@ -92,7 +92,8 @@ def _parse_index(text: str, count: int) -> int | None:
     return None
 
 
-def _json_object(text: str) -> dict[str, Any] | None:
+def parse_json_object(text: str) -> dict[str, Any] | None:
+    """从 LLM 输出里取第一个 JSON 对象（容忍前后夹带说明文字）。"""
     try:
         parsed = json.loads(text)
         return parsed if isinstance(parsed, dict) else None

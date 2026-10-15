@@ -17,6 +17,7 @@ from app.models.offline import (
     OfflineMemoryNoteResponse,
 )
 from app.services.offline import activity_media_repo, activity_media_storage, gift_repository
+from app.services.offline.gift_status import IN_TRANSIT_STATUSES
 from app.services.offline import memory_note as memory_note_gen
 from app.services.offline import prophecy as prophecy_pool
 from app.services.offline import repository as repo
@@ -76,7 +77,7 @@ async def get_home(user_id: str, workspace_id: str | None = None) -> dict:
     pending = [a for a in activities if a["status"] == "pending"]
     accepted = [a for a in activities if a["status"] == "accepted"]
     completed = [a for a in activities if a["status"] == "completed"]
-    shipping = [g for g in gifts if g["status"] in {"ordered", "shipping"}]
+    shipping = [g for g in gifts if g["status"] in IN_TRANSIT_STATUSES]
     tags = await repo.list_user_tags(
         user_id,
         ctx["workspace_id"] if ctx else workspace_id,
@@ -131,7 +132,7 @@ async def clear_all_activities(user_id: str) -> dict[str, int]:
     media = await activity_media_repo.delete_user_activity_media(user_id)
     for item in media:
         activity_media_storage.delete_media_file(item.storage_key)
-    activity_media_storage.delete_user_media_files(user_id)
+    activity_media_storage.delete_user_media_files(user_id, keep_gift_images=True)
     return await repo.clear_user_activities(user_id)
 
 

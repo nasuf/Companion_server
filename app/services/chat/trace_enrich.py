@@ -590,6 +590,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("offline.memory_note", "活动总结旅途小记", "data", _label_reply_text),
     ("offline.gift_selection", "线下礼物选择", "data", _label_reply_text),
     ("offline.gift_candidate_pick", "礼物候选精选", "data", _label_reply_text),
+    ("offline.gift_admin_recommendations", "后台礼物推荐分析", "data", _label_reply_text),
     ("music.co_listening_context", "共听上下文", "data", _label_reply_text),
 
     # Reply 类
@@ -640,7 +641,8 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("proactive.special_combined", "特殊日期(合并)", "reply", _label_reply_text),
     ("offline.gift_thanks_reply", "礼物感谢回应", "reply", _label_reply_text),
     ("offline.gift_sent_message", "礼物寄出提示", "reply", _label_reply_text),
-    ("offline.gift_delivered_message", "礼物送达提示", "reply", _label_reply_text),
+    ("offline.gift_out_for_delivery_message", "礼物派送提醒签收", "reply", _label_reply_text),
+    ("offline.gift_received_message", "礼物签收揭晓", "reply", _label_reply_text),
     ("offline.gift_first_address_request", "首次送礼地址提醒", "reply", _label_reply_text),
     ("offline.activity_invite_message", "线下活动邀约消息", "reply", _label_reply_text),
     ("music.accept_invite", "接受共听邀请", "reply", _label_reply_text),

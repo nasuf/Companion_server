@@ -109,7 +109,8 @@ REPLY_PROMPT_KEYS: frozenset[str] = frozenset({
     # 线下互动用户可见文案
     "offline.gift_first_address_request",
     "offline.gift_sent_message",
-    "offline.gift_delivered_message",
+    "offline.gift_out_for_delivery_message",
+    "offline.gift_received_message",
     "offline.gift_thanks_reply",
     "offline.activity_invite_message",
 })

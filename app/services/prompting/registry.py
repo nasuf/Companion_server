@@ -114,9 +114,11 @@ from app.services.prompting.defaults import (
     OFFLINE_PHOTO_SUBJECTS_PROMPT,
     OFFLINE_SAFE_REWRITE_PROMPT,
     OFFLINE_SHOOTING_ITEMS_PROMPT,
-    OFFLINE_GIFT_DELIVERED_MESSAGE_PROMPT,
+    OFFLINE_GIFT_ADMIN_RECOMMENDATIONS_PROMPT,
     OFFLINE_GIFT_CANDIDATE_PICK_PROMPT,
     OFFLINE_GIFT_FIRST_ADDRESS_REQUEST_PROMPT,
+    OFFLINE_GIFT_OUT_FOR_DELIVERY_MESSAGE_PROMPT,
+    OFFLINE_GIFT_RECEIVED_MESSAGE_PROMPT,
     OFFLINE_GIFT_SELECTION_PROMPT,
     OFFLINE_GIFT_SENT_MESSAGE_PROMPT,
     OFFLINE_GIFT_THANKS_REPLY_PROMPT,
@@ -421,13 +423,27 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "offline.gift_sent_message", "礼物寄出提示", "线下互动", "礼物",
-        "【工程扩展】V3 现实世界互动. 礼物下单后，用朋友口吻告诉用户有礼物在路上.",
+        "【工程扩展】V3 现实世界互动. 礼物寄出后，用朋友口吻告诉用户有惊喜在路上；签收前保密，"
+        "prompt 不提供任何礼物信息. 占位符 {memory}.",
         OFFLINE_GIFT_SENT_MESSAGE_PROMPT,
     ),
     PromptDefinition(
-        "offline.gift_delivered_message", "礼物送达提示", "线下互动", "礼物",
-        "【工程扩展】V3 现实世界互动. mock/真实物流显示送达后，用朋友口吻提醒用户查收.",
-        OFFLINE_GIFT_DELIVERED_MESSAGE_PROMPT,
+        "offline.gift_out_for_delivery_message", "礼物派送提醒签收", "线下互动", "礼物",
+        "【工程扩展】V3 现实世界互动. 物流进入派送中时提醒用户收到后去礼物页确认签收；不透露礼物. "
+        "占位符 {memory}.",
+        OFFLINE_GIFT_OUT_FOR_DELIVERY_MESSAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.gift_received_message", "礼物签收揭晓", "线下互动", "礼物",
+        "【工程扩展】V3 现实世界互动. 用户确认签收后揭晓礼物并说明心意. "
+        "占位符 {gift_name} {gift_reason} {gift_note} {memory}.",
+        OFFLINE_GIFT_RECEIVED_MESSAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.gift_admin_recommendations", "后台礼物推荐分析", "线下互动", "礼物",
+        "【工程扩展】Web 后台礼物管理. 基于用户画像标签与记忆一次生成多个礼物候选，"
+        "每个候选用 M/T 编号引用依据（服务端校验编号）. 结构化 JSON 输出.",
+        OFFLINE_GIFT_ADMIN_RECOMMENDATIONS_PROMPT,
     ),
     PromptDefinition(
         "offline.gift_thanks_reply", "礼物感谢回应", "线下互动", "礼物",

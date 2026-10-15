@@ -52,7 +52,7 @@ Trace 面板是"真实场景端到端验证"，Replay 是"单点文案验证"—
 | `music.co_listening_context` | web 端发起共听后聊天 |
 | `music.accept_invite` / `busy_reject` / `sleep_reject` / `switch_track` | web 端分享歌曲发起共听（AI 空闲/忙碌/睡眠状态下分别触发），回复消息带 Trace 按钮 |
 | `music.busy_exit` / `agent_join_after_busy` / `agent_late_missed` 等共听事件 | 共听中暂停超时/AI 作息切换等事件，回复消息带 Trace 按钮 |
-| `offline.gift_sent_message` / `gift_delivered_message` / `gift_thanks_reply` / `gift_first_address_request` / `activity_invite_message` | 礼物寄出/送达/感谢/首次要地址/活动邀请消息，均带 Trace 按钮（2026-07-04 已接 tracer） |
+| `offline.gift_sent_message` / `gift_out_for_delivery_message` / `gift_received_message` / `gift_thanks_reply` / `gift_first_address_request` / `activity_invite_message` | 礼物寄出（神秘，不含礼物信息）/派送提醒签收/签收揭晓/感谢/首次要地址/活动邀请消息，均带 Trace 按钮 |
 
 ### 2.3 主动消息（主动消息本体带 Trace 按钮）
 `proactive.silence_*`（4）/ `proactive.memory_ai|user` / `proactive.scheduled_scene` / `proactive.decay_final` / `proactive.first_greeting`（新会话首条）/ `proactive.special_*`（4，特殊日期）/ `proactive.reminder_message` + `proactive.reminder_pre_check`（设一个"2 分钟后提醒我X"最快）/ `proactive.memory_topic_rerank`。

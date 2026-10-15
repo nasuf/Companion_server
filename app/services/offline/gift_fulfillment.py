@@ -4,6 +4,12 @@ from typing import Any
 
 from app.services.offline import gift_repository as gift_repo
 from app.services.offline.gift_selection import select_best_candidate
+from app.services.offline.gift_status import (
+    MANUAL_PROVIDER,
+    advances_transit,
+    gift_status_for_event,
+    normalize_provider_event_status,
+)
 from app.services.offline.providers.gift_types import (
     GiftOrderResult,
     GiftProductCandidate,
@@ -62,6 +68,13 @@ def candidate_snapshot(candidate: GiftProductCandidate) -> dict[str, Any]:
 
 
 async def sync_tracking_events(user_id: str, gift: dict[str, Any]) -> GiftTrackingSnapshot | None:
+    """从物流 provider 拉轨迹并落库。
+
+    手动礼物（管理员线下寄出）没有可查询的 provider，轨迹全靠后台录入，这里直接跳过——
+    否则默认的 mock provider 会往真实寄出的礼物里塞假轨迹。
+    """
+    if gift.get("provider") == MANUAL_PROVIDER:
+        return None
     provider = get_logistics_provider()
     snapshot = await provider.fetch_tracking(
         provider=gift.get("provider") or "mock",
@@ -73,10 +86,12 @@ async def sync_tracking_events(user_id: str, gift: dict[str, Any]) -> GiftTracki
             gift["id"],
             [_tracking_event_payload(event) for event in snapshot.events],
         )
+    target = provider_gift_status(snapshot.current_status)
     await gift_repo.update_tracking_snapshot(
         gift["id"],
         user_id,
-        status=_gift_status_from_tracking(snapshot.current_status),
+        # 派送中由调用方走 CAS（需要幂等通知用户），这里只推进 ordered → shipping。
+        status=target if target != "out_for_delivery" and advances_transit(gift.get("status"), target) else None,
         tracking_number=snapshot.tracking_number,
         logistics_provider=provider.name,
         logistics_payload=snapshot.raw,
@@ -84,29 +99,17 @@ async def sync_tracking_events(user_id: str, gift: dict[str, Any]) -> GiftTracki
     return snapshot
 
 
-def latest_tracking_event(
-    events: list[GiftTrackingUpdate],
-    status: str,
-) -> GiftTrackingUpdate | None:
-    matches = [event for event in events if event.status == status]
-    return max(matches, key=lambda event: event.occurred_at) if matches else None
+def provider_gift_status(status: str | None) -> str | None:
+    """provider 当前状态 → 礼物状态；快递侧已送达只算派送中，签收要用户确认。"""
+    return gift_status_for_event(normalize_provider_event_status(status)) if status else None
 
 
 def _tracking_event_payload(event: GiftTrackingUpdate) -> dict[str, Any]:
     return {
-        "status": event.status,
+        # 轨迹里的 delivered 只由用户签收写入；快递侧送达记为派送中。
+        "status": normalize_provider_event_status(event.status),
         "title": event.title,
         "description": event.description,
         "location": event.location,
         "occurred_at": event.occurred_at,
     }
-
-
-def _gift_status_from_tracking(status: str | None) -> str | None:
-    if status == "delivered":
-        return "delivered"
-    if status in {"packed", "shipping"}:
-        return "shipping"
-    if status == "ordered":
-        return "ordered"
-    return None

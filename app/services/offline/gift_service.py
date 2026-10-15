@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException
 
 from app.models.offline import (
     GiftAddressRequest,
     GiftAddressResponse,
+    GiftReceiptResponse,
     GiftThanksResponse,
     GiftTrackingEvent,
     GiftTrackingResponse,
@@ -18,6 +17,7 @@ from app.models.offline import (
     GiftsHomeResponse,
     RealWorldGiftItem,
 )
+from app.observability.events import EVT_GIFT_OUT_FOR_DELIVERY, EVT_GIFT_RECEIVED
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.offline import gift_fulfillment
 from app.services.offline import gift_repository as gift_repo
@@ -32,31 +32,24 @@ from app.services.offline.gift_amount import sample_gift_amount_cents
 from app.services.offline.gift_budget import available_gift_budget_cents
 from app.services.offline.gift_messages import (
     first_address_request_message,
-    gift_delivered_message,
+    gift_out_for_delivery_message,
+    gift_received_message,
     gift_sent_message,
     gift_thanks_reply,
 )
+from app.services.offline.gift_status import (
+    ACTIVE_STATUSES,
+    IN_TRANSIT_STATUSES,
+    REVEALED_STATUS,
+    SPENT_STATUSES,
+    user_view,
+)
+from app.services.offline.gift_selection import parse_json_object
 from app.services.offline.memory_hooks import remember_user_event
 from app.services.offline.providers.gift_types import GiftProviderError
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
-
-
-def _json_object(text: str) -> dict[str, Any] | None:
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else None
-    except Exception:
-        pass
-    match = re.search(r"\{.*\}", text, flags=re.S)
-    if not match:
-        return None
-    try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else None
-    except Exception:
-        return None
 
 
 async def get_gifts(user_id: str, workspace_id: str | None = None) -> GiftsHomeResponse:
@@ -66,18 +59,18 @@ async def get_gifts(user_id: str, workspace_id: str | None = None) -> GiftsHomeR
         await _refresh_deliveries(user_id, resolved_workspace, ctx)
     address = await gift_repo.default_address(user_id, masked=True)
     gifts = await gift_repo.list_gifts(user_id, resolved_workspace)
-    shipping = next((g for g in gifts if g["status"] in {"ordered", "shipping"}), None)
+    # list_gifts 按创建时间倒序，第一份就是最新寄出的。
+    in_transit = [RealWorldGiftItem(**user_view(g)) for g in gifts if g["status"] in IN_TRANSIT_STATUSES]
     grouped: dict[int, list[RealWorldGiftItem]] = {}
     for gift in gifts:
-        if shipping and gift["id"] == shipping["id"]:
-            continue
-        if gift["status"] != "delivered":
+        if gift["status"] != REVEALED_STATUS:
             continue
         year = _year_for_gift(gift)
-        grouped.setdefault(year, []).append(RealWorldGiftItem(**gift))
+        grouped.setdefault(year, []).append(RealWorldGiftItem(**user_view(gift)))
     return GiftsHomeResponse(
         address=GiftAddressResponse(**address) if address else None,
-        shipping_gift=RealWorldGiftItem(**shipping) if shipping else None,
+        shipping_gift=in_transit[0] if in_transit else None,
+        shipping_gifts=in_transit,
         groups=[
             GiftYearGroup(year=year, gifts=items)
             for year, items in sorted(grouped.items(), reverse=True)
@@ -122,7 +115,7 @@ async def get_gift(user_id: str, gift_id: str) -> RealWorldGiftItem:
     ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
     if ctx:
         gift = await _refresh_one_delivery(user_id, gift, ctx) or gift
-    return RealWorldGiftItem(**gift)
+    return RealWorldGiftItem(**user_view(gift))
 
 
 async def get_tracking(user_id: str, gift_id: str) -> GiftTrackingResponse:
@@ -151,7 +144,7 @@ async def refresh_due_gift_deliveries(
     for gift in await gift_repo.list_gifts(user_id, resolved.get("workspace_id")):
         before = gift.get("status")
         updated = await _refresh_one_delivery(user_id, gift, resolved)
-        if before in {"ordered", "shipping"} and updated and updated.get("status") == "delivered":
+        if before in {"ordered", "shipping"} and updated and updated.get("status") == "out_for_delivery":
             refreshed += 1
     return refreshed
 
@@ -166,8 +159,11 @@ async def send_thanks(
     gift = await gift_repo.get_gift(gift_id, user_id)
     if not gift:
         raise HTTPException(status_code=404, detail="Gift not found")
+    if gift.get("status") != REVEALED_STATUS:
+        # 感谢消息会带上礼物名，签收前发出去等于提前揭晓。
+        raise HTTPException(status_code=409, detail="签收礼物后才能道谢哦")
     if gift.get("thanks_sent_at"):
-        return GiftThanksResponse(ok=True, gift=RealWorldGiftItem(**gift), assistant_message=None)
+        return GiftThanksResponse(ok=True, gift=RealWorldGiftItem(**user_view(gift)), assistant_message=None)
     ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
     if ctx:
         await insert_user_component_message(
@@ -210,7 +206,7 @@ async def send_thanks(
     )
     return GiftThanksResponse(
         ok=True,
-        gift=RealWorldGiftItem(**updated),
+        gift=RealWorldGiftItem(**user_view(updated)),
         assistant_message=assistant,
     )
 
@@ -225,10 +221,7 @@ async def create_gift_for_user(
     if not ctx or not ctx.get("conversation_id"):
         return None
     existing = await gift_repo.list_gifts(user_id, ctx["workspace_id"])
-    active = next(
-        (g for g in existing if g["status"] in {"pending_address", "selecting", "ordered", "shipping"}),
-        None,
-    )
+    active = next((g for g in existing if g["status"] in ACTIVE_STATUSES), None)
     if active:
         if active["status"] == "pending_address":
             address = await gift_repo.default_address(user_id, masked=False)
@@ -322,18 +315,21 @@ _MOCK_ADDRESS: dict[str, Any] = {
 }
 
 
+MockGiftStage = Literal["shipping", "out_for_delivery", "delivered"]
+
+
 async def create_mock_gift_for_user(
     *,
     user_id: str,
     workspace_id: str | None = None,
-    delivered: bool = False,
+    stage: MockGiftStage = "shipping",
 ) -> dict[str, Any] | None:
     """管理员测试：为当前用户注入一份礼物，用于验证前端展示。
 
     仅在 mock provider 下可用：跳过触发判定、预算门控与 LLM 选礼，直接造一份 spec 走
-    purchase_gift（mock 下单）+ sync_tracking_events（mock 物流轨迹），
-    用于在前端验证礼物卡 / 物流时间线 / 送达态 / 感谢交互的完整性。
-    delivered=True 时额外强制标记送达并推送送达消息。
+    purchase_gift（mock 下单）+ sync_tracking_events（mock 物流轨迹）。
+    stage 决定停在哪一步：shipping 运输中；out_for_delivery 派送中（可测签收）；
+    delivered 再走一遍真实的签收流程（揭晓卡片 + AI 消息），用于测感谢交互。
 
     ⚠️ 若当前 GIFT_COMMERCE_PROVIDER 是真实 provider（如 ali1688），此接口会触发
     真实下单+真实扣款，故显式拒绝——测试注入只允许在 mock 下进行。
@@ -371,8 +367,12 @@ async def create_mock_gift_for_user(
     if not gift:
         raise HTTPException(status_code=500, detail="测试礼物下单失败，请检查 gift provider 配置。")
 
-    if delivered:
-        gift = await _emit_delivery_once(user_id, gift, ctx, datetime.now(UTC)) or gift
+    if stage in {"out_for_delivery", "delivered"}:
+        gift = await advance_to_out_for_delivery(
+            user_id, gift, ctx=ctx, event=_courier_at_door_event(datetime.now(UTC)),
+        ) or gift
+    if stage == "delivered":
+        gift = (await _confirm_receipt(user_id, gift["id"], actor="admin"))[0]
     return gift
 
 
@@ -488,7 +488,7 @@ async def _fulfill_gift(
         "agent_id": ctx["agent_id"],
         "workspace_id": ctx["workspace_id"],
         "conversation_id": ctx["conversation_id"],
-        "status": order.status if order.status in {"ordered", "shipping", "delivered"} else "ordered",
+        "status": _initial_order_status(order.status),
         "trigger_type": trigger_type,
         "gift_name": spec["gift_name"],
         "gift_reason": spec["gift_reason"],
@@ -513,6 +513,7 @@ async def _fulfill_gift(
     }
     gift = await gift_repo.update_gift_order_details(gift["id"], user_id, payload)
     if not gift:
+        logger.warning("[offline] gift cancelled while ordering user_id=%s", user_id)
         return None
     await gift_fulfillment.sync_tracking_events(user_id, gift)
     await gift_repo.update_last_gift_paid(user_id, ctx["agent_id"], ctx["workspace_id"])
@@ -521,7 +522,7 @@ async def _fulfill_gift(
         conversation_id=ctx["conversation_id"],
         agent_id=ctx["agent_id"], user_id=user_id,
     ) as tracer:
-        message = await gift_sent_message(user_id, ctx["workspace_id"], gift)
+        message = await gift_sent_message(user_id, ctx["workspace_id"])
         await emit_gift_card(
             conversation_id=ctx["conversation_id"],
             user_id=user_id,
@@ -533,12 +534,15 @@ async def _fulfill_gift(
             message=message,
             trace_id=tracer.safe_trace_id,
         )
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=ctx["workspace_id"],
-        text=f"AI 给用户寄出礼物「{gift['gift_name']}」：{gift.get('gift_reason') or ''}",
-    )
+    remember_mystery_gift_sent(user_id, ctx["workspace_id"])
     return gift
+
+
+def _initial_order_status(provider_status: str) -> str:
+    # provider 下单即报「已送达」也只算派送中之前的在途：签收必须由用户确认。
+    if provider_status in {"ordered", "shipping"}:
+        return provider_status
+    return "shipping" if provider_status in {"out_for_delivery", "delivered"} else "ordered"
 
 
 def _gift_staging_payload(
@@ -575,7 +579,7 @@ async def _select_gift(user_id: str, workspace_id: str | None, amount_cents: int
     memory = await repo.memory_brief(user_id, workspace_id, limit=80)
     sent_gifts = [
         gift["gift_name"] for gift in await gift_repo.list_gifts(user_id, workspace_id)
-        if gift.get("gift_name") and gift["status"] in {"ordered", "shipping", "delivered"}
+        if gift.get("gift_name") and gift["status"] in SPENT_STATUSES
     ][:20]
     try:
         prompt_text = (await get_prompt_text("offline.gift_selection")).format(
@@ -587,7 +591,7 @@ async def _select_gift(user_id: str, workspace_id: str | None, amount_cents: int
             sent_gifts=", ".join(sent_gifts) if sent_gifts else "暂无",
         )
         raw = await invoke_text(get_chat_model(), prompt_text)
-        parsed = _json_object(raw) or {}
+        parsed = parse_json_object(raw) or {}
     except Exception as exc:
         logger.warning("[offline] gift selection failed: %s", exc)
         parsed = {}
@@ -615,63 +619,194 @@ async def _refresh_one_delivery(
     gift: dict[str, Any],
     ctx: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if gift.get("status") not in {"ordered", "shipping"}:
+    # 派送中也继续同步：快递员 / 驿站的后续轨迹要能看到；状态迁移由 CAS 保证不重复。
+    if gift.get("status") not in IN_TRANSIT_STATUSES:
         return gift
     try:
         snapshot = await gift_fulfillment.sync_tracking_events(user_id, gift)
     except GiftProviderError as exc:
         logger.warning("[offline] gift tracking refresh failed gift_id=%s: %s", gift["id"], exc)
         return gift
-    if snapshot and snapshot.current_status == "delivered":
-        delivered_event = gift_fulfillment.latest_tracking_event(snapshot.events, "delivered")
-        delivered_at = delivered_event.occurred_at if delivered_event else datetime.now(UTC)
-        return await _emit_delivery_once(user_id, gift, ctx, delivered_at)
-    delivered_at = _parse_dt(gift.get("delivered_at"))
-    if not delivered_at or delivered_at > datetime.now(UTC):
+    if snapshot is None:
+        # 手动礼物：轨迹由后台录入，派送中由管理员推进。
         return gift
-    return await _emit_delivery_once(user_id, gift, ctx, delivered_at)
+    if gift_fulfillment.provider_gift_status(snapshot.current_status) == "out_for_delivery":
+        return await advance_to_out_for_delivery(user_id, gift, ctx=ctx) or gift
+    # provider 只给了预计送达时间（mock 即如此）：到点视为快递已在派送。
+    eta = _parse_dt(gift.get("delivered_at"))
+    if eta and eta <= datetime.now(UTC):
+        return await advance_to_out_for_delivery(
+            user_id, gift, ctx=ctx, event=_courier_at_door_event(eta),
+        ) or gift
+    return gift
 
 
-async def _emit_delivery_once(
+def _courier_at_door_event(occurred_at: datetime) -> dict[str, Any]:
+    return {
+        "status": "out_for_delivery",
+        "title": "快递员正在派送",
+        "description": "收到后记得在礼物页确认签收，签收后就能揭晓礼物啦。",
+        "location": "收货地址附近",
+        "occurred_at": occurred_at,
+    }
+
+
+async def advance_to_out_for_delivery(
     user_id: str,
     gift: dict[str, Any],
-    ctx: dict[str, Any],
-    delivered_at: datetime,
+    *,
+    ctx: dict[str, Any] | None = None,
+    event: dict[str, Any] | None = None,
+    notify: bool = True,
 ) -> dict[str, Any] | None:
-    updated = await gift_repo.mark_gift_delivered(gift["id"], user_id, delivered_at)
+    """在途 → 派送中（待签收），并提醒用户收到后签收。
+
+    状态迁移是 CAS：并发刷新 / 重复请求只有一次真正迁移，提醒消息也只发一次。
+    没有发生迁移时返回 None。同一份礼物只提醒一次（以聊天里是否已有提醒消息为准），
+    notify=False 时由调用方自行决定是否提醒。
+    """
+    updated = await gift_repo.mark_gift_out_for_delivery(gift["id"], user_id)
     if not updated:
-        return gift
-    if not await gift_repo.tracking_status_exists(gift["id"], "delivered"):
-        await gift_repo.add_tracking_events(
-            gift["id"],
-            [
-                {
-                    "status": "delivered",
-                    "title": "礼物已送达指定地址",
-                    "description": "记得查收这份小心意。",
-                    "location": "收货地址",
-                    "occurred_at": delivered_at,
-                }
-            ],
-        )
-    async with offline_trace(
-        "gift_delivered",
-        conversation_id=ctx.get("conversation_id"),
-        agent_id=ctx["agent_id"], user_id=user_id,
-    ) as tracer:
-        message = await gift_delivered_message(user_id, ctx.get("workspace_id"), updated)
-        await emit_gift_card(
-            conversation_id=ctx.get("conversation_id"),
-            user_id=user_id,
-            agent_id=ctx["agent_id"],
-            workspace_id=ctx.get("workspace_id"),
-            gift=updated,
-            trigger_type="gift_delivered",
-            status_label="已送达",
-            message=message,
-            trace_id=tracer.safe_trace_id,
-        )
+        return None
+    if event:
+        await gift_repo.add_tracking_events(gift["id"], [event])
+    logger.info(
+        "[offline] gift out for delivery gift_id=%s",
+        gift["id"],
+        extra={"event": EVT_GIFT_OUT_FOR_DELIVERY, "gift_id": gift["id"], "user_id": user_id},
+    )
+    if notify and not await gift_repo.gift_notice_sent(gift["id"], user_id, "gift_out_for_delivery"):
+        await notify_out_for_delivery(user_id, updated, ctx=ctx)
     return updated
+
+
+async def notify_out_for_delivery(
+    user_id: str,
+    gift: dict[str, Any],
+    *,
+    ctx: dict[str, Any] | None = None,
+) -> str | None:
+    """AI 提醒用户快递在派送、收到后去签收。失败只记日志：状态已经迁移成功。"""
+    try:
+        ctx = ctx or await repo.resolve_user_context(user_id, gift.get("workspace_id"))
+        if not ctx:
+            return None
+        async with offline_trace(
+            "gift_out_for_delivery",
+            conversation_id=ctx.get("conversation_id"),
+            agent_id=ctx["agent_id"], user_id=user_id,
+        ) as tracer:
+            message = await gift_out_for_delivery_message(user_id, ctx.get("workspace_id"))
+            return await emit_gift_card(
+                conversation_id=ctx.get("conversation_id"),
+                user_id=user_id,
+                agent_id=ctx["agent_id"],
+                workspace_id=ctx.get("workspace_id"),
+                gift=gift,
+                trigger_type="gift_out_for_delivery",
+                status_label="派送中",
+                message=message,
+                trace_id=tracer.safe_trace_id,
+            )
+    except Exception as exc:
+        logger.warning("[offline] gift out-for-delivery notify failed gift_id=%s: %s", gift.get("id"), exc)
+        return None
+
+
+async def confirm_receipt(user_id: str, gift_id: str) -> GiftReceiptResponse:
+    """用户确认签收：派送中 → 已收到，并揭晓礼物。"""
+    gift, assistant, already = await _confirm_receipt(user_id, gift_id, actor="user")
+    return GiftReceiptResponse(
+        ok=True,
+        gift=RealWorldGiftItem(**user_view(gift)),
+        assistant_message=assistant,
+        already_confirmed=already,
+    )
+
+
+async def confirm_receipt_as_admin(user_id: str, gift_id: str) -> tuple[dict[str, Any], str | None, bool]:
+    """后台代签收（用户找不到按钮 / 旧版客户端）。流程与用户签收完全一致。"""
+    return await _confirm_receipt(user_id, gift_id, actor="admin")
+
+
+async def _confirm_receipt(
+    user_id: str,
+    gift_id: str,
+    *,
+    actor: str,
+) -> tuple[dict[str, Any], str | None, bool]:
+    gift = await gift_repo.get_gift(gift_id, user_id)
+    if not gift:
+        raise HTTPException(status_code=404, detail="Gift not found")
+    if gift["status"] == REVEALED_STATUS:
+        return gift, None, True
+    updated = await gift_repo.mark_gift_received(gift_id, user_id)
+    if not updated:
+        latest = await gift_repo.get_gift(gift_id, user_id)
+        if latest and latest["status"] == REVEALED_STATUS:
+            return latest, None, True
+        raise HTTPException(status_code=409, detail="礼物还没到派送环节，收到快递后再来签收吧")
+    await gift_repo.add_tracking_events(
+        gift_id,
+        [{
+            "status": REVEALED_STATUS,
+            "title": "已签收",
+            "description": "你已确认收到这份礼物" if actor == "user" else "已由客服代你确认签收",
+            "location": None,
+            "occurred_at": datetime.now(UTC),
+        }],
+    )
+    logger.info(
+        "[offline] gift received gift_id=%s actor=%s",
+        gift_id,
+        actor,
+        extra={"event": EVT_GIFT_RECEIVED, "gift_id": gift_id, "user_id": user_id, "actor": actor},
+    )
+    assistant = await _announce_received(user_id, updated)
+    remember_user_event(
+        user_id=user_id,
+        workspace_id=updated.get("workspace_id"),
+        text=f"用户签收了 AI 寄出的礼物「{updated['gift_name']}」，礼物已经揭晓，可以自然地聊它",
+    )
+    return updated, assistant, False
+
+
+async def _announce_received(user_id: str, gift: dict[str, Any]) -> str | None:
+    """签收后的揭晓卡片 + AI 消息。失败只记日志：签收本身已经成功。"""
+    try:
+        ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
+        if not ctx:
+            return None
+        async with offline_trace(
+            "gift_received",
+            conversation_id=ctx.get("conversation_id"),
+            agent_id=ctx["agent_id"], user_id=user_id,
+        ) as tracer:
+            message = await gift_received_message(user_id, ctx.get("workspace_id"), gift)
+            await emit_gift_card(
+                conversation_id=ctx.get("conversation_id"),
+                user_id=user_id,
+                agent_id=ctx["agent_id"],
+                workspace_id=ctx.get("workspace_id"),
+                gift=gift,
+                trigger_type="gift_received",
+                status_label="已签收",
+                message=message,
+                trace_id=tracer.safe_trace_id,
+            )
+            return message
+    except Exception as exc:
+        logger.warning("[offline] gift received announce failed gift_id=%s: %s", gift.get("id"), exc)
+        return None
+
+
+def remember_mystery_gift_sent(user_id: str, workspace_id: str | None) -> None:
+    # 礼物名不进记忆：记忆会注入聊天，AI 可能在用户签收前说漏嘴。
+    remember_user_event(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        text="AI 给用户寄出了一份神秘礼物，用户签收前要保密，不要提前透露礼物是什么",
+    )
 
 
 def _parse_dt(value: Any) -> datetime | None:

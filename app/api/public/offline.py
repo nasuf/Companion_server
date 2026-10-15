@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.jwt_auth import require_admin_jwt, require_user
@@ -8,6 +10,7 @@ from app.models.offline import (
     AdminGiftClearResponse,
     GiftAddressRequest,
     GiftAddressResponse,
+    GiftReceiptResponse,
     GiftThanksRequest,
     GiftThanksResponse,
     GiftTrackingResponse,
@@ -29,6 +32,7 @@ from app.services.offline import (
     activity_service,
     gift_service,
 )
+from app.services.offline.gift_status import user_view
 from app.services.offline.module_settings import is_activity_enabled, is_gift_enabled
 
 router = APIRouter(prefix="/offline", tags=["offline"])
@@ -96,6 +100,8 @@ async def admin_generate_activity_items(
 @router.post("/admin/gifts/mock", response_model=RealWorldGiftItem)
 async def create_mock_gift(
     workspace_id: str | None = Query(default=None),
+    stage: Literal["shipping", "out_for_delivery", "delivered"] | None = Query(default=None),
+    # 旧版管理员页只会传 delivered=true，等价于 stage=delivered。
     delivered: bool = Query(default=False),
     user: dict = Depends(require_admin_jwt),
 ):
@@ -104,9 +110,9 @@ async def create_mock_gift(
     gift = await gift_service.create_mock_gift_for_user(
         user_id=str(user["sub"]),
         workspace_id=workspace_id,
-        delivered=delivered,
+        stage=stage or ("delivered" if delivered else "shipping"),
     )
-    return RealWorldGiftItem(**gift)
+    return RealWorldGiftItem(**user_view(gift))
 
 
 @router.delete("/admin/gifts", response_model=AdminGiftClearResponse)
@@ -328,6 +334,12 @@ async def thank_gift(
         data.message,
         client_id=data.client_id,
     )
+
+
+@router.post("/gifts/{gift_id}/confirm-receipt", response_model=GiftReceiptResponse)
+async def confirm_gift_receipt(gift_id: str, user: dict = Depends(require_user)):
+    """派送中的礼物由用户本人确认签收；签收后才揭晓礼物详情。"""
+    return await gift_service.confirm_receipt(str(user["sub"]), gift_id)
 
 
 def _media_response(

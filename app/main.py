@@ -284,6 +284,7 @@ from app.api.public.vip_activation import router as vip_activation_router
 from app.api.admin.vip_activation import router as admin_vip_activation_router
 from app.api.admin.chat_quota import router as admin_chat_quota_router
 from app.api.admin.offline_settings import router as admin_offline_settings_router
+from app.api.admin.gifts import router as admin_gifts_router
 from app.api.admin.achievement_settings import router as admin_achievement_settings_router
 from app.api.admin.last_wills import router as admin_last_wills_router
 from app.api.admin.proactive import router as admin_proactive_router
@@ -351,6 +352,7 @@ app.include_router(admin_payments_router)
 app.include_router(admin_vip_activation_router)
 app.include_router(admin_chat_quota_router)
 app.include_router(admin_offline_settings_router)
+app.include_router(admin_gifts_router)
 app.include_router(admin_achievement_settings_router)
 app.include_router(admin_last_wills_router)
 app.include_router(admin_proactive_router)

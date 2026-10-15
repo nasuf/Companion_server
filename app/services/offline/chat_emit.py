@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 from prisma import Json
 
 from app.db import db
+from app.services.offline.gift_status import MYSTERY_GIFT_NAME, is_revealed
 from app.services.proactive.emit import emit_proactive_message
 from app.services.runtime.ws_manager import manager
 
@@ -112,36 +113,38 @@ def build_gift_component_card(
     status_label: str,
     message: str | None = None,
 ) -> dict[str, Any]:
-    image_url = (
-        gift.get("product_image_url")
-        or gift.get("image_url")
-        or gift.get("cover_url")
-    )
+    """礼物聊天卡片。卡片随消息永久落库，所以签收前就不能写入礼物名称/图片/寄语。"""
+    revealed = is_revealed(gift)
     subtitle_parts = [status_label]
-    if gift.get("logistics_provider"):
+    if gift.get("logistics_provider") and gift.get("logistics_provider") != "mock":
         subtitle_parts.append(str(gift["logistics_provider"]))
     elif gift.get("tracking_number"):
         subtitle_parts.append("物流更新中")
-    body = (
-        message
-        or gift.get("gift_note")
-        or gift.get("gift_reason")
-        or "有一份小心意正在路上。"
-    )
+    if revealed:
+        title = gift.get("gift_name") or "一份小礼物"
+        image_url = gift.get("product_image_url") or gift.get("image_url") or gift.get("cover_url")
+        body = message or gift.get("gift_note") or gift.get("gift_reason") or "这份小心意已经送到你手上了。"
+        footer = "点击查看礼物详情"
+    else:
+        title = MYSTERY_GIFT_NAME
+        image_url = None
+        body = message or "有一份神秘礼物正在路上，签收后揭晓。"
+        footer = "点击查看物流"
     return {
         "version": 1,
         "type": "offline_gift",
-        "title": gift.get("gift_name") or "一份小礼物",
+        "title": title,
         "subtitle": " · ".join(part for part in subtitle_parts if part),
         "body": body,
-        "footer": "点击查看礼物详情",
+        "footer": footer,
         "accent": "#F6A64B",
         "payload": {
             "gift_id": gift.get("id"),
             "status": gift.get("status"),
             "status_label": status_label,
-            "gift_name": gift.get("gift_name"),
+            "gift_name": title if revealed else None,
             "image_url": image_url,
+            "revealed": revealed,
             "real_world_type": "gift",
         },
     }
@@ -248,7 +251,7 @@ async def emit_gift_card(
         user_id=user_id,
         agent_id=agent_id,
         workspace_id=workspace_id,
-        message=message or f"礼物卡片：{gift.get('gift_name') or '一份小礼物'}",
+        message=message or f"礼物卡片：{card['title']}",
         trigger_type=trigger_type,
         extra_metadata=metadata,
         ws_payload_extra={"component_card": card},

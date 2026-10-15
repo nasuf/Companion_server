@@ -86,7 +86,9 @@ def storage_key_for(user_id: str, mime: str, *, kind: str = "image") -> str:
         ext = _ALLOWED_AUDIO_MIMES.get(mime, ".m4a")
         return f"{user_id}_voice_{uuid.uuid4().hex}{ext}"
     ext = _ALLOWED_IMAGE_MIMES.get(mime, ".jpg")
-    return f"{user_id}_image_{uuid.uuid4().hex}{ext}"
+    # 后台为礼物上传的图片单独命名：清空活动测试数据时要保留它们。
+    label = "gift" if kind == "gift" else "image"
+    return f"{user_id}_{label}_{uuid.uuid4().hex}{ext}"
 
 
 def storage_path(storage_key: str) -> Path:
@@ -99,10 +101,10 @@ def media_url(storage_key: str) -> str:
     return f"{_MEDIA_PUBLIC_PREFIX}/{storage_key}"
 
 
-def save_image_blob(*, user_id: str, blob: bytes, mime: str) -> str:
+def save_image_blob(*, user_id: str, blob: bytes, mime: str, kind: str = "image") -> str:
     validate_image_size(blob)
     _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    key = storage_key_for(user_id, mime, kind="image")
+    key = storage_key_for(user_id, mime, kind=kind)
     storage_path(key).write_bytes(blob)
     return key
 
@@ -123,12 +125,15 @@ def delete_media_file(storage_key: str | None) -> None:
         path.unlink()
 
 
-def delete_user_media_files(user_id: str) -> int:
+def delete_user_media_files(user_id: str, *, keep_gift_images: bool = False) -> int:
     if not _MEDIA_DIR.exists() or not _MEDIA_DIR.is_dir():
         return 0
     prefix = f"{user_id}_"
+    gift_prefix = f"{user_id}_gift_"
     deleted = 0
     for path in _MEDIA_DIR.iterdir():
+        if keep_gift_images and path.name.startswith(gift_prefix):
+            continue
         if path.is_file() and path.name.startswith(prefix):
             path.unlink()
             deleted += 1

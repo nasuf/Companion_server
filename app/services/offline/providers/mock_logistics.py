@@ -18,6 +18,7 @@ class MockGiftLogisticsProvider:
         provider_order_id: str | None,
         tracking_number: str | None,
     ) -> GiftTrackingSnapshot:
+        # 轨迹时间都落在过去：签收/派送节点按"现在"写入，未来时间会让时间线乱序。
         now = datetime.now(UTC)
         events = [
             GiftTrackingUpdate(
@@ -25,7 +26,7 @@ class MockGiftLogisticsProvider:
                 title="订单已创建，等待商家发货",
                 description="小惊喜已经进入准备流程。",
                 location="上海",
-                occurred_at=now,
+                occurred_at=now - timedelta(hours=26),
                 raw={"mock": True},
             ),
             GiftTrackingUpdate(
@@ -33,7 +34,7 @@ class MockGiftLogisticsProvider:
                 title="包裹已揽收，从上海发出",
                 description="礼物已经打包好，正在向你飞奔。",
                 location="上海",
-                occurred_at=now + timedelta(hours=8),
+                occurred_at=now - timedelta(hours=18),
                 raw={"mock": True},
             ),
             GiftTrackingUpdate(
@@ -41,7 +42,7 @@ class MockGiftLogisticsProvider:
                 title="包裹正在运输中",
                 description="下一站会继续更新。",
                 location="转运中心",
-                occurred_at=now + timedelta(days=1),
+                occurred_at=now - timedelta(hours=2),
                 raw={"mock": True},
             ),
         ]

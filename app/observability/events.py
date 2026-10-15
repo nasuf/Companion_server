@@ -91,6 +91,15 @@ EVT_REMINDER_DLQ = "reminder.dead_letter"
 EVT_INTERACTION_RECORDED = "interaction.recorded"
 EVT_INTERACTION_MAKEUP = "interaction.makeup"
 
+# Real-world gifts (AI → user physical gifts)
+EVT_GIFT_ADMIN_SENT = "gift.admin_sent"
+EVT_GIFT_ADMIN_UPDATED = "gift.admin_updated"
+EVT_GIFT_TRACKING_ADDED = "gift.tracking_added"
+EVT_GIFT_OUT_FOR_DELIVERY = "gift.out_for_delivery"
+EVT_GIFT_RECEIVED = "gift.received"
+EVT_GIFT_CANCELLED = "gift.cancelled"
+EVT_GIFT_RECOMMENDATIONS = "gift.recommendations"
+
 # Offerings (red packets / future gifts)
 EVT_OFFERING_SENT = "offering.sent"
 EVT_OFFERING_RECEIVED = "offering.received"

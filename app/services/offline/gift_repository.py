@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from app.db import db
+from app.services.offline.gift_status import SPENT_STATUSES
 from app.services.offline.repository import _field, _iso, new_id, now_utc
 
 
@@ -277,7 +278,7 @@ async def update_gift_order_details(gift_id: str, user_id: str, data: dict[str, 
             shipped_at = $22::timestamptz,
             delivered_at = $23::timestamptz,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND user_id = $2
+        WHERE id = $1 AND user_id = $2 AND status <> 'cancelled'
         RETURNING *
         """,
         gift_id,
@@ -320,7 +321,7 @@ async def update_gift_status(
         SET status = $3,
             failure_reason = $4,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND user_id = $2
+        WHERE id = $1 AND user_id = $2 AND status <> 'cancelled'
         RETURNING *
         """,
         gift_id,
@@ -331,23 +332,36 @@ async def update_gift_status(
     return gift_from_row(rows[0]) if rows else None
 
 
-async def mark_gift_delivered(
-    gift_id: str,
-    user_id: str,
-    delivered_at: datetime | None = None,
-) -> dict[str, Any] | None:
+async def mark_gift_out_for_delivery(gift_id: str, user_id: str) -> dict[str, Any] | None:
+    """在途 → 派送中（待签收）。CAS：只有本次真正完成迁移才返回行，用于幂等通知。"""
     rows = await db.query_raw(
         """
         UPDATE real_world_gifts
-        SET status = 'delivered',
-            delivered_at = COALESCE($3::timestamptz, delivered_at, CURRENT_TIMESTAMP),
+        SET status = 'out_for_delivery',
+            shipped_at = COALESCE(shipped_at, CURRENT_TIMESTAMP),
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND user_id = $2
+        WHERE id = $1 AND user_id = $2 AND status IN ('ordered', 'shipping')
         RETURNING *
         """,
         gift_id,
         user_id,
-        delivered_at,
+    )
+    return gift_from_row(rows[0]) if rows else None
+
+
+async def mark_gift_received(gift_id: str, user_id: str) -> dict[str, Any] | None:
+    """派送中 → 已签收。CAS 保证双击 / 并发签收只有一次生效。"""
+    rows = await db.query_raw(
+        """
+        UPDATE real_world_gifts
+        SET status = 'delivered',
+            delivered_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND user_id = $2 AND status = 'out_for_delivery'
+        RETURNING *
+        """,
+        gift_id,
+        user_id,
     )
     return gift_from_row(rows[0]) if rows else None
 
@@ -419,10 +433,14 @@ async def update_tracking_snapshot(
     logistics_provider: str | None = None,
     logistics_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    # status 只允许在 ordered/shipping 之间前进；派送中与签收走各自的 CAS。
     rows = await db.query_raw(
         """
         UPDATE real_world_gifts
-        SET status = COALESCE($3, status),
+        SET status = CASE
+                WHEN $3::text IS NOT NULL AND status IN ('ordered', 'shipping') THEN $3
+                ELSE status
+            END,
             tracking_number = COALESCE($4, tracking_number),
             logistics_provider = COALESCE($5, logistics_provider),
             logistics_payload = COALESCE($6::jsonb, logistics_payload),
@@ -480,6 +498,26 @@ async def gift_tracking(gift_id: str, user_id: str) -> list[dict[str, Any]]:
     ]
 
 
+async def gift_notice_sent(gift_id: str, user_id: str, trigger_type: str) -> bool:
+    """这份礼物的某类聊天通知是否已经发出（以消息表为准，发送失败的不算）。"""
+    rows = await db.query_raw(
+        """
+        SELECT 1
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.user_id = $2
+          AND m.metadata->>'real_world_type' = 'gift'
+          AND m.metadata->>'source_id' = $1
+          AND m.metadata->>'trigger_type' = $3
+        LIMIT 1
+        """,
+        gift_id,
+        user_id,
+        trigger_type,
+    )
+    return bool(rows)
+
+
 async def tracking_status_exists(gift_id: str, status: str) -> bool:
     rows = await db.query_raw(
         """
@@ -511,9 +549,10 @@ async def historical_gift_spend_cents(user_id: str) -> int:
         """
         SELECT COALESCE(SUM(paid_amount_cents), 0) AS total
         FROM real_world_gifts
-        WHERE user_id = $1 AND status IN ('ordered', 'shipping', 'delivered')
+        WHERE user_id = $1 AND status = ANY($2::text[])
         """,
         user_id,
+        list(SPENT_STATUSES),
     )
     return int(_field(rows[0], "total", default=0) or 0) if rows else 0
 

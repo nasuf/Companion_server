@@ -15,9 +15,11 @@ GiftStatus = Literal[
     "selecting",
     "ordered",
     "shipping",
+    "out_for_delivery",
     "delivered",
     "failed",
     "skipped",
+    "cancelled",
 ]
 
 
@@ -201,9 +203,13 @@ class GiftTrackingEvent(BaseModel):
 
 
 class RealWorldGiftItem(BaseModel):
+    """用户侧礼物视图。签收（delivered）前由 gift_status.user_view 脱敏为神秘礼物。"""
+
     id: str
     status: GiftStatus
     trigger_type: str
+    revealed: bool = False
+    can_confirm_receipt: bool = False
     gift_name: str
     gift_reason: str | None = None
     gift_note: str | None = None
@@ -231,7 +237,9 @@ class GiftYearGroup(BaseModel):
 
 class GiftsHomeResponse(BaseModel):
     address: GiftAddressResponse | None = None
+    # 旧客户端只认单个在途礼物；新客户端读 shipping_gifts（全部在途，最新在前）。
     shipping_gift: RealWorldGiftItem | None = None
+    shipping_gifts: list[RealWorldGiftItem] = Field(default_factory=list)
     groups: list[GiftYearGroup] = Field(default_factory=list)
 
 
@@ -256,3 +264,11 @@ class GiftThanksResponse(BaseModel):
 class GiftTrackingResponse(BaseModel):
     gift_id: str
     events: list[GiftTrackingEvent] = Field(default_factory=list)
+
+
+class GiftReceiptResponse(BaseModel):
+    ok: bool
+    gift: RealWorldGiftItem
+    assistant_message: str | None = None
+    # 重复点击 / 并发签收时为 True：礼物早已签收，本次没有产生新的消息。
+    already_confirmed: bool = False

@@ -7,6 +7,7 @@ from app.services.offline import gift_repository as gift_repo
 from app.services.offline import repository as repo
 from app.services.offline.activity_service import create_recommendation_for_user
 from app.services.offline.gift_service import create_gift_for_user, refresh_due_gift_deliveries
+from app.services.offline.gift_status import ACTIVE_STATUSES
 from app.services.offline.gift_trigger_policy import GiftTriggerDecision, decide_gift_trigger
 from app.services.offline.module_settings import get_offline_module_flags
 
@@ -107,7 +108,7 @@ async def _should_create_gift(
 ):
     active = [
         g for g in await gift_repo.list_gifts(user_id, workspace_id)
-        if g["status"] in {"pending_address", "selecting", "ordered", "shipping"}
+        if g["status"] in ACTIVE_STATUSES
     ]
     if active:
         return GiftTriggerDecision(False, reason="active_gift")
