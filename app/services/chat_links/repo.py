@@ -71,11 +71,12 @@ async def create_or_update_link_card(
         user_id=user_id,
         conversation_id=conversation_id,
         metadata=metadata,
+        database=client,
     )
     metadata = cover.metadata
     merged_extra_metadata = {
-        **cover.extra_metadata,
         **(extra_metadata or {}),
+        **cover.extra_metadata,
     }
     snapshot_id = str(uuid4())
     try:
@@ -85,7 +86,8 @@ async def create_or_update_link_card(
         async with context as tx:
             rows = await tx.query_raw(
                 """
-                WITH cached AS (INSERT INTO chat_link_cards (
+                WITH guard AS MATERIALIZED (SELECT pg_advisory_xact_lock(87231615)),
+                cached AS (INSERT INTO chat_link_cards (
                     user_id, conversation_id, message_id, role, source_app,
                     source_url, final_url, platform, title, description, author,
                     image_url, content_text, original_text, summary, status, error,
@@ -94,7 +96,7 @@ async def create_or_update_link_card(
                 SELECT $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10, $11,
                     $12, $13, $14, $15, $16, $17, $18::jsonb
-                FROM conversations c WHERE c.id=$2 AND c.user_id=$1 AND NOT c.is_deleted
+                FROM conversations c CROSS JOIN guard WHERE c.id=$2 AND c.user_id=$1 AND NOT c.is_deleted
                   AND ($3::text IS NULL OR EXISTS (
                       SELECT 1 FROM messages m WHERE m.id=$3 AND m.conversation_id=c.id AND m.role=$4
                   ))
@@ -113,7 +115,8 @@ async def create_or_update_link_card(
                     summary = EXCLUDED.summary,
                     status = EXCLUDED.status,
                     error = EXCLUDED.error,
-                    metadata = COALESCE(chat_link_cards.metadata, '{}'::jsonb)
+                    metadata = (COALESCE(chat_link_cards.metadata, '{}'::jsonb)
+                        - 'cover_storage_key' - 'cover_cached_url' - 'cover_cache_status' - 'remote_image_url')
                         || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
                     updated_at = NOW()
                 RETURNING *), frozen AS (

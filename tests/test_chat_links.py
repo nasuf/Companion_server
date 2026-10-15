@@ -985,6 +985,9 @@ async def test_prepare_proactive_link_recommendation_records_search_source(monke
 
 async def test_cache_link_cover_rewrites_remote_image_to_local_media(monkeypatch, tmp_path):
     monkeypatch.setattr(cover_mod.storage, "_MEDIA_DIR", tmp_path)
+    from unittest.mock import AsyncMock
+    from app.services.chat_links import retention
+    monkeypatch.setattr(retention, "reserve_cover", AsyncMock(return_value=True))
 
     async def fake_download_image(url, referer_url=None):
         assert url == "https://sns-webpic-qc.xhscdn.com/cover.jpg"
@@ -1047,7 +1050,7 @@ async def test_create_link_card_retains_cached_cover_when_commit_outcome_is_unkn
         image_url="/chat/media/user-id_cached.jpg",
     )
 
-    async def fake_cache_link_cover(*, user_id, conversation_id, metadata):
+    async def fake_cache_link_cover(*, user_id, conversation_id, metadata, database=None):
         assert conversation_id == "conv-id"
         return cover_mod.CachedCoverResult(
             metadata=metadata,

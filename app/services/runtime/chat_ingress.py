@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
+from prisma.errors import RawQueryError
 from uuid import uuid4
 
 from app.services.runtime.chat_ingress_contracts import (
@@ -21,7 +22,7 @@ from app.services.runtime.execution_scope import (
     ExecutionScope, ExecutionScopeExpired, ExecutionScopeUnavailable,
     scoped_transaction,
 )
-from app.services.runtime.chat_ingress_effects import ChatIngressEffects
+from app.services.runtime.chat_ingress_effects import ChatIngressEffects, ChatIngressResourceInvalid
 
 
 CHAT_JOB_HANDLER = "chat.execute.v1"
@@ -306,12 +307,19 @@ async def accept_chat_message(scope: ExecutionScope, request: ChatRequestInput,
                 metadata["client_id"] = request.client_id
             else:
                 metadata.pop("client_id", None)
-            await tx.execute_raw(
-                "INSERT INTO messages (id,conversation_id,role,content,metadata,created_at) "
-                "VALUES ($1,$2,'user',$3,$4::jsonb,$5::timestamptz)",
-                message_id, scope.conversation_id, message.persisted_text,
-                canonical_object(metadata), message.received_at.isoformat(),
-            )
+            try:
+                await tx.execute_raw(
+                    "INSERT INTO messages (id,conversation_id,role,content,metadata,created_at) "
+                    "VALUES ($1,$2,'user',$3,$4::jsonb,$5::timestamptz)",
+                    message_id, scope.conversation_id, message.persisted_text,
+                    canonical_object(metadata), message.received_at.isoformat(),
+                )
+            except RawQueryError as exc:
+                if any(marker in str(exc) for marker in (
+                    "chat_link_resource_unavailable", "chat_link_cover_retiring"
+                )):
+                    raise ChatIngressResourceInvalid() from exc
+                raise
             if effects is not None:
                 metadata["ingress_effects"] = await effects.commit(tx, scope, request, message_id, metadata)
                 await tx.execute_raw("UPDATE messages SET metadata=$2::jsonb WHERE id=$1",

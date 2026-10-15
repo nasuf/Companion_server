@@ -1182,8 +1182,6 @@ async def _ensure_link_card_for_turn(
                     part
                     for part in (
                         text,
-                        str(component_card.get("title") or ""),
-                        str(component_card.get("body") or ""),
                         source_url,
                     )
                     if part.strip()
@@ -1241,20 +1239,8 @@ async def _ensure_link_card_for_turn(
 
 
 def _link_card_needs_refresh(link) -> bool:
-    if str(getattr(link, "platform", "") or "") != "微博":
-        return False
-    fields = (
-        getattr(link, "title", ""),
-        getattr(link, "description", ""),
-        getattr(link, "summary", ""),
-        getattr(link, "content_text", ""),
-    )
-    text = " ".join(str(field or "") for field in fields)
-    if "Sina Visitor System" in text:
-        return True
-    body = " ".join(str(field or "") for field in fields[1:]).strip()
-    url_count = len(extract_urls(body))
-    return url_count > 0 and len(body.replace(" ", "")) <= 120 + url_count * 80
+    from app.services.chat_links.refresh import needs_refresh
+    return needs_refresh(link)
 
 
 async def _handle_takeover_user_message(

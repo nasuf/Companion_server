@@ -170,11 +170,11 @@ async def test_rejected_quota_keeps_preview_reusable_without_binding(links):
     assert (await receive(card=card, paid=True)).created
 
 
-@pytest.mark.parametrize("kind", ["foreign_conversation", "assistant", "missing_version", "missing_cache", "bad_payload"])
+@pytest.mark.parametrize("kind", ["foreign_conversation", "missing_version", "missing_cache", "bad_payload"])
 async def test_invalid_or_foreign_card_cannot_fetch_charge_or_write(links, kind):
     flow, fetch, preview, receive = links
     link = await preview(conversation_id=flow.ids["other_conversation"] if kind == "foreign_conversation" else flow.ids["conversation"],
-                         role="assistant" if kind == "assistant" else "user")
+                         role="user")
     card = cards.component_card_for_link(link)
     if kind == "missing_version": card["payload"]["snapshot_id"] = str(uuid4())
     if kind == "missing_cache": del card["payload"]["link_id"]

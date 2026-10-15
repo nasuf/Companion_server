@@ -243,7 +243,7 @@ async def test_snapshot_failure_rolls_back_cache_and_lost_ack_keeps_cover(
     class LostAck:
         async def query_raw(self, sql, *args):
             result = await db.query_raw(sql, *args)
-            if "WITH cached AS" in sql:
+            if "INSERT INTO chat_link_cards" in sql:
                 raise ConnectionError("synthetic lost commit acknowledgement")
             return result
 

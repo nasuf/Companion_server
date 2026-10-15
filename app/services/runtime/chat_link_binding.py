@@ -26,16 +26,9 @@ async def bind_ingress_link(tx: Any, scope: ExecutionScope, original: dict,
     link_id, version = projection.get("id"), projection.get("snapshot_id")
     if any(type(value) is not str or not value or len(value) > 256 for value in (link_id, version)):
         raise ChatIngressResourceInvalid()
-    if card:
-        payload = card.get("payload", {})
-        if type(payload) is not dict or any(
-            key in payload and payload[key] != value
-            for key, value in (("link_id", link_id), ("snapshot_id", version))
-        ):
-            raise ChatIngressResourceInvalid()
     rows = await tx.query_raw(
         "SELECT s.id FROM chat_link_snapshots s JOIN chat_link_cards l ON l.id=s.link_card_id "
-        "WHERE s.id=$1 AND l.id=$2 AND l.user_id=$3 AND l.conversation_id=$4 AND l.role='user' "
+        "WHERE s.id=$1 AND l.id=$2 AND l.user_id=$3 AND l.conversation_id=$4 AND l.role IN ('user','assistant') "
         "FOR SHARE OF s,l", version, link_id, scope.owner_user_id, scope.conversation_id)
     if len(rows) != 1:
         raise ChatIngressResourceInvalid()
@@ -44,6 +37,22 @@ async def bind_ingress_link(tx: Any, scope: ExecutionScope, original: dict,
     if (link is None or projection != metadata_for_link_card(link)
             or metadata.get("component_card") != component_card_for_link(link)):
         raise ChatIngressResourceInvalid()
+    if card:
+        payload = card.get("payload", {})
+        if type(payload) is not dict:
+            raise ChatIngressResourceInvalid()
+        if "snapshot_id" in payload and payload["snapshot_id"] != version:
+            raise ChatIngressResourceInvalid()
+        origin = payload.get("link_id")
+        if origin and origin != link_id:
+            # Redirects or resharing an assistant recommendation can create a
+            # different cache. Only a server-recorded, same-conversation refresh
+            # may bridge that identity, never a supplied pinned version.
+            if (payload.get("snapshot_id") or
+                    (link.metadata or {}).get("refreshed_from_link_id") != origin or
+                    await find_link_card(link_id=origin, user_id=scope.owner_user_id,
+                        conversation_id=scope.conversation_id, database=tx) is None):
+                raise ChatIngressResourceInvalid()
     await tx.execute_raw(
         "INSERT INTO chat_link_message_bindings(message_id,snapshot_id) VALUES ($1,$2)",
         message_id, version)

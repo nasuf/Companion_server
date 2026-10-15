@@ -25,6 +25,38 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin-api/stats", tags=["admin-stats"])
 
+
+@router.get("/link-storage")
+async def link_storage_status(_admin: dict = Depends(require_admin_jwt)):
+    from app.services.chat_links import retention
+    try:
+        return await retention.status()
+    except Exception:
+        raise HTTPException(status_code=503, detail="链接存储指标暂不可用") from None
+
+
+@router.post("/link-storage/preview")
+async def link_storage_preview(_admin: dict = Depends(require_admin_jwt)):
+    from app.services.chat_links import retention
+    try:
+        return await retention.preview()
+    except Exception:
+        raise HTTPException(status_code=503, detail="链接清理预演失败；未执行清理") from None
+
+
+@router.post("/link-storage/execute")
+async def link_storage_execute(policy_version: str = Query(...), confirmed: bool = Query(False),
+                               _admin: dict = Depends(require_admin_jwt)):
+    from app.services.chat_links import retention
+    if not confirmed or policy_version != retention.POLICY_VERSION:
+        raise HTTPException(status_code=409, detail="请按当前保留策略确认清理")
+    try:
+        return await retention.execute()
+    except retention.MaintenanceBusy:
+        raise HTTPException(status_code=409, detail="链接资源正在使用或维护，请稍后重试") from None
+    except Exception:
+        raise HTTPException(status_code=503, detail="链接清理未完成，请刷新查看执行状态") from None
+
 # 业务时区固定 UTC+8 (与 settings.schedule_timezone 一致). created_at 列以 naive
 # UTC 落库, 统计按"本地自然日/小时"分桶时必须先转成 UTC+8 墙钟, 否则每日走势会
 # 按 UTC 午夜切分 (整体偏 8 小时), 例如凌晨 0-8 点的用量会被算进"前一天".

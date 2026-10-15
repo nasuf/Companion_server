@@ -9,6 +9,7 @@ import httpx
 from app.services.chat_links.extraction import LinkMetadata
 from app.services.chat_links.fetch import COVER_MAX_BYTES, public_link_client
 from app.services.chat_media import storage
+from app.services.chat_links.retention import write_cover
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ async def cache_link_cover(
     user_id: str,
     conversation_id: str | None = None,
     metadata: LinkMetadata,
+    database=None,
 ) -> CachedCoverResult:
     """Cache a remote link cover through authenticated chat media storage.
 
@@ -43,15 +45,19 @@ async def cache_link_cover(
         return CachedCoverResult(metadata=metadata, extra_metadata={})
     try:
         blob, mime = await _download_image(remote_url, referer_url=metadata.final_url or metadata.source_url)
-        storage_key = storage.save_image_blob(
+        storage_key = await write_cover(
             user_id=user_id,
             conversation_id=conversation_id,
             blob=blob,
             mime=mime,
+            database=database,
         )
+        if storage_key is None:
+            return CachedCoverResult(metadata=metadata, extra_metadata={
+                "remote_image_url": remote_url, "cover_cache_status": "capacity_limited"})
         cached_url = storage.media_url(storage_key)
     except Exception as exc:
-        logger.info("[chat-links] cover cache skipped url=%s error=%s", remote_url[:180], exc)
+        logger.info("[chat-links] cover cache skipped: %s", type(exc).__name__)
         return CachedCoverResult(metadata=metadata, extra_metadata={"remote_image_url": remote_url})
     return CachedCoverResult(
         metadata=replace(metadata, image_url=cached_url),

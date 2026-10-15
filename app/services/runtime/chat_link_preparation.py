@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.services.chat_links import repo
 from app.services.chat_links.extraction import extract_first_url, extract_link_metadata
+from app.services.chat_links.refresh import needs_refresh
 from app.services.runtime.chat_ingress_contracts import ChatRequestInput
 from app.services.runtime.chat_ingress_effects import ChatIngressResourceInvalid
 from app.services.runtime.execution_scope import ExecutionScope, revalidate_scope, scoped_transaction
@@ -38,15 +39,31 @@ async def prepare_ingress_link(scope: ExecutionScope, request: ChatRequestInput)
         link = await repo.find_link_card(link_id=link_id, snapshot_id=version,
             user_id=scope.owner_user_id, conversation_id=scope.conversation_id)
         # Never turn a missing/foreign identity into a new URL fetch.
-        if link is None or link.role != "user":
+        if link is None or link.role not in {"user", "assistant"}:
             raise ChatIngressResourceInvalid()
+        if not version and needs_refresh(link):
+            # Only server-selected source material may become model context.
+            # A recommendation retains its source role; the new message is user.
+            try:
+                metadata = await extract_link_metadata(
+                    url=link.source_url or link.final_url,
+                    shared_text="\n".join((text, link.source_url or link.final_url)),
+                )
+            except ValueError as error:
+                raise ChatIngressResourceInvalid() from error
+            return await repo.create_or_update_link_card(
+                user_id=scope.owner_user_id, conversation_id=scope.conversation_id,
+                metadata=metadata, role="user", source_app="component_card_refresh",
+                extra_metadata={"refreshed_from_link_id": link.id}, execution_scope=scope,
+            )
         if not link.snapshot_id:
             # Old caches remain compatible. Capture the selected cache under the
             # same lifecycle fence, without pretending it was a historical version.
             async with scoped_transaction(scope) as tx:
+                await tx.execute_raw("SELECT pg_advisory_xact_lock(87231615)")
                 rows = await tx.query_raw(
                     "SELECT id FROM chat_link_cards WHERE id=$1 AND user_id=$2 "
-                    "AND conversation_id=$3 AND role='user' FOR SHARE", link_id,
+                    "AND conversation_id=$3 AND role IN ('user','assistant') FOR SHARE", link_id,
                     scope.owner_user_id, scope.conversation_id)
                 if not rows:
                     raise ChatIngressResourceInvalid()

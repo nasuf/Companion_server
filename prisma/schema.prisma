@@ -2544,3 +2544,26 @@ model ChatLinkMessageBinding {
   @@ignore
   @@map("chat_link_message_bindings")
 }
+
+// SQL-only bounded link resource governance. No recursive generated client types.
+model ChatLinkStorageState {
+  id Int @id
+  reservedBytes BigInt @default(0) @map("reserved_bytes")
+  cursors Json @default("{}")
+  lastPreview Json? @map("last_preview")
+  lastRun Json? @map("last_run")
+  runId String? @map("run_id")
+  runningSince DateTime? @map("running_since") @db.Timestamptz(6)
+  @@ignore
+  @@map("chat_link_storage_state")
+}
+
+model ChatLinkCoverObject {
+  storageKey String @id @map("storage_key")
+  imageUrl String @unique @map("image_url")
+  byteSize BigInt @map("byte_size")
+  state String @default("live")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  @@ignore
+  @@map("chat_link_cover_objects")
+}
