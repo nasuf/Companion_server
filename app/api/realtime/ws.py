@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 
@@ -364,11 +365,13 @@ def _safe_float(
     min_value: float,
     max_value: float,
 ) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
-    if parsed < min_value or parsed > max_value:
+    if not math.isfinite(parsed) or parsed < min_value or parsed > max_value:
         return None
     return parsed
 
@@ -427,7 +430,8 @@ def _component_card_reply_message(text: str, component_card: dict | None) -> str
             coord_text = f"（约 {latitude:.5f}, {longitude:.5f}）"
         return (
             f"用户分享了当前位置：{place_text}{coord_text}。"
-            "请基于这个位置自然回应，不要重复索要定位权限，也不要让用户再发一遍位置。"
+            "这是用户在本次消息中分享的位置点，只用于理解本轮上下文；不代表用户常住地，不能用作你的所在地或经历。"
+            "请基于这次位置分享自然回应，不要重复索要定位权限，也不要让用户再发一遍位置。"
         )
     if card_type not in {"checkin_reminder", "checkin_habit"}:
         return None
@@ -1175,6 +1179,8 @@ async def _ensure_link_card_for_turn(
 ) -> tuple[dict | None, dict | None]:
     """Return (component_card, model-visible link metadata) for this user turn."""
     link = None
+    if component_card and component_card.get("type") == "location":
+        return component_card, None
     if component_card and component_card.get("type") == "external_link":
         payload = component_card.get("payload")
         payload = payload if isinstance(payload, dict) else {}
@@ -1351,6 +1357,29 @@ async def _handle_message(
             except Exception:
                 pass
         return
+    location_request_input = None
+    if isinstance(component_card, dict) and component_card.get("type") == "location":
+        from app.services.location_ingress import location_request, previous_location_message
+        from app.services.runtime.chat_ingress import ChatRequestConflict
+        try:
+            location_request_input = location_request(text=text, card=component_card,
+                client_id=client_id, attachment_ids=attachment_ids)
+            previous = await previous_location_message(db, conversation_id=conversation_id,
+                user_id=user_id, request=location_request_input)
+            if previous:
+                await _send_ack(ws, message_id=previous, client_id=client_id)
+                return
+        except (ValueError, ChatRequestConflict):
+            await ws.send_json({"type": "error", "data": {
+                "message": "位置消息无效或重试内容已改变，请重新选择位置", "client_id": client_id,
+            }})
+            return
+        except Exception:
+            logger.warning("Location retry lookup failed", exc_info=True)
+            await ws.send_json({"type": "error", "data": {
+                "message": "位置消息暂时无法发送，请重试", "client_id": client_id,
+            }})
+            return
     # CLAUDE.md 权益项 1 只约束"发消息聊天"这件事。红包/礼物走的是自己的
     # 钞票/积分支付流程 (offerings.py)，跟对话额度是两套互不相关的计费口径
     # —— 不豁免的话，一个聊天额度用尽、没钞票的用户会连"花钞票发红包"这个
@@ -1359,7 +1388,7 @@ async def _handle_message(
         isinstance(component_card, dict)
         and component_card.get("type") in {"red_packet", "gift"}
     )
-    if not is_red_packet_or_gift:
+    if not is_red_packet_or_gift and location_request_input is None:
         # 这段裸奔的话, 一旦 is_vip/consume_one 抛异常 (比如高峰期多个用户
         # 同时顶到当日额度上限, 小连接池下触发连接池耗尽) 会直接冒到
         # websocket_endpoint 外层的 while 循环, 打断整条连接后续所有消息
@@ -1523,19 +1552,37 @@ async def _handle_message(
         from app.services.offerings_memory_text import render_component_card_line
 
         persisted_text = render_component_card_line("", component_card)
-    user_message_id = await _persist_user_message(
-        conversation_id,
-        persisted_text,
-        metadata=_message_metadata(
-            plan.metadata,
-            client_id=client_id,
-            component_card=component_card,
-            attachments=attachment_metadata,
-            link_card=link_card_metadata,
-        ),
-        workspace_id=workspace_id,
-        user_id=user_id,
+    message_metadata = _message_metadata(
+        plan.metadata, client_id=client_id, component_card=component_card,
+        attachments=attachment_metadata, link_card=link_card_metadata,
     )
+    if location_request_input is not None:
+        from app.services.location_ingress import accept_location_message
+        from app.services.runtime.chat_ingress_effects import ChatIngressQuotaBlocked
+        try:
+            user_message_id, created = await accept_location_message(
+                conversation_id=conversation_id, user_id=user_id, request=location_request_input,
+                content=persisted_text, metadata=message_metadata, paid_confirmed=paid_confirmed,
+            )
+        except ChatIngressQuotaBlocked as exc:
+            await ws.send_json({"type": "quota_blocked", "data": {**exc.result, "client_id": client_id}})
+            return
+        except Exception:
+            logger.warning("Location message admission failed", exc_info=True)
+            await ws.send_json({"type": "error", "data": {
+                "message": "位置消息暂时无法发送，请重试", "client_id": client_id,
+            }})
+            return
+        if not created:
+            await _send_ack(ws, message_id=user_message_id, client_id=client_id)
+            return
+        await mark_user_replied_for_conversation(conversation_id)
+        from app.services.interaction_streak import record_user_message_day_for_conversation
+        fire_background(record_user_message_day_for_conversation(
+            conversation_id, workspace_id=workspace_id, user_id=user_id))
+    else:
+        user_message_id = await _persist_user_message(conversation_id, persisted_text,
+            metadata=message_metadata, workspace_id=workspace_id, user_id=user_id)
     # Cancel a pending activity companion before reply generation. The
     # follow-up clock starts only after this turn's reply is persisted.
     try:
@@ -1551,21 +1598,16 @@ async def _handle_message(
         isinstance(component_card, dict)
         and component_card.get("type") == "location"
     ):
-        from app.services.location_memory import write_location_share_memories
+        from app.services.location_memory import dispatch_location_events
 
-        fire_background(
-            write_location_share_memories(
-                user_id=user_id,
-                workspace_id=workspace_id,
-                component_card=component_card,
-            )
+        fire_background(dispatch_location_events(message_id=user_message_id, limit=1))
+    if location_request_input is None:
+        await chat_media_repo.bind_attachments_to_message(
+            attachment_ids=[item.id for item in attachments],
+            message_id=user_message_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
         )
-    await chat_media_repo.bind_attachments_to_message(
-        attachment_ids=[item.id for item in attachments],
-        message_id=user_message_id,
-        user_id=user_id,
-        conversation_id=conversation_id,
-    )
     # 线下活动打卡：到达中发来的现场图片/语音路由进活动（素材+识图/转写归档），
     # fire-and-forget，不阻塞回复。无进行中已到达活动时钩子内部自行 no-op。
     if attachments:

@@ -11,4 +11,6 @@ def register_runtime_handlers() -> tuple[str, ...]:
         "agent_initialization", _run_agent_initialization_job,
         legacy_no_delay=True, recovery_delay_s=MEMORY_GENERATION_LOCK_TTL_S,
     )
-    return ("agent_initialization",)
+    from app.services.location_memory import JOB_TYPE, write_location_share_memories
+    register_job_handler(JOB_TYPE, write_location_share_memories)
+    return ("agent_initialization", JOB_TYPE)

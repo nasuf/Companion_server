@@ -144,7 +144,12 @@ def render_component_card_line(content: str, card: dict[str, Any]) -> str:
         coord_text = ""
         if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
             coord_text = f"（约 {latitude:.5f}, {longitude:.5f}）"
-        line = f"用户分享了当前位置：{place_text}{coord_text}"
+        # Old persisted cards contain this generated sentence. Replace it when
+        # rendering history so "current" never means the time of a later reply.
+        if text == f"用户分享了当前位置：{place_text}{coord_text}":
+            text = ""
+        line = (f"用户在这条消息中分享了位置点：{place_text}{coord_text}。"
+                "仅代表当时的位置分享，不证明现在的位置、常住地或Agent所在地。")
     else:
         return text
 

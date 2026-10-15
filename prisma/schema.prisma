@@ -319,6 +319,8 @@ model Message {
 
   linkBinding ChatLinkMessageBinding? @ignore
 
+  locationMemoryEvent LocationMemoryEvent? @ignore
+
   @@index([conversationId, createdAt(sort: Desc)])
   // admin 监控聚合 (分时段/每日活跃/句子区间/DAU-WAU-MAU) 都按 role='user' +
   // created_at 范围扫全表, 加此索引避免顺序扫.
@@ -2566,4 +2568,23 @@ model ChatLinkCoverObject {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   @@ignore
   @@map("chat_link_cover_objects")
+}
+
+// Transactional location-message outbox. Raw SQL keeps the generated client stable.
+model LocationMemoryEvent {
+  messageId String @id @map("message_id")
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  scope Json
+  sourceVersion String @map("source_version")
+  status String @default("pending_dispatch")
+  jobId String? @map("job_id")
+  nextDispatchAt DateTime @default(now()) @map("next_dispatch_at") @db.Timestamptz(6)
+  dispatchAttempts Int @default(0) @map("dispatch_attempts")
+  lastError String? @map("last_error")
+  memoryIds Json @default("[]") @map("memory_ids")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@ignore
+  @@index([createdAt(sort: Desc), messageId(sort: Desc)], map: "location_memory_recent_idx")
+  @@map("location_memory_events")
 }

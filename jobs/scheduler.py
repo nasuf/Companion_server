@@ -975,6 +975,13 @@ async def _run_runtime_job_queue():
             # 这里原本是裸 logger.warning: 失败不上报健康记录, 也不按 error 级别
             # 出现 —— 跟当年 L2 动态分级崩几个月没人发现是同一个写法。
             _job_failed("Runtime job queue scan", e)
+        # The SQL outbox must not block unrelated Redis jobs during a database
+        # outage. Each failure still participates in scheduler health reporting.
+        try:
+            from app.services.location_memory import dispatch_location_events
+            await dispatch_location_events(limit=10)
+        except Exception as e:
+            _job_failed("Location memory dispatch", e)
 
     await _run_local_job("runtime_job_queue", _body)
 

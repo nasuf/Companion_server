@@ -29,33 +29,15 @@ def _location_card():
 
 
 def test_build_location_memory_texts():
-    user_text, ai_text = location_memory.build_location_memory_texts(_location_card())
-    assert "用户当前在" in user_text
-    assert "上海市黄浦区中山东一路" in user_text
-    assert "用户向我分享了当前位置" in ai_text
-    assert "31.23040" in ai_text
-
-
-@pytest.mark.asyncio
-async def test_write_location_share_memories_calls_store_memory_twice(monkeypatch):
-    calls: list[dict] = []
-
-    async def _fake_store_memory(user_id, content, **kwargs):
-        calls.append({"user_id": user_id, "content": content, **kwargs})
-
-    monkeypatch.setattr(location_memory, "store_memory", _fake_store_memory)
-    await location_memory.write_location_share_memories(
-        user_id="u1",
-        workspace_id="ws1",
-        component_card=_location_card(),
-    )
-    assert len(calls) == 2
-    assert calls[0]["main_category"] == "身份"
-    assert calls[0]["sub_category"] == "现居地"
-    assert calls[0]["source"] == "user"
-    assert calls[1]["main_category"] == "生活"
-    assert calls[1]["sub_category"] == "交互"
-    assert calls[1]["source"] == "ai"
+    from datetime import datetime, timezone
+    texts = location_memory.build_location_memory_texts(_location_card(),
+        accepted_at=datetime(2026, 10, 15, tzinfo=timezone.utc))
+    for text in texts:
+        assert "2026-10-15T00:00:00+00:00" in text
+        assert "用户分享了位置点" in text
+        assert "不代表常住地或Agent所在地" in text
+        assert "31.23040" not in text
+        assert "用户当前在" not in text
 
 
 class TestLocationCardSearch:

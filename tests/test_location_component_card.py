@@ -30,7 +30,8 @@ def _location_card(**payload_overrides):
 def test_render_component_card_line_location():
     card = _location_card()
     rendered = render_component_card_line("", card)
-    assert "用户分享了当前位置" in rendered
+    assert "用户在这条消息中分享了位置点" in rendered
+    assert "不证明现在的位置、常住地或Agent所在地" in rendered
     assert "上海市黄浦区中山东一路" in rendered
     assert "31.23040" in rendered
 
@@ -38,7 +39,7 @@ def test_render_component_card_line_location():
 def test_render_message_content_for_prompt_location_card():
     card = _location_card()
     rendered = render_message_content_for_prompt("", {"component_card": card})
-    assert "用户分享了当前位置" in rendered
+    assert "用户在这条消息中分享了位置点" in rendered
 
 
 def test_sanitize_component_card_location():

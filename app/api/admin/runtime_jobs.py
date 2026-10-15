@@ -63,6 +63,18 @@ async def retry_jobs(
         raise HTTPException(status_code=503, detail="任务队列暂时不可用，请刷新状态后重试。") from error
 
 
+@router.get("/location-events")
+async def get_location_events(
+    limit: int = Query(20, ge=1, le=50),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    from app.services.location_memory import inspect_location_events
+    try:
+        return await inspect_location_events(limit=limit)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="位置分享处理记录暂时不可用，请重试。") from error
+
+
 @router.get("/{job_id}")
 async def get_job(
     job_id: str,

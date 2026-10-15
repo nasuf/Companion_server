@@ -104,9 +104,10 @@ def test_registration_uses_service_without_router_imports(monkeypatch):
     monkeypatch.setattr(job_queue, '_HANDLERS', {})
     monkeypatch.setattr(job_queue, '_RECOVERY_DELAYS', {})
     monkeypatch.setattr(job_queue, '_LEGACY_NO_DELAY_HANDLERS', set())
-    assert register_runtime_handlers() == ('agent_initialization',)
-    assert register_runtime_handlers() == ('agent_initialization',)
-    assert job_queue._HANDLERS == {'agent_initialization': _run_agent_initialization_job}
+    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory')
+    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory')
+    from app.services.location_memory import write_location_share_memories
+    assert job_queue._HANDLERS == {'agent_initialization': _run_agent_initialization_job, 'location_share_memory': write_location_share_memories}
     assert job_queue._RECOVERY_DELAYS['agent_initialization'] == MEMORY_GENERATION_LOCK_TTL_S
     assert job_queue._LEGACY_NO_DELAY_HANDLERS == {'agent_initialization'}
 
