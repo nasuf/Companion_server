@@ -14,7 +14,7 @@ from redis.asyncio import Redis
 from app.config import settings
 from app.db import db
 from app.api import deps
-from app.api.public import chat, conversations
+from app.api.public import chat, conversations, daily_share
 from app.api.realtime import admin_inbox, ws
 from app.api.admin import takeovers
 from app.services.admin_takeover import service
@@ -46,7 +46,7 @@ async def lifespan(_):
         await ws_manager.manager.stop_subscriber();await redis.aclose();await db.disconnect()
 
 app=FastAPI(lifespan=lifespan)
-for router in (chat.router,ws.router,takeovers.router,admin_inbox.router,conversations.router):app.include_router(router)
+for router in (chat.router,ws.router,takeovers.router,admin_inbox.router,conversations.router,daily_share.router):app.include_router(router)
 
 @app.get('/health')
 async def health():return {'status':'ok'}

@@ -192,6 +192,16 @@ async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(req
             raise HTTPException(503, detail={"code": "storage_unavailable"}) from None
         return EventSourceResponse(_accepted_sql_stream(receipt), headers={"Cache-Control": "no-store"})
 
+    # This legacy HTTP route only queues text. Cards/media are admitted by the
+    # authenticated WebSocket path; never acknowledge a request after dropping
+    # its resource payload. Human takeover and staged SQL have their own adapters.
+    if data.component_card is not None or data.attachments:
+        raise HTTPException(422, detail={
+            "code": "unsupported_transport_payload",
+            "message": "卡片和附件请通过聊天连接发送",
+            "client_id": data.client_id,
+        })
+
     # --- 用户回合聚合：fragment/turn 策略由 user_turn_aggregation 统一决定 ---
     schedule = await get_cached_schedule(conv.agent.id)
     if not schedule:

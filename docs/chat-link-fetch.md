@@ -82,8 +82,10 @@ Cards carry an optional `payload.snapshot_id`. Sending it resolves that exact
 version within the authenticated owner and conversation, without refetching the
 page or trusting client-supplied body text. Missing/foreign versions produce a
 correlated retry error. Clients that omit the key still resolve the existing
-cache ID and retain the legacy refresh behavior. Flutter and the service-account
-Web entry pass the card payload through unchanged; no required wire field changed.
+cache ID and retain the legacy refresh behavior. The optional version does not
+change required wire fields. Flutter payload round-trip coverage is not evidence
+that a service-account callback forwards card payloads: the authenticated H5 chat
+and the external WeChat callback are separate transports and need separate evidence.
 
 Each persisted message already owns its `metadata.link_card` projection. Daily
 share history now reads those message projections, so repeat shares of one URL
@@ -138,10 +140,48 @@ Web admin link details show `已原子绑定` only when the version-1 effect rec
 matches the message snapshot. Old records, unsupported versions and inconsistent
 records remain distinct. This is per-message admission evidence, not successful
 model execution or delivery, and uses the already authorized history response.
-Flutter and service-account request/ACK/card contracts are unchanged.
+These additive fields describe the authenticated chat request/ACK/card contract;
+they do not establish end-to-end card support in the external WeChat callback.
 
 SQL ingress and checkpoint activation remain disabled. Consumer, durable delivery
 and domain follow-up qualification remains R01.03.8.3.2.4 and its dependent tasks.
-A rejected/racing preparation can leave an unused preview; bounded retention,
-cover cleanup and total storage budgets remain separate, unresolved work. This
-batch neither deletes production history nor changes prompt content.
+A rejected/racing preparation can leave an unused preview. LINK03 added bounded
+manual retention and a budget for registered covers; see `chat-link-retention.md`.
+Unregistered legacy files remain retained and outside measured cover capacity.
+LINK04 changes neither production history nor prompt content.
+
+## Current Redis entry and human takeover contracts (LINK04)
+
+The ordinary Redis HTTP `/chat/{conversation_id}` route queues text. It explicitly
+rejects `component_card` or nonempty `attachments` with HTTP 422 and
+`unsupported_transport_payload`, before preparation, message writes or quota
+changes. These resources use the authenticated chat WebSocket. HTTP acceptance
+must never silently discard a card or attachment. This guard runs after the
+human-takeover and staged SQL adapters, which have separate admission contracts.
+
+During human takeover, HTTP and WebSocket admission resolve an external-link
+card's cache ID and optional version against the current owner and conversation.
+Client titles, body text and summaries are replaced with the saved projection.
+A pinned missing/foreign version fails before quota, message and notification
+writes. Supplied cache/version identities must be nonempty strings within the
+wire bound; invalid values are rejected rather than trimmed, truncated or treated
+as an omitted legacy version. The same transaction stores the immutable link projection and binding;
+the administrator's live inbox and both participants' message history receive
+that version. An assistant recommendation retains its original source role while
+the reshare is a user message. A repeated client ID returns its existing message
+without a second charge or inbox event.
+
+Unversioned cards select stored content; a legacy cache without a snapshot gets
+a new snapshot at admission. Human takeover performs no provider refresh or model
+work. A raw URL sent as text remains literal text, without fabricated link
+metadata or snapshots. Administrator replies continue to support text and one
+audio attachment; this change does not add administrator card composition.
+
+`test_chat_link_takeover_wire.py` uses two real API processes, PostgreSQL and
+Redis to exercise authenticated HTTP/WS admission, inbox publication, immutable
+history and daily-share reads, retries, quota, cross-conversation rejection,
+administrator read state and user read receipts. Its seeded saved link content
+does not verify external fetching. It is protocol coverage, not browser UI,
+Flutter device or external WeChat callback coverage; actual H5/Flutter evidence
+must be recorded separately. SQL consumers, durable delivery and checkpoint
+activation remain outside this current-transport verification.

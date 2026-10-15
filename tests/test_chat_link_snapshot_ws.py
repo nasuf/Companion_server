@@ -8,6 +8,22 @@ from app.services.chat_links import repo, cards
 from tests.test_chat_link_snapshots_postgres import links, origins
 
 
+@pytest.mark.parametrize("field", ["link_id", "snapshot_id"])
+@pytest.mark.parametrize("invalid", [None, "", "  ", [], 42, "x" * 81])
+def test_supplied_link_identity_is_not_trimmed_dropped_or_truncated(field, invalid):
+    with pytest.raises(ValueError, match="identity"):
+        ws._sanitize_component_card({"type": "external_link", "payload": {
+            "link_id": "owned", "snapshot_id": "selected", field: invalid,
+        }})
+
+
+def test_snapshot_identity_cannot_be_dropped_without_a_cache_id():
+    with pytest.raises(ValueError, match="cache identity"):
+        ws._sanitize_component_card({"type": "external_link", "payload": {
+            "snapshot_id": "selected", "source_url": "https://example.com",
+        }})
+
+
 async def test_preview_version_survives_sanitization_and_changed_cache(
     links, monkeypatch
 ):

@@ -17,6 +17,9 @@ from app.services.runtime.chat_ingress_contracts import ChatRequestInput, canoni
 
 from app.services.chat_media.prompt import attachment_to_metadata
 from app.services.chat_media.repo import _attachment_from_row
+from app.services.chat_links.cards import component_card_for_link, metadata_for_link_card
+from app.services.chat_links.extraction import extract_first_url
+from app.services.chat_links.repo import find_link_card
 from app.services.offerings import _offering_from_row, build_offering_card
 from app.services.runtime.chat_entrypoint import parse_client_chat_input
 from app.services.runtime.chat_ingress import ChatRequestConflict
@@ -36,9 +39,47 @@ def quota_request_without_card(request: ChatRequestInput, original: dict) -> Cha
     """Quota adapter sees an ordinary text turn, not the shared card."""
     stripped = {**original, "component_card": None}
     text = stripped.get("text")
-    if (type(text) is not str or not text.strip()) and not stripped.get("attachment_ids"):
+    if extract_first_url(text or "") or (
+        (type(text) is not str or not text.strip()) and not stripped.get("attachment_ids")
+    ):
         stripped["text"] = _QUOTA_STANDIN_TEXT
     return replace(request, input_json=canonical_object(stripped))
+
+
+async def _resolve_link_card(tx, scope, card: dict):
+    """Resolve an owned saved card without provider work during human admission."""
+    payload = card.get("payload")
+    if type(payload) is not dict:
+        raise ChatIngressResourceInvalid()
+    link_id, version = payload.get("link_id"), payload.get("snapshot_id")
+    if (type(link_id) is not str or not link_id or len(link_id) > 256
+            or link_id != link_id.strip()):
+        raise ChatIngressResourceInvalid()
+    if "snapshot_id" in payload and (
+        type(version) is not str or not version or len(version) > 256 or version != version.strip()
+    ):
+        raise ChatIngressResourceInvalid()
+    # Serialize with bounded retention before reading a selected cache/version.
+    # Message metadata and the binding are committed before this lock is released.
+    await tx.execute_raw("SELECT pg_advisory_xact_lock(87231615)")
+    link = await find_link_card(link_id=link_id, snapshot_id=version,
+        user_id=scope.owner_user_id, conversation_id=scope.conversation_id, database=tx)
+    if link is None or link.role not in {"user", "assistant"}:
+        raise ChatIngressResourceInvalid()
+    if not link.snapshot_id:
+        # Old clients may select a cache with no saved version. Capture exactly
+        # the currently stored content; human chat does not refresh its provider.
+        version = str(uuid.uuid4())
+        await tx.execute_raw(
+            "INSERT INTO chat_link_snapshots(id,link_card_id,payload) "
+            "SELECT $1,id,to_jsonb(l)-'message_id'-'created_at'-'updated_at' "
+            "FROM chat_link_cards l WHERE id=$2", version, link_id,
+        )
+        link = await find_link_card(link_id=link_id, snapshot_id=version,
+            user_id=scope.owner_user_id, conversation_id=scope.conversation_id, database=tx)
+        if link is None:
+            raise ChatIngressResourceInvalid()
+    return link
 
 
 async def persist_user_message(*, conversation_id: str, user_id: str, text: str,
@@ -60,10 +101,17 @@ async def _persist_user_message(*, conversation_id: str, user_id: str, text: str
                                metadata: dict, paid_confirmed: bool, database) -> dict:
     # Old SSE callers may omit an ID. Keep them usable with a server identity;
     # retry deduplication requires the stable ID sent by Web/Flutter clients.
+    component_card = metadata.get("component_card")
+    if isinstance(component_card, dict) and component_card.get("type") == "external_link":
+        from app.api.realtime.ws import _sanitize_component_card
+
+        # WS already sanitizes the envelope. Apply the same contract to HTTP so
+        # a retry through another transport keeps the original request identity.
+        component_card = _sanitize_component_card(component_card)
     incoming = parse_client_chat_input({
         "message": text, "client_id": metadata.get("client_id") or str(uuid.uuid4()),
         "attachments": metadata.get("attachments", []),
-        "component_card": metadata.get("component_card"), "paid_confirmed": paid_confirmed,
+        "component_card": component_card, "paid_confirmed": paid_confirmed,
     })
     request = incoming.request
     original = json.loads(request.input_json)
@@ -105,7 +153,9 @@ async def _persist_user_message(*, conversation_id: str, user_id: str, text: str
                 raise ChatIngressResourceInvalid()
             prepared['attachments'] = [attachment_to_metadata(_attachment_from_row(by_id[ident])) for ident in ids]
         card = original['component_card']
-        effect_request = request
+        # A plain URL sent to a human remains plain text. The quota adapter must
+        # not infer model-facing link preparation from that literal text.
+        effect_request = quota_request_without_card(request, original) if card is None else request
         if card:
             kind = card.get('type')
             if kind in {'gift', 'red_packet'}:
@@ -121,6 +171,10 @@ async def _persist_user_message(*, conversation_id: str, user_id: str, text: str
                 if not offerings:
                     raise ChatIngressResourceInvalid()
                 prepared['component_card'] = build_offering_card(_offering_from_row(offerings[0]))
+            elif kind == 'external_link':
+                link = await _resolve_link_card(tx, scope, card)
+                prepared['component_card'] = component_card_for_link(link)
+                prepared['link_card'] = metadata_for_link_card(link)
             else:
                 from app.api.realtime.ws import _sanitize_component_card
                 sanitized = _sanitize_component_card(card)
@@ -137,7 +191,7 @@ async def _persist_user_message(*, conversation_id: str, user_id: str, text: str
         })
         effect_metadata = dict(prepared)
         if effect_request is not request:
-            effect_metadata.pop("component_card")
+            effect_metadata.pop("component_card", None)
         effects = await ChatIngressEffects(incoming.paid_confirmed).commit(tx, scope, effect_request, message.id, effect_metadata)
         prepared['ingress_effects'] = effects
         await tx.message.update(where={"id": message.id}, data={"metadata": Json(prepared)})

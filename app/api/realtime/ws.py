@@ -211,9 +211,17 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
         return payload
     if card_type == "external_link":
         payload = {}
+        # Identities are selections, not display text: trimming/truncating or
+        # dropping a supplied invalid version can silently select another card.
+        for key in ("link_id", "snapshot_id"):
+            if key in raw:
+                value = raw[key]
+                if type(value) is not str or not value or value != value.strip() or len(value) > 80:
+                    raise ValueError("Invalid link card identity")
+                payload[key] = value
+        if "snapshot_id" in payload and "link_id" not in payload:
+            raise ValueError("Link snapshot requires its cache identity")
         for key, limit in (
-            ("link_id", 80),
-            ("snapshot_id", 80),
             ("app_url", 2000),
             ("source_url", 2000),
             ("final_url", 2000),
@@ -957,7 +965,13 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     # 不传时 ack 仅含 message_id (DB id), 前端按时间顺序匹配.
                     client_id = payload.get("client_id")
                     raw_component_card = payload.get("component_card")
-                    component_card = _sanitize_component_card(raw_component_card)
+                    try:
+                        component_card = _sanitize_component_card(raw_component_card)
+                    except ValueError:
+                        await websocket.send_json({"type": "error", "data": {
+                            "code": "invalid_resource", "message": "链接卡片无效，请重新选择", "client_id": client_id,
+                        }})
+                        continue
                     attachment_ids = _sanitize_attachment_ids(payload.get("attachments"))
                     paid_confirmed = payload.get("paid_confirmed", False)
                     if type(paid_confirmed) is not bool:

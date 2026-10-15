@@ -143,6 +143,19 @@ def test_invalid_payment_confirmation_does_not_disconnect_or_charge(secured_ws, 
     ws._handle_message.assert_not_called()
 
 
+@pytest.mark.parametrize('value', ['', None, 'x'*81])
+def test_invalid_link_version_returns_correlated_error_and_keeps_socket(secured_ws, value):
+    s=secured_ws
+    with s.client.websocket_connect('/ws/conv',subprotocols=protocols(mint(s))) as socket:
+        socket.send_json({'type':'message','data':{'message':'card','client_id':'bad-version',
+            'component_card':{'type':'external_link','payload':{'link_id':'owned','snapshot_id':value}}}})
+        assert socket.receive_json()=={'type':'error','data':{
+            'code':'invalid_resource','message':'链接卡片无效，请重新选择','client_id':'bad-version'}}
+        socket.send_json({'type':'ping'})
+        assert socket.receive_json()=={'type':'pong'}
+    ws._handle_message.assert_not_called()
+
+
 @pytest.mark.parametrize('role', ['user','admin'])
 def test_sql_message_frame_uses_authenticated_actor_and_original_input(secured_ws, monkeypatch, role):
     from app.services.runtime import chat_entrypoint

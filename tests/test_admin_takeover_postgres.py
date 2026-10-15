@@ -206,7 +206,13 @@ async def test_offerings_authorize_bind_and_exempt_quota(human,kind):
     with pytest.raises(ChatIngressResourceInvalid):await user_message(h,key='another',metadata={'component_card':card})
 
 
-@pytest.mark.parametrize('card',[{'type':'gift'},{'type':'gift','payload':{}},{'type':'music'},{'type':'gift','payload':{'offering_id':'missing'}}])
+@pytest.mark.parametrize('card',[
+    {'type':'gift'}, {'type':'gift','payload':{}}, {'type':'music'},
+    {'type':'gift','payload':{'offering_id':'missing'}},
+    {'type':'external_link'},
+    {'type':'external_link','payload':{'source_url':'https://synthetic.invalid/unprepared'}},
+    {'type':'external_link','payload':{'link_id':'missing','snapshot_id':'missing'}},
+])
 async def test_forged_or_unsupported_card_cannot_bypass_quota(human,card):
     await activate(human)
     with pytest.raises(ChatIngressResourceInvalid):await user_message(human,metadata={'component_card':card})
@@ -331,14 +337,107 @@ async def test_admin_http_auth_bounds_claim_status_messages_and_read(human):
 
 
 async def test_nonfinancial_sharing_is_delivered_without_automation_and_pays_quota(human):
+    from app.services.chat_links.cards import component_card_for_link, metadata_for_link_card
+    from app.services.chat_links.extraction import LinkMetadata
+    from app.services.chat_links.repo import create_or_update_link_card
+
     h=human;await activate(h)
-    card={'type':'external_link','payload':{'source_url':'https://synthetic.invalid/article','summary':'shared'}}
+    link=await create_or_update_link_card(user_id=h.flow.ids['owner'],
+        conversation_id=h.flow.ids['conversation'], database=h.flow.db,
+        metadata=LinkMetadata(source_url='https://synthetic.invalid/article',
+            final_url='https://synthetic.invalid/article', platform='链接',
+            title='saved share', summary='shared'))
+    card=component_card_for_link(link)
+    missing_version=json.loads(json.dumps(card))
+    missing_version['payload']['snapshot_id']='missing-version'
+    with pytest.raises(ChatIngressResourceInvalid):
+        await user_message(h,key='missing-version',metadata={'component_card':missing_version})
+    assert (await balances(h.flow))[1]==[]
     result=await user_message(h,metadata={'component_card':card})
     saved=await h.flow.db.message.find_unique(where={'id':result['message_id']})
-    assert saved.metadata['component_card']['type']==card['type']
-    assert saved.metadata['component_card']['payload']==card['payload']
+    assert saved.metadata['component_card']==card
+    assert saved.metadata['link_card']==metadata_for_link_card(link)
     assert (await balances(h.flow))[1][0]['used']==1
     assert await h.flow.db.agentrun.count(where={'conversationId':h.flow.ids['conversation']})==0
+
+
+async def test_legacy_link_snapshot_and_binding_roll_back_with_admission(human):
+    from app.services.chat_links.cards import component_card_for_link
+    from app.services.chat_links.extraction import LinkMetadata
+    from app.services.chat_links.repo import create_or_update_link_card
+
+    h=human;await activate(h);await seed_quota(h.flow)
+    link=await create_or_update_link_card(user_id=h.flow.ids['owner'],
+        conversation_id=h.flow.ids['conversation'], database=h.flow.db,
+        metadata=LinkMetadata(source_url='https://synthetic.invalid/legacy',
+            final_url='https://synthetic.invalid/legacy', platform='链接', title='legacy'))
+    await h.flow.db.execute_raw('DELETE FROM chat_link_snapshots WHERE id=$1',link.snapshot_id)
+    card=component_card_for_link(link)
+    card['payload'].pop('snapshot_id')
+    before=await balances(h.flow)
+
+    async def assert_rolled_back():
+        assert await balances(h.flow)==before
+        assert await h.flow.db.message.count(where={'conversationId':h.flow.ids['conversation']})==0
+        assert await h.flow.db.query_raw('SELECT id FROM chat_link_snapshots WHERE link_card_id=$1',link.id)==[]
+        assert await h.flow.db.query_raw('SELECT b.message_id FROM chat_link_message_bindings b JOIN chat_link_snapshots s ON s.id=b.snapshot_id WHERE s.link_card_id=$1',link.id)==[]
+        assert (await service.takeover_unread_summary(h.admins[0]))['unread_count']==0
+
+    with pytest.raises(ChatIngressQuotaBlocked):
+        await user_message(h,metadata={'component_card':card})
+    await assert_rolled_back()
+    with pytest.raises(RuntimeError,match='synthetic write failure'):
+        await user_message(h,metadata={'component_card':card},paid=True,
+            database=ScopedFaultDatabase(h.flow.db,'INSERT INTO notification_events'))
+    await assert_rolled_back()
+    result=await user_message(h,metadata={'component_card':card},paid=True)
+    retry=await user_message(h,metadata={'component_card':card},paid=True)
+    assert retry['message_id']==result['message_id'] and not retry['created']
+    saved=await h.flow.db.message.find_unique(where={'id':result['message_id']})
+    version=saved.metadata['link_card']['snapshot_id']
+    assert version and version!=link.snapshot_id
+    assert await h.flow.db.query_raw('SELECT id FROM chat_link_snapshots WHERE link_card_id=$1',link.id)==[{'id':version}]
+    assert await h.flow.db.query_raw('SELECT message_id FROM chat_link_message_bindings WHERE snapshot_id=$1',version)==[{'message_id':result['message_id']}]
+    assert (await balances(h.flow))[1]==[{'used':21}]
+
+
+async def test_takeover_literal_url_dedupes_as_text_without_link_metadata(human):
+    h=human;await activate(h)
+    text='人工聊天 https://synthetic.invalid/keep-literal'
+    first=await user_message(h,key='literal',text=text)
+    retry=await user_message(h,key='literal',text=text)
+    assert first['message_id']==retry['message_id'] and not retry['created']
+    saved=await h.flow.db.message.find_unique(where={'id':first['message_id']})
+    assert saved.content==text
+    assert 'link_card' not in saved.metadata and 'component_card' not in saved.metadata
+    assert await h.flow.db.query_raw('SELECT id FROM chat_link_cards WHERE conversation_id=$1',h.flow.ids['conversation'])==[]
+    assert (await balances(h.flow))[1]==[{'used':1}]
+    with pytest.raises(ChatRequestConflict):
+        await user_message(h,key='literal',text=text+'/changed')
+
+
+@pytest.mark.parametrize('resource',[
+    {'component_card':{'type':'external_link','payload':{'link_id':'unprepared'}}},
+    {'attachments':[{'id':'unprepared'}]},
+])
+async def test_ordinary_http_resource_rejection_precedes_preparation(human,monkeypatch,resource):
+    from app.api.public import chat
+    from app.api import deps
+    h=human;await attach(h)
+    monkeypatch.setattr(chat,'db',h.flow.db)
+    monkeypatch.setattr(deps,'is_redis_healthy',lambda:True)
+    monkeypatch.setattr(chat,'get_cached_schedule',AsyncMock(side_effect=AssertionError('preparation entered')))
+    app=FastAPI();app.include_router(chat.router)
+    headers={'Authorization':'Bearer '+create_jwt(h.flow.ids['owner'],'user')}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+        response=await client.post('/chat/'+h.flow.ids['conversation'],headers=headers,
+            json={'message':'resource','client_id':'unsupported',**resource})
+        assert response.status_code==422
+        assert response.json()['detail']=={'code':'unsupported_transport_payload',
+            'message':'卡片和附件请通过聊天连接发送','client_id':'unsupported'}
+    assert await h.flow.db.message.count(where={'conversationId':h.flow.ids['conversation']})==0
+    assert (await balances(h.flow))[1]==[]
+    chat.get_cached_schedule.assert_not_called()
 
 
 async def test_sse_takeover_acceptance_retry_and_resource_failure_use_real_transaction(human,monkeypatch):
