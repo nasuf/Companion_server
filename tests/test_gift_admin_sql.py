@@ -247,3 +247,32 @@ async def test_user_context_queries(sql):
     assert (await admin_repo.get_user(user))["nickname"] == "微信昵称"
     assert await admin_repo.get_user("missing-" + sql["tag"]) is None
     assert await admin_repo.gift_names_for_user(user) == ["桂花乌龙茶"]
+
+
+@pytest.mark.asyncio
+async def test_future_dated_events_are_clamped_to_now(sql):
+    gift = await _manual_gift(sql)
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    await gift_repo.add_tracking_events(gift["id"], [{
+        "status": "shipping", "title": "旧 mock 轨迹", "description": None, "location": None, "occurred_at": future,
+    }])
+    inserted = await admin_repo.insert_tracking_event(gift["id"], {
+        "status": "out_for_delivery", "title": "派送", "description": None, "location": None, "occurred_at": future,
+    })
+    now = datetime.now(timezone.utc) + timedelta(seconds=5)
+    for event in await admin_repo.list_tracking_events(gift["id"]):
+        assert datetime.fromisoformat(event["occurred_at"]) <= now
+    assert datetime.fromisoformat(inserted["occurred_at"]) <= now
+
+
+@pytest.mark.asyncio
+async def test_thanks_can_only_be_claimed_once(sql):
+    gift = await _manual_gift(sql, status="shipping")
+    owner, other = sql["users"]
+    first = await gift_repo.mark_gift_thanked(gift["id"], owner, "谢谢你")
+    assert first and first["thanks_sent_at"]
+    # 连点第二次、或别人的请求，都占不到：不会再发一张道谢卡和一份记忆。
+    assert await gift_repo.mark_gift_thanked(gift["id"], owner, "再谢一次") is None
+    assert await gift_repo.mark_gift_thanked(gift["id"], other, "别人的") is None
+    row = await sql["db"].realworldgift.find_unique(where={"id": gift["id"]})
+    assert row.thanksMessage == "谢谢你"

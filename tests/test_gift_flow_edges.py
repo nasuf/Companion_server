@@ -205,7 +205,7 @@ def _patch_create(monkeypatch, *, user=True, workspaces=(WORKSPACE,), ctx=CTX, i
     emit = AsyncMock(return_value="msg")
     monkeypatch.setattr(svc, "emit_gift_card", emit)
     remember = Mock()
-    monkeypatch.setattr(svc.gift_service, "remember_user_event", remember)
+    monkeypatch.setattr(svc.gift_memory, "remember_gift_sent", remember)
     return insert, add_events, emit, remember
 
 
@@ -243,9 +243,14 @@ async def test_manual_send_cleans_up_upload_when_insert_fails(monkeypatch, plain
 
 @pytest.mark.asyncio
 async def test_ordered_send_with_failed_notification_keeps_gift_and_skips_memory(monkeypatch, plain_response):
-    _, add_events, emit, remember = _patch_create(monkeypatch)
+    insert, add_events, emit, remember = _patch_create(monkeypatch)
+    fetch = AsyncMock(return_value=(b"\x89PNG", "image/png"))
+    monkeypatch.setattr(svc, "fetch_gift_image", fetch)
+    monkeypatch.setattr(svc.activity_media_storage, "save_image_blob", Mock(return_value="user-1_gift_c.png"))
     emit.side_effect = RuntimeError("ws down")
     result = await svc.create_manual_gift("admin-1", _create(image_url="https://img.example/a.jpg"))
+    fetch.assert_awaited_once_with("https://img.example/a.jpg")
+    assert insert.await_args.args[0]["product_image_url"] == "/offline/media/user-1_gift_c.png"  # 外链已转存
     assert result["notification"] == "failed"
     assert [e["status"] for e in add_events.await_args.args[1]] == ["ordered"]
     remember.assert_not_called()  # 用户没收到消息，就不写「寄出了神秘礼物」的记忆
@@ -291,15 +296,19 @@ async def test_cancel_trims_reason(monkeypatch):
     monkeypatch.setattr(svc, "gift_detail", AsyncMock(return_value={}))
     cancel = AsyncMock(return_value=True)
     monkeypatch.setattr(svc.admin_repo, "cancel_gift", cancel)
+    notice = AsyncMock(return_value=True)
+    monkeypatch.setattr(svc.gift_repo, "gift_notice_sent", notice)
+    forget = Mock()
+    monkeypatch.setattr(svc.gift_memory, "remember_gift_cancelled", forget)
     await svc.cancel_gift("admin-1", "g", "  寄错了  ")
     cancel.assert_awaited_once_with("g", "寄错了")
+    # 用户已被告知有礼物在路上：AI 记忆里也要记下它不会到了。
+    assert forget.call_args.args[0] == "user-1"
 
-
-def test_time_helpers_tolerate_missing_and_bad_values():
-    assert svc._parse_iso(None) is None
-    assert svc._parse_iso("not-a-date") is None
-    assert svc._parse_iso("2026-10-15T08:00:00") == NOW
-    assert svc._minute(None) == datetime(1970, 1, 1, tzinfo=UTC)
+    forget.reset_mock()
+    notice.return_value = False
+    await svc.cancel_gift("admin-1", "g", "寄错了")
+    forget.assert_not_called()  # 用户从没听说过这份礼物，就不必记
 
 
 # ── 用户侧服务的剩余分支 ─────────────────────────────────────────────────
@@ -353,7 +362,7 @@ async def test_refresh_leaves_closed_and_undue_gifts_alone(monkeypatch):
 async def test_notifications_degrade_without_context_or_on_errors(monkeypatch):
     monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(return_value=None))
     assert await gift_service.notify_out_for_delivery("user-1", _gift()) is None
-    assert await gift_service._announce_received("user-1", _gift("delivered")) is None
+    assert await gift_service._announce_received("user-1", _gift("delivered"), None) is None
 
     monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(side_effect=RuntimeError("db")))
     assert await gift_service.notify_out_for_delivery("user-1", _gift()) is None
@@ -508,3 +517,59 @@ async def test_home_counts_door_gifts_and_activity_reset_keeps_gift_images(monke
     monkeypatch.setattr(activity_service.repo, "clear_user_activities", AsyncMock(return_value={}))
     await activity_service.clear_all_activities("user-1")
     delete_files.assert_called_once_with("user-1", keep_gift_images=True)
+
+
+@pytest.mark.asyncio
+async def test_thanks_is_sent_as_a_user_gift_card_with_the_users_words(monkeypatch):
+    gift = _gift("delivered", product_image_url="/offline/media/user-1_gift_a.png")
+    monkeypatch.setattr(gift_service.gift_repo, "get_gift", AsyncMock(return_value=gift))
+    monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(return_value=CTX))
+    insert = AsyncMock(return_value="m")
+    monkeypatch.setattr(gift_service, "insert_user_component_message", insert)
+    monkeypatch.setattr(gift_service.gift_repo, "mark_gift_thanked", AsyncMock(return_value={
+        **gift, "thanks_sent_at": NOW.isoformat(),
+    }))
+    monkeypatch.setattr(gift_service, "gift_thanks_reply", AsyncMock(return_value="喜欢就好"))
+    monkeypatch.setattr(gift_service, "emit_assistant", AsyncMock())
+    remember = Mock()
+    monkeypatch.setattr(gift_service.gift_memory, "remember_gift_thanks", remember)
+
+    await gift_service.send_thanks("user-1", gift["id"], "好暖和||谢谢你", client_id="c-1")
+
+    kwargs = insert.await_args.kwargs
+    card = kwargs["metadata"]["component_card"]
+    assert kwargs["client_id"] == "c-1"
+    assert card["payload"]["kind"] == "thanks" and card["payload"]["status_label"] == "谢谢你"
+    assert card["payload"]["image_url"] == "/offline/media/user-1_gift_a.png"
+    assert card["title"] == "暖手宝" and card["body"] == "好暖和 谢谢你"
+    # 记忆拿到的是聊天里那条道谢消息本身，作为用户侧抽取的出处。
+    memory = remember.call_args.kwargs
+    assert memory["message"] == "好暖和||谢谢你" and memory["message_id"] == "m"
+    assert memory["message_content"] == kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_thanks_double_tap_posts_one_card_one_reply_one_memory(monkeypatch):
+    gift = _gift("delivered")
+    thanked = {**gift, "thanks_sent_at": NOW.isoformat()}
+    monkeypatch.setattr(gift_service.gift_repo, "get_gift", AsyncMock(side_effect=[gift, thanked]))
+    # 另一次点击已经抢先占住「已道谢」。
+    monkeypatch.setattr(gift_service.gift_repo, "mark_gift_thanked", AsyncMock(return_value=None))
+    insert = AsyncMock()
+    monkeypatch.setattr(gift_service, "insert_user_component_message", insert)
+    reply = AsyncMock()
+    monkeypatch.setattr(gift_service, "gift_thanks_reply", reply)
+    remember = Mock()
+    monkeypatch.setattr(gift_service.gift_memory, "remember_gift_thanks", remember)
+
+    result = await gift_service.send_thanks("user-1", gift["id"], "谢谢")
+
+    assert result.ok and result.assistant_message is None and result.gift.thanks_sent_at
+    insert.assert_not_awaited()
+    reply.assert_not_awaited()
+    remember.assert_not_called()
+
+    monkeypatch.setattr(gift_service.gift_repo, "get_gift", AsyncMock(side_effect=[gift, None]))
+    with pytest.raises(HTTPException) as gone:
+        await gift_service.send_thanks("user-1", gift["id"], "谢谢")
+    assert gone.value.status_code == 404

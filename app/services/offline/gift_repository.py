@@ -367,13 +367,14 @@ async def mark_gift_received(gift_id: str, user_id: str) -> dict[str, Any] | Non
 
 
 async def mark_gift_thanked(gift_id: str, user_id: str, message: str) -> dict[str, Any] | None:
+    """只有第一次道谢能占住；已经道谢过返回 None，调用方据此不再重复发卡片、回应和记忆。"""
     rows = await db.query_raw(
         """
         UPDATE real_world_gifts
-        SET thanks_message = COALESCE(thanks_message, $3),
-            thanks_sent_at = COALESCE(thanks_sent_at, CURRENT_TIMESTAMP),
+        SET thanks_message = $3,
+            thanks_sent_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND user_id = $2
+        WHERE id = $1 AND user_id = $2 AND thanks_sent_at IS NULL
         RETURNING *
         """,
         gift_id,
@@ -412,7 +413,8 @@ async def add_tracking_events(gift_id: str, events: list[dict[str, Any]]) -> Non
             INSERT INTO gift_tracking_events (
                 id, gift_id, status, title, description, location, occurred_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
+            -- provider / 旧 mock 偶尔给出未来时间，统一不晚于写入时刻，时间线才不会乱序。
+            VALUES ($1, $2, $3, $4, $5, $6, LEAST($7::timestamptz, CURRENT_TIMESTAMP))
             """,
             new_id(),
             gift_id,

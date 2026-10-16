@@ -31,12 +31,19 @@ from app.observability.events import (
     EVT_GIFT_CANCELLED,
     EVT_GIFT_STAGE_CHANGED,
 )
-from app.services.offline import activity_media_storage, gift_fulfillment, gift_recommendation, gift_service
+from app.services.offline import (
+    activity_media_storage,
+    gift_fulfillment,
+    gift_memory,
+    gift_recommendation,
+    gift_service,
+)
 from app.services.offline import gift_admin_repository as admin_repo
 from app.services.offline import gift_repository as gift_repo
 from app.services.offline import repository as repo
 from app.services.offline.chat_emit import emit_gift_card, offline_trace
 from app.services.offline.gift_budget import available_gift_budget_cents
+from app.services.offline.gift_image_fetch import GiftImageFetchError, fetch_gift_image
 from app.services.offline.gift_messages import gift_sent_message
 from app.services.offline.gift_status import (
     CONFIRMABLE_STATUS,
@@ -140,7 +147,7 @@ async def create_manual_gift(admin_id: str, data: AdminGiftCreateRequest) -> Adm
     if not address:
         raise HTTPException(status_code=409, detail="该用户还没有填写收货地址，无法寄出")
 
-    image_url, stored_key = _resolve_image(data.user_id, data, current=None)
+    image_url, stored_key = await _resolve_image(data.user_id, data, current=None)
     try:
         gift, created = await admin_repo.insert_manual_gift({
             "id": gift_id,
@@ -194,7 +201,7 @@ async def _finish_manual_send(
     if not await gift_repo.gift_notice_sent(gift_id, data.user_id, "gift_sent"):
         notification, message = await _announce_sent(data.user_id, gift, ctx)
         if notification == "sent":
-            gift_service.remember_mystery_gift_sent(data.user_id, ctx["workspace_id"])
+            gift_memory.remember_gift_sent(data.user_id, ctx["workspace_id"], gift)
     logger.info(
         "[gift-admin] manual gift sent gift_id=%s user_id=%s notification=%s",
         gift_id,
@@ -231,7 +238,7 @@ async def update_gift(admin_id: str, gift_id: str, data: AdminGiftUpdateRequest)
         fields["paid_amount_cents"] = _cents(data.paid_amount_yuan)
     stored_key = None
     if provided & {"image_url", "image_base64"}:
-        fields["product_image_url"], stored_key = _resolve_image(
+        fields["product_image_url"], stored_key = await _resolve_image(
             gift["user_id"], data, current=gift.get("product_image_url"),
         )
     updated = await admin_repo.update_gift_details(gift_id, fields)
@@ -250,8 +257,9 @@ async def update_gift(admin_id: str, gift_id: str, data: AdminGiftUpdateRequest)
 async def set_stage(admin_id: str, gift_id: str, stage: str) -> AdminGiftActionResponse:
     """把在途礼物推进（或纠错回退）到 下单 / 运输 / 派送 中的某个节点。
 
-    签收是第四个节点，只能由用户在 App 里确认，后台不能代办。回退时删掉更靠后的节点，
-    这样误点「派送」后退回运输，用户就不能再对没到的包裹签收。
+    以管理员点选的节点为准直接生效，不从轨迹时间推断（历史 mock 轨迹里有未来时间，
+    推断会让点了「派送」却停在「运输」）。签收是第四个节点，只能由用户在 App 里确认。
+    回退时删掉更靠后的节点，误点「派送」后退回运输，用户就不能再对没到的包裹签收。
     """
     gift = await _require_gift(gift_id)
     current = gift["status"]
@@ -265,7 +273,18 @@ async def set_stage(admin_id: str, gift_id: str, stage: str) -> AdminGiftActionR
     events = await admin_repo.list_tracking_events(gift_id)
     if not any(gift_status_for_event(e["status"]) == stage for e in events):
         await admin_repo.insert_tracking_event(gift_id, _stage_event(stage, gift.get("carrier")))
-    applied, notification = await _sync_status_with_latest_event(gift)
+
+    notification = "skipped"
+    if stage == CONFIRMABLE_STATUS:
+        moved = await gift_service.advance_to_out_for_delivery(gift["user_id"], gift, notify=False)
+        if not moved:
+            raise HTTPException(status_code=409, detail="礼物状态刚刚发生了变化，请刷新后再试")
+        # 同一份礼物只提醒一次签收（派送后又回退过就不再打扰）。
+        if not await gift_repo.gift_notice_sent(gift_id, gift["user_id"], "gift_out_for_delivery"):
+            message_id = await gift_service.notify_out_for_delivery(gift["user_id"], moved)
+            notification = "sent" if message_id else "failed"
+    elif not await admin_repo.set_transit_status(gift_id, stage):
+        raise HTTPException(status_code=409, detail="礼物状态刚刚发生了变化，请刷新后再试")
     logger.info(
         "[gift-admin] stage changed gift_id=%s %s -> %s notification=%s",
         gift_id,
@@ -277,41 +296,20 @@ async def set_stage(admin_id: str, gift_id: str, stage: str) -> AdminGiftActionR
             "gift_id": gift_id,
             "admin_id": admin_id,
             "from_status": current,
-            "to_status": applied,
+            "to_status": stage,
             "notification": notification,
         },
     )
     return AdminGiftActionResponse(gift=await gift_detail(gift_id), notification=notification)
 
 
-async def _sync_status_with_latest_event(gift: dict[str, Any]) -> tuple[str | None, str]:
-    """在途礼物的状态跟随时间最新的物流节点；返回 (新状态或 None, 通知结果)。
-
-    同一分钟内以后录入的为准。进入派送中时，同一份礼物只提醒一次签收。
-    """
-    events = [e for e in await admin_repo.list_tracking_events(gift["id"]) if gift_status_for_event(e["status"])]
-    latest = max(
-        events,
-        key=lambda e: (_minute(_parse_iso(e["occurred_at"])), _parse_iso(e.get("created_at")) or _EPOCH),
-        default=None,
-    )
-    target = gift_status_for_event(latest["status"]) if latest else "ordered"
-    if target is None or target == gift["status"]:
-        return None, "skipped"
-    if target != CONFIRMABLE_STATUS:
-        await admin_repo.set_transit_status(gift["id"], target)
-        return target, "skipped"
-    moved = await gift_service.advance_to_out_for_delivery(gift["user_id"], gift, notify=False)
-    if not moved or await gift_repo.gift_notice_sent(gift["id"], gift["user_id"], "gift_out_for_delivery"):
-        return target, "skipped"
-    message_id = await gift_service.notify_out_for_delivery(gift["user_id"], moved)
-    return target, "sent" if message_id else "failed"
-
-
 async def cancel_gift(admin_id: str, gift_id: str, reason: str) -> AdminGiftDetail:
-    await _require_gift(gift_id)
+    gift = await _require_gift(gift_id)
     if not await admin_repo.cancel_gift(gift_id, reason.strip()):
         raise HTTPException(status_code=409, detail="已签收或已关闭的礼物不能撤销")
+    if await gift_repo.gift_notice_sent(gift_id, gift["user_id"], "gift_sent"):
+        # 用户已经被告知有礼物在路上：AI 的记忆里也要知道它不会到了。
+        gift_memory.remember_gift_cancelled(gift["user_id"], gift.get("workspace_id"), gift)
     logger.info(
         "[gift-admin] gift cancelled gift_id=%s",
         gift_id,
@@ -336,7 +334,6 @@ async def _announce_sent(user_id: str, gift: dict[str, Any], ctx: dict[str, Any]
                 workspace_id=ctx["workspace_id"],
                 gift=gift,
                 trigger_type="gift_sent",
-                status_label="在路上",
                 message=message,
                 trace_id=tracer.safe_trace_id,
             )
@@ -373,16 +370,34 @@ def _initial_events(data: AdminGiftCreateRequest) -> list[dict[str, Any]]:
     return events
 
 
-def _resolve_image(user_id: str, data: Any, *, current: str | None) -> tuple[str | None, str | None]:
-    """返回 (图片 URL, 本次新存的文件 key)。上传的图片按收件用户存放，只有该用户和管理员能读。"""
+async def _resolve_image(user_id: str, data: Any, *, current: str | None) -> tuple[str | None, str | None]:
+    """返回 (图片 URL, 本次新存的文件 key)。图片一律按收件用户存放，只有该用户和管理员能读。
+
+    外部链接会被下载转存（商品页取主图），不直接引用：外链常是网页、会防盗链或过期。
+    """
     if data.image_base64:
         mime = activity_media_storage.normalize_image_mime(data.image_mime)
         blob = activity_media_storage.decode_image_base64(data.image_base64)
-        key = activity_media_storage.save_image_blob(user_id=user_id, blob=blob, mime=mime, kind="gift")
-        return activity_media_storage.media_url(key), key
+        return _store_gift_image(user_id, blob, mime)
     if data.image_url is None:
         return (current if "image_url" not in data.model_fields_set else None), None
-    return _validate_image_url(user_id, data.image_url), None
+    url = _validate_image_url(user_id, data.image_url)
+    if url is None or url.startswith(activity_media_storage.media_url("")):
+        return url, None
+    try:
+        blob, mime = await fetch_gift_image(url)
+    except GiftImageFetchError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        mime = activity_media_storage.normalize_image_mime(mime)
+    except HTTPException as exc:
+        raise HTTPException(status_code=422, detail="图片格式不支持（仅 JPG / PNG / WEBP），请换一张或直接上传") from exc
+    return _store_gift_image(user_id, blob, mime)
+
+
+def _store_gift_image(user_id: str, blob: bytes, mime: str) -> tuple[str, str]:
+    key = activity_media_storage.save_image_blob(user_id=user_id, blob=blob, mime=mime, kind="gift")
+    return activity_media_storage.media_url(key), key
 
 
 def _validate_image_url(user_id: str, value: str) -> str | None:
@@ -430,25 +445,3 @@ def _gift_id_from_request(request_id: str) -> str:
 
 def _cents(yuan: float) -> int:
     return int(round(yuan * 100))
-
-
-def _aware(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    return value if value.tzinfo else value.replace(tzinfo=UTC)
-
-
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-
-
-def _minute(value: datetime | None) -> datetime:
-    return (value or _EPOCH).replace(second=0, microsecond=0)
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
-    except ValueError:
-        return None

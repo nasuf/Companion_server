@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 from prisma import Json
 
 from app.db import db
-from app.services.offline.gift_status import MYSTERY_GIFT_NAME, is_revealed
+from app.services.offline.gift_status import MYSTERY_GIFT_NAME, is_revealed, status_label as gift_status_label
 from app.services.proactive.emit import emit_proactive_message
 from app.services.runtime.ws_manager import manager
 
@@ -107,13 +107,25 @@ def build_activity_component_card(activity: dict[str, Any], *, status_label: str
     }
 
 
+def single_bubble_text(text: str | None) -> str:
+    """卡片正文是一整段：模型按聊天习惯输出的 || 分句与系统标记都要清掉。"""
+    from app.services.chat.reply_formatting import strip_system_markers
+
+    value = (text or "").strip()
+    if "||" in value:
+        value = " ".join(part.strip() for part in value.split("||") if part.strip())
+    return (strip_system_markers(value) or "").strip()
+
+
 def build_gift_component_card(
     gift: dict[str, Any],
     *,
-    status_label: str,
+    status_label: str | None = None,
     message: str | None = None,
 ) -> dict[str, Any]:
     """礼物聊天卡片。卡片随消息永久落库，所以签收前就不能写入礼物名称/图片/寄语。"""
+    status_label = status_label or gift_status_label(gift.get("status"))
+    message = single_bubble_text(message) or None
     revealed = is_revealed(gift)
     subtitle_parts = [status_label]
     if gift.get("logistics_provider") and gift.get("logistics_provider") != "mock":
@@ -145,6 +157,29 @@ def build_gift_component_card(
             "gift_name": title if revealed else None,
             "image_url": image_url,
             "revealed": revealed,
+            "real_world_type": "gift",
+        },
+    }
+
+
+def build_gift_user_card(gift: dict[str, Any], *, kind: str, status_label: str, body: str) -> dict[str, Any]:
+    """用户发给 AI 的礼物卡片（签收 / 道谢）。只在签收后出现，封面是礼物实物图。"""
+    return {
+        "version": 1,
+        "type": "offline_gift",
+        "title": gift.get("gift_name") or "一份小礼物",
+        "subtitle": status_label,
+        "body": single_bubble_text(body),
+        "footer": "点击查看礼物详情",
+        "accent": "#F6A64B",
+        "payload": {
+            "gift_id": gift.get("id"),
+            "status": gift.get("status"),
+            "status_label": status_label,
+            "gift_name": gift.get("gift_name"),
+            "image_url": gift.get("product_image_url"),
+            "revealed": True,
+            "kind": kind,
             "real_world_type": "gift",
         },
     }
@@ -234,12 +269,13 @@ async def emit_gift_card(
     workspace_id: str | None,
     gift: dict[str, Any],
     trigger_type: str,
-    status_label: str,
+    status_label: str | None = None,
     message: str | None = None,
     trace_id: str | None = None,
 ) -> str | None:
     if not conversation_id:
         return None
+    message = single_bubble_text(message) or None
     card = build_gift_component_card(gift, status_label=status_label, message=message)
     metadata = {
         "real_world_type": "gift",

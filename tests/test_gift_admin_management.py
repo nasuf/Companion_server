@@ -169,7 +169,7 @@ def _patch_create(monkeypatch, *, address=ADDRESS, inserted=(None, True)):
     emit = AsyncMock(return_value="msg-1")
     monkeypatch.setattr(svc, "emit_gift_card", emit)
     remember = Mock()
-    monkeypatch.setattr(svc.gift_service, "remember_user_event", remember)
+    monkeypatch.setattr(svc.gift_memory, "remember_gift_sent", remember)
     monkeypatch.setattr(svc, "gift_detail", AsyncMock(side_effect=lambda gift_id: {"id": gift_id}))
     monkeypatch.setattr(svc, "AdminGiftActionResponse", lambda **kw: kw)
     return insert, add_events, emit, paid, remember
@@ -193,7 +193,7 @@ async def test_manual_gift_is_created_as_mystery_with_initial_tracking(monkeypat
     assert [e["status"] for e in add_events.await_args.args[1]] == ["ordered", "shipping"]
     paid.assert_awaited_once()
     assert emit.await_args.kwargs["trigger_type"] == "gift_sent"
-    assert "桂花" not in remember.call_args.kwargs["text"]
+    assert remember.call_args.args[:2] == ("user-1", CTX["workspace_id"])
     assert result["notification"] == "sent"
 
 
@@ -322,7 +322,7 @@ async def test_advancing_to_shipping_records_the_standard_node(monkeypatch):
     event = insert.await_args.args[1]
     assert (event["status"], event["title"]) == ("shipping", "包裹运输中")
     assert "中通" in event["description"]
-    set_status.assert_awaited_once_with("a" * 32, "shipping")
+    set_status.assert_awaited_once_with("g", "shipping")
     delete_later.assert_not_awaited()
     advance.assert_not_awaited()
     assert result["notification"] == "skipped"
@@ -358,14 +358,45 @@ async def test_rolling_back_removes_later_nodes_so_user_cannot_sign(monkeypatch)
     await svc.set_stage("admin-1", "g", "shipping")
     delete_later.assert_awaited_once_with("g", ["out_for_delivery"])
     insert.assert_not_awaited()  # 运输节点还在，不重复记录
-    set_status.assert_awaited_once_with("a" * 32, "shipping")
+    set_status.assert_awaited_once_with("g", "shipping")
     advance.assert_not_awaited()
 
     insert, delete_later, set_status, *_ = _patch_stage(monkeypatch, _admin_gift("shipping"), [])
     await svc.set_stage("admin-1", "g", "ordered")
     assert delete_later.await_args.args[1] == ["shipping", "out_for_delivery", "packed"]
     assert insert.await_args.args[1]["status"] == "ordered"  # 没有下单节点就补一条
-    set_status.assert_awaited_once_with("a" * 32, "ordered")
+    set_status.assert_awaited_once_with("g", "ordered")
+
+
+@pytest.mark.asyncio
+async def test_chosen_stage_wins_over_future_dated_legacy_events(monkeypatch):
+    # 旧 mock 轨迹的「运输」节点时间在未来：点「派送」仍然要生效并提醒用户。
+    insert, _, set_status, advance, notify = _patch_stage(
+        monkeypatch, _admin_gift("shipping"),
+        [_ev("ordered", NOW - timedelta(days=1)), _ev("packed", NOW + timedelta(hours=8)),
+         _ev("shipping", NOW + timedelta(days=1))],
+    )
+    result = await svc.set_stage("admin-1", "g", "out_for_delivery")
+    insert.assert_awaited_once()
+    advance.assert_awaited_once()
+    notify.assert_awaited_once()
+    assert result["notification"] == "sent"
+    set_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stage_change_lost_race_reports_conflict(monkeypatch):
+    _, _, set_status, advance, _ = _patch_stage(monkeypatch, _admin_gift("shipping"), [])
+    advance.return_value = None
+    with pytest.raises(HTTPException) as door:
+        await svc.set_stage("admin-1", "g", "out_for_delivery")
+    assert door.value.status_code == 409
+
+    _, _, set_status, _, _ = _patch_stage(monkeypatch, _admin_gift("ordered"), [])
+    set_status.return_value = False
+    with pytest.raises(HTTPException) as moved:
+        await svc.set_stage("admin-1", "g", "shipping")
+    assert moved.value.status_code == 409
 
 
 @pytest.mark.asyncio

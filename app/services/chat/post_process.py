@@ -399,6 +399,14 @@ async def _do_memory_pipeline(
 
 
 _WATERMARK_BACKLOG_LIMIT = 30
+# Real-world gift messages are history context, never extraction targets: the
+# gift lifecycle writes 生活/馈赠 memories itself (offline/gift_memory.py), and the
+# system-written receipt/thanks cards are not the user's own words.
+_LIFECYCLE_MEMORY_REAL_WORLD_TYPES = frozenset({"gift"})
+
+
+def _memory_written_by_lifecycle(m: dict) -> bool:
+    return (m.get("metadata") or {}).get("real_world_type") in _LIFECYCLE_MEMORY_REAL_WORLD_TYPES
 
 
 async def _fetch_new_side_messages(
@@ -487,7 +495,12 @@ async def _pipeline_with_watermark(
 
     def _add_target(m: dict) -> None:
         nonlocal max_side_ts
-        excluded = (m.get("metadata") or {}).get("human_takeover") or (m.get("metadata") or {}).get("memory_confirmation")
+        metadata = m.get("metadata") or {}
+        excluded = (
+            metadata.get("human_takeover")
+            or metadata.get("memory_confirmation")
+            or _memory_written_by_lifecycle(m)
+        )
         if not excluded:
             new_target_msgs.append(m)
         ts = _parse_ts(m)
@@ -503,7 +516,7 @@ async def _pipeline_with_watermark(
         for m in recent:
             ts = _parse_ts(m)
             is_new_target = m.get("role") == target_role and (ts is None or ts > wm)
-            if not is_new_target:
+            if not is_new_target or _memory_written_by_lifecycle(m):
                 context_msgs.append(m)
             elif ts is None and (m.get("content") or "").strip() not in backlog_contents:
                 # Synthetic fresh reply (just-generated, no persisted ts) that the
@@ -518,7 +531,7 @@ async def _pipeline_with_watermark(
             is_new = wm is None or ts is None or ts > wm
             if is_new and m.get("role") == target_role:
                 _add_target(m)
-            else:
+            if not (is_new and m.get("role") == target_role) or _memory_written_by_lifecycle(m):
                 context_msgs.append(m)
 
     if max_side_ts is None:

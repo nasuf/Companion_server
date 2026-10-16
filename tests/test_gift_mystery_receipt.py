@@ -88,8 +88,11 @@ def test_status_helpers_never_let_logistics_sign_on_behalf_of_user():
 
 
 def test_chat_card_persists_no_gift_identity_until_revealed():
-    card = chat_emit.build_gift_component_card(_gift("shipping"), status_label="在路上", message="有惊喜在路上")
+    card = chat_emit.build_gift_component_card(_gift("shipping"), message="有惊喜||在路上 [EMO:高兴/60]")
     assert card["title"] == MYSTERY_GIFT_NAME
+    assert card["payload"]["status_label"] == "运输中"  # 角标跟随礼物状态
+    assert card["body"] == "有惊喜 在路上"  # 卡片正文是一整段，不带 || 和系统标记
+    assert chat_emit.build_gift_component_card(_gift("ordered"))["payload"]["status_label"] == "已下单"
     assert card["payload"]["image_url"] is None
     assert card["payload"]["gift_name"] is None
     assert card["payload"]["revealed"] is False
@@ -149,10 +152,12 @@ def _patch_receipt(monkeypatch, *, current, cas_result, reread=None):
     monkeypatch.setattr(gift_service.gift_repo, "add_tracking_events", add_events)
     monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(return_value=CTX))
     monkeypatch.setattr(gift_service, "gift_received_message", AsyncMock(return_value="是桂花乌龙茶，记得你爱花香"))
+    user_card = AsyncMock(return_value="msg-user")
+    monkeypatch.setattr(gift_service, "insert_user_component_message", user_card)
     emit = AsyncMock(return_value="msg-1")
-    monkeypatch.setattr(gift_service, "emit_gift_card", emit)
+    monkeypatch.setattr(gift_service, "emit_assistant", emit)
     remember = Mock()
-    monkeypatch.setattr(gift_service, "remember_user_event", remember)
+    monkeypatch.setattr(gift_service.gift_memory, "remember_gift_received", remember)
     return add_events, emit, remember
 
 
@@ -170,10 +175,36 @@ async def test_user_confirms_receipt_reveals_gift_once(monkeypatch):
     assert result.assistant_message == "是桂花乌龙茶，记得你爱花香"
     event = add_events.await_args.args[1][0]
     assert event["status"] == "delivered" and event["description"] == "你已确认收到这份礼物"
-    card_kwargs = emit.await_args.kwargs
-    assert card_kwargs["trigger_type"] == "gift_received"
-    assert card_kwargs["gift"]["status"] == "delivered"
-    assert "桂花乌龙茶" in remember.call_args.kwargs["text"]
+    # 签收卡片由用户发给 AI（封面是礼物实物图），AI 只回一段文字。
+    user_card = gift_service.insert_user_component_message.await_args.kwargs
+    card = user_card["metadata"]["component_card"]
+    assert user_card["metadata"]["trigger_type"] == "gift_received"
+    assert card["payload"]["kind"] == "received" and card["payload"]["revealed"] is True
+    assert card["payload"]["image_url"] == "/offline/media/user-1_image_abc.jpg"
+    assert card["title"] == "桂花乌龙茶"
+    reply = emit.await_args.kwargs
+    assert reply["trigger_type"] == "gift_received_reply"
+    assert reply["message"] == "是桂花乌龙茶，记得你爱花香"
+    # 签收记忆带上礼物和揭晓时说的话（为什么送）。
+    assert remember.call_args.args[2]["gift_name"] == "桂花乌龙茶"
+    assert remember.call_args.kwargs["reveal_message"] == "是桂花乌龙茶，记得你爱花香"
+
+
+@pytest.mark.asyncio
+async def test_receipt_is_remembered_even_when_the_chat_is_unreachable(monkeypatch):
+    add_events, emit, remember = _patch_receipt(
+        monkeypatch, current=_gift("out_for_delivery"), cas_result=_gift("delivered"),
+    )
+    monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(side_effect=RuntimeError("db")))
+
+    result = await gift_service.confirm_receipt("user-1", "gift-1")
+
+    # 签收已经成功：聊天发不出去，记忆照样要写（工作区取礼物自己的）。
+    assert result.gift.revealed is True and result.assistant_message is None
+    emit.assert_not_awaited()
+    args, kwargs = remember.call_args
+    assert args[1] == _gift("delivered").get("workspace_id")
+    assert kwargs == {"agent_name": None, "reveal_message": None}
 
 
 @pytest.mark.asyncio
@@ -346,10 +377,6 @@ async def test_sent_message_and_memory_never_see_the_gift(monkeypatch):
     assert await gift_messages.gift_sent_message("user-1", "ws-1") == "我给你寄了个小惊喜，先保密"
     assert set(rendered) == {"memory"}
 
-    remember = Mock()
-    monkeypatch.setattr(gift_service, "remember_user_event", remember)
-    gift_service.remember_mystery_gift_sent("user-1", "ws-1")
-    assert "神秘礼物" in remember.call_args.kwargs["text"]
 
 
 @pytest.mark.asyncio

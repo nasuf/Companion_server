@@ -264,7 +264,8 @@ async def insert_tracking_event(gift_id: str, event: dict[str, Any]) -> dict[str
     rows = await db.query_raw(
         """
         INSERT INTO gift_tracking_events (id, gift_id, status, title, description, location, occurred_at)
-        SELECT $1, $2, $3::text, $4::text, $5::text, $6::text, COALESCE($7::timestamptz, CURRENT_TIMESTAMP)
+        SELECT $1, $2, $3::text, $4::text, $5::text, $6::text,
+               LEAST(COALESCE($7::timestamptz, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
         WHERE NOT EXISTS (
             SELECT 1 FROM gift_tracking_events
             WHERE gift_id = $2

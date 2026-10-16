@@ -225,12 +225,15 @@ async def test_create_gift_resumes_pending_address_task(monkeypatch):
     monkeypatch.setattr(gift_service.gift_fulfillment, "sync_tracking_events", sync_tracking)
     monkeypatch.setattr(gift_service.gift_repo, "update_last_gift_paid", AsyncMock())
     monkeypatch.setattr(gift_service, "gift_sent_message", AsyncMock(return_value="我给你寄了个小东西。"))
-    emit_gift_card = AsyncMock()
+    emit_gift_card = AsyncMock(return_value="msg-sent")
     monkeypatch.setattr(gift_service, "emit_gift_card", emit_gift_card)
+    remember = Mock()
+    monkeypatch.setattr(gift_service.gift_memory, "remember_gift_sent", remember)
 
     result = await gift_service.create_gift_for_user(user_id="user-1", workspace_id="workspace-1")
 
     assert result == fulfilled
+    remember.assert_called_once_with("user-1", "workspace-1", fulfilled)
     select_gift.assert_awaited_once_with("user-1", "workspace-1", 3_000)
     purchase.assert_awaited_once()
     sync_tracking.assert_awaited_once()
@@ -239,7 +242,15 @@ async def test_create_gift_resumes_pending_address_task(monkeypatch):
     assert update_order.await_args_list[-1].args[2]["status"] == "shipping"
     emit_gift_card.assert_awaited_once()
     assert emit_gift_card.await_args.kwargs["trigger_type"] == "gift_sent"
-    assert emit_gift_card.await_args.kwargs["status_label"] == "在路上"
+    # 角标不再写死「在路上」，由卡片按礼物状态生成（运输中）。
+    assert "status_label" not in emit_gift_card.await_args.kwargs
+
+    # 卡片没能发进聊天（没有会话）：用户不知道有礼物，AI 也不该记得自己寄过。
+    remember.reset_mock()
+    emit_gift_card.return_value = None
+    update_order.side_effect = [{**fulfilled, "status": "selecting"}, fulfilled]
+    await gift_service.create_gift_for_user(user_id="user-1", workspace_id="workspace-1")
+    remember.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -406,7 +417,7 @@ async def test_send_thanks_writes_user_message_assistant_reply_and_memory(monkey
     monkeypatch.setattr(gift_service.gift_repo, "mark_gift_thanked", AsyncMock(return_value=updated))
     monkeypatch.setattr(gift_service, "gift_thanks_reply", AsyncMock(return_value="收到你的谢谢，我会偷偷开心很久。"))
     monkeypatch.setattr(gift_service, "emit_assistant", assistant_message)
-    monkeypatch.setattr(gift_service, "remember_user_event", remember)
+    monkeypatch.setattr(gift_service.gift_memory, "remember_gift_thanks", remember)
 
     result = await gift_service.send_thanks("user-1", "gift-1", "我收到礼物啦，谢谢你")
 

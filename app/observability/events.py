@@ -98,6 +98,7 @@ EVT_GIFT_STAGE_CHANGED = "gift.stage_changed"
 EVT_GIFT_OUT_FOR_DELIVERY = "gift.out_for_delivery"
 EVT_GIFT_RECEIVED = "gift.received"
 EVT_GIFT_CANCELLED = "gift.cancelled"
+EVT_GIFT_MEMORY = "gift.memory"
 EVT_GIFT_RECOMMENDATIONS = "gift.recommendations"
 
 # Offerings (red packets / future gifts)

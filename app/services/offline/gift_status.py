@@ -26,6 +26,18 @@ CLOSED_STATUSES: tuple[str, ...] = ("delivered", "failed", "skipped", "cancelled
 MANUAL_PROVIDER = "manual"
 MYSTERY_GIFT_NAME = "神秘礼物"
 
+# 聊天卡片角标：和用户看到的四个物流节点同名。
+_STATUS_LABELS = {
+    "ordered": "已下单",
+    "shipping": "运输中",
+    "out_for_delivery": "派送中",
+    "delivered": "已签收",
+}
+
+
+def status_label(status: str | None) -> str:
+    return _STATUS_LABELS.get(status or "", "小心意")
+
 _TRANSIT_RANK = {status: rank for rank, status in enumerate(IN_TRANSIT_STATUSES)}
 
 

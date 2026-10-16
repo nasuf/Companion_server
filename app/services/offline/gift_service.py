@@ -20,9 +20,11 @@ from app.models.offline import (
 from app.observability.events import EVT_GIFT_OUT_FOR_DELIVERY, EVT_GIFT_RECEIVED
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.offline import gift_fulfillment
+from app.services.offline import gift_memory
 from app.services.offline import gift_repository as gift_repo
 from app.services.offline import repository as repo
 from app.services.offline.chat_emit import (
+    build_gift_user_card,
     emit_assistant,
     emit_gift_card,
     insert_user_component_message,
@@ -164,23 +166,31 @@ async def send_thanks(
         raise HTTPException(status_code=409, detail="签收礼物后才能道谢哦")
     if gift.get("thanks_sent_at"):
         return GiftThanksResponse(ok=True, gift=RealWorldGiftItem(**user_view(gift)), assistant_message=None)
+    # 先占住「已道谢」再发消息：连点两次也只会有一张道谢卡、一条回应、一份记忆。
+    updated = await gift_repo.mark_gift_thanked(gift_id, user_id, message)
+    if not updated:
+        latest = await gift_repo.get_gift(gift_id, user_id)
+        if not latest:
+            raise HTTPException(status_code=404, detail="Gift not found")
+        return GiftThanksResponse(ok=True, gift=RealWorldGiftItem(**user_view(latest)), assistant_message=None)
     ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
+    thanks_content = f"我收到了「{gift['gift_name']}」，想说：{message}".strip()
+    thanks_message_id = None
     if ctx:
-        await insert_user_component_message(
+        # 道谢渲染成一张用户发给 AI 的礼物卡片（封面是礼物实物图），而不是普通文字气泡。
+        thanks_message_id = await insert_user_component_message(
             conversation_id=ctx.get("conversation_id"),
             workspace_id=ctx.get("workspace_id"),
-            content=f"我收到了「{gift['gift_name']}」，想说：{message}",
+            content=thanks_content,
             client_id=client_id,
             metadata={
                 "user_id": user_id,
                 "real_world_type": "gift",
                 "source_id": gift_id,
                 "trigger_type": "gift_thanks",
+                "component_card": build_gift_user_card(gift, kind="thanks", status_label="谢谢你", body=message),
             },
         )
-    updated = await gift_repo.mark_gift_thanked(gift_id, user_id, message)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Gift not found")
     async with offline_trace(
         "gift_thanks",
         conversation_id=(ctx or {}).get("conversation_id"),
@@ -199,10 +209,13 @@ async def send_thanks(
                 trigger_type="gift_thanks_reply",
                 trace_id=tracer.safe_trace_id,
             )
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=gift.get("workspace_id"),
-        text=f"用户收到礼物「{gift['gift_name']}」后表达感谢：{message}",
+    gift_memory.remember_gift_thanks(
+        user_id,
+        (ctx or {}).get("workspace_id") or gift.get("workspace_id"),
+        gift,
+        message=message,
+        message_id=thanks_message_id,
+        message_content=thanks_content if thanks_message_id else None,
     )
     return GiftThanksResponse(
         ok=True,
@@ -523,18 +536,18 @@ async def _fulfill_gift(
         agent_id=ctx["agent_id"], user_id=user_id,
     ) as tracer:
         message = await gift_sent_message(user_id, ctx["workspace_id"])
-        await emit_gift_card(
+        sent_message_id = await emit_gift_card(
             conversation_id=ctx["conversation_id"],
             user_id=user_id,
             agent_id=ctx["agent_id"],
             workspace_id=ctx["workspace_id"],
             gift=gift,
             trigger_type="gift_sent",
-            status_label="在路上",
             message=message,
             trace_id=tracer.safe_trace_id,
         )
-    remember_mystery_gift_sent(user_id, ctx["workspace_id"])
+    if sent_message_id:  # 用户真的收到了「有礼物在路上」，AI 才记得自己寄过
+        gift_memory.remember_gift_sent(user_id, ctx["workspace_id"], gift)
     return gift
 
 
@@ -704,7 +717,6 @@ async def notify_out_for_delivery(
                 workspace_id=ctx.get("workspace_id"),
                 gift=gift,
                 trigger_type="gift_out_for_delivery",
-                status_label="派送中",
                 message=message,
                 trace_id=tracer.safe_trace_id,
             )
@@ -757,51 +769,62 @@ async def _confirm_receipt(
         actor,
         extra={"event": EVT_GIFT_RECEIVED, "gift_id": gift_id, "user_id": user_id, "actor": actor},
     )
-    assistant = await _announce_received(user_id, updated)
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=updated.get("workspace_id"),
-        text=f"用户签收了 AI 寄出的礼物「{updated['gift_name']}」，礼物已经揭晓，可以自然地聊它",
+    try:
+        ctx = await repo.resolve_user_context(user_id, updated.get("workspace_id"))
+    except Exception as exc:
+        logger.warning("[offline] gift received context failed gift_id=%s: %s", gift_id, exc)
+        ctx = None
+    assistant = await _announce_received(user_id, updated, ctx)
+    gift_memory.remember_gift_received(
+        user_id,
+        (ctx or {}).get("workspace_id") or updated.get("workspace_id"),
+        updated,
+        agent_name=(ctx or {}).get("agent_name"),
+        reveal_message=assistant,
     )
     return updated, assistant, False
 
 
-async def _announce_received(user_id: str, gift: dict[str, Any]) -> str | None:
-    """签收后的揭晓卡片 + AI 消息。失败只记日志：签收本身已经成功。"""
+async def _announce_received(user_id: str, gift: dict[str, Any], ctx: dict[str, Any] | None) -> str | None:
+    """签收：用户发给 AI 一张已签收的礼物卡片，AI 用文字回应。失败只记日志：签收本身已经成功。"""
+    if not ctx:
+        return None
     try:
-        ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
-        if not ctx:
-            return None
+        await insert_user_component_message(
+            conversation_id=ctx.get("conversation_id"),
+            workspace_id=ctx.get("workspace_id"),
+            content=f"我签收了你寄来的「{gift['gift_name']}」",
+            metadata={
+                "user_id": user_id,
+                "real_world_type": "gift",
+                "source_id": gift["id"],
+                "trigger_type": "gift_received",
+                "component_card": build_gift_user_card(
+                    gift, kind="received", status_label="已签收", body="我签收啦，拆开看看是什么～",
+                ),
+            },
+        )
         async with offline_trace(
             "gift_received",
             conversation_id=ctx.get("conversation_id"),
             agent_id=ctx["agent_id"], user_id=user_id,
         ) as tracer:
             message = await gift_received_message(user_id, ctx.get("workspace_id"), gift)
-            await emit_gift_card(
+            await emit_assistant(
                 conversation_id=ctx.get("conversation_id"),
                 user_id=user_id,
                 agent_id=ctx["agent_id"],
                 workspace_id=ctx.get("workspace_id"),
-                gift=gift,
-                trigger_type="gift_received",
-                status_label="已签收",
                 message=message,
+                real_world_type="gift",
+                source_id=gift["id"],
+                trigger_type="gift_received_reply",
                 trace_id=tracer.safe_trace_id,
             )
             return message
     except Exception as exc:
         logger.warning("[offline] gift received announce failed gift_id=%s: %s", gift.get("id"), exc)
         return None
-
-
-def remember_mystery_gift_sent(user_id: str, workspace_id: str | None) -> None:
-    # 礼物名不进记忆：记忆会注入聊天，AI 可能在用户签收前说漏嘴。
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=workspace_id,
-        text="AI 给用户寄出了一份神秘礼物，用户签收前要保密，不要提前透露礼物是什么",
-    )
 
 
 def _parse_dt(value: Any) -> datetime | None:
