@@ -64,18 +64,30 @@ async def record_event(
     metadata: dict | None = None,
     occurred_at: datetime | None = None,
 ) -> bool:
-    """Persist a lightweight achievement event. Returns False for duplicate source events."""
+    """Persist a lightweight achievement event. Returns False for duplicate or invalidated sources; DB failures raise."""
+    from app.services.achievements.source import (
+        CONTRACT, LIVE_SOURCE_SQL, assert_matching_scope, current_source,
+    )
+    source = current_source.get()
+    params = []
+    guard = "TRUE"
+    if source is not None:
+        assert_matching_scope(source, user_id, agent_id, workspace_id, conversation_id)
+        occurred_at = source.occurred_at
+        metadata = {**(metadata or {}), "source_contract": CONTRACT,
+                    "source_message_id": source.message_id, "source_role": source.role}
+        guard = LIVE_SOURCE_SQL.format(message="$11", role="$12")
+        params = [source.message_id, source.role]
     try:
         rows = await db.query_raw(
-            """
+            f"""
             INSERT INTO achievement_events (
                 user_id, agent_id, workspace_id, conversation_id, event_type,
                 source_id, value_int, value_text, metadata, occurred_at
             )
-            VALUES (
-                $1, $2, $3, $4, $5,
+            SELECT $1, $2, $3, $4, $5,
                 $6, $7, $8, $9::jsonb, COALESCE($10::timestamp, CURRENT_TIMESTAMP)
-            )
+            WHERE {guard}
             ON CONFLICT DO NOTHING
             RETURNING id
             """,
@@ -89,11 +101,12 @@ async def record_event(
             value_text,
             _json(metadata),
             occurred_at,
+            *params,
         )
         return bool(rows)
     except Exception as e:
         logger.warning(f"[ACH] record_event failed type={event_type}: {e}")
-        return False
+        raise
 
 
 async def unlock_achievement(
@@ -116,13 +129,23 @@ async def unlock_achievement(
         return False
     if await _is_unlock_cached(user_id, agent_id, achievement_id):
         return False
+    from app.services.achievements.source import (
+        LIVE_SOURCE_SQL, assert_matching_scope, current_source,
+    )
+    source = current_source.get()
+    params = []
+    guard = "TRUE"
+    if source is not None:
+        assert_matching_scope(source, user_id, agent_id, workspace_id, conversation_id)
+        guard = LIVE_SOURCE_SQL.format(message="$7", role="$8")
+        params = [source.message_id, source.role]
     try:
         rows = await db.query_raw(
-            """
+            f"""
             INSERT INTO achievement_unlocks (
                 user_id, agent_id, workspace_id, conversation_id, achievement_id, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            SELECT $1, $2, $3, $4, $5, $6::jsonb WHERE {guard}
             ON CONFLICT (user_id, agent_id, achievement_id) DO NOTHING
             RETURNING id, unlocked_at
             """,
@@ -132,12 +155,14 @@ async def unlock_achievement(
             conversation_id,
             achievement_id,
             _json(metadata),
+            *params,
         )
     except Exception as e:
         logger.warning(f"[ACH] unlock failed id={achievement_id}: {e}")
-        return False
+        raise
     if not rows:
-        await _cache_unlocked_achievements(user_id, agent_id, {achievement_id})
+        if source is None:
+            await _cache_unlocked_achievements(user_id, agent_id, {achievement_id})
         return False
     await _cache_unlocked_achievements(user_id, agent_id, {achievement_id})
     unlocked_at = _field(rows[0], "unlocked_at") or _now()
@@ -356,6 +381,12 @@ async def _event_count(user_id: str, agent_id: str, event_type: str) -> int:
           AND e.agent_id = $2
           AND e.event_type = $3
           AND (e.conversation_id IS NULL OR c.is_deleted = FALSE)
+          AND (e.metadata->>'source_contract' IS DISTINCT FROM 'persisted_message_v1'
+               OR EXISTS (SELECT 1 FROM messages m
+                  WHERE m.id=e.metadata->>'source_message_id'
+                    AND m.conversation_id=c.id
+                    AND m.role=e.metadata->>'source_role'
+                    AND c.user_id=e.user_id AND c.agent_id=e.agent_id))
         """,
         user_id,
         agent_id,

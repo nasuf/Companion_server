@@ -497,7 +497,7 @@ async def _persist_user_message(
 
     fire_background(
         record_user_message_day_for_conversation(
-            conversation_id, workspace_id=workspace_id, user_id=user_id,
+            conversation_id, message_id=saved.id, workspace_id=workspace_id, user_id=user_id,
         )
     )
     return saved.id
@@ -1579,7 +1579,7 @@ async def _handle_message(
         await mark_user_replied_for_conversation(conversation_id)
         from app.services.interaction_streak import record_user_message_day_for_conversation
         fire_background(record_user_message_day_for_conversation(
-            conversation_id, workspace_id=workspace_id, user_id=user_id))
+            conversation_id, message_id=user_message_id, workspace_id=workspace_id, user_id=user_id))
     else:
         user_message_id = await _persist_user_message(conversation_id, persisted_text,
             metadata=message_metadata, workspace_id=workspace_id, user_id=user_id)

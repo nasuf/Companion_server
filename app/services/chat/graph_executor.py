@@ -86,6 +86,7 @@ async def stream_graph_response(
             services._fire_background(
                 record_user_message_day_for_conversation(
                     conversation_id,
+                    message_id=user_message_id,
                     workspace_id=workspace_id,
                     user_id=getattr(conversation, "userId", None),
                 )
