@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 import time
 from urllib.parse import urlsplit,urlunsplit
 from uuid import uuid4
@@ -47,7 +48,13 @@ async def test_input_prisma_upgrade_preserves_old_data_and_recovers_lock_failure
             return result
         await command('deploy')
         user=await client.user.create(data={'username':'input-migration-'+uuid4().hex})
-        agent=await client.aiagent.create(data={'userId':user.id,'name':'Synthetic'})
+        # 历史版本的库只有当时的列; 用当前生成客户端的 aiagent.create 会去读写之后
+        # 新增的列 (如 nickname) 而失败。基线数据只写历史 schema 里存在的列。
+        agent_id = str(uuid4())
+        await client.execute_raw(
+            "INSERT INTO ai_agents (id, name, user_id, updated_at) VALUES ($1, 'Synthetic', $2, CURRENT_TIMESTAMP)",
+            agent_id, user.id)
+        agent = SimpleNamespace(id=agent_id)
         space=await client.chatworkspace.create(data={'userId':user.id,'agentId':agent.id})
         conv=await client.conversation.create(data={'userId':user.id,'agentId':agent.id,'workspaceId':space.id})
         msg=await client.message.create(data={'conversationId':conv.id,'role':'user','content':'Synthetic source'})
