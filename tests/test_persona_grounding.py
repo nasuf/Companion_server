@@ -296,6 +296,86 @@ async def test_new_schedule_verdict_is_reused_by_the_read_path(checker, monkeypa
     assert s._GENERATION_GROUNDING_TIMEOUT > g.VERIFY_TIMEOUT_S
 
 
+def _generation_store(monkeypatch, *, set_side_effect=None):
+    cache = {}
+
+    async def store(key, value, **kw):
+        if set_side_effect:
+            set_side_effect(key)
+        cache[key] = value
+
+    redis = SimpleNamespace(get=AsyncMock(side_effect=lambda key: cache.get(key)),
+                            set=AsyncMock(side_effect=store))
+    monkeypatch.setattr(s, "get_redis", AsyncMock(return_value=redis))
+    upsert = AsyncMock()
+    monkeypatch.setattr(s, "db", SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=agent())),
+                                                 aidailyschedule=SimpleNamespace(upsert=upsert)))
+    return cache, upsert
+
+
+async def test_new_schedule_without_gated_slots_needs_no_policy_or_verifier(checker, monkeypatch):
+    cache, upsert = _generation_store(monkeypatch)
+    policy = AsyncMock(return_value=defaults.PERSONA_GROUNDING_CHECK_PROMPT)
+    monkeypatch.setattr(s, "get_prompt_text", policy)
+    day = datetime(2026, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
+    slots = [{"start": "09:00", "end": "18:00", "event": "处理客服工单", "status": "忙碌"}]
+    assert await s._ground_and_cache_new_schedule("agent", day, agent(), slots) == slots
+    policy.assert_not_awaited()
+    checker.assert_not_awaited()
+    assert upsert.await_count == 1
+    assert s._grounded_cache_key("agent", day, agent(), slots, "") in cache
+
+
+async def test_new_schedule_without_readable_policy_is_still_neutralized(checker, monkeypatch):
+    """Web 策略停用/读不到: 照常核验落库, 但不能把结论记成可复用的。"""
+    cache, upsert = _generation_store(monkeypatch)
+    monkeypatch.setattr(s, "get_prompt_text", AsyncMock(side_effect=RuntimeError("disabled")))
+    day = datetime(2026, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
+    slots = [{"start": "19:00", "end": "20:00", "event": "漫步润州街头", "status": "空闲"}]
+    clean = await s._ground_and_cache_new_schedule("agent", day, agent(), slots)
+    assert [slot["event"] for slot in clean] == ["自由时间"]
+    assert upsert.await_args.kwargs["data"]["update"]["scheduleData"].data == clean
+    assert not any(":grounded:" in key for key in cache)
+
+
+async def test_recording_the_verdict_is_best_effort(checker, monkeypatch, caplog):
+    def fail_on_verdict(key):
+        if ":grounded:" in key:
+            raise ConnectionError("redis down")
+
+    _, upsert = _generation_store(monkeypatch, set_side_effect=fail_on_verdict)
+    monkeypatch.setattr(s, "get_prompt_text", AsyncMock(return_value=defaults.PERSONA_GROUNDING_CHECK_PROMPT))
+    day = datetime(2026, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
+    slots = [{"start": "09:00", "end": "18:00", "event": "处理客服工单", "status": "忙碌"}]
+    with caplog.at_level("WARNING"):
+        assert await s._ground_and_cache_new_schedule("agent", day, agent(), slots) == slots
+    assert upsert.await_count == 1
+    assert "Failed to record schedule grounding" in caplog.text
+
+
+async def test_generated_schedule_goes_through_grounding_and_cache(monkeypatch):
+    """LLM 生成的作息必须经过核验+落库这一个出口, 不能绕开它直接写缓存。"""
+    import app.services.runtime_config as runtime_config
+    slots = [{"start": f"{h:02d}:00", "end": f"{h + 1:02d}:00", "event": "处理客服工单", "status": "忙碌"}
+             for h in range(9, 14)]
+    monkeypatch.setattr(runtime_config, "bind_agent_context", AsyncMock())
+    monkeypatch.setattr(s, "db", SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=agent()))))
+    monkeypatch.setattr(s, "is_holiday", lambda _d: None)
+    monkeypatch.setattr(s, "is_workday_swap", lambda _d: False)
+    monkeypatch.setattr(s, "classify_day_kind", lambda *a, **k: "工作日")
+    monkeypatch.setattr(s, "get_prompt_text", AsyncMock(return_value=defaults.DAILY_SCHEDULE_PROMPT))
+    monkeypatch.setattr(s, "get_utility_model", lambda: object())
+    monkeypatch.setattr(s, "invoke_json", AsyncMock(return_value=slots))
+    monkeypatch.setattr(s, "_apply_carried_adjustment", AsyncMock(side_effect=lambda _a, _d, sch: sch))
+    grounded = [{**slot, "event": "忙手头的事"} for slot in slots]
+    seal = AsyncMock(return_value=grounded)
+    monkeypatch.setattr(s, "_ground_and_cache_new_schedule", seal)
+    day = datetime(2026, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
+    result = await s.generate_daily_schedule("agent", "小伴", None, life_overview="客服员的一天", date=day)
+    assert result == grounded
+    assert seal.await_args.args[3] == slots
+
+
 async def test_expired_verification_budget_is_unverified_not_allowed(checker):
     async def slow(*args, **kwargs):
         await asyncio.sleep(1)
