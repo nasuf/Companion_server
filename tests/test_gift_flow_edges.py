@@ -72,9 +72,7 @@ def test_admin_routes_forward_payloads_and_operator(api_client, auth_header, mon
     record("list_gifts", {"items": [_gift()], "total": 1})
     record("gift_detail", detail)
     record("update_gift", detail)
-    record("add_tracking_event", action)
-    record("delete_tracking_event", action)
-    record("confirm_receipt", action)
+    record("set_stage", action)
     record("cancel_gift", detail)
     from app.services import game_points
 
@@ -94,16 +92,15 @@ def test_admin_routes_forward_payloads_and_operator(api_client, auth_header, mon
     assert api_client.get("/admin-api/gifts/g1", headers=headers).status_code == 200
     assert api_client.patch("/admin-api/gifts/g1", json={"gift_note": "新"}, headers=headers).status_code == 200
     assert calls["update_gift"][0][:2] == ("admin-7", "g1")
-    assert api_client.post("/admin-api/gifts/g1/tracking", json={"status": "shipping", "title": "已发出"},
+    assert api_client.post("/admin-api/gifts/g1/stage", json={"stage": "out_for_delivery"},
                            headers=headers).status_code == 200
-    assert api_client.delete("/admin-api/gifts/g1/tracking/e1", headers=headers).status_code == 200
-    assert calls["delete_tracking_event"][0] == ("admin-7", "g1", "e1")
-    assert api_client.post("/admin-api/gifts/g1/confirm-receipt", headers=headers).status_code == 200
+    assert calls["set_stage"][0] == ("admin-7", "g1", "out_for_delivery")
     assert api_client.post("/admin-api/gifts/g1/cancel", json={"reason": "寄错"}, headers=headers).status_code == 200
     assert calls["cancel_gift"][0] == ("admin-7", "g1", "寄错")
-    # 只允许已知的手动物流状态：签收不能由后台录物流产生。
-    assert api_client.post("/admin-api/gifts/g1/tracking", json={"status": "delivered", "title": "x"},
+    # 签收是第四个节点，只能由用户在 App 里完成：后台既不能推进到签收，也没有代签收接口。
+    assert api_client.post("/admin-api/gifts/g1/stage", json={"stage": "delivered"},
                            headers=headers).status_code == 422
+    assert api_client.post("/admin-api/gifts/g1/confirm-receipt", headers=headers).status_code in {404, 405}
 
 
 # ── 概览 / 推荐 / 详情 ───────────────────────────────────────────────────
@@ -289,22 +286,9 @@ async def test_update_validation_amount_and_cancelled_refusal(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_delete_and_cancel_paths(monkeypatch):
-    monkeypatch.setattr(svc.admin_repo, "get_gift", AsyncMock(return_value=_gift("delivered")))
-    monkeypatch.setattr(svc.admin_repo, "delete_tracking_event", AsyncMock(return_value=False))
-    with pytest.raises(HTTPException) as missing:
-        await svc.delete_tracking_event("admin-1", "g", "signed-event")
-    assert missing.value.status_code == 404
-
-    # 已签收的礼物删掉一条旧轨迹：状态不再随轨迹变化。
-    monkeypatch.setattr(svc.admin_repo, "delete_tracking_event", AsyncMock(return_value=True))
-    set_status = AsyncMock()
-    monkeypatch.setattr(svc.admin_repo, "set_transit_status", set_status)
+async def test_cancel_trims_reason(monkeypatch):
+    monkeypatch.setattr(svc.admin_repo, "get_gift", AsyncMock(return_value=_gift("shipping")))
     monkeypatch.setattr(svc, "gift_detail", AsyncMock(return_value={}))
-    monkeypatch.setattr(svc, "AdminGiftActionResponse", lambda **kw: kw)
-    assert (await svc.delete_tracking_event("admin-1", "g", "old"))["notification"] == "skipped"
-    set_status.assert_not_awaited()
-
     cancel = AsyncMock(return_value=True)
     monkeypatch.setattr(svc.admin_repo, "cancel_gift", cancel)
     await svc.cancel_gift("admin-1", "g", "  寄错了  ")
@@ -376,11 +360,9 @@ async def test_notifications_degrade_without_context_or_on_errors(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_admin_receipt_and_mock_received_stage_share_the_user_path(monkeypatch):
+async def test_mock_received_stage_reuses_the_receipt_path(monkeypatch):
     confirm = AsyncMock(return_value=(_gift("delivered"), "揭晓", False))
     monkeypatch.setattr(gift_service, "_confirm_receipt", confirm)
-    assert (await gift_service.confirm_receipt_as_admin("user-1", "g"))[1] == "揭晓"
-    assert confirm.await_args.kwargs == {"actor": "admin"}
 
     monkeypatch.setattr(gift_service.gift_fulfillment, "commerce_provider_name", lambda: "mock")
     monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(return_value=CTX))
@@ -391,6 +373,7 @@ async def test_admin_receipt_and_mock_received_stage_share_the_user_path(monkeyp
                         AsyncMock(return_value=_gift("out_for_delivery", provider="mock")))
     gift = await gift_service.create_mock_gift_for_user(user_id="user-1", stage="delivered")
     assert gift["status"] == "delivered"
+    assert confirm.await_args.kwargs == {"actor": "admin"}
 
 
 @pytest.mark.asyncio

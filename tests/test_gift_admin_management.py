@@ -9,7 +9,6 @@ from fastapi import HTTPException
 
 from app.models.admin_gifts import (
     AdminGiftCreateRequest,
-    AdminGiftTrackingRequest,
     AdminGiftUpdateRequest,
 )
 from app.services.offline import gift_admin_service as svc
@@ -282,13 +281,22 @@ async def test_update_only_touches_provided_fields_and_can_clear_image(monkeypat
 # ── 物流录入 ──────────────────────────────────────────────────────────────
 
 
-def _patch_tracking(monkeypatch, gift, events, *, inserted=True, notice_sent=False):
-    """events 是插入/删除之后库里剩下的全部节点。"""
+def _patch_stage(monkeypatch, gift, events, *, notice_sent=False):
+    """events 是回退删除之后、插入之前库里的节点；插入的新节点会追加进去。"""
+    store = list(events)
     monkeypatch.setattr(svc.admin_repo, "get_gift", AsyncMock(return_value=gift))
-    monkeypatch.setattr(svc.admin_repo, "list_tracking_events", AsyncMock(return_value=events))
-    insert = AsyncMock(return_value={"id": "new"} if inserted else None)
-    monkeypatch.setattr(svc.admin_repo, "insert_tracking_event", insert)
-    monkeypatch.setattr(svc.admin_repo, "delete_tracking_event", AsyncMock(return_value=True))
+    monkeypatch.setattr(svc.admin_repo, "list_tracking_events", AsyncMock(side_effect=lambda gift_id: list(store)))
+
+    async def insert(gift_id, event):
+        row = {**event, "id": f"new-{event['status']}", "occurred_at": NOW.isoformat(),
+               "created_at": (NOW + timedelta(seconds=1)).isoformat()}
+        store.append(row)
+        return row
+
+    insert_mock = AsyncMock(side_effect=insert)
+    monkeypatch.setattr(svc.admin_repo, "insert_tracking_event", insert_mock)
+    delete_later = AsyncMock(return_value=1)
+    monkeypatch.setattr(svc.admin_repo, "delete_events_after_stage", delete_later)
     set_status = AsyncMock(return_value=True)
     monkeypatch.setattr(svc.admin_repo, "set_transit_status", set_status)
     advance = AsyncMock(return_value=_admin_gift("out_for_delivery"))
@@ -298,7 +306,7 @@ def _patch_tracking(monkeypatch, gift, events, *, inserted=True, notice_sent=Fal
     monkeypatch.setattr(svc.gift_service, "notify_out_for_delivery", notify)
     monkeypatch.setattr(svc, "gift_detail", AsyncMock(return_value={}))
     monkeypatch.setattr(svc, "AdminGiftActionResponse", lambda **kw: kw)
-    return insert, set_status, advance, notify
+    return insert_mock, delete_later, set_status, advance, notify
 
 
 def _ev(status, occurred_at, created_at=None):
@@ -306,107 +314,70 @@ def _ev(status, occurred_at, created_at=None):
 
 
 @pytest.mark.asyncio
-async def test_first_out_for_delivery_event_moves_status_and_reminds_user(monkeypatch):
-    insert, set_status, advance, notify = _patch_tracking(
-        monkeypatch, _admin_gift("shipping"),
-        [_ev("shipping", NOW - timedelta(days=1)), _ev("out_for_delivery", NOW)],
+async def test_advancing_to_shipping_records_the_standard_node(monkeypatch):
+    insert, delete_later, set_status, advance, notify = _patch_stage(
+        monkeypatch, _admin_gift("ordered", carrier="中通"), [_ev("ordered", NOW - timedelta(days=1))],
     )
-    result = await svc.add_tracking_event("admin-1", "g", AdminGiftTrackingRequest(
-        status="out_for_delivery", title="快递员派送中", occurred_at=NOW,
-    ))
+    result = await svc.set_stage("admin-1", "g", "shipping")
+    event = insert.await_args.args[1]
+    assert (event["status"], event["title"]) == ("shipping", "包裹运输中")
+    assert "中通" in event["description"]
+    set_status.assert_awaited_once_with("a" * 32, "shipping")
+    delete_later.assert_not_awaited()
+    advance.assert_not_awaited()
+    assert result["notification"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_first_door_stage_reminds_user_once(monkeypatch):
+    insert, _, set_status, advance, notify = _patch_stage(
+        monkeypatch, _admin_gift("shipping"), [_ev("shipping", NOW - timedelta(days=1))],
+    )
+    result = await svc.set_stage("admin-1", "g", "out_for_delivery")
+    assert insert.await_args.args[1]["title"] == "快递员正在派送"
     assert advance.await_args.kwargs["notify"] is False
     notify.assert_awaited_once()
     assert result["notification"] == "sent"
     set_status.assert_not_awaited()
 
-
-@pytest.mark.asyncio
-async def test_repeat_out_for_delivery_does_not_remind_again(monkeypatch):
-    _, _, advance, notify = _patch_tracking(
-        monkeypatch, _admin_gift("shipping"),
-        [_ev("out_for_delivery", NOW - timedelta(hours=3)), _ev("shipping", NOW - timedelta(hours=1)),
-         _ev("out_for_delivery", NOW)],
-        notice_sent=True,
+    insert, _, _, advance, notify = _patch_stage(
+        monkeypatch, _admin_gift("shipping"), [_ev("shipping", NOW - timedelta(days=1))], notice_sent=True,
     )
-    result = await svc.add_tracking_event("admin-1", "g", AdminGiftTrackingRequest(
-        status="out_for_delivery", title="再次派送", occurred_at=NOW,
-    ))
+    result = await svc.set_stage("admin-1", "g", "out_for_delivery")
     advance.assert_awaited_once()
-    notify.assert_not_awaited()
+    notify.assert_not_awaited()  # 之前已经提醒过（例如派送后又回退过）
     assert result["notification"] == "skipped"
 
 
 @pytest.mark.asyncio
-async def test_backfilled_older_event_does_not_regress_status(monkeypatch):
-    insert, set_status, advance, _ = _patch_tracking(
-        monkeypatch, _admin_gift("shipping"),
-        [_ev("ordered", NOW - timedelta(days=2), created_at=NOW), _ev("shipping", NOW, created_at=NOW - timedelta(hours=1))],
+async def test_rolling_back_removes_later_nodes_so_user_cannot_sign(monkeypatch):
+    insert, delete_later, set_status, advance, notify = _patch_stage(
+        monkeypatch, _admin_gift("out_for_delivery"),
+        [_ev("ordered", NOW - timedelta(days=2)), _ev("shipping", NOW - timedelta(days=1))],
     )
-    await svc.add_tracking_event("admin-1", "g", AdminGiftTrackingRequest(
-        status="ordered", title="补录下单", occurred_at=NOW - timedelta(days=2),
-    ))
-    insert.assert_awaited_once()
-    set_status.assert_not_awaited()
-    advance.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_same_minute_event_counts_as_latest(monkeypatch):
-    # 后台时间选择器只精确到分钟：同一分钟内后录入的节点为准。
-    _, set_status, _, _ = _patch_tracking(
-        monkeypatch, _admin_gift("ordered"),
-        [_ev("ordered", NOW.replace(second=40), created_at=NOW),
-         _ev("shipping", NOW.replace(second=0), created_at=NOW + timedelta(seconds=5))],
-    )
-    await svc.add_tracking_event("admin-1", "g", AdminGiftTrackingRequest(
-        status="shipping", title="已发出", occurred_at=NOW.replace(second=0),
-    ))
-    set_status.assert_awaited_once_with("a" * 32, "shipping")
-
-
-@pytest.mark.asyncio
-async def test_deleting_mistaken_door_event_reverts_to_in_transit(monkeypatch):
-    _, set_status, advance, notify = _patch_tracking(
-        monkeypatch, _admin_gift("out_for_delivery"), [_ev("shipping", NOW - timedelta(hours=1))],
-    )
-    result = await svc.delete_tracking_event("admin-1", "g", "door-event")
+    await svc.set_stage("admin-1", "g", "shipping")
+    delete_later.assert_awaited_once_with("g", ["out_for_delivery"])
+    insert.assert_not_awaited()  # 运输节点还在，不重复记录
     set_status.assert_awaited_once_with("a" * 32, "shipping")
     advance.assert_not_awaited()
-    notify.assert_not_awaited()
-    assert result["notification"] == "skipped"
+
+    insert, delete_later, set_status, *_ = _patch_stage(monkeypatch, _admin_gift("shipping"), [])
+    await svc.set_stage("admin-1", "g", "ordered")
+    assert delete_later.await_args.args[1] == ["shipping", "out_for_delivery", "packed"]
+    assert insert.await_args.args[1]["status"] == "ordered"  # 没有下单节点就补一条
+    set_status.assert_awaited_once_with("a" * 32, "ordered")
 
 
 @pytest.mark.asyncio
-async def test_tracking_rejects_closed_gifts_and_duplicates(monkeypatch):
-    insert, *_ = _patch_tracking(monkeypatch, _admin_gift("delivered"), [])
-    with pytest.raises(HTTPException) as closed:
-        await svc.add_tracking_event("admin-1", "g", AdminGiftTrackingRequest(status="shipping", title="x"))
-    assert closed.value.status_code == 409
+@pytest.mark.parametrize("status,stage", [
+    ("delivered", "shipping"), ("cancelled", "shipping"), ("shipping", "shipping"),
+])
+async def test_stage_changes_refused_outside_transit_or_for_same_node(monkeypatch, status, stage):
+    insert, *_ = _patch_stage(monkeypatch, _admin_gift(status), [])
+    with pytest.raises(HTTPException) as exc:
+        await svc.set_stage("admin-1", "g", stage)
+    assert exc.value.status_code == 409
     insert.assert_not_awaited()
-
-    _patch_tracking(monkeypatch, _admin_gift("shipping"), [], inserted=False)
-    with pytest.raises(HTTPException) as duplicate:
-        await svc.add_tracking_event("admin-1", "g", AdminGiftTrackingRequest(status="shipping", title="x"))
-    assert duplicate.value.status_code == 409
-
-
-@pytest.mark.asyncio
-async def test_admin_receipt_only_from_out_for_delivery(monkeypatch):
-    monkeypatch.setattr(svc.admin_repo, "get_gift", AsyncMock(return_value=_admin_gift("shipping")))
-    confirm = AsyncMock()
-    monkeypatch.setattr(svc.gift_service, "confirm_receipt_as_admin", confirm)
-    with pytest.raises(HTTPException) as early:
-        await svc.confirm_receipt("admin-1", "g")
-    assert early.value.status_code == 409
-    confirm.assert_not_awaited()
-
-    monkeypatch.setattr(svc.admin_repo, "get_gift", AsyncMock(return_value=_admin_gift("out_for_delivery")))
-    confirm.return_value = (_admin_gift("delivered"), "是桂花乌龙茶", False)
-    monkeypatch.setattr(svc, "gift_detail", AsyncMock(return_value={}))
-    monkeypatch.setattr(svc, "AdminGiftActionResponse", lambda **kw: kw)
-    result = await svc.confirm_receipt("admin-1", "g")
-    confirm.assert_awaited_once_with("user-1", "g")
-    assert result["notification"] == "sent"
 
 
 @pytest.mark.asyncio
@@ -429,9 +400,7 @@ async def test_cancel_refuses_received_gifts(monkeypatch):
     ("post", "/admin-api/gifts"),
     ("get", "/admin-api/gifts/g"),
     ("patch", "/admin-api/gifts/g"),
-    ("post", "/admin-api/gifts/g/tracking"),
-    ("delete", "/admin-api/gifts/g/tracking/e"),
-    ("post", "/admin-api/gifts/g/confirm-receipt"),
+    ("post", "/admin-api/gifts/g/stage"),
     ("post", "/admin-api/gifts/g/cancel"),
 ])
 @pytest.mark.parametrize("role,status", [(None, 401), ("user", 403)])

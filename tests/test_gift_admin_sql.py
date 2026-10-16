@@ -135,22 +135,23 @@ async def test_tracking_snapshot_only_advances_ordered_to_shipping(sql):
 
 
 @pytest.mark.asyncio
-async def test_tracking_insert_dedupes_and_sign_record_is_undeletable(sql):
+async def test_tracking_insert_dedupes_and_rollback_keeps_sign_record(sql):
     gift = await _manual_gift(sql)
     when = datetime.now(timezone.utc) - timedelta(hours=1)
-    event = {"status": "shipping", "title": "已发出", "description": None, "location": "上海", "occurred_at": when}
+    event = {"status": "shipping", "title": "包裹运输中", "description": None, "location": None, "occurred_at": when}
     first = await admin_repo.insert_tracking_event(gift["id"], event)
     assert first and first["status"] == "shipping"
     assert await admin_repo.insert_tracking_event(gift["id"], event) is None
-    await gift_repo.add_tracking_events(gift["id"], [{
-        "status": "delivered", "title": "已签收", "description": "你已确认", "location": None, "occurred_at": when,
-    }])
-    events = await admin_repo.list_tracking_events(gift["id"])
-    signed = next(e for e in events if e["status"] == "delivered")
-    assert await admin_repo.delete_tracking_event(gift["id"], signed["id"]) is False
-    assert await admin_repo.delete_tracking_event(gift["id"], first["id"]) is True
+    for status in ("packed", "out_for_delivery", "delivered"):
+        await gift_repo.add_tracking_events(gift["id"], [{
+            "status": status, "title": status, "description": None, "location": None, "occurred_at": when,
+        }])
+    removed = await admin_repo.delete_events_after_stage(
+        gift["id"], ["shipping", "out_for_delivery", "packed", "delivered"],
+    )
+    assert removed == 3
     assert [e["status"] for e in await admin_repo.list_tracking_events(gift["id"])] == ["delivered"]
-    assert (await admin_repo.get_gift(gift["id"]))["last_event_title"] == "已签收"
+    assert (await admin_repo.get_gift(gift["id"]))["last_event_title"] == "delivered"
 
 
 @pytest.mark.asyncio

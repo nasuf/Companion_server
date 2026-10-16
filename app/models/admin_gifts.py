@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 AdminGiftStatusFilter = Literal["all", "in_transit", "out_for_delivery", "delivered", "closed"]
-ManualTrackingStatus = Literal["ordered", "packed", "shipping", "out_for_delivery"]
+# 后台能推进到的物流节点：下单 / 运输 / 派送。第四个节点「签收」只能由用户在 App 里完成。
+AdminGiftStage = Literal["ordered", "shipping", "out_for_delivery"]
 
 # 10MB 图片的 base64 约 13.4M 字符。
 _MAX_IMAGE_BASE64 = 14_000_000
@@ -219,19 +219,10 @@ class AdminGiftUpdateRequest(_ImageFields):
         return value.strip() if isinstance(value, str) else value
 
 
-class AdminGiftTrackingRequest(BaseModel):
+class AdminGiftStageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: ManualTrackingStatus
-    title: str = Field(min_length=1, max_length=120)
-    description: str | None = Field(default=None, max_length=300)
-    location: str | None = Field(default=None, max_length=60)
-    occurred_at: datetime | None = None
-
-    @field_validator("title", "description", "location", mode="before")
-    @classmethod
-    def _trim(cls, value: Any) -> Any:
-        return value.strip() if isinstance(value, str) else value
+    stage: AdminGiftStage
 
 
 class AdminGiftCancelRequest(BaseModel):

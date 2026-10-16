@@ -94,7 +94,7 @@ EVT_INTERACTION_MAKEUP = "interaction.makeup"
 # Real-world gifts (AI → user physical gifts)
 EVT_GIFT_ADMIN_SENT = "gift.admin_sent"
 EVT_GIFT_ADMIN_UPDATED = "gift.admin_updated"
-EVT_GIFT_TRACKING_ADDED = "gift.tracking_added"
+EVT_GIFT_STAGE_CHANGED = "gift.stage_changed"
 EVT_GIFT_OUT_FOR_DELIVERY = "gift.out_for_delivery"
 EVT_GIFT_RECEIVED = "gift.received"
 EVT_GIFT_CANCELLED = "gift.cancelled"

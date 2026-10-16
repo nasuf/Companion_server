@@ -79,6 +79,7 @@ def test_user_view_reveals_after_receipt_but_keeps_admin_reason_internal():
 
 def test_status_helpers_never_let_logistics_sign_on_behalf_of_user():
     assert normalize_provider_event_status("delivered") == "out_for_delivery"
+    assert normalize_provider_event_status("packed") == "shipping"  # 用户只看到 下单/运输/派送/签收
     assert gift_status_for_event("packed") == "shipping"
     assert gift_status_for_event("delivered") is None
     assert advances_transit("ordered", "shipping") is True

@@ -724,11 +724,6 @@ async def confirm_receipt(user_id: str, gift_id: str) -> GiftReceiptResponse:
     )
 
 
-async def confirm_receipt_as_admin(user_id: str, gift_id: str) -> tuple[dict[str, Any], str | None, bool]:
-    """后台代签收（用户找不到按钮 / 旧版客户端）。流程与用户签收完全一致。"""
-    return await _confirm_receipt(user_id, gift_id, actor="admin")
-
-
 async def _confirm_receipt(
     user_id: str,
     gift_id: str,

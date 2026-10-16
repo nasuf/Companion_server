@@ -291,18 +291,18 @@ async def insert_tracking_event(gift_id: str, event: dict[str, Any]) -> dict[str
     return _event_from_row(rows[0]) if rows else None
 
 
-async def delete_tracking_event(gift_id: str, event_id: str) -> bool:
-    # 签收节点是审计证据，不允许删除。
+async def delete_events_after_stage(gift_id: str, statuses: list[str]) -> int:
+    """回退物流进度时删掉更靠后的节点（签收记录不在其中，永远保留）。"""
     rows = await db.query_raw(
         """
         DELETE FROM gift_tracking_events
-        WHERE id = $1 AND gift_id = $2 AND status <> 'delivered'
+        WHERE gift_id = $1 AND status = ANY($2::text[]) AND status <> 'delivered'
         RETURNING id
         """,
-        event_id,
         gift_id,
+        statuses,
     )
-    return bool(rows)
+    return len(rows or [])
 
 
 async def cancel_gift(gift_id: str, reason: str) -> bool:

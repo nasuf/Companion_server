@@ -22,7 +22,6 @@ from app.models.admin_gifts import (
     AdminGiftListResponse,
     AdminGiftRecommendationRequest,
     AdminGiftRecommendationResponse,
-    AdminGiftTrackingRequest,
     AdminGiftUpdateRequest,
     AdminGiftUserOverview,
 )
@@ -30,7 +29,7 @@ from app.observability.events import (
     EVT_GIFT_ADMIN_SENT,
     EVT_GIFT_ADMIN_UPDATED,
     EVT_GIFT_CANCELLED,
-    EVT_GIFT_TRACKING_ADDED,
+    EVT_GIFT_STAGE_CHANGED,
 )
 from app.services.offline import activity_media_storage, gift_fulfillment, gift_recommendation, gift_service
 from app.services.offline import gift_admin_repository as admin_repo
@@ -42,7 +41,7 @@ from app.services.offline.gift_messages import gift_sent_message
 from app.services.offline.gift_status import (
     CONFIRMABLE_STATUS,
     IN_TRANSIT_STATUSES,
-    REVEALED_STATUS,
+    transit_rank,
     gift_status_for_event,
 )
 from app.services.offline.module_settings import is_gift_enabled
@@ -248,53 +247,39 @@ async def update_gift(admin_id: str, gift_id: str, data: AdminGiftUpdateRequest)
     return await gift_detail(gift_id)
 
 
-async def add_tracking_event(
-    admin_id: str,
-    gift_id: str,
-    data: AdminGiftTrackingRequest,
-) -> AdminGiftActionResponse:
+async def set_stage(admin_id: str, gift_id: str, stage: str) -> AdminGiftActionResponse:
+    """把在途礼物推进（或纠错回退）到 下单 / 运输 / 派送 中的某个节点。
+
+    签收是第四个节点，只能由用户在 App 里确认，后台不能代办。回退时删掉更靠后的节点，
+    这样误点「派送」后退回运输，用户就不能再对没到的包裹签收。
+    """
     gift = await _require_gift(gift_id)
-    if gift["status"] not in IN_TRANSIT_STATUSES:
-        raise HTTPException(status_code=409, detail=f"只有在途的礼物可以更新物流（当前：{gift['status']}）")
-    event = await admin_repo.insert_tracking_event(gift_id, {
-        "status": data.status,
-        "title": data.title,
-        "description": data.description or None,
-        "location": data.location or None,
-        "occurred_at": _aware(data.occurred_at) or datetime.now(UTC),
-    })
-    if event is None:
-        raise HTTPException(status_code=409, detail="和已有物流节点完全一样，没有重复添加")
+    current = gift["status"]
+    if current not in IN_TRANSIT_STATUSES:
+        raise HTTPException(status_code=409, detail="只有在途的礼物可以调整物流进度（签收只能由用户在 App 里完成）")
+    if stage == current:
+        raise HTTPException(status_code=409, detail="礼物已经在这个节点了")
+    if transit_rank(stage) < transit_rank(current):
+        later = [s for s in IN_TRANSIT_STATUSES if transit_rank(s) > transit_rank(stage)]
+        await admin_repo.delete_events_after_stage(gift_id, later + (["packed"] if stage == "ordered" else []))
+    events = await admin_repo.list_tracking_events(gift_id)
+    if not any(gift_status_for_event(e["status"]) == stage for e in events):
+        await admin_repo.insert_tracking_event(gift_id, _stage_event(stage, gift.get("carrier")))
     applied, notification = await _sync_status_with_latest_event(gift)
     logger.info(
-        "[gift-admin] tracking added gift_id=%s status=%s notification=%s",
+        "[gift-admin] stage changed gift_id=%s %s -> %s notification=%s",
         gift_id,
-        data.status,
+        current,
+        stage,
         notification,
         extra={
-            "event": EVT_GIFT_TRACKING_ADDED,
+            "event": EVT_GIFT_STAGE_CHANGED,
             "gift_id": gift_id,
             "admin_id": admin_id,
-            "tracking_status": data.status,
-            "applied_status": applied,
+            "from_status": current,
+            "to_status": applied,
             "notification": notification,
         },
-    )
-    return AdminGiftActionResponse(gift=await gift_detail(gift_id), notification=notification)
-
-
-async def delete_tracking_event(admin_id: str, gift_id: str, event_id: str) -> AdminGiftActionResponse:
-    gift = await _require_gift(gift_id)
-    if not await admin_repo.delete_tracking_event(gift_id, event_id):
-        raise HTTPException(status_code=404, detail="物流节点不存在，或是不可删除的签收记录")
-    # 删掉误录的「派送中」后礼物要退回在途，否则用户还能对没到的包裹签收。
-    applied, notification = await _sync_status_with_latest_event(gift)
-    logger.info(
-        "[gift-admin] tracking deleted gift_id=%s event_id=%s applied=%s",
-        gift_id,
-        event_id,
-        applied,
-        extra={"event": EVT_GIFT_TRACKING_ADDED, "gift_id": gift_id, "admin_id": admin_id, "deleted": True},
     )
     return AdminGiftActionResponse(gift=await gift_detail(gift_id), notification=notification)
 
@@ -302,11 +287,8 @@ async def delete_tracking_event(admin_id: str, gift_id: str, event_id: str) -> A
 async def _sync_status_with_latest_event(gift: dict[str, Any]) -> tuple[str | None, str]:
     """在途礼物的状态跟随时间最新的物流节点；返回 (新状态或 None, 通知结果)。
 
-    时间按分钟比较（后台时间选择器只精确到分钟），同一分钟内以后录入的为准；补录更早的
-    节点因此不会让状态倒退。进入派送中时，同一份礼物只提醒一次签收。
+    同一分钟内以后录入的为准。进入派送中时，同一份礼物只提醒一次签收。
     """
-    if gift["status"] not in IN_TRANSIT_STATUSES:
-        return None, "skipped"
     events = [e for e in await admin_repo.list_tracking_events(gift["id"]) if gift_status_for_event(e["status"])]
     latest = max(
         events,
@@ -324,16 +306,6 @@ async def _sync_status_with_latest_event(gift: dict[str, Any]) -> tuple[str | No
         return target, "skipped"
     message_id = await gift_service.notify_out_for_delivery(gift["user_id"], moved)
     return target, "sent" if message_id else "failed"
-
-
-async def confirm_receipt(admin_id: str, gift_id: str) -> AdminGiftActionResponse:
-    gift = await _require_gift(gift_id)
-    if gift["status"] not in {CONFIRMABLE_STATUS, REVEALED_STATUS}:
-        raise HTTPException(status_code=409, detail="礼物进入派送中之后才能代签收")
-    _, message, already = await gift_service.confirm_receipt_as_admin(gift["user_id"], gift_id)
-    logger.info("[gift-admin] receipt confirmed by admin gift_id=%s admin_id=%s", gift_id, admin_id)
-    notification = "skipped" if already else ("sent" if message else "failed")
-    return AdminGiftActionResponse(gift=await gift_detail(gift_id), notification=notification, assistant_message=message)
 
 
 async def cancel_gift(admin_id: str, gift_id: str, reason: str) -> AdminGiftDetail:
@@ -374,23 +346,30 @@ async def _announce_sent(user_id: str, gift: dict[str, Any], ctx: dict[str, Any]
         return "failed", None
 
 
-def _initial_events(data: AdminGiftCreateRequest) -> list[dict[str, Any]]:
-    now = datetime.now(UTC)
-    events = [{
-        "status": "ordered",
-        "title": "礼物已下单",
-        "description": "TA 为你挑的礼物已经下单，正在准备发出",
+_STAGE_EVENTS = {
+    "ordered": ("礼物已下单", "TA 为你挑的礼物已经下单，正在准备发出"),
+    "shipping": ("包裹运输中", "包裹正在运输途中"),
+    "out_for_delivery": ("快递员正在派送", "收到后记得在礼物页确认签收，签收后就能揭晓礼物啦。"),
+}
+
+
+def _stage_event(stage: str, carrier: str | None = None) -> dict[str, Any]:
+    title, description = _STAGE_EVENTS[stage]
+    if stage == "shipping" and carrier:
+        description = f"由{carrier}承运，正在运输途中"
+    return {
+        "status": stage,
+        "title": title,
+        "description": description,
         "location": None,
-        "occurred_at": now,
-    }]
+        "occurred_at": datetime.now(UTC),
+    }
+
+
+def _initial_events(data: AdminGiftCreateRequest) -> list[dict[str, Any]]:
+    events = [_stage_event("ordered")]
     if data.initial_status == "shipping":
-        events.append({
-            "status": "shipping",
-            "title": "包裹已发出",
-            "description": f"由{data.carrier}承运" if data.carrier else "包裹正在运输途中",
-            "location": None,
-            "occurred_at": now,
-        })
+        events.append(_stage_event("shipping", data.carrier))
     return events
 
 

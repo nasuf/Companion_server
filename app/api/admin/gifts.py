@@ -1,4 +1,4 @@
-"""Admin API: 礼物管理 — 搜索用户、礼物推荐分析、手动寄送、物流录入、代签收。
+"""Admin API: 礼物管理 — 搜索用户、礼物推荐分析、手动寄送、物流节点推进、撤销。
 
 Endpoints (all admin-only, /admin-api/gifts):
   GET    /users?q=                        搜索用户
@@ -8,9 +8,8 @@ Endpoints (all admin-only, /admin-api/gifts):
   POST   ""                               手动寄送礼物（request_id 幂等）
   GET    /{gift_id}                       礼物详情（轨迹 + 关联聊天消息）
   PATCH  /{gift_id}                       修改礼物信息 / 图片 / 快递
-  POST   /{gift_id}/tracking              追加物流节点（派送中会提醒用户签收）
-  DELETE /{gift_id}/tracking/{event_id}   删除录错的物流节点（签收记录不可删）
-  POST   /{gift_id}/confirm-receipt       代用户确认签收
+  POST   /{gift_id}/stage                 推进 / 纠错回退物流节点：下单、运输、派送
+                                          （派送会提醒用户签收；签收只能由用户完成）
   POST   /{gift_id}/cancel                撤销礼物
 
 返回的收货地址未脱敏（运营要据此寄快递）；日志里不记录地址与手机号。
@@ -31,7 +30,7 @@ from app.models.admin_gifts import (
     AdminGiftRecommendationRequest,
     AdminGiftRecommendationResponse,
     AdminGiftStatusFilter,
-    AdminGiftTrackingRequest,
+    AdminGiftStageRequest,
     AdminGiftUpdateRequest,
     AdminGiftUserOverview,
 )
@@ -93,23 +92,9 @@ async def update_gift(gift_id: str, payload: AdminGiftUpdateRequest, admin: dict
     return await gift_admin_service.update_gift(str(admin["sub"]), gift_id, payload)
 
 
-@router.post("/{gift_id}/tracking", response_model=AdminGiftActionResponse)
-async def add_tracking_event(
-    gift_id: str,
-    payload: AdminGiftTrackingRequest,
-    admin: dict = Depends(require_admin_jwt),
-):
-    return await gift_admin_service.add_tracking_event(str(admin["sub"]), gift_id, payload)
-
-
-@router.delete("/{gift_id}/tracking/{event_id}", response_model=AdminGiftActionResponse)
-async def delete_tracking_event(gift_id: str, event_id: str, admin: dict = Depends(require_admin_jwt)):
-    return await gift_admin_service.delete_tracking_event(str(admin["sub"]), gift_id, event_id)
-
-
-@router.post("/{gift_id}/confirm-receipt", response_model=AdminGiftActionResponse)
-async def confirm_receipt(gift_id: str, admin: dict = Depends(require_admin_jwt)):
-    return await gift_admin_service.confirm_receipt(str(admin["sub"]), gift_id)
+@router.post("/{gift_id}/stage", response_model=AdminGiftActionResponse)
+async def set_stage(gift_id: str, payload: AdminGiftStageRequest, admin: dict = Depends(require_admin_jwt)):
+    return await gift_admin_service.set_stage(str(admin["sub"]), gift_id, payload.stage)
 
 
 @router.post("/{gift_id}/cancel", response_model=AdminGiftDetail)

@@ -3,7 +3,7 @@
     pending_address → selecting → ordered → shipping → out_for_delivery → delivered
                                       └─────────── failed / skipped / cancelled
 
-- ``delivered`` 表示用户（或管理员代用户）确认签收，即「已收到」。它是唯一会向用户
+- ``delivered`` 表示用户在 App 里确认签收，即「已收到」。它是唯一会向用户
   揭晓礼物名称、图片、寄语的状态——在途期间礼物保持神秘。
 - 物流侧的「已送达 / 已签收」（快递员、驿站代收）只推进到 ``out_for_delivery``，
   最终签收必须由用户在礼物页点「确认签收」完成。
@@ -23,13 +23,14 @@ REVEALED_STATUS = "delivered"
 CONFIRMABLE_STATUS = "out_for_delivery"
 CLOSED_STATUSES: tuple[str, ...] = ("delivered", "failed", "skipped", "cancelled")
 
-# 管理员可以手动录入的物流节点。签收（delivered）不在其中：只能由签收动作产生。
-MANUAL_TRACKING_STATUSES: tuple[str, ...] = ("ordered", "packed", "shipping", "out_for_delivery")
-
 MANUAL_PROVIDER = "manual"
 MYSTERY_GIFT_NAME = "神秘礼物"
 
 _TRANSIT_RANK = {status: rank for rank, status in enumerate(IN_TRANSIT_STATUSES)}
+
+
+def transit_rank(status: str) -> int:
+    return _TRANSIT_RANK[status]
 
 
 def gift_status_for_event(event_status: str | None) -> str | None:
@@ -45,9 +46,16 @@ def gift_status_for_event(event_status: str | None) -> str | None:
 
 
 def normalize_provider_event_status(status: str | None) -> str:
-    """快递侧「已送达」只代表包裹到了，不代表用户确认收到。"""
+    """把 provider 的轨迹状态收敛到四个用户可见节点：下单 / 运输 / 派送 / 签收。
+
+    揽收归入运输；快递侧「已送达」只代表包裹到了，不代表用户确认收到，记为派送。
+    """
     value = (status or "").strip().lower()
-    return "out_for_delivery" if value == "delivered" else (value or "shipping")
+    if value == "delivered":
+        return "out_for_delivery"
+    if value == "packed":
+        return "shipping"
+    return value or "shipping"
 
 
 def advances_transit(current: str | None, target: str | None) -> bool:
