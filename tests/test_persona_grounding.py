@@ -1,4 +1,5 @@
 """Regression for user location -> schedule -> self-memory feedback loops."""
+import asyncio
 import json
 from datetime import datetime
 from types import SimpleNamespace
@@ -132,7 +133,7 @@ async def test_schedule_filters_user_scope_archive_and_identity(monkeypatch):
 async def test_old_poisoned_schedule_is_neutralized_before_current_state(checker):
     slots = [{"start": "18:30", "end": "20:00", "event": "漫步润州街头", "status": "空闲"}]
     clean = await s._ground_schedule(agent(), slots)
-    assert s.get_current_status(clean, datetime(2026, 10, 9, 19, 7))["event"] == "日常活动"
+    assert s.get_current_status(clean, datetime(2026, 10, 9, 19, 7))["event"] == "自由时间"
     assert slots[0]["event"] == "漫步润州街头"  # source evidence retained
     assert clean[0]["start"] == "18:30"
 
@@ -143,7 +144,7 @@ async def test_unknown_schedule_verdict_preserves_timing_and_safe_activity(check
              {"start": "18:00", "end": "19:00", "activity": "去镇江润州街头", "type": "leisure"}]
     clean = await s._ground_schedule(agent(), slots)
     assert clean[0] == slots[0]
-    assert clean[1]["activity"] == "日常活动"
+    assert clean[1]["activity"] == "自由时间"
 
 
 async def test_cached_schedule_validation_is_bound_to_profile_and_content(checker, monkeypatch):
@@ -157,7 +158,7 @@ async def test_cached_schedule_validation_is_bound_to_profile_and_content(checke
     profile = agent()
     monkeypatch.setattr(s, "db", SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=profile))))
     day = datetime(2026, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
-    assert (await s.get_cached_schedule("agent", day))[0]["event"] == "日常活动"
+    assert (await s.get_cached_schedule("agent", day))[0]["event"] == "自由时间"
     await s.get_cached_schedule("agent", day)
     assert checker.await_count == 1
     assert redis.set.await_args.kwargs["ex"] == 86400
@@ -175,7 +176,7 @@ async def test_cached_schedule_validation_is_bound_to_profile_and_content(checke
     assert checker.await_count == 4
     checker.side_effect = TimeoutError()
     policy.return_value += "\nRetry policy"
-    assert (await s.get_cached_schedule("agent", day))[0]["event"] == "日常活动"
+    assert (await s.get_cached_schedule("agent", day))[0]["event"] == "自由时间"
     assert redis.set.await_args.kwargs["ex"] == 300
 
 
@@ -186,9 +187,122 @@ async def test_disabled_schedule_policy_cannot_reuse_a_previous_verdict(checker,
     monkeypatch.setattr(s, "get_redis", AsyncMock(return_value=redis))
     monkeypatch.setattr(s, "db", SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=agent()))))
     monkeypatch.setattr(s, "get_prompt_text", AsyncMock(side_effect=PromptDisabledError("persona.grounding_check")))
-    assert (await s.get_cached_schedule("agent", datetime(2026, 10, 9)))[0]["event"] == "日常活动"
+    assert (await s.get_cached_schedule("agent", datetime(2026, 10, 9)))[0]["event"] == "自由时间"
     assert redis.get.await_count == 1  # no old derived verdict read
     redis.set.assert_not_awaited()
+
+
+def _batch_verifier(*, reject=(), fail=()):
+    """Fake verifier: judges each submitted item, times out a batch containing `fail`."""
+    def verdicts(model, prompt, **kw):
+        items = json.loads(prompt.split("待审核项：", 1)[1].splitlines()[0])
+        if any(word in item["text"] for item in items for word in fail):
+            raise TimeoutError()
+        return {"verdicts": [{"index": item["index"], "reason": "",
+                              "allowed": not any(word in item["text"] for word in reject)}
+                             for item in items]}
+    return verdicts
+
+
+def _submitted(checker) -> list[list[str]]:
+    return [[item["text"] for item in json.loads(call.args[1].split("待审核项：", 1)[1].splitlines()[0])]
+            for call in checker.await_args_list]
+
+
+async def test_schedule_is_verified_in_small_batches_and_a_failure_stays_local(checker):
+    # One large batch outlived the verifier timeout and erased every gated slot,
+    # including generic places the verifier would have allowed.
+    events = [("下班回家", "空闲"), ("在车间抽检毛茶", "很忙碌"), ("去凤凰路的面馆吃早点", "空闲"),
+              ("在实验室做检测", "很忙碌"), ("晚饭后在小区散步", "空闲"), ("回家做饭", "忙碌"),
+              ("处理邮件", "忙碌")]
+    slots = [{"start": f"{8 + i:02d}:00", "end": f"{9 + i:02d}:00", "event": e, "status": st}
+             for i, (e, st) in enumerate(events)]
+    checker.side_effect = _batch_verifier(reject=("凤凰路",), fail=("散步",))
+    clean, verified = await s._ground_schedule_result(agent(), slots)
+    assert sorted(_submitted(checker)) == sorted([
+        ["下班回家", "在车间抽检毛茶"], ["去凤凰路的面馆吃早点", "在实验室做检测"], ["晚饭后在小区散步", "回家做饭"],
+    ])
+    assert [slot["event"] for slot in clean] == [
+        "下班回家", "在车间抽检毛茶", "自由时间", "在实验室做检测", "自由时间", "忙手头的事", "处理邮件",
+    ]
+    assert [slot["start"] for slot in clean] == [slot["start"] for slot in slots]
+    assert not verified
+    assert slots[2]["event"] == "去凤凰路的面馆吃早点"  # source evidence retained
+
+
+async def test_rejected_busy_slot_keeps_its_workload_in_current_state(checker):
+    slots = [{"start": "09:00", "end": "12:00", "event": "去凤凰路的写字楼开会", "status": "很忙碌"}]
+    clean = await s._ground_schedule(agent(), slots)
+    status = s.get_current_status(clean, datetime(2026, 10, 9, 10, 0))
+    context = s.format_schedule_context(status)
+    assert status["status"] == "very_busy"
+    assert "最忙" in context and "凤凰路" not in context and "日常活动" not in context
+
+
+def test_neutral_replacements_never_need_verification_again():
+    # A replacement that re-entered the gate would be re-verified on every read.
+    for text in s._DEFAULT_ACTIVITY.values():
+        assert not g.needs_location_verification(text, implicit_self=True)
+
+
+async def test_schedule_without_canonical_city_neutralizes_only_gated_slots(checker):
+    slots = [{"start": "09:00", "end": "12:00", "event": "处理客户工单", "status": "很忙碌"},
+             {"start": "18:00", "end": "19:00", "event": "下班回家", "status": "空闲"}]
+    clean, verified = await s._ground_schedule_result(agent(None), slots)
+    assert [slot["event"] for slot in clean] == ["处理客户工单", "自由时间"]
+    assert not verified
+    checker.assert_not_awaited()
+
+
+async def test_oversized_schedule_is_not_fanned_out(checker):
+    slots = [{"start": "18:00", "end": "19:00", "event": "下班回家", "status": "空闲"}] * 51
+    clean, verified = await s._ground_schedule_result(agent(), slots)
+    assert not verified and {slot["event"] for slot in clean} == {"自由时间"}
+    checker.assert_not_awaited()
+
+
+async def test_new_schedule_verdict_is_reused_by_the_read_path(checker, monkeypatch):
+    # Generation runs in the background; the first read is usually a chat turn.
+    cache = {}
+    redis = SimpleNamespace(get=AsyncMock(side_effect=lambda key: cache.get(key)),
+                            set=AsyncMock(side_effect=lambda key, value, **kw: cache.update({key: value})))
+    monkeypatch.setattr(s, "get_redis", AsyncMock(return_value=redis))
+    monkeypatch.setattr(s, "get_prompt_text", AsyncMock(return_value=defaults.PERSONA_GROUNDING_CHECK_PROMPT))
+    profile = agent()
+    upsert = AsyncMock()
+    monkeypatch.setattr(s, "db", SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=profile)),
+                                                 aidailyschedule=SimpleNamespace(upsert=upsert)))
+    checker.side_effect = _batch_verifier(reject=("凤凰路",))
+    budgets = []
+    verify = g.verify_generated_locations
+    async def spy(*args, **kwargs):
+        budgets.append(kwargs["timeout"])
+        return await verify(*args, **kwargs)
+    monkeypatch.setattr(g, "verify_generated_locations", spy)
+    day = datetime(2026, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
+    slots = [{"start": "18:00", "end": "19:00", "event": "下班回家", "status": "空闲"},
+             {"start": "19:00", "end": "20:00", "event": "去凤凰路吃米线", "status": "空闲"}]
+    clean = await s._ground_and_cache_new_schedule("agent", day, profile, slots)
+    assert [slot["event"] for slot in clean] == ["下班回家", "自由时间"]
+    assert upsert.await_args.kwargs["data"]["update"]["scheduleData"].data == clean
+    assert checker.await_count == 1
+    assert await s.get_cached_schedule("agent", day) == clean
+    assert checker.await_count == 1
+    profile.city = "江苏省镇江市润州区"  # a profile change still forces a fresh verdict
+    await s.get_cached_schedule("agent", day)
+    assert checker.await_count == 2
+    # Background generation may wait; the chat-path read keeps the hot-path budget.
+    assert budgets == [s._GENERATION_GROUNDING_TIMEOUT, g.VERIFY_TIMEOUT_S]
+    assert s._GENERATION_GROUNDING_TIMEOUT > g.VERIFY_TIMEOUT_S
+
+
+async def test_expired_verification_budget_is_unverified_not_allowed(checker):
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(1)
+        return {"verdicts": [{"index": 0, "allowed": True}]}
+    checker.side_effect = slow
+    with pytest.raises(g.GroundingUnavailable):
+        await g.verify_generated_locations(agent(), ["下班回家"], kind="schedule", timeout=0.01)
 
 
 async def test_storage_gate_runs_before_embeddings_and_classification(monkeypatch):
@@ -343,7 +457,7 @@ async def test_status_db_fallback_cannot_expose_old_scene(checker, monkeypatch):
         aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=agent())),
     ))
     result = await api._current_ai_status("agent")
-    assert result["ai_activity"] == "日常活动"
+    assert result["ai_activity"] == "自由时间"
     assert result["ai_status"] == "idle"
 
 

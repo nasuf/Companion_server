@@ -47,6 +47,10 @@ _STABLE_SELF = re.compile(
 )
 
 
+# The hot-path budget: a reply guard runs while the user waits.
+VERIFY_TIMEOUT_S = 5
+
+
 class GroundingUnavailable(RuntimeError):
     """A risky generated claim has not passed verification; retry is possible."""
 
@@ -125,13 +129,16 @@ async def grounding_context(
 
 async def verify_generated_locations(
     agent: Any, texts: list[str], *, kind: str, always: bool = False, question: str = "",
-    policy_template: str | None = None,
+    policy_template: str | None = None, timeout: float = VERIFY_TIMEOUT_S,
 ) -> list[int]:
     """Return rejected indices; only fully typed, complete verdicts are accepted.
 
     No hot-path call for ordinary non-location replies. Schedules are checked
     once when generated. This is never allowed to modify canonical facts or to
     use a previous model claim as proof of travel/moving home.
+
+    `timeout` defaults to the hot-path budget; callers off the hot path may
+    allow more, since an expired check counts as unverified, never as allowed.
     """
     facts = canonical_facts(agent)
     if not texts:
@@ -154,7 +161,7 @@ async def verify_generated_locations(
             kind=kind, items=json.dumps(items, ensure_ascii=False),
             question=json.dumps(question, ensure_ascii=False),
         )
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(timeout):
             result = await invoke_json(get_grounding_model(), prompt, temperature=0)
         verdicts = result["verdicts"]
         if not isinstance(verdicts, list) or len(verdicts) != len(indices):

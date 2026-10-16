@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import logging
@@ -20,6 +21,7 @@ from prisma import Json
 
 from app.config import settings
 from app.db import db
+from app.observability.events import EVT_SCHEDULE_GROUNDING
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
@@ -222,8 +224,7 @@ async def generate_daily_schedule(
                     from types import SimpleNamespace
                     agent_row = SimpleNamespace(name=name, city=city, age=age, occupation=occupation)
                 schedule = await _apply_carried_adjustment(agent_id, date, schedule)
-                schedule = await _ground_schedule(agent_row, schedule)
-                await _cache_schedule(agent_id, date, schedule)
+                schedule = await _ground_and_cache_new_schedule(agent_id, date, agent_row, schedule)
                 logger.info(f"[SCHEDULE] {agent_id} {date.date()} gen via {prompt_key}")
                 return schedule
         except Exception as e:
@@ -316,25 +317,140 @@ async def _ground_schedule(agent: Any, schedule: list[dict]) -> list[dict]:
     return clean
 
 
+# 一次最多送几段给核验模型。它对每段先写理由再下判定, 耗时随段数线性增长, 而原来
+# 一天的送检段一次全送、超时 5s: 生产 2026-10-10 起 (核验上线) 每天 27-43% 的作息
+# 段被抹成同一个占位词, 送检 ≥4 段的作息无一幸免, 且被抹的作息里 56/63 份剩下的段
+# 一条送检词都没有 —— 是整批超时, 不是核验拒绝。当前状态回复只拿到占位词, 模型就从
+# 人设里现编。
+_GROUNDING_BATCH = 2
+# 生成多在后台 (凌晨批量 / 连接时预热), 等得起; 读路径在聊天热路径上, 仍守核验的
+# 默认 5s。用上线前的 71 份原句作息回放 (290 段送检, 生产同款策略): 每批 2 段
+# p50 3.9s / p90 4.7s, 5s 下仍有 19% 的段超时; 单段一批也有 5%。超时只会按无法
+# 核验处理 (换成中性说法), 不会放行, 放宽它不降低防编造的底线。
+_GENERATION_GROUNDING_TIMEOUT = 12
+# 正常一天十几段; 超过这个数只可能是坏数据, 不值得为它并发几十次核验。
+_GROUNDING_MAX_SLOTS = 50
+
+
+def _schedule_texts(schedule: list[dict]) -> list[str]:
+    return [str(s.get("event") or s.get("activity") or "") for s in schedule]
+
+
+def _gated_slots(schedule: list[dict]) -> list[int]:
+    """需要送检的段 (只是送检资格, 不是判定; 见 persona_grounding 顶部说明)。"""
+    from app.services.persona_grounding import needs_location_verification
+    return [i for i, text in enumerate(_schedule_texts(schedule))
+            if needs_location_verification(text, implicit_self=True)]
+
+
 async def _ground_schedule_result(
     agent: Any, schedule: list[dict], *, policy_template: str | None = None,
+    timeout: float | None = None,
 ) -> tuple[list[dict], bool]:
-    from app.services.persona_grounding import GroundingUnavailable, verify_generated_locations
-    texts = [str(s.get("event") or s.get("activity") or "") for s in schedule]
-    verified = True
-    try:
-        rejected = await verify_generated_locations(agent, texts, kind="schedule", policy_template=policy_template)
-    except GroundingUnavailable:
-        verified = False
-        # Unknown specific geography must not become live state. Keep times and
-        # workload; a neutral activity is preferable to inventing a journey.
-        from app.services.persona_grounding import needs_location_verification
-        rejected = [i for i, text in enumerate(texts)
-                    if needs_location_verification(text, implicit_self=True)]
+    """`timeout` 为 None 时用核验的热路径默认值。"""
+    from app.services.persona_grounding import (
+        VERIFY_TIMEOUT_S, GroundingUnavailable, canonical_facts, verify_generated_locations,
+    )
+    texts = _schedule_texts(schedule)
+    gated = _gated_slots(schedule)
+
+    async def check(batch: list[int]) -> tuple[list[int], list[int], bool]:
+        try:
+            rejected = await verify_generated_locations(
+                agent, [texts[i] for i in batch], kind="schedule", policy_template=policy_template,
+                timeout=VERIFY_TIMEOUT_S if timeout is None else timeout,
+            )
+        except GroundingUnavailable:
+            # Unknown specific geography must not become live state. Only this
+            # batch is unknown; the other batches' verdicts still stand.
+            return batch, batch, False
+        return batch, [batch[j] for j in rejected], True
+
+    if len(schedule) > _GROUNDING_MAX_SLOTS:
+        results = [(gated, gated, False)]
+    else:
+        results = await asyncio.gather(*(
+            check(gated[k:k + _GROUNDING_BATCH]) for k in range(0, len(gated), _GROUNDING_BATCH)
+        ))
     clean = [s.copy() for s in schedule]
-    for i in rejected:
-        clean[i]["event"] = clean[i]["activity"] = "日常活动"
-    return clean, verified
+    for _, rejected, _ in results:
+        for i in rejected:
+            # Keep times and workload; a neutral activity is preferable to
+            # inventing a journey. 中性说法要跟这一段的忙闲对得上: 统一换成一个占位词
+            # 时, 「很忙碌」的段到了当前状态回复里只剩「在忙日常活动」, 模型就照人设
+            # 补出「摸鱼」, 跟顶部的「很忙碌」打架。
+            neutral = _DEFAULT_ACTIVITY.get(_slot_to_status(clean[i])["status"], "自由时间")
+            clean[i]["event"] = clean[i]["activity"] = neutral
+    if gated:
+        rejected_count = sum(len(rejected) for _, rejected, ok in results if ok)
+        unverified = sum(len(batch) for batch, _, ok in results if not ok)
+        logger.info(
+            "[SCHEDULE-GROUNDING] gated=%d rejected=%d unverified=%d",
+            len(gated), rejected_count, unverified,
+            extra={
+                "event": EVT_SCHEDULE_GROUNDING,
+                "gated": len(gated),
+                "rejected": rejected_count,
+                "unverified": unverified,
+                "has_city": bool(canonical_facts(agent).get("city")),
+            },
+        )
+    return clean, all(ok for _, _, ok in results)
+
+
+async def _grounding_policy(schedule: list[dict]) -> str:
+    """有送检段时读当前的 Web 核验策略, 没有则为空串; 策略被停用/读不到时抛出。
+
+    读路径和生成路径必须用同一份策略算指纹, 停用的策略也不能复用旧结论。
+    """
+    if not _gated_slots(schedule):
+        return ""
+    return await get_prompt_text("persona.grounding_check")
+
+
+def _grounded_cache_key(
+    agent_id: str, date: datetime, agent: Any, schedule: list[dict], policy: str,
+) -> str:
+    from app.services.persona_grounding import canonical_facts
+    fingerprint = hashlib.sha256(json.dumps(
+        [canonical_facts(agent), schedule, policy], ensure_ascii=False, sort_keys=True,
+    ).encode()).hexdigest()
+    # v3: 被拒段的替换文案改了, v2 时代按旧文案派生的结果不能再复用
+    return f"{_schedule_key(agent_id, date)}:grounded:v3:{fingerprint}"
+
+
+async def _ground_and_cache_new_schedule(
+    agent_id: str, date: datetime, agent: Any, schedule: list[dict],
+) -> list[dict]:
+    """核验新生成的作息并落库, 同时把结论按读路径同一把指纹记下来。
+
+    落库的是核验后的版本, 但读路径的指纹按「档案 + 作息内容 + 核验策略」算, 内容
+    是新的就必然未命中, 于是当天第一次读 (常常是用户在等回复的时候) 还得再调一次
+    核验模型。生成多在后台, 在这里记下, 读路径就直接命中。
+    """
+    try:
+        policy = await _grounding_policy(schedule)
+    except Exception:
+        clean = await _ground_schedule(agent, schedule)
+        await _cache_schedule(agent_id, date, clean)
+        return clean
+    clean, _ = await _ground_schedule_result(
+        agent, schedule, policy_template=policy or None, timeout=_GENERATION_GROUNDING_TIMEOUT,
+    )
+    await _cache_schedule(agent_id, date, clean)
+    # 留下的送检段都已被放行, 被拒或无法核验的已换成中性说法 (不再触发送检), 所以
+    # clean 本身就是这份档案和策略下核验过的结果, 失败批也不例外 —— 它们的原文已经
+    # 不在 clean 里了。读路径只在还有送检段时读策略, 指纹跟着同样算。
+    sealed_policy = policy if _gated_slots(clean) else ""
+    try:
+        redis = await get_redis()
+        await redis.set(
+            _grounded_cache_key(agent_id, date, agent, clean, sealed_policy),
+            json.dumps(clean, ensure_ascii=False), ex=86400,
+        )
+    except Exception as e:
+        logger.warning("Failed to record schedule grounding for %s: %s", agent_id, type(e).__name__)
+    return clean
 
 
 async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -> None:
@@ -438,21 +554,11 @@ async def get_cached_schedule(agent_id: str, date: datetime | None = None) -> li
             if not isinstance(schedule, list) or not all(isinstance(s, dict) for s in schedule):
                 return None
             agent = await db.aiagent.find_unique(where={"id": agent_id})
-            from app.services.persona_grounding import canonical_facts, needs_location_verification
-            policy = ""
-            if any(needs_location_verification(
-                str(slot.get("event") or slot.get("activity") or ""), implicit_self=True,
-            ) for slot in schedule):
-                try:
-                    # Read the same current Web-managed policy as the verifier.
-                    # A disabled/unavailable policy cannot reuse an old verdict.
-                    policy = await get_prompt_text("persona.grounding_check")
-                except Exception:
-                    return await _ground_schedule(agent, schedule)
-            fingerprint = hashlib.sha256(json.dumps(
-                [canonical_facts(agent), schedule, policy], ensure_ascii=False, sort_keys=True,
-            ).encode()).hexdigest()
-            checked_key = f"{_schedule_key(agent_id, date)}:grounded:v2:{fingerprint}"
+            try:
+                policy = await _grounding_policy(schedule)
+            except Exception:
+                return await _ground_schedule(agent, schedule)
+            checked_key = _grounded_cache_key(agent_id, date, agent, schedule, policy)
             checked = await redis.get(checked_key)
             if checked:
                 return json.loads(checked)

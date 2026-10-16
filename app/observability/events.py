@@ -173,6 +173,8 @@ EVT_PROACTIVE_FOLLOWUP_SENT = "proactive.followup_sent"
 EVT_PROACTIVE_FOLLOWUP_SKIPPED = "proactive.followup_skipped"
 # 被动回复的话题接续段 (回归承接 / 跳话题过渡)
 EVT_CHAT_TOPIC_CONTINUATION = "chat.topic_continuation"
+# 作息地点核验: 送检 / 被拒 / 无法核验各几段 (被拒和无法核验的段都会换成中性描述)
+EVT_SCHEDULE_GROUNDING = "schedule.grounding"
 
 # State machine transitions
 EVT_PROACTIVE_STATE_TRANSITION = "proactive.state_transition"  # session start, escalate n→n+1, cycle restart, user_replied reset
