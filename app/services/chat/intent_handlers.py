@@ -465,7 +465,7 @@ async def handle_schedule_adjust(
         adjustment = ((result or {}).get("adjustment") or "").strip()
         if adjustment:
             # 真的改了作息才落表 + 计数; 婉拒 / 口头安抚不动作息表。
-            await update_schedule_slot(ctx.agent_id, schedule, ai_status)
+            await update_schedule_slot(ctx.agent_id, schedule, adjustment)
             await log_schedule_adjustment(
                 ctx.agent_id, ai_status, user_message, adjustment,
                 feasibility_score=score,

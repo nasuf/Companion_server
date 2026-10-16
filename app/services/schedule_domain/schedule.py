@@ -30,6 +30,7 @@ from app.services.schedule_domain.time_service import (
 )
 from app.services.schedule_domain.time_parser import (
     ParsedTime,
+    _parse_cn_number,
     has_explicit_time,
     parse_time_expressions,
 )
@@ -220,6 +221,7 @@ async def generate_daily_schedule(
                 if agent_row is None:
                     from types import SimpleNamespace
                     agent_row = SimpleNamespace(name=name, city=city, age=age, occupation=occupation)
+                schedule = await _apply_carried_adjustment(agent_id, date, schedule)
                 schedule = await _ground_schedule(agent_row, schedule)
                 await _cache_schedule(agent_id, date, schedule)
                 logger.info(f"[SCHEDULE] {agent_id} {date.date()} gen via {prompt_key}")
@@ -229,6 +231,7 @@ async def generate_daily_schedule(
 
     # 兜底: 无 life_overview 或 LLM 失败时用模板
     schedule = _personalize_template(mbti, date, holiday=holiday, workday_swap=workday_swap)
+    schedule = await _apply_carried_adjustment(agent_id, date, schedule)
     await _cache_schedule(agent_id, date, schedule)
     return schedule
 
@@ -471,7 +474,7 @@ def get_current_status(schedule: list[dict], now: datetime | None = None) -> dic
 
     返回 {"event": str, "activity": str (= event, 永不为空),
           "status": "idle"|"busy"|"very_busy"|"sleep",
-          "status_source": "slot"|"unscheduled_night"|"unscheduled_gap",
+          "status_source": "slot"|"adjustment"|"unscheduled_night"|"unscheduled_gap",
           "upcoming": str}
 
     没有命中任何一段时不再一律当空闲, 见 `_unscheduled_status`。顶部状态、当前状态
@@ -486,12 +489,19 @@ def get_current_status(schedule: list[dict], now: datetime | None = None) -> dic
     upcoming = format_upcoming(get_upcoming_slots(schedule, now))
 
     spans = [(span, slot) for slot in schedule if (span := _slot_span(slot))]
-    for (start, end), slot in spans:
-        # 第二个条件是跨午夜段在今天凌晨的那一截 (23:00-07:00 在 01:00 也算命中)
-        if start <= minute < end or start <= minute + _DAY_MINUTES < end:
-            return {**_slot_to_status(slot), "status_source": "slot", "upcoming": upcoming}
+    # 先认今天明确写到这一刻的段, 再认跨午夜段在今天凌晨的那一截 (23:00-07:00 在
+    # 01:00 也算命中)。后者只是拿今晚那一觉代指昨晚, 凌晨的作息调整 (01:00-01:30
+    # 陪聊) 得盖得过它, 不能按列表顺序谁先谁赢。
+    for shift in (0, _DAY_MINUTES):
+        for (start, end), slot in spans:
+            if start <= minute + shift < end:
+                source = "adjustment" if _is_adjustment(slot) else "slot"
+                return {**_slot_to_status(slot), "status_source": source, "upcoming": upcoming}
 
-    return {**_unscheduled_status(spans, minute), "upcoming": upcoming}
+    # 夜里从哪开始算由原定作息决定: 凌晨陪聊的那一截不能把「最后一段之后都在睡」
+    # 的推断挪走, 否则陪聊结束后的整个后半夜都成了「空档 = 空闲」。
+    planned = [(span, slot) for span, slot in spans if not _is_adjustment(slot)]
+    return {**_unscheduled_status(planned, minute), "upcoming": upcoming}
 
 
 _DAY_MINUTES = 24 * 60
@@ -959,23 +969,285 @@ async def log_schedule_adjustment(
         logger.warning(f"Failed to log schedule adjustment: {e}")
 
 
+# --- 作息调整写回 (spec §3.4.2 第 3 步「按调整内容更新作息表」) ---
+#
+# adjustment 是大模型写的自由文本, 提示词要的格式是「从X调整为Y」, 例如
+# 「从23:00睡觉调整为次日01:00睡觉」。只改写它真正涉及的那一截, 其余保持原样。
+#
+# 旧实现只写 type/activity, 而 LLM 作息的状态读的是 event/status, 于是对 LLM 作息
+# 这次调整完全不生效 —— AI 嘴上答应陪你不睡, 顶部仍是睡眠, 下一句「在干嘛」还说在
+# 睡觉; 对模板作息又把命中的整段 (常常是 23:00-07:00 一整夜) 改成「和用户聊天/空
+# 闲」, 用户走了 AI 一整夜都显示空闲 —— 「聊天覆盖真实作息」唯一真实存在的代码
+# 路径; 当前段按字符串比较匹配, 跨午夜段压根匹配不到。
+
+# 没写截止时刻也没写时长 (「好呀不睡了陪你」) 时改写多久。与可行性打分的口径一致:
+# 超过 60 分钟才算大调整 (compute_adjustment_feasibility), 没说多久的就是小调整。
+_ADJUST_DEFAULT_MINUTES = 60
+# 一次调整最多改写多久。与会话边界同一个 3 小时 (interaction/topic_continuity 的
+# SESSION_GAP_SECONDS): 调整是为这次聊天做的, 对方走开 3 小时后下一句已是新会话,
+# 不该还顶着。提示词自己的例子 (23:00 → 次日 01:00) 是 2 小时, 在界内。
+_ADJUST_MAX_MINUTES = 180
+# Y 里的时刻按「下一次到来」换算; 比这还远的多半是刚过去的时刻 (23:05 说「陪你到
+# 23:00」), 不当成明天, 当作没写。12 小时以内但超过上限的 (陪你聊到早上 6 点) 截到上限。
+_ADJUST_CLOCK_HORIZON = 12 * 60
+_ADJUSTMENT_SOURCE = "user_adjustment"
+
+# 写进去的段同时带 spec 字段 (event/status) 和旧字段 (type/activity): 状态读前者,
+# 还在按 type 判空闲的旧调用方 (主动消息顺延) 读后者, 两边得一致。不写「和用户
+# 聊天」: activity 会原样显示在 App 顶部, 也会拼进提示词「你现在在{activity}」。
+_AWAKE_FILL = {"event": "聊天", "activity": "聊天", "status": "空闲", "type": "leisure"}
+_SLEEP_FILL = {"event": "睡觉", "activity": "睡觉", "status": "睡眠", "type": "sleep"}
+
+_ADJUST_TARGET_RE = re.compile(
+    r"调整为|调整成|调整到|改为|改成|改到|推迟到|延后到|延迟到|推到|提前到|变成|换成"
+)
+# 只认阿拉伯数字的「N点」: 「晚一点睡」里的「一点」是「稍微」, 不是 1:00
+_ADJUST_HOUR_RE = re.compile(
+    r"(凌晨|早上|上午|中午|下午|傍晚|晚上|夜里)?\s*(\d{1,2})\s*点\s*(?:(半)|(\d{1,2})\s*分?)?"
+)
+_ADJUST_PM_PERIODS = ("下午", "傍晚", "晚上", "夜里")
+_ADJUST_DURATION_RE = re.compile(
+    r"(半|[\d一二两三四五六七八九十]{1,3})\s*个?\s*(半)?\s*(小时|钟头|分钟)"
+)
+# Y 里有「睡」却不是去睡: 「晚点睡」「不睡了陪你」「推迟睡觉」
+_ADJUST_STAY_UP_RE = re.compile(
+    r"不睡|没睡|别睡|晚睡|晚点睡|晚些睡|熬夜|通宵|醒|起床|起来|陪|推迟|延后|延迟"
+)
+_ADJUST_NAP_RE = re.compile(r"午睡|午觉|小睡|眯|盹")
+
+
+def _is_adjustment(slot: dict) -> bool:
+    return slot.get("source") == _ADJUSTMENT_SOURCE
+
+
+def _clock_offsets(text: str, now_minute: int) -> list[int] | None:
+    """text 里按出现顺序的每个时刻 → 距现在多少分钟 (取下一次到来); 没写时刻返回 None。
+
+    「次日」不用管: 取下一次到来已经覆盖了它, 而凌晨答应时 LLM 也会照作息表的写法
+    说「次日01:00」, 那时它其实就是今天。不带时段的「1点」在 1:00 和 13:00 里取近的。
+    """
+    found: list[tuple[int, list[int]]] = []
+    for match in _CLOCK_RE.finditer(text):
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if hour <= 24 and minute < 60:
+            found.append((match.start(), [hour * 60 + minute]))
+    for match in _ADJUST_HOUR_RE.finditer(text):
+        period, hour = match.group(1), int(match.group(2))
+        minute = 30 if match.group(3) else int(match.group(4) or 0)
+        if hour > 24 or minute >= 60:
+            continue
+        if period in ("晚上", "夜里") and hour == 12:
+            hours = [0]
+        elif period in _ADJUST_PM_PERIODS or (period == "中午" and hour < 11):
+            hours = [hour % 12 + 12]
+        elif period:
+            hours = [hour]
+        else:
+            hours = [hour % 12, hour % 12 + 12]
+        found.append((match.start(), [h * 60 + minute for h in hours]))
+    if not found:
+        return None
+    return [
+        min((m - now_minute) % _DAY_MINUTES for m in minutes)
+        for _, minutes in sorted(found, key=lambda item: item[0])
+    ]
+
+
+def _duration_minutes(text: str) -> int | None:
+    """「半小时」「一个半小时」「20分钟」→ 分钟数; 没写时长返回 None。"""
+    match = _ADJUST_DURATION_RE.search(text)
+    if not match:
+        return None
+    head, half, unit = match.groups()
+    amount = 0.5 if head == "半" else _parse_cn_number(head)
+    if amount is None:
+        return None
+    minutes = (amount + (0.5 if half else 0)) * (1 if unit == "分钟" else 60)
+    return int(minutes) or None
+
+
+def _first_sleep_offset(schedule: list[dict], now: datetime, horizon: int) -> int | None:
+    """按调整前的作息, 从现在起多少分钟后进入睡眠 (含夜间推断); horizon 内不睡返回 None。
+
+    状态只会在段的起止处变化, 只看这些时刻就是精确的。
+    """
+    base = now.replace(second=0, microsecond=0)
+    now_minute = base.hour * 60 + base.minute
+    offsets = {0}
+    for slot in schedule:
+        for boundary in _slot_span(slot) or ():
+            if (offset := (boundary - now_minute) % _DAY_MINUTES) <= horizon:
+                offsets.add(offset)
+    for offset in sorted(offsets):
+        if get_current_status(schedule, base + timedelta(minutes=offset))["status"] == "sleep":
+            return offset
+    return None
+
+
+def _plan_adjustment(
+    schedule: list[dict], adjustment: str, now: datetime,
+) -> tuple[int, int, dict] | None:
+    """adjustment → (起, 止, 写入内容), 起止是距现在的分钟数; 读不懂返回 None。
+
+    读不懂就不动作息表: 方向猜反 (把「早点睡」写成陪聊) 比不写更糟, 不写的后果只是
+    这次调整没在作息里留痕, 计数照记。
+    """
+    parts = _ADJUST_TARGET_RE.split(adjustment)
+    # 只看「调整为」后面的 Y: X 里的「23:00睡觉」是原来的安排, 不是要改成的
+    target = parts[-1] if len(parts) > 1 else adjustment
+    clocks = _clock_offsets(target, now.hour * 60 + now.minute)
+    if clocks is not None:
+        clocks = [offset for offset in clocks if offset <= _ADJUST_CLOCK_HORIZON]
+        if not clocks:
+            return None
+    duration = _duration_minutes(target)
+    cap = _ADJUST_MAX_MINUTES
+
+    if "睡" not in target or _ADJUST_STAY_UP_RE.search(target):
+        # 晚点睡 / 放下手头的事陪对方: 从现在起改成醒着聊天
+        until = clocks[-1] if clocks else duration or _ADJUST_DEFAULT_MINUTES
+        return 0, min(until, cap), _AWAKE_FILL
+
+    # Y 说的是什么时候去睡: 跟原定入睡的时刻比, 决定是推迟还是提前
+    asleep = _first_sleep_offset(schedule, now, cap)
+    if clocks:
+        bedtime = clocks[-1]
+        if asleep is not None and asleep < bedtime:
+            # 推迟: 原定已经睡着的那截改成醒着, 之前的安排不动
+            return asleep, min(bedtime, cap), _AWAKE_FILL
+        if asleep is None or asleep > bedtime:
+            # 提前: 从说好的时刻睡到原定入睡接上
+            return bedtime, cap if asleep is None else asleep, _SLEEP_FILL
+        return None
+    if duration or _ADJUST_NAP_RE.search(target):
+        return 0, min(duration or _ADJUST_DEFAULT_MINUTES, cap), _SLEEP_FILL
+    if asleep == 0:
+        return None
+    # 现在就去睡, 睡到原定入睡接上
+    return 0, cap if asleep is None else asleep, _SLEEP_FILL
+
+
+def _format_clock(minute: int) -> str:
+    minute %= _DAY_MINUTES
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def _slot_piece(slot: dict, start: int, end: int) -> dict:
+    """slot 截成 [start, end) 的一段, 时刻写成 _slot_span 能原样读回的形式。
+
+    整段都过了午夜的写成凌晨时刻 (01:00-07:00), 与「23:00-07:00」凌晨那一截同义。
+    不写「次日01:00」: 还有调用方拿 start.split(":") 取整点, 认不了它。
+    """
+    if start >= _DAY_MINUTES:
+        start, end = start - _DAY_MINUTES, end - _DAY_MINUTES
+    return {**slot, "start": _format_clock(start), "end": _format_clock(end)}
+
+
+def _overlay_window(schedule: list[dict], start: int, end: int, fill: dict) -> list[dict]:
+    """把当天 [start, end) 分钟改写成 fill: 重叠的段切掉重叠部分, 其余原样保留。"""
+    window = {**_slot_piece(fill, start, end), "source": _ADJUSTMENT_SOURCE}
+    result: list[dict] = []
+    placed = False
+    for slot in schedule:
+        span = _slot_span(slot)
+        if span is None or span[1] <= start or span[0] >= end:
+            result.append(slot)
+            continue
+        if span[0] < start:
+            result.append(_slot_piece(slot, span[0], start))
+        if not placed:
+            result.append(window)
+            placed = True
+        if span[1] > end:
+            result.append(_slot_piece(slot, end, span[1]))
+    if not placed:
+        # 落在作息没写到的时段 (夜里 / 两段之间): 插到第一段开始得更晚的段前面
+        index = next(
+            (i for i, slot in enumerate(result) if (span := _slot_span(slot)) and span[0] > start),
+            len(result),
+        )
+        result.insert(index, window)
+    return result
+
+
+def _adj_carry_key(agent_id: str, date: datetime) -> str:
+    return f"schedule_adj_carry:{agent_id}:{date.strftime('%Y%m%d')}"
+
+
+async def _carry_to_next_day(
+    agent_id: str, day: datetime, start: int, end: int, fill: dict, *, ttl: int,
+) -> None:
+    """调整跨过午夜的那一截写进明天的作息; 明天的还没生成就先记下, 生成时补上。"""
+    try:
+        redis = await get_redis()
+        raw = await redis.get(_schedule_key(agent_id, day))
+        existing = json.loads(raw) if raw else None
+        if isinstance(existing, list) and existing and all(isinstance(s, dict) for s in existing):
+            await _cache_schedule(agent_id, day, _overlay_window(existing, start, end, fill))
+            return
+        await redis.set(
+            _adj_carry_key(agent_id, day),
+            json.dumps({"start": start, "end": end, "fill": fill}, ensure_ascii=False),
+            ex=ttl,
+        )
+    except Exception as e:
+        logger.warning("Failed to carry schedule adjustment for %s: %s", agent_id, type(e).__name__)
+
+
+async def _apply_carried_adjustment(
+    agent_id: str, date: datetime, schedule: list[dict],
+) -> list[dict]:
+    """前一晚答应的调整跨过了午夜, 今天的作息这时才生成: 把落在今天的那一截补上。
+
+    只在生成时用。之后再写今天的作息 (又一次调整) 不能重放它, 否则会盖掉新的调整。
+    """
+    try:
+        redis = await get_redis()
+        raw = await redis.get(_adj_carry_key(agent_id, date))
+        if not raw:
+            return schedule
+        carry = json.loads(raw)
+        return _overlay_window(schedule, int(carry["start"]), int(carry["end"]), dict(carry["fill"]))
+    except Exception as e:
+        logger.warning("Failed to apply carried schedule adjustment for %s: %s", agent_id, type(e).__name__)
+        return schedule
+
+
 async def update_schedule_slot(
     agent_id: str,
     schedule: list[dict],
-    current_status: dict,
-    new_type: str = "leisure",
-    new_activity: str = "和用户聊天",
+    adjustment: str,
+    *,
+    now: datetime | None = None,
 ) -> list[dict]:
-    """更新当前时段并写回 Redis。按时间范围匹配当前时段。"""
-    now = _local_now()
-    now_str = now.strftime("%H:%M")
-    updated = [s.copy() for s in schedule]
-    for s in updated:
-        if s.get("start", "") <= now_str < s.get("end", "24:00"):
-            s["type"] = new_type
-            s["activity"] = new_activity
-            break
+    """把一次真实的作息调整写回当日作息, 只改写它涉及的那一截 (≤ 3 小时)。
+
+    跨过午夜的部分属于明天那份作息 (见 _carry_to_next_day) —— 否则答应陪到 1 点,
+    一过 0 点新的一天生成作息, AI 又睡着了。
+    """
+    now = now or _local_now()
+    plan = _plan_adjustment(schedule, adjustment, now)
+    if plan is None or plan[0] >= plan[1]:
+        logger.info("[SCHEDULE-ADJ] skipped unparsed adjustment_preview=%r", adjustment[:40])
+        return schedule
+    offset_start, offset_end, fill = plan
+    now_minute = now.hour * 60 + now.minute
+    start, end = now_minute + offset_start, now_minute + offset_end
+    # 整截都在午夜之后 (23:50 答应 00:30 去睡) 时, 今天这份里按凌晨时刻记
+    shift = _DAY_MINUTES if start >= _DAY_MINUTES else 0
+    updated = _overlay_window(schedule, start - shift, end - shift, fill)
     await _cache_schedule(agent_id, now, updated)
+    carried = end > _DAY_MINUTES
+    if carried:
+        await _carry_to_next_day(
+            agent_id, now + timedelta(days=1),
+            max(start, _DAY_MINUTES) - _DAY_MINUTES, end - _DAY_MINUTES, fill,
+            ttl=(offset_end + 10) * 60,
+        )
+    logger.info(
+        "[SCHEDULE-ADJ] applied status=%s window=%s-%s carried=%s",
+        fill["status"], _format_clock(start), _format_clock(end), carried,
+    )
     return updated
 
 
