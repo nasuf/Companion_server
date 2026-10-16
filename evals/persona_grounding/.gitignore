@@ -1,0 +1,4 @@
+# Replay cases exported from production (schedule_replay.py, reply_memory_replay.py)
+# stay local; see the scripts' docstrings for the read-only export.
+*.jsonl
+*_profiles.json
