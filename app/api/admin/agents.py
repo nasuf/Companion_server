@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
@@ -219,6 +219,19 @@ async def get_agent_achievements(
         "level_stats": sorted(level_stats.values(), key=lambda row: (-row["unlocked"], row["level_name"])),
         "recent_unlocks": recent[:8],
     }
+
+
+@router.get("/{agent_id}/achievement-sources")
+async def get_agent_achievement_sources(
+    agent_id: str,
+    limit: int = Query(20, ge=1, le=50),
+    _: str = Depends(require_admin_jwt),
+):
+    from app.services.achievements.source import recent_message_sources
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return await recent_message_sources(agent.userId, agent_id, limit)
 
 
 @router.get("/{agent_id}/memories")

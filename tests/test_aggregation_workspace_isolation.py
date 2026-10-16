@@ -90,6 +90,12 @@ async def test_completed_multi_fragment_window_emits_one_achievement_event(
     fake_aggregation_redis,
 ):
     from app.services.achievements.rules import aggregation_rules
+    from app.services.achievements import source
+
+    async def resolve_test_source(event):
+        # This unit tests aggregation emission; persisted source validation has
+        # separate real-PG coverage.
+        return event, None
 
     redis = fake_aggregation_redis
     background_tasks = []
@@ -98,6 +104,7 @@ async def test_completed_multi_fragment_window_emits_one_achievement_event(
         background_tasks.append(coro)
 
     with (
+        patch.object(source, "resolve_message_event", resolve_test_source),
         patch("app.services.interaction.aggregation.get_redis", return_value=redis),
         patch.object(aggregation_rules, "record_event", AsyncMock()) as record,
         patch.object(

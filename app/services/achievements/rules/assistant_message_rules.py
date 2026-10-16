@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.db import db
+from app.services.achievements.source import current_source, MAX_TURN_MESSAGES
 from app.services.achievements.events import AssistantMessageAchievementEvent, AssistantTurnAchievementEvent
 from app.services.achievements.repository import _birthday_mmdd, _event_count, record_event, unlock_achievement
 from app.services.achievements.utils import _aware, _field, _local, _now, count_chars
@@ -153,6 +154,8 @@ async def _check_turn_pair_100(
     if assistant_rows:
         assistant_chars = sum(count_chars(str(_field(row, "content") or "")) for row in assistant_rows)
     else:
+        if current_source.get() is not None:
+            return
         assistant_chars = sum(count_chars(text) for text in assistant_texts)
     user_rows = await _turn_user_message_rows(user_id, agent_id, user_message_ids, at)
     user_chars = sum(count_chars(str(_field(row, "content") or "")) for row in user_rows)
@@ -167,7 +170,8 @@ async def _turn_assistant_message_rows(
 ) -> list:
     if not turn_id:
         return []
-    return await db.query_raw(
+    source = current_source.get()
+    rows = await db.query_raw(
         """
         SELECT m.content
         FROM messages m
@@ -177,12 +181,16 @@ async def _turn_assistant_message_rows(
           AND c.is_deleted = FALSE
           AND m.role = 'assistant'
           AND m.metadata->>'achievement_turn_id' = $3
-        ORDER BY m.created_at ASC
+          AND ($4::text IS NULL OR m.conversation_id=$4)
+        ORDER BY m.created_at ASC, m.id ASC
+        LIMIT 101
         """,
         user_id,
         agent_id,
         turn_id,
+        source.conversation_id if source else None,
     )
+    return rows if len(rows) <= MAX_TURN_MESSAGES else []
 
 
 async def _turn_user_message_rows(
@@ -191,6 +199,7 @@ async def _turn_user_message_rows(
     user_message_ids: list[str],
     at: datetime,
 ) -> list:
+    source = current_source.get()
     ids = [message_id for message_id in dict.fromkeys(user_message_ids) if message_id]
     if ids:
         return await db.query_raw(
@@ -203,11 +212,13 @@ async def _turn_user_message_rows(
               AND c.is_deleted = FALSE
               AND m.role = 'user'
               AND m.id = ANY($3::text[])
+              AND ($4::text IS NULL OR m.conversation_id=$4)
             ORDER BY m.created_at ASC
             """,
             user_id,
             agent_id,
             ids,
+            source.conversation_id if source else None,
         )
     return await db.query_raw(
         """
