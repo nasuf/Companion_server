@@ -275,6 +275,7 @@ async def prepare_reads(ctx):
                 user_message=ctx.user_message,
                 messages_dicts=ctx.messages_dicts,
                 parsed_times=early_parsed_times,
+                exclude_message_ids=ctx.current_turn_ids,
             )
         )
         ctx.session_recap_task = ctx.spawn(
@@ -624,6 +625,7 @@ async def prepare_context(ctx):
             parsed_times=parsed_times,
             detected_intent=ctx.detected_intent,
             l3_trigger_classify_fn=services._l3_trigger_analyze,
+            exclude_message_ids=ctx.current_turn_ids,
         )
     ctx.memory_relevance = ctx.fetched.memory_relevance
     ctx.classified_memories = ctx.fetched.classified_memories

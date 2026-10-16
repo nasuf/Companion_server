@@ -30,7 +30,11 @@ def _msg_with_id(message_id: str, role: str, content: str, ts: datetime) -> dict
 
 @pytest.mark.asyncio
 async def test_watermark_absent_extracts_target_role_only():
-    """首次运行 (无水位线) → target_role 新消息进 new, cross-role 进 context (反幻觉切回路)."""
+    """首次运行 (无水位线) → 只抽 target_role 的新消息 (反幻觉切回路).
+
+    AI 对这句话的回复不进 user 侧的任何一段: 进 new 会被当成用户事实抽走; 进
+    context 会排在【待抽取消息】上面, 读起来像发生在用户这句之前 (2026-10-15 trace).
+    """
     from app.services.chat.post_process import _bg_memory_pipeline
 
     t0 = datetime.now(UTC)
@@ -46,10 +50,10 @@ async def test_watermark_absent_extracts_target_role_only():
 
     assert mock_pipeline.await_count == 2  # user + ai
     by_side = {c.kwargs["side"]: c.kwargs for c in mock_pipeline.await_args_list}
-    # user 侧: 只 user 行进 new, AI 行进 context
+    # user 侧: 只 user 行进 new; 之后的 AI 回复也不进 context
     assert "user: hi" in by_side["user"]["new_conversation"]
     assert "assistant: hey" not in by_side["user"]["new_conversation"]
-    assert "assistant: hey" in by_side["user"]["context_conversation"]
+    assert "assistant: hey" not in by_side["user"]["context_conversation"]
     # ai 侧反过来
     assert "assistant: hey" in by_side["ai"]["new_conversation"]
     assert "user: hi" not in by_side["ai"]["new_conversation"]
@@ -100,11 +104,11 @@ async def test_watermark_splits_context_and_new():
     # user + ai 两条 pipeline 都应被调用
     assert mock_pipeline.await_count == 2
     by_side = {c.kwargs["side"]: c.kwargs for c in mock_pipeline.await_args_list}
-    # 每条 context 都包含 pre-wm 历史 + 本轮 cross-role NEW (反幻觉自我强化回路 cut)
+    # context = pre-wm 历史 + 不晚于本侧最新目标的 cross-role NEW (反幻觉自我强化回路 cut)
     # user 侧
     assert "old_u" in by_side["user"]["context_conversation"]
     assert "old_a" in by_side["user"]["context_conversation"]
-    assert "new_a" in by_side["user"]["context_conversation"]   # cross-role NEW 进 context
+    assert "new_a" not in by_side["user"]["context_conversation"]   # 晚于 new_u, 不能排在它上面
     assert "new_u" in by_side["user"]["new_conversation"]
     assert "new_a" not in by_side["user"]["new_conversation"]   # 不再被抽
     # ai 侧 (镜像)

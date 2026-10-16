@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -509,7 +510,7 @@ async def _pipeline_with_watermark(
             max_side_ts = effective
 
     if db_backlog is not None:
-        backlog_contents = {(m.get("content") or "").strip() for m in db_backlog}
+        backlog_text = _comparable_text("".join(m.get("content") or "" for m in db_backlog))
         for m in db_backlog:
             _add_target(m)
         # The window contributes context plus synthetic (un-persisted) targets.
@@ -518,12 +519,14 @@ async def _pipeline_with_watermark(
             is_new_target = m.get("role") == target_role and (ts is None or ts > wm)
             if not is_new_target or _memory_written_by_lifecycle(m):
                 context_msgs.append(m)
-            elif ts is None and (m.get("content") or "").strip() not in backlog_contents:
+            elif ts is None and _comparable_text(m.get("content")) not in backlog_text:
                 # Synthetic fresh reply (just-generated, no persisted ts) that the
                 # DB backlog snapshot does NOT already contain — extract it now
-                # instead of deferring a whole turn. Content-dedupe against the
-                # backlog prevents double-extracting a reply that WAS persisted
-                # before this snapshot (then it's authoritative via db_backlog).
+                # instead of deferring a whole turn. A reply that WAS persisted is
+                # stored as split bubbles while the synthetic copy is the whole
+                # text, so compare against the joined backlog: a per-row match
+                # missed it and fed the AI pre-filter the bubbles plus the whole
+                # reply again (2026-10-15 trace).
                 _add_target(m)
     else:
         for m in recent:
@@ -542,6 +545,7 @@ async def _pipeline_with_watermark(
         if conversation_id and (wm is None or max_side_ts > wm):
             await set_watermark(conversation_id, side, max_side_ts)
         return 0
+    context_msgs = _context_before_targets(context_msgs, new_target_msgs, recent, target_role)
     evidence_message_ids = [
         str(m.get("id"))
         for m in new_target_msgs
@@ -632,24 +636,73 @@ def _ensure_aware(dt: datetime | None) -> datetime | None:
 
 
 def _ai_line_before(messages: list[dict], first_new_target: dict | None) -> str:
-    """取引出目标消息的那一句 AI 发言.
+    """取引出目标消息的那一次 AI 发言 (该次回复的全部气泡).
 
     不能直接拿 context 的最后一句: 记忆管线跑在 AI 回复之后, 那个位置上的是 AI
     对本轮的**回复**, 不是引出本轮的**提问**. 判断 "不好" 该不该记, 需要的是它
-    前面的 "你今天还好吗"。
+    前面的 "你今天还好吗"。一次回复拆成多个气泡各占一行, 只取最后一个气泡会
+    丢掉问题本身 (只剩 "你更喜欢那种呀？", 不知道在问软甜还是酷甜).
     """
     if not first_new_target:
         return ""
     target_id = first_new_target.get("id")
-    seen: str = ""
+    reply: list[str] = []
+    in_reply = False
     for m in messages:
         if target_id is not None and m.get("id") == target_id:
             break
         if m is first_new_target:
             break
-        if m.get("role") == "assistant" and (m.get("content") or "").strip():
-            seen = str(m["content"]).strip()
-    return seen
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if m.get("role") == "assistant":
+            if not in_reply:
+                reply = []
+            reply.append(content)
+            in_reply = True
+        else:
+            in_reply = False
+    return " ".join(reply)
+
+
+def _comparable_text(text: Any) -> str:
+    """Text with whitespace, punctuation, emoji and the || splitter removed."""
+    return re.sub(r"[\W_]+", "", str(text or ""))
+
+
+def _context_before_targets(
+    context_msgs: list[dict],
+    new_target_msgs: list[dict],
+    recent: list[dict],
+    target_role: str,
+) -> list[dict]:
+    """Keep only context rows at or before the newest extraction target.
+
+    The extraction prompt renders 【历史上下文】 above 【待抽取消息】, so a later
+    row there reads as having happened first: the user side showed the AI's
+    reply to "我喜欢你" above "我喜欢你" itself (2026-10-15 trace). Rows without
+    a timestamp are the just-generated synthetic ones: they are placed by their
+    position in the window, and an un-timestamped target is the newest row, so
+    it lifts the time bound entirely.
+    """
+    target_ts = [_parse_ts(m) for m in new_target_msgs]
+    timed = [ts for ts in target_ts if ts is not None]
+    latest_target_ts = max(timed) if timed and len(timed) == len(target_ts) else None
+    last_target_pos = max(
+        (i for i, m in enumerate(recent) if m.get("role") == target_role),
+        default=-1,
+    )
+    earlier = recent[: last_target_pos + 1]
+    kept: list[dict] = []
+    for m in context_msgs:
+        ts = _parse_ts(m)
+        if ts is not None:
+            if latest_target_ts is None or ts <= latest_target_ts:
+                kept.append(m)
+        elif any(m is row for row in earlier):
+            kept.append(m)
+    return kept
 
 
 def _fmt_conversation(msgs: list[dict]) -> str:

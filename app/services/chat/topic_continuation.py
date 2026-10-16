@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.observability.events import EVT_CHAT_TOPIC_CONTINUATION
+from app.services.chat.message_utils import last_user_turns
 from app.services.interaction.topic_continuity import (
     FOLLOWUP_TRIGGER_TYPE,
     ContinuationCue,
@@ -39,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
-# 提示词文档: "前20轮对话上下文"
-_CONTEXT_MESSAGES = 40
+# 提示词文档: "前20轮对话上下文". 按用户回合截, 不按行 (AI 回复拆成多个气泡各占一行).
+_CONTEXT_USER_TURNS = 20
 _LLM_TIMEOUT_S = 6.0
 # 主回复已经准备好时最多再等这么久: 承接句是锦上添花, 不能把整轮回复拖慢
 _AWAIT_BUDGET_S = 3.0
@@ -78,7 +79,7 @@ def _history_text(history: list[Any], current_turn_ids: set[str]) -> str:
         text = render_message_content_for_prompt(str(m.content or ""), metadata).strip()
         if text:
             entries.append((m.role, text, _as_datetime(getattr(m, "createdAt", None))))
-    return render_dialogue(entries[-_CONTEXT_MESSAGES:])
+    return render_dialogue(last_user_turns(entries, _CONTEXT_USER_TURNS, lambda e: e[0]))
 
 
 def _clean_line(raw: str | None) -> str | None:

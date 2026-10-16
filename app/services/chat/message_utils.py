@@ -7,8 +7,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
+
+_T = TypeVar("_T")
 
 
 def _previous_assistant_message(recent_messages: list[Any], current_user_message_id: str | None) -> Any | None:
@@ -161,6 +164,27 @@ def is_offering_received_notice(metadata: Any) -> bool:
     if isinstance(metadata, dict):
         return bool(metadata.get("offering_received"))
     return False
+
+
+def last_user_turns(
+    items: list[_T], turns: int, role_of: Callable[[_T], str | None],
+) -> list[_T]:
+    """Keep the newest ``turns`` user turns: from the turns-th last user row to the end.
+
+    Windows are counted in user turns, not rows: one AI reply is split into 1-4
+    bubbles stored as separate rows (user:assistant ≈ 1:2.56), so a row-count
+    window gets eaten by bubbles. With fewer user rows than ``turns`` the list is
+    returned whole, including any leading AI opener.
+    """
+    if turns <= 0:
+        return []
+    seen = 0
+    for index in range(len(items) - 1, -1, -1):
+        if role_of(items[index]) == "user":
+            seen += 1
+            if seen == turns:
+                return items[index:]
+    return list(items)
 
 
 def _max_user_created_at(messages: list[dict]) -> datetime | None:

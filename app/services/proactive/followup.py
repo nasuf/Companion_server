@@ -29,6 +29,7 @@ from app.observability.events import (
     EVT_PROACTIVE_FOLLOWUP_SKIPPED,
     EVT_PROACTIVE_TOPIC_JUDGED,
 )
+from app.services.chat.message_utils import last_user_turns
 from app.services.interaction import topic_continuity
 from app.services.interaction.topic_continuity import (
     FOLLOWUP_TRIGGER_TYPE,
@@ -55,8 +56,10 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
-# 提示词文档: "前20轮对话上下文" —— 一轮 = 用户一句 + AI 一句
-_RECENT_LIMIT = 40
+# 提示词文档: "前20轮对话上下文". 按用户回合截, 不按行: AI 一次回复拆成多个气泡
+# 各占一行, 之前的 40 行实际只有约 11 轮. 取数上限给气泡留足余量.
+_CONTEXT_USER_TURNS = 20
+_RECENT_ROW_LIMIT = 120
 _JUDGE_TIMEOUT_S = 10.0
 _GENERATE_TIMEOUT_S = 20.0
 
@@ -110,7 +113,7 @@ async def _load_recent_turns(conversation_id: str) -> list[_Turn]:
         LIMIT $2
         """,
         conversation_id,
-        _RECENT_LIMIT,
+        _RECENT_ROW_LIMIT,
     )
     turns: list[_Turn] = []
     for row in reversed(rows or []):
@@ -129,7 +132,7 @@ async def _load_recent_turns(conversation_id: str) -> list[_Turn]:
             created_at=_aware(row.get("created_at")),
             no_followup=_blocks_followup(metadata),
         ))
-    return turns
+    return last_user_turns(turns, _CONTEXT_USER_TURNS, lambda t: t.role)
 
 
 def format_turns(turns: list[_Turn]) -> str:

@@ -164,6 +164,7 @@ from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
 from app.services.chat.data_fetch_phase import (
     FetchedContext,
     fetch_parallel_context,
+    format_dialogue_lines,
     format_recent_context,
     maybe_awaken_l3,
 )
@@ -330,9 +331,11 @@ async def _record_memory_retrieval_feedback(
         logger.exception("[MEM-FEEDBACK] failed to record memory retrieval feedback")
 
 
-# 最近 6 条 ≈ 3 轮对话, 覆盖 "好" / "嗯" / "对" 类短应答对前一两轮
-# AI 问话的 context 依赖; 再大会挤占 intent prompt 的 token 预算.
-_INTENT_CONTEXT_WINDOW = 6
+# 最近 3 个用户回合, 覆盖 "好" / "嗯" / "对" 类短应答对前一两轮 AI 问话的依赖.
+# 曾是 6 行 (注释说 ≈3 轮), 但 AI 一次回复拆成多个气泡各占一行, 6 行实际只剩
+# 1.5 轮 (2026-10-15 trace). 取数上限只为装下 3 个回合的气泡, 不决定窗口大小.
+_INTENT_CONTEXT_TURNS = 3
+_INTENT_CONTEXT_FETCH_LIMIT = 40
 
 # 历史消息的取数上限. 真正决定注入多少的是 build_chat_messages 的 token 预算
 # (CHAT_HISTORY_TOKEN_BUDGET=4000); 这里只是给 DB 查询一个安全上界.
@@ -354,7 +357,7 @@ async def _fetch_intent_context(
     exclude_ids: set[str] | None = None,
     exclude_content: str | None = None,
 ) -> str:
-    """拉最近 N 条消息拼成意图识别 prompt 的上下文段落。
+    """拉最近几个用户回合拼成意图识别 prompt 的上下文段落。
 
     spec §3.3 step 1 要求识别 "用户消息及上下文". 常见场景:
     AI 问 "要我再陪你一会儿吗?" + 用户回 "好" — 必须结合 AI 上一句
@@ -368,7 +371,7 @@ async def _fetch_intent_context(
         rows = await db.message.find_many(
             where={"conversationId": conversation_id},
             order={"createdAt": "desc"},
-            take=_INTENT_CONTEXT_WINDOW + 1,
+            take=_INTENT_CONTEXT_FETCH_LIMIT,
         )
     except Exception as e:
         # 静默降级对意图识别质量影响较大, 生产环境需能 grep 到
@@ -382,30 +385,29 @@ async def _fetch_intent_context(
     # Prisma desc 排序下, 首条即最新; 当前消息通常在这里.
     # 回退按内容匹配时只过滤第一条 (即最新那条) 命中的用户消息,
     # 避免用户连发两条相同短消息 ("好" / "好") 把上一轮的 "好" 也丢掉.
-    lines: list[str] = []
+    kept: list[dict] = []
     content_fallback_consumed = False
     for row in rows:
         content = (getattr(row, "content", "") or "").strip()
         if not content:
             continue
-        role = "AI" if getattr(row, "role", "") == "assistant" else "用户"
+        role = "assistant" if getattr(row, "role", "") == "assistant" else "user"
         if getattr(row, "id", None) in excluded_ids:
             continue
         if (
             not exclude_id
             and exclude_content
             and not content_fallback_consumed
-            and role == "用户"
+            and role == "user"
             and content == exclude_content
         ):
             content_fallback_consumed = True
             continue
-        lines.append(f"{role}: {content}")
+        kept.append({"role": role, "content": content})
 
-    # desc 顺序 → 反转为时间顺序, 只保留最近 N 条
-    lines.reverse()
-    lines = lines[-_INTENT_CONTEXT_WINDOW:]
-    return "\n".join(lines)
+    # desc 顺序 → 反转为时间顺序
+    kept.reverse()
+    return "\n".join(format_dialogue_lines(kept, turns=_INTENT_CONTEXT_TURNS))
 
 
 async def _stream_legacy_response(
@@ -809,6 +811,7 @@ async def _stream_legacy_response(
                 user_id=user_id, agent_id=agent_id, workspace_id=workspace_id,
                 user_message=user_message,
                 messages_dicts=messages_dicts, parsed_times=early_parsed_times,
+                exclude_message_ids=current_turn_ids,
                 # detected_intent / l3_trigger_classify_fn 都不传 → fetch 跳过 L3,
                 # 由 orchestrator 在 intent 出来后单独跑.
             ))
@@ -1161,6 +1164,7 @@ async def _stream_legacy_response(
                 messages_dicts=messages_dicts, parsed_times=parsed_times,
                 detected_intent=detected_intent,
                 l3_trigger_classify_fn=_l3_trigger_analyze,
+                exclude_message_ids=current_turn_ids,
             )
         memory_relevance = fetched.memory_relevance
         classified_memories = fetched.classified_memories
