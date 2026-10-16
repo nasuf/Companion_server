@@ -259,6 +259,22 @@ async def set_transit_status(gift_id: str, status: str) -> bool:
     return bool(rows)
 
 
+async def mark_shipped_from_ordered(gift_id: str) -> bool:
+    """已下单 → 运输中的 CAS：并发 / 重复点击只有一次真正推进，「发货了」消息也只发一次。"""
+    rows = await db.query_raw(
+        """
+        UPDATE real_world_gifts
+        SET status = 'shipping',
+            shipped_at = COALESCE(shipped_at, CURRENT_TIMESTAMP),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'ordered'
+        RETURNING id
+        """,
+        gift_id,
+    )
+    return bool(rows)
+
+
 async def insert_tracking_event(gift_id: str, event: dict[str, Any]) -> dict[str, Any] | None:
     """插入一条物流节点；与已有节点完全相同时返回 None（视为重复录入）。"""
     rows = await db.query_raw(

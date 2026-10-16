@@ -299,11 +299,13 @@ def _patch_stage(monkeypatch, gift, events, *, notice_sent=False):
     monkeypatch.setattr(svc.admin_repo, "delete_events_after_stage", delete_later)
     set_status = AsyncMock(return_value=True)
     monkeypatch.setattr(svc.admin_repo, "set_transit_status", set_status)
+    monkeypatch.setattr(svc.admin_repo, "mark_shipped_from_ordered", AsyncMock(return_value=True))
     advance = AsyncMock(return_value=_admin_gift("out_for_delivery"))
     monkeypatch.setattr(svc.gift_service, "advance_to_out_for_delivery", advance)
     monkeypatch.setattr(svc.gift_repo, "gift_notice_sent", AsyncMock(return_value=notice_sent))
     notify = AsyncMock(return_value="msg-door")
     monkeypatch.setattr(svc.gift_service, "notify_out_for_delivery", notify)
+    monkeypatch.setattr(svc.gift_service, "notify_shipped_once", AsyncMock(return_value="sent"))
     monkeypatch.setattr(svc, "gift_detail", AsyncMock(return_value={}))
     monkeypatch.setattr(svc, "AdminGiftActionResponse", lambda **kw: kw)
     return insert_mock, delete_later, set_status, advance, notify
@@ -322,10 +324,26 @@ async def test_advancing_to_shipping_records_the_standard_node(monkeypatch):
     event = insert.await_args.args[1]
     assert (event["status"], event["title"]) == ("shipping", "包裹运输中")
     assert "中通" in event["description"]
-    set_status.assert_awaited_once_with("g", "shipping")
+    svc.admin_repo.mark_shipped_from_ordered.assert_awaited_once_with("g")
+    set_status.assert_not_awaited()
     delete_later.assert_not_awaited()
     advance.assert_not_awaited()
-    assert result["notification"] == "skipped"
+    # 已下单 → 运输：告诉用户礼物发货了（之前这里没有任何消息）。
+    shipped = svc.gift_service.notify_shipped_once
+    assert shipped.await_args.args[0] == "user-1"
+    assert shipped.await_args.args[1]["status"] == "shipping"
+    assert result["notification"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_shipping_clicks_send_one_message(monkeypatch):
+    _patch_stage(monkeypatch, _admin_gift("ordered"), [_ev("ordered", NOW - timedelta(days=1))])
+    # 另一次点击已经把它推进到运输了：这次 CAS 落空。
+    monkeypatch.setattr(svc.admin_repo, "mark_shipped_from_ordered", AsyncMock(return_value=False))
+    with pytest.raises(HTTPException) as lost:
+        await svc.set_stage("admin-1", "g", "shipping")
+    assert lost.value.status_code == 409
+    svc.gift_service.notify_shipped_once.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -355,11 +373,13 @@ async def test_rolling_back_removes_later_nodes_so_user_cannot_sign(monkeypatch)
         monkeypatch, _admin_gift("out_for_delivery"),
         [_ev("ordered", NOW - timedelta(days=2)), _ev("shipping", NOW - timedelta(days=1))],
     )
-    await svc.set_stage("admin-1", "g", "shipping")
+    result = await svc.set_stage("admin-1", "g", "shipping")
     delete_later.assert_awaited_once_with("g", ["out_for_delivery"])
     insert.assert_not_awaited()  # 运输节点还在，不重复记录
     set_status.assert_awaited_once_with("g", "shipping")
     advance.assert_not_awaited()
+    svc.gift_service.notify_shipped_once.assert_not_awaited()  # 回退是纠错，不再说「发货了」
+    assert result["notification"] == "skipped"
 
     insert, delete_later, set_status, *_ = _patch_stage(monkeypatch, _admin_gift("shipping"), [])
     await svc.set_stage("admin-1", "g", "ordered")
@@ -392,7 +412,8 @@ async def test_stage_change_lost_race_reports_conflict(monkeypatch):
         await svc.set_stage("admin-1", "g", "out_for_delivery")
     assert door.value.status_code == 409
 
-    _, _, set_status, _, _ = _patch_stage(monkeypatch, _admin_gift("ordered"), [])
+    # 回退仍走 set_transit_status（已下单 → 运输的 CAS 见 test_concurrent_shipping_clicks_send_one_message）。
+    _, _, set_status, _, _ = _patch_stage(monkeypatch, _admin_gift("out_for_delivery"), [])
     set_status.return_value = False
     with pytest.raises(HTTPException) as moved:
         await svc.set_stage("admin-1", "g", "shipping")

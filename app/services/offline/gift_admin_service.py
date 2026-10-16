@@ -283,6 +283,12 @@ async def set_stage(admin_id: str, gift_id: str, stage: str) -> AdminGiftActionR
         if not await gift_repo.gift_notice_sent(gift_id, gift["user_id"], "gift_out_for_delivery"):
             message_id = await gift_service.notify_out_for_delivery(gift["user_id"], moved)
             notification = "sent" if message_id else "failed"
+    elif stage == "shipping" and current == "ordered":
+        # 往前推进才告诉用户「发货了」（从派送退回运输是纠错，不打扰用户）。走 CAS：
+        # 连点或两个页面同时操作，只有一次真正推进，消息也只发一次。
+        if not await admin_repo.mark_shipped_from_ordered(gift_id):
+            raise HTTPException(status_code=409, detail="礼物状态刚刚发生了变化，请刷新后再试")
+        notification = await gift_service.notify_shipped_once(gift["user_id"], {**gift, "status": stage})
     elif not await admin_repo.set_transit_status(gift_id, stage):
         raise HTTPException(status_code=409, detail="礼物状态刚刚发生了变化，请刷新后再试")
     logger.info(

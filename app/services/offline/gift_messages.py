@@ -48,6 +48,20 @@ async def gift_sent_message(user_id: str, workspace_id: str | None) -> str:
         return fallback
 
 
+async def gift_shipped_message(user_id: str, workspace_id: str | None) -> str:
+    """发货了、在运输途中。同样不知道礼物是什么，也还没到签收的时候。"""
+    memory = await repo.memory_brief(user_id, workspace_id, limit=20)
+    fallback = "给你寄的礼物已经发货啦，正在路上，先别猜是什么，到了我再提醒你～"
+    try:
+        prompt_text = (await get_prompt_text("offline.gift_shipped_message")).format(
+            memory=memory or "暂无",
+        )
+        reply = (await invoke_text(get_chat_model(), prompt_text)).strip()
+        return _single_line_friend_message(reply, fallback=fallback, limit=120)
+    except Exception:
+        return fallback
+
+
 async def gift_out_for_delivery_message(user_id: str, workspace_id: str | None) -> str:
     """快递派送中，提醒用户收到后去礼物页确认签收。同样不知道礼物是什么。"""
     memory = await repo.memory_brief(user_id, workspace_id, limit=20)

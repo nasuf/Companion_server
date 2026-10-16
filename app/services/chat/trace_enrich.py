@@ -641,6 +641,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("proactive.special_combined", "特殊日期(合并)", "reply", _label_reply_text),
     ("offline.gift_thanks_reply", "礼物感谢回应", "reply", _label_reply_text),
     ("offline.gift_sent_message", "礼物寄出提示", "reply", _label_reply_text),
+    ("offline.gift_shipped_message", "礼物发货提醒", "reply", _label_reply_text),
     ("offline.gift_out_for_delivery_message", "礼物派送提醒签收", "reply", _label_reply_text),
     ("offline.gift_received_message", "礼物签收揭晓", "reply", _label_reply_text),
     ("offline.gift_first_address_request", "首次送礼地址提醒", "reply", _label_reply_text),

@@ -276,3 +276,12 @@ async def test_thanks_can_only_be_claimed_once(sql):
     assert await gift_repo.mark_gift_thanked(gift["id"], other, "别人的") is None
     row = await sql["db"].realworldgift.find_unique(where={"id": gift["id"]})
     assert row.thanksMessage == "谢谢你"
+
+
+@pytest.mark.asyncio
+async def test_shipping_from_ordered_is_a_single_shot_cas(sql):
+    gift = await _manual_gift(sql, status="ordered")
+    assert await admin_repo.mark_shipped_from_ordered(gift["id"]) is True
+    assert await admin_repo.mark_shipped_from_ordered(gift["id"]) is False  # 第二次点击落空
+    row = await sql["db"].realworldgift.find_unique(where={"id": gift["id"]})
+    assert row.status == "shipping" and row.shippedAt is not None

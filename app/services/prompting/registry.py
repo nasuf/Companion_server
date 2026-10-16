@@ -121,6 +121,7 @@ from app.services.prompting.defaults import (
     OFFLINE_GIFT_RECEIVED_MESSAGE_PROMPT,
     OFFLINE_GIFT_SELECTION_PROMPT,
     OFFLINE_GIFT_SENT_MESSAGE_PROMPT,
+    OFFLINE_GIFT_SHIPPED_MESSAGE_PROMPT,
     OFFLINE_GIFT_THANKS_REPLY_PROMPT,
     MUSIC_ACCEPT_INVITE_PROMPT,
     MUSIC_AGENT_JOIN_AFTER_BUSY_PROMPT,
@@ -426,6 +427,12 @@ PROMPT_DEFINITIONS = [
         "【工程扩展】V3 现实世界互动. 礼物寄出后，用朋友口吻告诉用户有惊喜在路上；签收前保密，"
         "prompt 不提供任何礼物信息. 占位符 {memory}.",
         OFFLINE_GIFT_SENT_MESSAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.gift_shipped_message", "礼物发货提醒", "线下互动", "礼物",
+        "【工程扩展】V3 现实世界互动. 物流从已下单进入运输中时告诉用户礼物已经出发；不透露礼物，"
+        "不催签收. 占位符 {memory}.",
+        OFFLINE_GIFT_SHIPPED_MESSAGE_PROMPT,
     ),
     PromptDefinition(
         "offline.gift_out_for_delivery_message", "礼物派送提醒签收", "线下互动", "礼物",

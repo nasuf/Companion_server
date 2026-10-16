@@ -359,6 +359,36 @@ async def test_refresh_leaves_closed_and_undue_gifts_alone(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_shipped_notice_is_sent_once_and_reports_failures(monkeypatch):
+    notice = AsyncMock(return_value=False)
+    monkeypatch.setattr(gift_service.gift_repo, "gift_notice_sent", notice)
+    monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(return_value=CTX))
+    monkeypatch.setattr(gift_service, "gift_shipped_message", AsyncMock(return_value="礼物出发啦"))
+    emit = AsyncMock(return_value="msg-ship")
+    monkeypatch.setattr(gift_service, "emit_gift_card", emit)
+    gift = _gift("shipping")
+
+    assert await gift_service.notify_shipped_once("user-1", gift) == "sent"
+    kwargs = emit.await_args.kwargs
+    assert kwargs["trigger_type"] == "gift_shipped" and kwargs["message"] == "礼物出发啦"
+    assert kwargs["gift"]["status"] == "shipping" and kwargs["conversation_id"] == "conv-1"
+    assert notice.await_args.args == (gift["id"], "user-1", "gift_shipped")
+
+    emit.return_value = None
+    assert await gift_service.notify_shipped_once("user-1", gift) == "failed"
+    emit.side_effect = RuntimeError("ws down")
+    assert await gift_service.notify_shipped_once("user-1", gift) == "failed"
+    monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(return_value=None))
+    assert await gift_service.notify_shipped_once("user-1", gift) == "failed"
+
+    # 发过一次就不再发（回退后再推进到运输也一样）。
+    emit.reset_mock()
+    notice.return_value = True
+    assert await gift_service.notify_shipped_once("user-1", gift) == "skipped"
+    emit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_notifications_degrade_without_context_or_on_errors(monkeypatch):
     monkeypatch.setattr(gift_service.repo, "resolve_user_context", AsyncMock(return_value=None))
     assert await gift_service.notify_out_for_delivery("user-1", _gift()) is None
@@ -424,6 +454,8 @@ async def test_door_and_reveal_messages_render_only_what_each_stage_may_know(mon
     monkeypatch.setattr(gift_messages, "invoke_text", AsyncMock(return_value="快递在派送啦，记得签收"))
     monkeypatch.setattr(gift_messages, "get_chat_model", lambda: object())
     assert await gift_messages.gift_out_for_delivery_message("user-1", "ws-1") == "快递在派送啦，记得签收"
+    assert await gift_messages.gift_shipped_message("user-1", "ws-1") == "快递在派送啦，记得签收"
+    assert set(rendered.pop()) == {"memory"}  # 发货提醒同样拿不到任何礼物信息
     monkeypatch.setattr(gift_messages, "invoke_text", AsyncMock(return_value="是暖手宝！"))
     assert await gift_messages.gift_received_message("user-1", "ws-1", _gift("delivered")) == "是暖手宝！"
     assert set(rendered[0]) == {"memory"}
@@ -431,6 +463,8 @@ async def test_door_and_reveal_messages_render_only_what_each_stage_may_know(mon
 
     monkeypatch.setattr(gift_messages, "invoke_text", AsyncMock(side_effect=RuntimeError("llm down")))
     door = await gift_messages.gift_out_for_delivery_message("user-1", "ws-1")
+    shipped = await gift_messages.gift_shipped_message("user-1", "ws-1")
+    assert "发货" in shipped and "暖手宝" not in shipped and "签收" not in shipped
     reveal = await gift_messages.gift_received_message("user-1", "ws-1", _gift("delivered"))
     assert "签收" in door and "暖手宝" not in door
     assert "暖手宝" in reveal

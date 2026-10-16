@@ -37,6 +37,7 @@ from app.services.offline.gift_messages import (
     gift_out_for_delivery_message,
     gift_received_message,
     gift_sent_message,
+    gift_shipped_message,
     gift_thanks_reply,
 )
 from app.services.offline.gift_status import (
@@ -691,6 +692,39 @@ async def advance_to_out_for_delivery(
     if notify and not await gift_repo.gift_notice_sent(gift["id"], user_id, "gift_out_for_delivery"):
         await notify_out_for_delivery(user_id, updated, ctx=ctx)
     return updated
+
+
+async def notify_shipped_once(user_id: str, gift: dict[str, Any]) -> str:
+    """已下单 → 运输中时告诉用户礼物出发了。同一份礼物只发一次（回退再推进不重复打扰）。
+
+    返回 sent / failed / skipped（之前已经发过）。失败只记日志：状态已经迁移成功。
+    """
+    if await gift_repo.gift_notice_sent(gift["id"], user_id, "gift_shipped"):
+        return "skipped"
+    try:
+        ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
+        if not ctx:
+            return "failed"
+        async with offline_trace(
+            "gift_shipped",
+            conversation_id=ctx.get("conversation_id"),
+            agent_id=ctx["agent_id"], user_id=user_id,
+        ) as tracer:
+            message = await gift_shipped_message(user_id, ctx.get("workspace_id"))
+            message_id = await emit_gift_card(
+                conversation_id=ctx.get("conversation_id"),
+                user_id=user_id,
+                agent_id=ctx["agent_id"],
+                workspace_id=ctx.get("workspace_id"),
+                gift=gift,
+                trigger_type="gift_shipped",
+                message=message,
+                trace_id=tracer.safe_trace_id,
+            )
+            return "sent" if message_id else "failed"
+    except Exception as exc:
+        logger.warning("[offline] gift shipped notify failed gift_id=%s: %s", gift.get("id"), exc)
+        return "failed"
 
 
 async def notify_out_for_delivery(
