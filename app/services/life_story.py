@@ -180,6 +180,27 @@ def _clean_text(value: object) -> str | None:
     return s if s else None
 
 
+def name_memory_content(
+    name: str, *, nickname: str | None = None, detail: str | None = None,
+) -> str:
+    """The singleton 身份/姓名 L1 memory text.
+
+    ``我叫陈砚，你可以叫我阿砚`` — the nickname clause is what lets the agent
+    answer "我该怎么叫你" and introduce itself the same way the client title
+    shows it. Shared by persona init and the existing-agent backfill so both
+    produce byte-identical text (the backfill relies on that to be idempotent).
+    """
+    name = name.strip()
+    content = f"我叫{name}"
+    nick = (nickname or "").strip()
+    if nick and nick != name:
+        content = f"{content}，你可以叫我{nick}"
+    extra = (detail or "").strip()
+    if extra and extra != name:
+        content = f"{content}。{extra}"
+    return content
+
+
 def _as_list(value: object) -> list[str]:
     """List/tag field → list of non-empty trimmed items. Scalars wrapped as [one]."""
     if value is None:
@@ -352,13 +373,14 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
 
     # ── 身份: singleton 事实 ──
     if (v := _clean_text(identity.get("name"))):
-        content = f"我叫{v}"
-        # Document imports keep the full naming line (大名/小名/称呼) in
-        # name_detail; fold it into the singleton 姓名 memory so aliases
-        # survive the admin-form name override.
-        detail = _clean_text(identity.get("name_detail"))
-        if detail and detail != v:
-            content = f"我叫{v}。{detail}"
+        content = name_memory_content(
+            v,
+            nickname=_clean_text(identity.get("nickname")),
+            # Document imports keep the full naming line (大名/小名/称呼) in
+            # name_detail; fold it into the singleton 姓名 memory so aliases
+            # survive the admin-form name override.
+            detail=_clean_text(identity.get("name_detail")),
+        )
         _add(memories, content, "身份", "姓名", "identity", 0.95)
     gender = identity.get("gender")
     if isinstance(gender, str):

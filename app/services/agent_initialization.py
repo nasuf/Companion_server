@@ -93,8 +93,10 @@ async def _run_agent_initialization_inner(
     await set_progress(agent.id, "prompt_building", message="正在构建生成提示...")
     profile: dict
     career = career_template_override
-    invocation_inputs = deepcopy({"name": agent.name, "gender": agent.gender,
-        "mbti": mbti, "personality": personality_dict, "profile_override": profile_override})
+    agent_nickname = (getattr(agent, "nickname", None) or "").strip() or None
+    invocation_inputs = deepcopy({"name": agent.name, "nickname": agent_nickname,
+        "gender": agent.gender, "mbti": mbti, "personality": personality_dict,
+        "profile_override": profile_override})
     if profile_override is not None:
         await set_progress(agent.id, "llm_generating", message="正在读取文档背景...")
         profile = dict(profile_override)
@@ -129,6 +131,11 @@ async def _run_agent_initialization_inner(
             logger.error(f"Background generation failed for {agent.id}: {e}", exc_info=True)
             await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
             return
+    # 昵称和姓名一样是建号时定下的身份事实, 不交给 LLM 生成: 两条分支都在这里
+    # 硬写进 identity, 且必须早于 prepare_profile_origin —— 姓名记忆
+    # 「我叫X，你可以叫我Y」要能在冻结的人设来源里找到出处。
+    if agent_nickname and isinstance(profile, dict):
+        profile.setdefault("identity", {})["nickname"] = agent_nickname
     done_message = (
         "文档背景解析完成, 正在转换..."
         if profile_override is not None

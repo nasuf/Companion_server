@@ -1177,6 +1177,8 @@ async def send_first_greeting(
                 return False
             prompt = tpl.format(
                 ai_name=agent.name,
+                # 姓名库没有配对昵称的 agent 用名字兜底; 模板要求两者相同时只说一次。
+                ai_nickname=(getattr(agent, "nickname", None) or "").strip() or agent.name,
                 personality_brief=build_personality_brief(agent),
                 occupation=getattr(agent, "occupation", None) or "普通人",
             )

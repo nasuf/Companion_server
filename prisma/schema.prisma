@@ -129,6 +129,10 @@ model AiAgent {
   executionGeneration      String @default(dbgenerated("gen_random_uuid()::text")) @map("execution_generation")
   id                       String                          @id @default(uuid())
   name                     String
+  // 姓名库 (name_templates) 里与 name 配对的昵称, 建号时随名字一起快照下来:
+  // 客户端聊天页标题显示它, 开场白里"你可以叫我xx"、L1 姓名记忆也用它。
+  // 不在姓名库里的名字 (手填/文档导入) 为 NULL, 展示时回落到 name。
+  nickname                 String?
   userId                   String                          @map("user_id")
   user                     User                            @relation(fields: [userId], references: [id])
   status                   String                          @default("active")

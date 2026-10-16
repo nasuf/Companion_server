@@ -130,6 +130,7 @@ def test_random_name_manual_career(api_client):
 
     assert response.status_code == 200, response.text
     assert response.json()["name"] == "陈砚"
+    assert created[0]["nickname"] == "阿砚"
     assert created[0]["career_template_override"]["title"] == "室内设计师"
     pick_names.assert_awaited_once()
     assert pick_names.await_args.kwargs["exclude"] == {"已有模板"}

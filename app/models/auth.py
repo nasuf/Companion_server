@@ -156,6 +156,8 @@ class AuthResponse(BaseModel):
     has_agent: bool
     agent_id: str | None = None
     agent_name: str | None = None
+    # 姓名库配对的昵称; 客户端聊天页标题优先显示它, 为空回落到 agent_name。
+    agent_nickname: str | None = None
     agent_avatar_key: str | None = None
     agent_avatar_url: str | None = None
     agent_city: str | None = None

@@ -53,7 +53,9 @@ class GroundingUnavailable(RuntimeError):
 
 def canonical_facts(agent: Any) -> dict[str, Any]:
     facts = {}
-    for name in ("name", "city", "occupation"):
+    # nickname: 聊天热路径不再常驻注入 L1 记忆 (纯检索), 姓名记忆里的「你可以叫我…」
+    # 未必每轮都被召回; 放进这份每轮都注入的档案, 用户叫昵称时 AI 才认得出自己。
+    for name in ("name", "nickname", "city", "occupation"):
         value = getattr(agent, name, None)
         if isinstance(value, str) and value.strip():
             facts[name] = value.strip()

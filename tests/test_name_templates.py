@@ -10,6 +10,7 @@ import pytest
 from app.services.name_templates import (
     ensure_default_names,
     load_default_names,
+    lookup_name_nickname,
     normalize_name_gender,
     pick_random_names,
 )
@@ -103,3 +104,37 @@ async def test_ensure_default_names_inserts_only_missing_keys():
         (row["gender"], row["name"]) != (first["gender"], first["name"])
         for row in inserted
     )
+
+
+@pytest.mark.asyncio
+async def test_lookup_name_nickname_uses_gender_name_key():
+    with patch("app.services.name_templates.db") as mock_db:
+        mock_db.nametemplate.find_unique = AsyncMock(
+            return_value=SimpleNamespace(nickname=" 阿砚 "),
+        )
+        assert await lookup_name_nickname(" 陈砚 ", "男") == "阿砚"
+    where = mock_db.nametemplate.find_unique.await_args.kwargs["where"]
+    assert where == {"gender_name": {"gender": "male", "name": "陈砚"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row", "name", "gender"),
+    [
+        (None, "小伴", "female"),                      # 手填名不在库里
+        (SimpleNamespace(nickname="  "), "陈砚", "male"),  # 库里昵称为空
+    ],
+)
+async def test_lookup_name_nickname_missing_is_none(row, name, gender):
+    with patch("app.services.name_templates.db") as mock_db:
+        mock_db.nametemplate.find_unique = AsyncMock(return_value=row)
+        assert await lookup_name_nickname(name, gender) is None
+
+
+@pytest.mark.asyncio
+async def test_lookup_name_nickname_skips_query_without_name_or_gender():
+    with patch("app.services.name_templates.db") as mock_db:
+        mock_db.nametemplate.find_unique = AsyncMock()
+        assert await lookup_name_nickname("  ", "male") is None
+        assert await lookup_name_nickname("陈砚", None) is None
+    mock_db.nametemplate.find_unique.assert_not_awaited()

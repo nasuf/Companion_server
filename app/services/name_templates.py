@@ -88,6 +88,25 @@ async def pick_random_names(
     return [name_row_to_dict(row) for row in chosen]
 
 
+async def lookup_name_nickname(name: str | None, gender: str | None) -> str | None:
+    """The library nickname paired with ``name`` for ``gender``, if any.
+
+    Used when a name arrives without its library row (explicit form name,
+    owner rename, manual template name). Names outside the library have no
+    nickname; callers fall back to the full name for display. Archived rows
+    still count: the agent was named while the row was active.
+    """
+    cleaned = (name or "").strip()
+    normalized = normalize_name_gender(gender)
+    if not cleaned or normalized not in {"male", "female"}:
+        return None
+    row = await db.nametemplate.find_unique(
+        where={"gender_name": {"gender": normalized, "name": cleaned}},
+    )
+    nickname = (getattr(row, "nickname", None) or "").strip()
+    return nickname or None
+
+
 async def ensure_default_names() -> None:
     """Insert bundled names that are not already in the table.
 

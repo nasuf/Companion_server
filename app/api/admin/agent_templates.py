@@ -313,6 +313,8 @@ async def create_template(data: TemplateCreateRequest) -> dict:
         if not template_name:
             raise HTTPException(status_code=400, detail="请填写模板名称")
         names = [template_name]
+        # 手填名不带库行; create_agent_with_provisioning 会按 (name, gender) 查库补昵称。
+        nicknames: list[str | None] = [None]
     else:
         if gender not in {"male", "female"}:
             raise HTTPException(status_code=400, detail="随机姓名需要先选择性别")
@@ -322,6 +324,7 @@ async def create_template(data: TemplateCreateRequest) -> dict:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         names = [row["name"] for row in picked]
+        nicknames = [(row.get("nickname") or "").strip() or None for row in picked]
 
     if data.career_mode == "manual":
         career = await get_active_career_by_id(data.career_id or "")
@@ -344,11 +347,14 @@ async def create_template(data: TemplateCreateRequest) -> dict:
     owner = await get_or_create_template_user()
     created: list[dict] = []
     errors: list[dict] = []
-    for name, career, personality in zip(names, careers, personalities, strict=True):
+    for name, nickname, career, personality in zip(
+        names, nicknames, careers, personalities, strict=True,
+    ):
         try:
             agent, workspace = await create_agent_with_provisioning(
                 user_id=owner.id,
                 name=name,
+                nickname=nickname,
                 personality=personality,
                 background=data.background,
                 gender=gender,

@@ -10,7 +10,7 @@ immediately" experience.
 Instead we provision ONE fully-built *template* agent once (via the normal flow,
 owned by the template system user), then cheaply **clone** it per user:
 
-* copy the persona row (name / MBTI / background / values ...) and assign one
+* copy the persona row (name / nickname / MBTI / background / values ...) and assign one
   gender-matched avatar for the new user,
 * copy its L1 ``memories_ai`` rows into the new user's workspace,
 * copy the corresponding pgvector embeddings (pure SQL copy — no Ollama call),
@@ -82,6 +82,7 @@ def _clone_persona_data(template, user_id: str) -> dict[str, Any]:
     avatar = pick_agent_avatar(template.gender)
     data: dict[str, Any] = {
         "name": template.name,
+        "nickname": getattr(template, "nickname", None),
         "user": {"connect": {"id": user_id}},
         "status": "active",
         "archivedAt": None,

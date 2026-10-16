@@ -112,6 +112,7 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
         has_agent=workspace is not None and agent is not None,
         agent_id=agent.id if agent else None,
         agent_name=agent.name if agent else None,
+        agent_nickname=(getattr(agent, "nickname", None) or None) if agent else None,
         agent_avatar_key=agent_avatar_key,
         agent_avatar_url=(
             build_avatar_url(agent_avatar_key)

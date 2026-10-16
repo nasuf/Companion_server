@@ -1,8 +1,8 @@
 """From-scratch agent creation samples a gender-matched library name.
 
-Flutter no longer sends a placeholder. The sampled name is the value stored
-on the agent, which the init job feeds into persona generation and the
-「我叫…」 L1 memory.
+Flutter no longer sends a placeholder. The sampled name (and the nickname
+paired with it in the library) is what gets stored on the agent, which the
+init job feeds into persona generation and the 「我叫…，你可以叫我…」 L1 memory.
 """
 
 from types import SimpleNamespace
@@ -25,10 +25,11 @@ _PERSONALITY = {
 }
 
 
-def _agent(name: str, gender: str = "male"):
+def _agent(name: str, gender: str = "male", nickname: str | None = None):
     return SimpleNamespace(
         id="agent-id",
         name=name,
+        nickname=nickname,
         userId="user-id",
         mbti=None,
         currentMbti=None,
@@ -45,9 +46,9 @@ async def test_blank_name_samples_library_by_gender():
     with patch(
         "app.api.public.agents.pick_random_names",
         new_callable=AsyncMock,
-        return_value=[{"name": "乔慕川", "gender": "male"}],
+        return_value=[{"name": "乔慕川", "nickname": " 阿川 ", "gender": "male"}],
     ) as pick:
-        assert await _resolve_create_name("  ", "male") == "乔慕川"
+        assert await _resolve_create_name("  ", "male") == ("乔慕川", "阿川")
     pick.assert_awaited_once_with("male", 1)
 
 
@@ -57,7 +58,8 @@ async def test_explicit_name_is_not_replaced():
         "app.api.public.agents.pick_random_names",
         new_callable=AsyncMock,
     ) as pick:
-        assert await _resolve_create_name(" 林昭 ", "female") == "林昭"
+        # 显式名字不带库行: 昵称交给 create_agent_with_provisioning 按库查。
+        assert await _resolve_create_name(" 林昭 ", "female") == ("林昭", None)
     pick.assert_not_awaited()
 
 
@@ -88,13 +90,13 @@ async def test_empty_name_pool_is_a_client_error():
 
 def test_create_agent_omitted_name_uses_sampled_name(api_client):
     client = api_client
-    agent = _agent("乔慕川")
+    agent = _agent("乔慕川", nickname="阿川")
     workspace = SimpleNamespace(id="workspace-id")
     with (
         patch(
             "app.api.public.agents.pick_random_names",
             new_callable=AsyncMock,
-            return_value=[{"name": "乔慕川", "gender": "male"}],
+            return_value=[{"name": "乔慕川", "nickname": "阿川", "gender": "male"}],
         ) as pick,
         patch(
             "app.api.public.agents.create_agent_with_provisioning",
@@ -113,8 +115,10 @@ def test_create_agent_omitted_name_uses_sampled_name(api_client):
         )
     assert response.status_code == 200
     assert response.json()["name"] == "乔慕川"
+    assert response.json()["nickname"] == "阿川"
     pick.assert_awaited_once_with("male", 1)
     assert create.await_args.kwargs["name"] == "乔慕川"
+    assert create.await_args.kwargs["nickname"] == "阿川"
     assert create.await_args.kwargs["gender"] == "male"
 
 
@@ -147,3 +151,46 @@ def test_create_agent_normalizes_chinese_gender_before_sampling(api_client):
     pick.assert_awaited_once_with("male", 1)
     assert create.await_args.kwargs["gender"] == "male"
     assert create.await_args.kwargs["name"] == "沈知远"
+
+
+def _rename(api_client, current, new_name):
+    from app.api.ownership import require_agent_owner
+    from app.main import app
+
+    app.dependency_overrides[require_agent_owner] = lambda: current
+    try:
+        with (
+            patch(
+                "app.api.public.agents.lookup_name_nickname",
+                new_callable=AsyncMock,
+                return_value="阿远",
+            ) as lookup,
+            patch("app.api.public.agents.db") as mock_db,
+        ):
+            mock_db.aiagent.update = AsyncMock(
+                side_effect=lambda where, data: SimpleNamespace(
+                    **{**vars(current), **data}),
+            )
+            response = api_client.patch(
+                "/agents/agent-id",
+                headers=make_auth_header("user-id"),
+                json={"name": new_name},
+            )
+        return response, lookup, mock_db.aiagent.update.await_args.kwargs["data"]
+    finally:
+        app.dependency_overrides.pop(require_agent_owner, None)
+
+
+def test_rename_rematches_nickname_from_library(api_client):
+    response, lookup, data = _rename(api_client, _agent("陈砚", nickname="阿砚"), "吴时远")
+    assert response.status_code == 200
+    lookup.assert_awaited_once_with("吴时远", "male")
+    assert data == {"name": "吴时远", "nickname": "阿远"}
+    assert response.json()["nickname"] == "阿远"
+
+
+def test_same_name_patch_keeps_nickname(api_client):
+    response, lookup, data = _rename(api_client, _agent("陈砚", nickname="阿砚"), "陈砚")
+    assert response.status_code == 200
+    lookup.assert_not_awaited()
+    assert data == {"name": "陈砚"}

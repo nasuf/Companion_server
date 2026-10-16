@@ -15,7 +15,11 @@ from app.api.ownership import (
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
 from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
-from app.services.name_templates import normalize_name_gender, pick_random_names
+from app.services.name_templates import (
+    lookup_name_nickname,
+    normalize_name_gender,
+    pick_random_names,
+)
 from app.services.agent_avatars import (
     build_avatar_url,
     get_avatar_path,
@@ -59,6 +63,7 @@ def _agent_response(agent, *, workspace_id: str | None = None) -> AgentResponse:
     return AgentResponse(
         id=agent.id,
         name=agent.name,
+        nickname=getattr(agent, "nickname", None),
         user_id=agent.userId,
         workspace_id=workspace_id,
         mbti=get_mbti(agent),
@@ -133,6 +138,7 @@ async def create_agent_with_provisioning(
     background: str | None = None,
     values: dict | None = None,
     gender: str | None = None,
+    nickname: str | None = None,
     profile_override: dict | None = None,
     career_template_override: dict | None = None,
     stage_existing_workspaces: bool = True,
@@ -142,6 +148,9 @@ async def create_agent_with_provisioning(
     Shared by the public create_agent endpoint and admin template creation so
     both paths yield identical agent data (persona + L1 memory + embeddings +
     schedule). Returns ``(agent, workspace)``.
+
+    ``nickname`` defaults to the name library's nickname for (name, gender);
+    pass it when the caller already holds the sampled library row.
     """
     # 防双击 / 重试竞态: 用户已有 provisioning agent 时拒绝新建. 否则两次并发
     # 会 (a) 重复扣 LLM 配额, (b) 后入的 stage_active_workspaces_for_user 把
@@ -159,8 +168,11 @@ async def create_agent_with_provisioning(
             )
     # Per spec §1.2: 7-dim / Big Five 用户输入仅作为 MBTI 计算的临时输入,
     # 不再常驻 DB. MBTI 在 _init_mbti() 里生成并写入.
+    if nickname is None:
+        nickname = await lookup_name_nickname(name, gender)
     create_data: dict = {
         "name": name,
+        "nickname": (nickname or "").strip() or None,
         "user": {"connect": {"id": user_id}},
         "status": "provisioning",
         "archivedAt": None,
@@ -241,17 +253,22 @@ async def create_agent_with_provisioning(
     return agent, workspace
 
 
-async def _resolve_create_name(name: str | None, gender: str | None) -> str:
-    """Name stored on the new agent, and therefore the name generation uses.
+async def _resolve_create_name(
+    name: str | None, gender: str | None,
+) -> tuple[str, str | None]:
+    """(name, nickname) stored on the new agent, and therefore what generation uses.
 
     The init job reads ``ai_agents.name`` into ``generate_full_profile``, which
-    hard-overrides ``identity.name``. Life-story then writes the L1 memory
-    ``我叫{name}``. Sampling here is what makes a gender-matched library name
-    show up in that memory. An explicit client name (the web form) is kept.
+    hard-overrides ``identity.name``, and copies ``ai_agents.nickname`` into
+    ``identity.nickname``. Life-story then writes the L1 memory
+    ``我叫{name}，你可以叫我{nickname}``. Sampling here is what makes a
+    gender-matched library name (and its paired nickname) show up in that
+    memory. An explicit client name (the web form) is kept; its nickname is
+    looked up from the library downstream.
     """
     cleaned = (name or "").strip()
     if cleaned:
-        return cleaned
+        return cleaned, None
     normalized = normalize_name_gender(gender)
     if normalized not in {"male", "female"}:
         raise HTTPException(status_code=400, detail="请先选择性别，才能分配姓名")
@@ -262,7 +279,7 @@ async def _resolve_create_name(name: str | None, gender: str | None) -> str:
     chosen = str(picked[0].get("name") or "").strip()
     if not chosen:
         raise HTTPException(status_code=500, detail="姓名库返回了空名字")
-    return chosen
+    return chosen, str(picked[0].get("nickname") or "").strip() or None
 
 
 @router.post("", response_model=AgentResponse)
@@ -275,10 +292,11 @@ async def create_agent(
     # Store male/female even if a client sends 男/女. Generation maps only
     # the English tokens onto 男/女; a raw 「男」 would be generated as female.
     gender = normalize_name_gender(data.gender) or data.gender
-    name = await _resolve_create_name(data.name, gender)
+    name, nickname = await _resolve_create_name(data.name, gender)
     agent, workspace = await create_agent_with_provisioning(
         user_id=data.user_id,
         name=name,
+        nickname=nickname,
         personality=data.personality.model_dump(),
         background=data.background,
         values=data.values,
@@ -342,6 +360,10 @@ async def update_agent(
     update_data = {}
     if data.name is not None:
         update_data["name"] = data.name
+        # 昵称跟名字成对: 改了名字就按新名字重新匹配姓名库, 不在库里则清空
+        # (展示回落到新名字), 避免标题还显示旧名字的昵称。
+        if data.name.strip() != (_agent.name or "").strip():
+            update_data["nickname"] = await lookup_name_nickname(data.name, _agent.gender)
     # MBTI 走 POST /agents/{id}/regenerate-mbti, 不在通用 PATCH 里
     if data.background is not None:
         update_data["background"] = data.background

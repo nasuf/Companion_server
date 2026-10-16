@@ -53,6 +53,8 @@ class AgentUpdate(BaseModel):
 class AgentResponse(BaseModel):
     id: str
     name: str
+    # 姓名库配对的昵称; 聊天页标题优先显示它, 为空时回落到 name。
+    nickname: str | None = None
     user_id: str
     workspace_id: str | None = None
     mbti: dict | None = None
