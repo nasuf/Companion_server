@@ -161,26 +161,46 @@ async def record_user_message_day(
 async def record_user_message_day_for_conversation(
     conversation_id: str | None,
     *,
+    message_id: str | None = None,
     workspace_id: str | None = None,
     user_id: str | None = None,
 ) -> None:
-    """Hot-path helper: prefer ids the caller already has, else load once."""
-    ws_id = workspace_id
-    uid = user_id
-    if (not ws_id or not uid) and conversation_id:
-        try:
-            conv = await db.conversation.find_unique(where={"id": conversation_id})
-        except Exception as exc:
-            logger.warning(
-                "interaction lookup failed conversation=%s: %r",
-                conversation_id,
-                exc,
-            )
-            conv = None
-        if conv is not None:
-            ws_id = ws_id or getattr(conv, "workspaceId", None)
-            uid = uid or getattr(conv, "userId", None)
-    await record_user_message_day(ws_id, uid)
+    """Mark the persisted message's Shanghai day, never the callback's day.
+
+    A single guarded INSERT owns deduplication. Redis is not an admission lock:
+    a worker dying between SET NX and SQL must not suppress the next retry.
+    """
+    if not conversation_id or not message_id:
+        return
+    try:
+        rows = await db.query_raw(
+            """
+            INSERT INTO workspace_interaction_days
+                (id, workspace_id, user_id, local_date, source, created_at)
+            SELECT $1, c.workspace_id, c.user_id,
+                (m.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date,
+                $2, CURRENT_TIMESTAMP
+            FROM messages m JOIN conversations c ON c.id=m.conversation_id
+            JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id
+            WHERE m.id=$3 AND m.conversation_id=$4 AND m.role='user'
+              AND c.is_deleted=FALSE AND w.status='active' AND w.agent_id=c.agent_id
+              AND ($5::text IS NULL OR c.workspace_id=$5)
+              AND ($6::text IS NULL OR c.user_id=$6)
+            ON CONFLICT (workspace_id, local_date) DO NOTHING
+            RETURNING id, workspace_id, local_date
+            """,
+            str(uuid4()), SOURCE_USER_MESSAGE, message_id, conversation_id,
+            workspace_id, user_id,
+        )
+        if rows:
+            logger.info("interaction day recorded", extra={
+                "event": EVT_INTERACTION_RECORDED,
+                "workspace_id": rows[0]["workspace_id"],
+                "source": SOURCE_USER_MESSAGE,
+            })
+    except Exception:
+        logger.warning("interaction persisted-message write failed", exc_info=True)
+        raise
 
 
 async def _load_marked_rows(

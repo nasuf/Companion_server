@@ -1116,3 +1116,12 @@ async def test_assistant_sticker_metadata_counts_for_achievement_59():
     event_types = [call.kwargs["event_type"] for call in record.await_args_list]
     assert "assistant_sticker" in event_types
     assert any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)
+
+
+@pytest.fixture(autouse=True)
+def _rule_test_source_boundary(monkeypatch):
+    # Source contract is exercised independently with real PostgreSQL and engine tests.
+    from app.services.achievements import source
+    async def identity(event):
+        return event, None
+    monkeypatch.setattr(source, "resolve_message_event", identity)

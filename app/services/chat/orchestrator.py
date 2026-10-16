@@ -473,6 +473,7 @@ async def _stream_legacy_response(
         _fire_background(
             record_user_message_day_for_conversation(
                 conversation_id,
+                message_id=user_message_id,
                 workspace_id=workspace_id,
                 user_id=getattr(conversation, "userId", None),
             )

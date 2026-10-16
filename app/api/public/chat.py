@@ -74,7 +74,7 @@ async def _persist_user_message(
 
     fire_background(
         record_user_message_day_for_conversation(
-            conversation_id, workspace_id=workspace_id, user_id=user_id,
+            conversation_id, message_id=saved.id, workspace_id=workspace_id, user_id=user_id,
         )
     )
     return saved.id
