@@ -337,3 +337,97 @@ class TestProviderAndProfile:
         from unittest.mock import MagicMock
         with pytest.raises(TypeError, match="profile override must be"):
             models._provider_and_profile(MagicMock(), 12345)  # type: ignore[arg-type]
+
+
+# ── Ollama 兜底的采样参数 ──
+
+class TestOllamaSamplingKwargs:
+    """调用方按 OpenAI 习惯传 temperature=0; ChatOllama 把 ainvoke 的额外 kwargs
+    平铺进 AsyncClient.chat(**params), 于是兜底每次都 TypeError (生产 2026-10-16:
+    地点核验主 provider 失败后, ollama 兜底三次全报
+    "AsyncClient.chat() got an unexpected keyword argument 'temperature'")。"""
+
+    @staticmethod
+    def _accepted_by_ollama_client(model, kwargs) -> None:
+        import inspect
+
+        import ollama
+        from langchain_core.messages import HumanMessage
+
+        params = model._chat_params([HumanMessage(content="hi")], **kwargs)
+        inspect.signature(ollama.AsyncClient.chat).bind(object(), **params)
+
+    def test_sampling_kwargs_move_onto_the_ollama_model(self):
+        base = ChatOllama(model="qwen2.5:7b", base_url="http://127.0.0.1:9", num_ctx=4096)
+        copy, rest = models._for_ollama(
+            base, {"temperature": 0, "max_tokens": 64, "top_p": None, "format": "json"},
+        )
+        assert (copy.temperature, copy.num_predict, copy.num_ctx) == (0, 64, 4096)
+        assert copy.top_p is None and base.temperature is None
+        assert rest == {"format": "json"}
+        self._accepted_by_ollama_client(copy, rest)
+
+    def test_unmoved_kwargs_still_break_the_client(self):
+        """反向守卫: 证明上面那条断言确实在测参数形状, 而不是恒真。"""
+        base = ChatOllama(model="qwen2.5:7b", base_url="http://127.0.0.1:9")
+        with pytest.raises(TypeError, match="temperature"):
+            self._accepted_by_ollama_client(base, {"temperature": 0})
+
+    def test_non_ollama_model_keeps_kwargs_as_request_params(self):
+        model = object()
+        kwargs = {"temperature": 0}
+        same, rest = models._for_ollama(model, kwargs)
+        assert same is model and rest == kwargs and rest is not kwargs
+
+    @staticmethod
+    def _failing_primary(stream: bool = False):
+        class _Primary(ChatOpenAI):
+            async def ainvoke(self, _messages, **_kwargs):
+                raise ConnectionError("primary down")
+
+            def astream(self, _messages, **_kwargs):
+                async def _g():
+                    raise ConnectionError("primary down")
+                    yield  # pragma: no cover
+                return _g()
+
+        return _Primary.model_construct(model_name="qwen3.5-plus")
+
+    def _recording_fallback(self, seen: dict):
+        from langchain_core.messages import AIMessage, AIMessageChunk
+
+        check = self._accepted_by_ollama_client
+
+        class _Fallback(ChatOllama):
+            async def ainvoke(self, _messages, **kwargs):
+                check(self, kwargs)
+                seen.update(temperature=self.temperature, kwargs=kwargs)
+                return AIMessage(content='{"ok": 1}')
+
+            def astream(self, _messages, **kwargs):
+                check(self, kwargs)
+                seen.update(temperature=self.temperature, kwargs=kwargs)
+
+                async def _g():
+                    yield AIMessageChunk(content='{"ok": 1}')
+                return _g()
+
+        return _Fallback.model_construct(model="qwen2.5:7b", base_url="http://fake")
+
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_fallback_runs_with_temperature(self, monkeypatch, stream):
+        resilience.set_profiles_for_testing({
+            "test_fallback": resilience.CallProfile(
+                timeout_s=2.0, max_retries=0, retry_backoff_s=(),
+                first_chunk_timeout_s=1.0, idle_timeout_s=1.0,
+                allow_ollama_fallback=True, stream_mode=stream,
+            ),
+        })
+        seen: dict = {}
+        monkeypatch.setattr(models, "get_fallback_chat_model", lambda: self._recording_fallback(seen))
+        result = await models.invoke_json(
+            self._failing_primary(), "prompt", temperature=0, profile="test_fallback",
+        )
+        assert result == {"ok": 1}
+        assert seen["temperature"] == 0
+        assert "temperature" not in seen["kwargs"] and seen["kwargs"]["format"] == "json"

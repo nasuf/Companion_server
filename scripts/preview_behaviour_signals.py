@@ -58,6 +58,9 @@ async def main() -> None:
     args = ap.parse_args()
 
     await db.connect()
+    # 先加载后台配置的模型路由; 不加载会落到环境变量默认的 provider, 跟线上不是同一个模型。
+    from app.services.runtime_config import load_caches
+    await load_caches()
     scopes = await db.query_raw(
         """
         SELECT c.user_id, c.agent_id, c.workspace_id,

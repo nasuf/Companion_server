@@ -96,6 +96,36 @@ def _build_fallback_chat_model(model: str) -> ChatOllama:
     return cast(ChatOllama, build_chat_model("ollama", model))
 
 
+# 调用方按 OpenAI 习惯传的采样参数 → ChatOllama 上的同义字段。
+_OLLAMA_SAMPLING_FIELDS = {
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "top_k": "top_k",
+    "seed": "seed",
+    "max_tokens": "num_predict",
+}
+
+
+def _for_ollama(model: BaseChatModel, kwargs: dict[str, Any]) -> tuple[BaseChatModel, dict[str, Any]]:
+    """把采样参数从调用 kwargs 挪到 ChatOllama 实例上。
+
+    OpenAI 兼容的模型把 ainvoke 的额外 kwargs 当请求参数, temperature=0 正常生效;
+    ChatOllama 却把它们原样平铺进 AsyncClient.chat(**params), 直接 TypeError ——
+    生产上地点核验 (invoke_json(..., temperature=0)) 主 provider 一挂, 兜底就三次
+    全报错, 兜底形同虚设。采样参数在 Ollama 里属于 options, 这里换成同名字段的
+    副本, 由 ChatOllama 自己拼 options, 模型原有的 num_ctx 等配置也不会被冲掉。
+    """
+    if not isinstance(model, ChatOllama):
+        return model, {**kwargs}
+    fields = {
+        _OLLAMA_SAMPLING_FIELDS[key]: value
+        for key, value in kwargs.items()
+        if key in _OLLAMA_SAMPLING_FIELDS and value is not None
+    }
+    rest = {key: value for key, value in kwargs.items() if key not in _OLLAMA_SAMPLING_FIELDS}
+    return (model.model_copy(update=fields) if fields else model), rest
+
+
 def get_chat_model() -> BaseChatModel:
     # Content-addressed cache: an old in-flight turn cannot poison a new turn's bucket.
     return _build_chat_model(_provider_for("chat"), _chat_model_name())
@@ -330,15 +360,16 @@ async def _invoke_with_resilience(
             op=op, force_json=force_json, **kwargs,
         )
 
+    primary_model, primary_kwargs = _for_ollama(model, kwargs)
+
     async def _primary():
-        return await model.ainvoke(messages, **kwargs)
+        return await primary_model.ainvoke(messages, **primary_kwargs)
 
     fallback_factory = None
     if provider != "ollama":
-        _fb_model = get_fallback_chat_model()
         # Fallback 是 Ollama, 需要 format='json' 走 JSON 模式.
         # 用 setdefault 与 primary 路径对称 — 尊重调用方显式传入的 format.
-        fb_kwargs = {**kwargs}
+        _fb_model, fb_kwargs = _for_ollama(get_fallback_chat_model(), kwargs)
         if force_json:
             fb_kwargs.setdefault("format", "json")
 
@@ -378,15 +409,16 @@ async def _invoke_via_stream(
     from app.services.llm.resilience import collect_stream
     from langchain_core.messages import AIMessage
 
+    primary_model, primary_kwargs = _for_ollama(model, kwargs)
+
     def _primary_stream():
-        return model.astream(messages, **kwargs)
+        return primary_model.astream(messages, **primary_kwargs)
 
     fallback_factory = None
     fb_model_name = ""
     if provider != "ollama" and profile.allow_ollama_fallback:
-        _fb_model = get_fallback_chat_model()
+        _fb_model, fb_kwargs = _for_ollama(get_fallback_chat_model(), kwargs)
         fb_model_name = _resolve_usage_model_key(_fb_model)
-        fb_kwargs = {**kwargs}
         if force_json:
             fb_kwargs.setdefault("format", "json")
 
