@@ -87,6 +87,7 @@ from app.services.prompting.defaults import (
     WEB_SEARCH_DECISION_PROMPT,
     WEB_SEARCH_RECENT_TITLES_PROMPT,
     WEB_SEARCH_USAGE_PROMPT,
+    CHAT_REPETITION_GUARD_PROMPT,
     LIFE_OVERVIEW_PROMPT,
     LIGHT_ATTACK_REPLY_PROMPT,
     LOW_PATIENCE_REPLY_PROMPT,
@@ -1324,6 +1325,13 @@ PROMPT_DEFINITIONS = [
         "3/5 降到 2/5 (模型要自己扫几十条历史), 给出具体清单后降到 0/6. "
         "占位符 {titles}. 用户当前消息里自己提到的标题不列入 (那是他主动问的).",
         WEB_SEARCH_RECENT_TITLES_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.repetition_guard_section", "避免重复", "聊天热路径", "聊天",
+        "【工程补丁】主回复会照抄历史里自己刚说过的句子 (2026-10-15 连续 4 条以「你今天"
+        "还忙吗」结尾). 代码在最近 6 次 AI 回复里检出出现 ≥2 次的句子 "
+        "(chat/repetition_guard), 有才注入, 放在本轮 system 段. 占位符 {phrases}.",
+        CHAT_REPETITION_GUARD_PROMPT,
     ),
     PromptDefinition(
         "chat.web_search_decision", "联网搜索判定", "日常交流", "意图",

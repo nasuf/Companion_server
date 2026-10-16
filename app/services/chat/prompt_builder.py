@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -92,6 +93,52 @@ def _format_mbti_detail(mbti: dict) -> str:
 class _PromptBody:
     body: str
     prompt_key: str | None = None
+
+
+class SystemPromptText(str):
+    """The full main-reply system prompt, remembering where its per-turn part starts.
+
+    ``turn_offset`` indexes the first per-turn section (state / time / memories /
+    …) inside the full text; ``full == lead + "\n\n" + turn``. build_chat_messages
+    sends the turn part after the chat history so the stable lead plus the history
+    form a prefix the provider can cache. ``None`` means nothing to split.
+    """
+
+    turn_offset: int | None
+
+    def __new__(cls, value: str, turn_offset: int | None = None):
+        obj = str.__new__(cls, value)
+        obj.turn_offset = turn_offset if turn_offset and 0 < turn_offset < len(value) else None
+        return obj
+
+
+def split_system_prompt(system_prompt: str) -> tuple[str, str]:
+    """(lead, turn) parts of a system prompt; turn is "" when it cannot be split."""
+    offset = getattr(system_prompt, "turn_offset", None)
+    if not offset:
+        return str(system_prompt), ""
+    return str(system_prompt)[: offset - 2], str(system_prompt)[offset:]
+
+
+def fold_trailing_system(chat_messages: list[dict]) -> list[dict]:
+    """Merge system messages after the first one back into the leading system message.
+
+    For routes that cannot take a mid-conversation system message: Anthropic
+    raises on a non-leading one, and the Ark Responses web-search call was only
+    verified with a single leading system. The result is byte-identical to the
+    single-system layout.
+    """
+    if not chat_messages or chat_messages[0].get("role") != "system":
+        return chat_messages
+    extra = [m for m in chat_messages[1:] if m.get("role") == "system"]
+    if not extra:
+        return chat_messages
+    lead = "\n\n".join(
+        str(m.get("content") or "") for m in [chat_messages[0], *extra] if m.get("content")
+    )
+    return [{**chat_messages[0], "content": lead}] + [
+        m for m in chat_messages[1:] if m.get("role") != "system"
+    ]
 
 
 def _has_prompt_body(body: str | None) -> bool:
@@ -655,6 +702,8 @@ async def build_system_prompt(
     # 线下活动进行中的外出情境 (title/location/reached)，注入「当前线下活动」段。
     offline_activity: dict[str, Any] | None = None,
     last_reply_count: int | None = None,
+    # 最近几次回复里已出现 ≥2 次的句子 (chat/repetition_guard), 注入「避免重复」段.
+    repeated_phrases: list[str] | None = None,
     # True → 本轮主回复走联网搜索, 追加「联网结果使用」段纠正播报腔与重复.
     needs_web_search: bool = False,
     # 最近几轮出现过的作品名, 仅联网轮使用 (见 llm/web_search_gate).
@@ -665,6 +714,9 @@ async def build_system_prompt(
     **_deprecated_kwargs,
 ) -> str:
     """Build the full system prompt from the prompt stack.
+
+    返回 SystemPromptText: 稳定段与本轮段的分界记在 turn_offset 上, build_chat_messages
+    把本轮段放到聊天历史之后发送 (稳定段 + 历史一起命中前缀缓存).
 
     Section 排序按 dashscope context cache 友好原则: **稳定前缀在前, 变化字段后置**.
     阿里云 prefix-based cache 命中要前缀字节级完全相同 — 把 stable (核心规则 / 反幻觉
@@ -740,6 +792,7 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "对话一致性")
+    stable_section_count = len(sections)
 
     # ═══ VARIABLE SUFFIX (每请求可能变化, cache miss 起点) ═══════════════
     # 区内按**变化频率升序**排列 (慢变在前, 每轮必变在后): prefix cache 从
@@ -1036,6 +1089,20 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "条数变化")
 
+    repetition_tpl = (
+        await _get_optional_prompt("chat.repetition_guard_section") if repeated_phrases else None
+    )
+    if repeated_phrases and repetition_tpl is not None:
+        _append_section(
+            sections, components, "避免重复",
+            _render_section(
+                repetition_tpl, {"phrases": "".join(f"「{p}」" for p in repeated_phrases)},
+            ),
+            prompt_key="chat.repetition_guard_section",
+        )
+    else:
+        _record_skipped_section(diagnostics, "避免重复")
+
     # 联网结果使用规则: 只在本轮真的会联网时注入. 搜索结果由 provider 作为工具
     # 输出追加在上下文最末尾, 显著性压过对话历史和记忆 — 实测模型会照榜单念、
     # 重复端出刚聊过的片子、每轮宣告"刚搜了下". 本段同样放末尾争显著性.
@@ -1086,14 +1153,18 @@ async def build_system_prompt(
         )
         diagnostics["system_prompt_section_count"] = len(sections)
 
-    system_prompt = "\n\n".join(sections)
+    full_prompt = "\n\n".join(sections)
+    turn_offset = (
+        len("\n\n".join(sections[:stable_section_count])) + 2
+        if 0 < stable_section_count < len(sections) else None
+    )
     record_prompt_render(
-        system_prompt,
+        full_prompt,
         prompt_key="chat.system_base",
         components=components,
         source="chat.system_prompt",
     )
-    return system_prompt
+    return SystemPromptText(full_prompt, turn_offset)
 
 
 _MSG_TZ = ZoneInfo(settings.schedule_timezone)
@@ -1259,24 +1330,73 @@ def _coalesce_bubbles(messages: list[dict]) -> list[dict]:
     user:assistant = 1:2.56), 二是模型看到的是"AI 连说了三次话", 跟实际的一
     次发言对不上.
 
-    合并只按"连续 + 同角色"判定, 不看时间戳: 用户连发几条碎片本来也会被聚合
-    层当成一条处理, 合并后与之一致. 时间戳取该组第一条 —— 一次回复的几个气泡
-    本就在同一分钟内, 而取第一条能让时间前缀跟这轮发言的起点对齐.
+    合并按"连续 + 同角色"判定: 用户连发几条碎片本来也会被聚合层当成一条处理,
+    合并后与之一致. 组的时间前缀取第一条; 与上一行隔了 _BUBBLE_MERGE_GAP_S 以上
+    的片段在正文里带上自己的时间 —— 否则隔天才发的主动消息会挂在前一天那条回复
+    的时间下面, 模型看到的时间线是错的 (2026-10-15 trace: 「好久没聊啦」被标成
+    前一晚 19:28, 紧跟在一次争执之后).
     """
     merged: list[dict] = []
+    last_ts: datetime | None = None
     for msg in messages:
         content = str(msg.get("content", "") or "")
+        ts = _parse_message_created_at(msg.get("createdAt"))
         if merged and merged[-1]["role"] == msg.get("role"):
             if content:
+                if ts and last_ts and (ts - last_ts).total_seconds() > _BUBBLE_MERGE_GAP_S:
+                    content = f"{format_message_timestamp(msg.get('createdAt'))}{content}"
                 prev = merged[-1]["content"]
                 merged[-1]["content"] = f"{prev} {content}".strip() if prev else content
+            last_ts = ts or last_ts
             continue
         merged.append({
+            "id": msg.get("id"),
             "role": msg.get("role"),
             "content": content,
             "createdAt": msg.get("createdAt"),
         })
+        last_ts = ts
     return merged
+
+
+# 一次回复的气泡几秒内就落库完; 主动追问最早在 AI 说完 5 分钟后.
+_BUBBLE_MERGE_GAP_S = 120
+# 历史窗口起点只落在"切点"上 (平均每 12 条一个). 切点由消息 id 决定、跨轮不变,
+# 于是窗口起点能连续几轮保持不动, 系统提示词 + 历史整段命中 provider 前缀缓存;
+# 按 token 预算逐条往前填时, 预算一满起点每轮都挪, 历史永远进不了缓存.
+_HISTORY_CUT_EVERY = 12
+# 为了对齐切点最多让出这么多预算; 让不出时退回逐条填充, 保证上下文不被砍太多.
+_HISTORY_CUT_MAX_SKIP = 0.35
+
+
+def _is_history_cut_point(msg: dict) -> bool:
+    key = msg.get("id") or msg.get("createdAt")
+    # crc32 rather than hash(): hash() is salted per process, and the window
+    # must start at the same message on every worker.
+    return bool(key) and zlib.crc32(str(key).encode("utf-8")) % _HISTORY_CUT_EVERY == 0
+
+
+def _select_history_window(
+    messages: list[dict], token_budget: int, token_counts: list[int],
+) -> int:
+    """Start index of the history window: greedy fit, then snapped to a cut point."""
+    used = 0
+    earliest = len(messages)
+    for index in range(len(messages) - 1, -1, -1):
+        if used + token_counts[index] > token_budget and earliest < len(messages):
+            break
+        used += token_counts[index]
+        earliest = index
+    if earliest == 0:
+        return 0
+    skipped = 0
+    for index in range(earliest, len(messages) - 1):
+        if _is_history_cut_point(messages[index]):
+            return index
+        skipped += token_counts[index]
+        if skipped > token_budget * _HISTORY_CUT_MAX_SKIP:
+            break
+    return earliest
 
 
 def build_chat_messages(
@@ -1298,6 +1418,13 @@ def build_chat_messages(
     （时区/缓存权衡见 format_message_timestamp docstring）。
 
     同一次回复被拆成的多个气泡先合并成一条再计预算（见 `_coalesce_bubbles`）。
+
+    布局为 [稳定 system] + 历史 + [本轮 system]: system 提示词里每轮都变的段落
+    (状态/时间/记忆/条数…) 放到历史之后 (见 SystemPromptText). 放在历史之前时
+    它们每轮都变, 后面约 4000 token 的历史永远命中不了 provider 前缀缓存
+    (2026-10-15 trace: 8075 输入只命中 3896). 窗口起点对齐到稳定切点
+    (`_select_history_window`), 否则预算一满起点每轮都挪, 缓存同样落空.
+    Anthropic 驱动与联网搜索调用前用 `fold_trailing_system` 合回单个 system.
 
     drop_older_than_seconds (2026-09-13): 传非 None 时, 把 createdAt 比
     (now - threshold) 更早的历史 turn 全部砍掉, **但当前那一轮 (messages 里
@@ -1342,19 +1469,20 @@ def build_chat_messages(
                 if ts is None or ts >= cutoff or ts == latest_ts
             ]
 
-    selected: list[dict] = []
-    used_tokens = 0
+    rendered = [
+        f"{format_message_timestamp(msg.get('createdAt'))}{msg.get('content', '')}"
+        for msg in coalesced
+    ]
+    start = _select_history_window(
+        coalesced, token_budget, [estimate_tokens(text) for text in rendered],
+    )
 
-    for msg in reversed(coalesced):
-        content = f"{format_message_timestamp(msg.get('createdAt'))}{msg.get('content', '')}"
-        tokens = estimate_tokens(content)
-        if used_tokens + tokens > token_budget and selected:
-            break  # budget exhausted (always include at least the latest message)
-        selected.append({"role": msg["role"], "content": content})
-        used_tokens += tokens
-
-    selected.reverse()
-
-    result: list[dict] = [{"role": "system", "content": system_prompt}]
-    result.extend(selected)
+    lead, turn = split_system_prompt(system_prompt)
+    result: list[dict] = [{"role": "system", "content": lead}]
+    result.extend(
+        {"role": msg["role"], "content": text}
+        for msg, text in zip(coalesced[start:], rendered[start:])
+    )
+    if turn:
+        result.append({"role": "system", "content": turn})
     return result

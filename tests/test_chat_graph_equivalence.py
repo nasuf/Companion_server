@@ -118,7 +118,10 @@ async def test_paired_reply_paths_and_prompt_inputs(monkeypatch, case):
                 assert snapshot["conflict_save"] == 1
             elif case in ("tier_empty", "tier_failure", "reunion", "relational", "music", "music_failure", "media", "aggregation"):
                 assert len(io.main_calls) == 1
-                prompt = io.main_calls[0][0][0]["content"]
+                # Per-turn sections ride in a trailing system message after the history.
+                prompt = "\n\n".join(
+                    m["content"] for m in io.main_calls[0][0] if m["role"] == "system"
+                )
                 if case == "music":
                     assert "合成歌曲" in prompt and "合成歌手" in prompt
                 if case == "music_failure":

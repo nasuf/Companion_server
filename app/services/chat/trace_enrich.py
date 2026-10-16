@@ -58,6 +58,7 @@ _MAIN_PROMPT_SECTION_COMPONENTS = [
     ("## 你的隐性状态约束", "chat.ai_state_constraint"),
     ("## 联网结果使用", "chat.web_search_usage"),
     ("## 刚聊过的作品", "chat.web_search_recent_titles"),
+    ("## 避免重复", "chat.repetition_guard_section"),
     ("## 回复要求", "chat.response_instruction"),
 ]
 
@@ -90,6 +91,8 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     # 联网结果使用规则 / 刚聊过的作品 — 仅在联网轮作为主回复 section 出现
     "chat.web_search_usage",
     "chat.web_search_recent_titles",
+    # 避免重复 — 仅在最近回复出现复读时作为主回复 section 出现
+    "chat.repetition_guard_section",
     "chat.delay_context_section",
     "chat.l3_memory_section",
     "chat.memory_empty_anchor",
@@ -699,6 +702,26 @@ def _extract_first_user_message(inputs: Any) -> str | None:
     return None
 
 
+def _extract_trailing_system_message(inputs: Any) -> str | None:
+    """Content of the last input message when it is a system message after others."""
+    if not isinstance(inputs, dict):
+        return None
+    messages = inputs.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    flat = [m for group in messages for m in (group if isinstance(group, list) else [group])]
+    if len(flat) < 2 or not isinstance(flat[-1], dict):
+        return None
+    last = flat[-1]
+    kwargs = last.get("kwargs") or {}
+    ids = last.get("id")
+    is_system = kwargs.get("type") == "system" or last.get("type") == "system" or (
+        isinstance(ids, list) and "SystemMessage" in ids
+    )
+    content = kwargs.get("content") if kwargs else last.get("content")
+    return content if is_system and isinstance(content, str) else None
+
+
 def _extract_output_text(outputs: Any) -> str:
     """LangSmith run.outputs.generations[0][0].text 通常就是 LLM 输出文本."""
     if not isinstance(outputs, dict):
@@ -843,6 +866,12 @@ def apply_prompt_render_traces(
         if not rendered_prompt:
             continue
         matched = by_hash.get(prompt_hash(rendered_prompt))
+        if not matched:
+            # Main reply: per-turn sections travel as a trailing system message
+            # after the history; spans were recorded over lead + "\n\n" + turn.
+            trailing = _extract_trailing_system_message(step.get("inputs"))
+            if trailing:
+                matched = by_hash.get(prompt_hash(f"{rendered_prompt}\n\n{trailing}"))
         if not matched:
             continue
 

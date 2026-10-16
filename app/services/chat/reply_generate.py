@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable
 
 from app.observability.events import EVT_REPLY_LLM, EVT_REPLY_SPLIT, EVT_REPLY_TIER
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
+from app.services.chat.prompt_builder import fold_trailing_system
 from app.services.llm.models import convert_messages, get_chat_model, get_fallback_chat_model
 from app.services.llm.resilience import (
     LLMFailedError,
@@ -135,7 +136,7 @@ async def _try_web_search_reply(chat_messages: list[dict]) -> str | None:
     except Exception:  # noqa: BLE001 — 配置读取失败不阻塞主回复
         return None
     return await generate_with_web_search(
-        chat_messages, model=resolved.remote_chat_model,
+        fold_trailing_system(chat_messages), model=resolved.remote_chat_model,
     )
 
 
@@ -166,6 +167,9 @@ async def _run_main_llm(
 
     primary = get_chat_model()
     primary_prov = provider_name(primary)
+    if primary_prov == "claude":
+        # Anthropic rejects a system message after the conversation has started.
+        chat_messages = fold_trailing_system(chat_messages)
     lc_messages = convert_messages(chat_messages)
 
     # primary 若本就是 Ollama, 不配 fallback (避免本地 → 本地二次重试无意义)

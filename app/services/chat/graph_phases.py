@@ -8,6 +8,7 @@ It deliberately has no checkpoint or replay implementation.
 from __future__ import annotations
 
 from app.services.chat.memory_usage import submit_memory_usage
+from app.services.chat.repetition_guard import find_repeated_ai_phrases
 
 
 async def load_turn(ctx):
@@ -911,6 +912,7 @@ async def prepare_reply(ctx):
             gift_context=ctx.gift_context,
             offline_activity=offline_activity,
             last_reply_count=ctx.last_reply_count,
+            repeated_phrases=find_repeated_ai_phrases(ctx.messages_dicts),
             needs_web_search=ctx.needs_web_search,
             discussed_titles=services.extract_discussed_titles(
                 ctx.messages_dicts, current_message=ctx.user_message

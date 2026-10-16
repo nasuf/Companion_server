@@ -173,6 +173,7 @@ from app.services.chat.post_process import (
     run_post_process as _background_post_process,
     _bg_memory_pipeline,
 )
+from app.services.chat.repetition_guard import find_repeated_ai_phrases
 from app.services.chat.tracing import create_tracer
 from app.services.mbti import get_mbti
 from app.services.chat.turn_lifecycle import finish_assistant_turn
@@ -1455,6 +1456,7 @@ async def _stream_legacy_response(
                 gift_context=gift_context,
                 offline_activity=offline_activity,
                 last_reply_count=last_reply_count,
+                repeated_phrases=find_repeated_ai_phrases(messages_dicts),
                 needs_web_search=needs_web_search,
                 discussed_titles=(
                     extract_discussed_titles(
