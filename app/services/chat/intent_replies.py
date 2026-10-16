@@ -45,13 +45,20 @@ async def _render_llm(
     params: dict[str, Any],
     *,
     max_chars: int = 120,
+    keep_bubbles: bool = True,
 ) -> str | None:
-    """聊天模型文本回复：取 prompt → format → LLM → 裁剪。"""
+    """聊天模型文本回复：取 prompt → format → LLM → 裁剪。
+
+    keep_bubbles: 这些回复都经短路出口 (short_circuit_reply) 发出, 模型按前置
+    【通用回复规则】写的 || 由出口拆成多气泡. 以前只取首段, 后半句 (常是追问)
+    被静默丢掉. 输出不经短路出口的调用方必须传 False.
+    """
     result = await render_prompt(
         prompt_key,
         params,
         lambda p: invoke_text(get_chat_model(), p),
         max_chars=max_chars,
+        keep_bubbles=keep_bubbles,
         optional_keys=_OPTIONAL_REFERENCE_KEYS,
     )
     return result or None
@@ -678,6 +685,8 @@ async def delay_explanation_reply(
             "delay_minutes": str(delay_minutes),
         },
         max_chars=50,
+        # 独立一条推送 (emit_replies), 不经短路出口拆分
+        keep_bubbles=False,
     )
 
 
@@ -905,8 +914,8 @@ async def ai_reply_emotion(reply_text: str) -> dict:
 # 1. lstrip("0123456789.、) ") 字符集贪心 → "12月8号" 首字符 "1"/"2" 被误删 (trace 019e0116)
 # 2. prompt 含 "可适当扩写" → LLM 看 🎂 自作主张编出"祝你生日快乐" (5 月份语境错)
 # 移除整层后, 主 LLM 给单句就单条, 给"句1||句2"就两条 — 信任 LLM 输出, 不再
-# 二次调用. 其他路径 (tier reply / intent reply / contradiction / boundary)
-# 本就是单条短回复, 不需要拆分.
+# 二次调用. 短路回复 (intent reply / boundary) 同理: 模型写的 || 由
+# short_circuit_reply 直接切成气泡, 不再调小模型.
 
 
 __all__ = [

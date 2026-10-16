@@ -270,6 +270,44 @@ def split_and_validate_replies(
     return result or [parts[0][:max_per_reply]]
 
 
+def split_short_circuit_reply(
+    text: str,
+    max_count: int = MAX_REPLY_COUNT,
+) -> list[str]:
+    """短路回复按模型写的 || 切成气泡; 没有 || 时原样单条.
+
+    与 split_and_validate_replies 的区别是刻意的:
+    - 只认 ||. 程序拼的确认文案 (删除候选列表等) 靠换行排版, 不能被空行切开
+      或折叠换行.
+    - 不再按字数截断: 短路回复的字数预算已在生成时 (render_prompt max_chars)
+      按可见字数收过, 这里只切分, 不丢内容.
+    条数溢出合并进最后一条 (同主回复护栏), 每条剥系统标记; 全空给占位省略号.
+    """
+    parts = [
+        cleaned for cleaned in (
+            strip_system_markers(part.strip()) for part in (text or "").split("||")
+        )
+        if cleaned
+    ]
+    if not parts:
+        return ["..."]
+    if len(parts) > max_count:
+        overflow = len(parts) - max_count
+        parts = parts[:max_count - 1] + [" ".join(parts[max_count - 1:])]
+        logger.info(
+            f"[REPLY-GUARDRAIL] short-circuit merged {overflow} overflow bubbles "
+            f"into last (max_count={max_count})",
+            extra={
+                "event": EVT_REPLY_GUARDRAIL,
+                "action": "merge_overflow",
+                "overflow_bubbles": overflow,
+                "max_count": max_count,
+                "reply_path": "short_circuit",
+            },
+        )
+    return _polish_split_boundaries(parts) or ["..."]
+
+
 def _merge_adjacent_shortest(parts: list[str], max_per: int) -> list[str] | None:
     """Merge the adjacent pair with the smallest combined length → count-1.
 

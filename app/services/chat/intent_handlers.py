@@ -192,6 +192,12 @@ class ShortCircuitCtx:
             if kind.startswith(text_only_prefixes)
             else VoiceContext.NORMAL_CHAT
         )
+
+        def _note_delivered(text: str) -> None:
+            # Legacy background processing must use the delivered text — every
+            # bubble, including any deterministic persona correction.
+            self.last_short_circuit_reply = text
+
         async for evt in finalize_short_circuit(
             reply,
             conversation_id=self.conversation_id,
@@ -215,15 +221,9 @@ class ShortCircuitCtx:
             persona_conflict_fallback=_CRISIS_STATIC_FALLBACK if kind.startswith("crisis") else None,
             workspace_id=self.workspace_id,
             memory_usage_event_id=self.memory_usage_event_id,
+            on_delivered=_note_delivered,
             **({"defer_turn_finalization": True} if self.defer_turn_finalization else {}),
         ):
-            if evt.get("event") == "reply":
-                import json
-                payload = json.loads(evt["data"])
-                if payload.get("index") == self.reply_index_offset:
-                    # Legacy background processing must use the delivered text,
-                    # including any deterministic persona correction.
-                    self.last_short_circuit_reply = payload["text"]
             yield evt
 
 
@@ -954,7 +954,7 @@ async def handle_crisis(
       让 AI 编故事好得多.
     - emoji/sticker 跳过 — handler 直接通过 ctx.finalize 走 finalize_short_circuit
       路径, 不走 emit_replies decoration. 这是天然就跳的, 不需要额外 flag.
-    - reply_count = 1 — finalize_short_circuit 默认单条, 跟其他 short-circuit 一致.
+    - 条数 — 模型写了 || 才由 short_circuit_reply 切成多条, 跟其他 short-circuit 一致.
     """
     user_memory_block = _format_user_memory_for_crisis(classified_memories)
     try:

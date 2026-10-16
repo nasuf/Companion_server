@@ -124,13 +124,19 @@ async def _emit_short_circuit(
     reply: str,
     extra_metadata: dict,
 ) -> AsyncGenerator[dict, None]:
-    """复用 ctx.short_circuit_fn 推 reply/done 事件。"""
+    """复用 ctx.short_circuit_fn 推 reply/done 事件。
+
+    last_short_circuit_reply 记实际发出的全文 (reply 里的 || 已被切成气泡)。
+    """
+    from app.services.chat.multi_intent import delivered_reply_text
+
     ctx.last_short_circuit_reply = reply
     events = await ctx.short_circuit_fn(
         reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
         extra_metadata=extra_metadata,
         trace_id=ctx.tracer.safe_trace_id,
     )
+    ctx.last_short_circuit_reply = delivered_reply_text(events) or reply
     for evt in events:
         yield evt
 
@@ -160,7 +166,7 @@ async def _handle_blocked(
             {"boundary": True, "zone": "blocked", "apology_unblock": True},
         ):
             yield evt
-        _fire_memory_pipeline(ctx, reply)
+        _fire_memory_pipeline(ctx, ctx.last_short_circuit_reply or reply)
         ctx.tracer.close()
         ctx.stopped = True
         return
@@ -313,7 +319,7 @@ async def _handle_residual_patience(
             ctx.tracer.close()
             ctx.stopped = True
             # 道歉是有价值的关系事件, 该进记忆 (与 blocked 态的处理一致)
-            _fire_memory_pipeline(ctx, reply)
+            _fire_memory_pipeline(ctx, ctx.last_short_circuit_reply or reply)
             return
 
     try:

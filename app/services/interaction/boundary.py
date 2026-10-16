@@ -32,7 +32,7 @@ from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
 from app.services.prompting.trace_components import record_prompt_render
-from app.services.prompting.utils import SafeDict
+from app.services.prompting.utils import SafeDict, normalize_reply_bubbles
 
 logger = logging.getLogger(__name__)
 
@@ -472,7 +472,11 @@ async def generate_boundary_reply_llm(
             ],
             source="boundary.composite",
         )
-        return (await invoke_text(get_chat_model(), prompt)).strip().split("||")[0][:120]
+        # 保留 || 气泡分隔: 边界回复全部经短路出口发出, 由它切成多条气泡
+        # (以前只取首段, 后半句被静默丢掉).
+        return normalize_reply_bubbles(
+            await invoke_text(get_chat_model(), prompt), 120,
+        )
     except Exception as e:
         logger.warning(f"Boundary LLM reply failed ({key}): {e}")
         return None

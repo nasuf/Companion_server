@@ -62,6 +62,33 @@ def _truncate_at_sentence_boundary(text: str, max_len: int) -> str:
     return truncated
 
 
+def normalize_reply_bubbles(raw: str, max_chars: int | None = None) -> str:
+    """保留 || 气泡分隔 (由短路出口拆成多气泡), 只做规整与总字数预算.
+
+    预算按可见字数算 (不含分隔符): 前面的气泡完整保留, 超出时在最后一条
+    放得下的气泡里按句末截断、其后丢弃 —— 与 split_and_validate_replies 的
+    总字数上限同语义. 首条气泡本身超长时照旧截断.
+    """
+    parts = [
+        part.strip() for part in (raw or "").split("||")
+        if part.strip()
+    ]
+    if not max_chars:
+        return "||".join(parts)
+    kept: list[str] = []
+    total = 0
+    for part in parts:
+        remaining = max_chars - total
+        if len(part) <= remaining:
+            kept.append(part)
+            total += len(part)
+            continue
+        if not kept or remaining > 5:
+            kept.append(_truncate_at_sentence_boundary(part, remaining))
+        break
+    return "||".join(kept)
+
+
 # 所有 prompt 里 {recent_context} 为空时的统一文本.
 # 全角括号: 跟 format_recent_context 的输出对齐, 让 LLM 始终看到同一 token.
 EMPTY_RECENT_CONTEXT = "（无）"
@@ -202,12 +229,16 @@ async def render_prompt(
     *,
     max_chars: int | None = None,
     strip_split: bool = True,
+    keep_bubbles: bool = False,
     optional_keys: Iterable[str] | None = None,
 ) -> Any:
     """取 prompt → format_map → 调 invoke_fn。
 
     - invoke_fn: `invoke_text` 返回 str，`invoke_json` 返回 dict/list。
     - max_chars / strip_split 仅对字符串结果生效：主动文案合并分句，其余取首段并裁剪。
+    - keep_bubbles: 非主动模板保留 || 气泡分隔 (调用方出口负责拆多气泡),
+      max_chars 按可见字数预算. 只给输出会进短路出口 (short_circuit_reply) 的
+      回复类模板用 —— 其余出口不拆 ||, 保留会把分隔符原样漏给用户.
     失败或空结果返回 None（或 {} 视 invoke_fn 而定，由调用方判断）。
     """
     try:
@@ -219,6 +250,8 @@ async def render_prompt(
                 from app.services.prompting.reply_prefix import PROACTIVE_REPLY_PROMPT_KEYS
                 if prompt_key in PROACTIVE_REPLY_PROMPT_KEYS:
                     raw = " ".join(part.strip() for part in raw.split("||") if part.strip())
+                elif keep_bubbles:
+                    return normalize_reply_bubbles(raw, max_chars)
                 else:
                     raw = raw.strip().split("||")[0]
             if max_chars and len(raw) > max_chars:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from app.db import db
@@ -31,6 +31,27 @@ from app.services.runtime.tasks import fire_background as _fire_background
 logger = logging.getLogger(__name__)
 
 _DONE_EVENT = {"event": "done", "data": json.dumps({"message_id": "complete"})}
+
+
+def _count_reply_events(events: list[dict]) -> int:
+    return sum(1 for evt in events if evt.get("event") == "reply")
+
+
+def delivered_reply_text(events: list[dict]) -> str:
+    """short_circuit_reply 事件里实际发给用户的全文 (多气泡空格拼接).
+
+    读不出文本时返回空串, 调用方回退到自己手里的原文."""
+    texts: list[str] = []
+    for evt in events:
+        if evt.get("event") != "reply":
+            continue
+        try:
+            text = json.loads(evt["data"]).get("text")
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        if isinstance(text, str) and text:
+            texts.append(text)
+    return " ".join(texts)
 
 
 def _turn_user_message_ids(reply_context: dict | None) -> list[str]:
@@ -75,36 +96,44 @@ async def short_circuit_reply(
     - extra_metadata：透传给 save_replies_fn 的持久化 metadata（如 boundary/zone/attack_level）.
     - trace_id: 挂到首条 reply.metadata, 让前端 Trace 按钮可点. sub_intent_mode
       或非父调用可不传.
+    - reply 可含 || 气泡分隔 (模型按前置【通用回复规则】写的), 在此切成多条
+      气泡, 每条一个 reply 事件、index 连续; 返回列表里的 reply 事件数即气泡数.
     """
-    # 硬保证: 一条消息最多 1 个 emoji (短路回复不走 emit_replies 的出口兜底,
-    # 在此单独收口; 持久化与 SSE 推送用同一份清理后的文本).
-    # 系统标记 (EMO/条数) 同点收口 — 短路 prompt 也带 reply_prefix, LLM 可能
-    # 跟着输出标记, 不剥会直接漏给用户 (生产 2026-07-19 复现).
-    from app.services.chat.reply_formatting import strip_system_markers
+    # 硬保证: 一个回合最多 1 个 emoji (短路回复不走 emit_replies 的出口兜底,
+    # 在此单独收口; 持久化与 SSE 推送用同一份清理后的文本). 切分前对整段收口,
+    # 多气泡也只留一个.
+    # 系统标记 (EMO/条数) 在切分时逐条剥 — 短路 prompt 也带 reply_prefix, LLM
+    # 可能跟着输出标记, 不剥会直接漏给用户 (生产 2026-07-19 复现). 整条都是标记
+    # 时给占位省略号, 绝不回退到未清理的原文.
+    from app.services.chat.reply_formatting import split_short_circuit_reply
     from app.services.emoji import limit_emojis
-    # 整条都是标记时给占位省略号 (与 split_and_validate_replies 兜底一致),
-    # 绝不回退到未清理的原文.
-    reply = limit_emojis(strip_system_markers(reply) or "...")
+    bubbles = split_short_circuit_reply(limit_emojis(reply or ""))
+    reply = " ".join(bubbles)
     if agent is not None:
         from app.services.persona_grounding import guard_reply
-        reply, corrected = await guard_reply(agent, reply)
+        guarded, corrected = await guard_reply(agent, reply)
         if corrected:
-            reply = persona_conflict_fallback or reply
+            reply = persona_conflict_fallback or guarded
+            bubbles = [reply]
             extra_metadata = {**(extra_metadata or {}), "persona_location_corrected": True}
+    # 语义 metadata (boundary / response_diagnostics.short_circuit_kind / 重复追问
+    # 键…) 每条气泡都带: 判定窗与重复追问检测读的是最后一条 AI 消息.
     metadata = dict(extra_metadata or {})
+    # 追踪快照只挂首条, 与主回复 persist_reply 一致.
+    first_metadata: dict[str, Any] = {}
     if not sub_intent_mode:
         try:
             from app.services.memory.retrieval.trace import snapshot_retrieval_traces
             retrieval_traces = snapshot_retrieval_traces()
             if retrieval_traces:
-                metadata.setdefault("memory_retrievals", retrieval_traces)
+                first_metadata["memory_retrievals"] = retrieval_traces
         except Exception:
             pass
         try:
             from app.services.prompting.trace_components import snapshot_prompt_render_traces
             prompt_traces = snapshot_prompt_render_traces()
             if prompt_traces:
-                metadata.setdefault("prompt_render_traces", prompt_traces)
+                first_metadata["prompt_render_traces"] = prompt_traces
         except Exception:
             pass
     prepared_voice = None
@@ -135,16 +164,21 @@ async def short_circuit_reply(
                 )
 
     if prepared_voice is not None:
+        # 语音只发一条, 念整段 (与主回复 normalize_reply 一致).
+        bubbles = [reply]
         metadata.update({
             "display_mode": "voice",
             "attachments": [prepared_voice.metadata],
         })
-    reply_payload: str | dict = (
-        {"text": reply, **metadata} if metadata else reply
-    )
+    reply_payloads: list[str | dict] = []
+    for i, text in enumerate(bubbles):
+        payload_metadata = {**first_metadata, **metadata} if i == 0 else metadata
+        reply_payloads.append(
+            {"text": text, **payload_metadata} if payload_metadata else text
+        )
     save_args = (
         conversation_id,
-        [reply_payload],
+        reply_payloads,
     )
     save_kwargs = {
         "trace_id": trace_id,
@@ -205,9 +239,11 @@ async def short_circuit_reply(
     else:
         _fire_background(save_replies_fn(*save_args, **save_kwargs))
     # 图灵测试条数变化: 短路回复也计入"上一轮条数" (用户感知的是气泡数,
-    # 不区分回复来自哪条管线). 累计 offset+1, 最后一次写入即本轮总数.
+    # 不区分回复来自哪条管线). 累计 offset+气泡数, 最后一次写入即本轮总数.
     from app.services.chat.reply_count_state import save_last_reply_count
-    _fire_background(save_last_reply_count(conversation_id, reply_index_offset + 1))
+    _fire_background(
+        save_last_reply_count(conversation_id, reply_index_offset + len(bubbles))
+    )
     if not sub_intent_mode and not defer_turn_finalization:
         await finish_assistant_turn(
             conversation_id=conversation_id,
@@ -217,20 +253,22 @@ async def short_circuit_reply(
             workspace_id=workspace_id,
             turn_message_ids=turn_user_message_ids,
         )
-    event_data: dict[str, Any] = {
-        "text": reply,
-        "index": reply_index_offset,
-    }
-    if prepared_voice is not None:
-        event_data.update({
-            "display_mode": "voice",
-            "attachments": [prepared_voice.metadata],
-            "assistant_message_id": assistant_message_id,
+    events: list[dict] = []
+    for i, text in enumerate(bubbles):
+        event_data: dict[str, Any] = {
+            "text": text,
+            "index": reply_index_offset + i,
+        }
+        if prepared_voice is not None:
+            event_data.update({
+                "display_mode": "voice",
+                "attachments": [prepared_voice.metadata],
+                "assistant_message_id": assistant_message_id,
+            })
+        events.append({
+            "event": "reply",
+            "data": json.dumps(event_data),
         })
-    events: list[dict] = [{
-        "event": "reply",
-        "data": json.dumps(event_data),
-    }]
     if include_done and not sub_intent_mode and not defer_turn_finalization:
         events.append(_DONE_EVENT)
     return events
@@ -326,11 +364,14 @@ async def finalize_short_circuit(
     defer_turn_finalization: bool = False,
     persona_conflict_fallback: str | None = None,
     memory_usage_event_id: str | None = None,
+    on_delivered: Callable[[str], None] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
     sub_intent_mode=True 时跳过 done/trace（由父调用完成）。
     tracer 是 `ChatTracer` 实例（LocalTracer / LangSmithTracer）；本函数仅调 `tracer.close()`。
+    on_delivered: 收到本条短路回复实际发出的全文 (多气泡空格拼接, 含人设纠正),
+    在推送前回调一次; 子意图的回复不计入.
     """
     # sub_intent_mode 父调用已经保存过 trace_id 到首条 reply.metadata, 不重复挂.
     trace_id = (
@@ -353,13 +394,17 @@ async def finalize_short_circuit(
         defer_turn_finalization=defer_turn_finalization,
         persona_conflict_fallback=persona_conflict_fallback,
     )
+    delivered = delivered_reply_text(events) if on_delivered is not None else ""
+    if delivered:
+        on_delivered(delivered)
     for evt in events:
         yield evt
 
     if not sub_intent_mode and not defer_turn_finalization and pending_sub_fragments:
         async for evt in process_sub_intents(
             pending_sub_fragments, conversation_id, agent, user_id,
-            reply_context, start_index=reply_index_offset + 1,
+            reply_context,
+            start_index=reply_index_offset + _count_reply_events(events),
             parent_patience=cached_patience,
             memory_usage_event_id=memory_usage_event_id,
         ):

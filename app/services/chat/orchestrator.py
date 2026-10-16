@@ -138,6 +138,7 @@ from app.services.chat.intent_routes import (
 from app.services.chat.reply_formatting import (
     _clean_reply_part,
     split_and_validate_replies,
+    split_short_circuit_reply,
     truncate_at_sentence,
 )
 # R4 拆分: 关系情绪线索检测移至 relationship/relation_context; re-export 兼容.
@@ -1969,6 +1970,9 @@ async def _stream_legacy_response(
             sc_reply = sc_ctx.last_short_circuit_reply
         elif preflight_ctx is not None and preflight_ctx.last_short_circuit_reply is not None:
             sc_reply = preflight_ctx.last_short_circuit_reply
+        if sc_reply is not None:
+            # preflight (及出口异常时的 sc_ctx) 记的是交给出口前的原文, 可能带 ||
+            sc_reply = " ".join(split_short_circuit_reply(sc_reply))
 
         boundary_handled = boundary_ctx is not None and boundary_ctx.stopped
         if (sc_reply is not None
