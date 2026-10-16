@@ -24,7 +24,7 @@ from app.services.reflection import run_weekly_reflection
 from app.services.portrait import update_portrait_weekly
 from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview, generate_daily_schedule, get_cached_schedule,
-    get_current_status, get_life_overview, review_daily_schedule,
+    get_current_status, get_life_overview, has_cached_schedule, review_daily_schedule,
 )
 from app.services.mbti import get_mbti
 from app.services.interaction.boundary import recover_patience_hourly
@@ -882,6 +882,11 @@ async def _run_weekly_reflection():
 async def _run_daily_schedules():
     async def _body():
         async def _gen(agent):
+            # 午夜后有人聊天时, 消息路径已经现场生成了今天的作息, AI 也照着它说过
+            # 话了。这里再生成一份会把它整份换掉 —— 刚说「明早要去车间」, 天亮后顶部
+            # 和回复却换成了另一套安排。
+            if await has_cached_schedule(agent.id):
+                return
             overview = await get_life_overview(agent.id)
             mbti = get_mbti(agent)
             await generate_daily_schedule(

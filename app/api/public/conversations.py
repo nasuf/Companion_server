@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
@@ -72,38 +72,51 @@ async def _agent_name(agent_id: str | None) -> str:
     return (getattr(agent, "name", None) or "我").strip() or "我"
 
 
+async def _load_day_schedule(agent_id: str, local_day: datetime) -> list | None:
+    try:
+        schedule = await get_cached_schedule(agent_id, local_day)
+    except Exception:
+        schedule = None
+    if schedule:
+        return schedule
+    try:
+        # tzinfo=None 是必须的, 理由见 schedule.py 落库处的注释: 列是
+        # @db.Date, 带时区的午夜会被归一到 UTC 后截断到前一天。读写两侧必须
+        # 用同一种写法, 否则这里查的行和那边写的行不是同一行。
+        date_only = local_day.replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=None,
+        )
+        row = await db.aidailyschedule.find_unique(
+            where={"agentId_date": {"agentId": agent_id, "date": date_only}}
+        )
+        schedule = getattr(row, "scheduleData", None) if row else None
+        if schedule:
+            # Redis failures must not expose ungrounded legacy DB scenes
+            # through the conversation activity/status response.
+            from app.services.schedule_domain.schedule import _ground_schedule
+            agent = await db.aiagent.find_unique(where={"id": agent_id})
+            schedule = await _ground_schedule(agent, schedule)
+    except Exception:
+        schedule = None
+    return schedule or None
+
+
 async def _current_ai_status(agent_id: str | None) -> dict | None:
     if not agent_id:
         return None
-    schedule = None
-    try:
-        schedule = await get_cached_schedule(agent_id)
-    except Exception:
-        schedule = None
-    if not schedule:
-        try:
-            local_now = datetime.now(ZoneInfo(settings.schedule_timezone))
-            # tzinfo=None 是必须的, 理由见 schedule.py 落库处的注释: 列是
-            # @db.Date, 带时区的午夜会被归一到 UTC 后截断到前一天。读写两侧必须
-            # 用同一种写法, 否则这里查的行和那边写的行不是同一行。
-            date_only = local_now.replace(
-                hour=0, minute=0, second=0, microsecond=0, tzinfo=None,
-            )
-            row = await db.aidailyschedule.find_unique(
-                where={"agentId_date": {"agentId": agent_id, "date": date_only}}
-            )
-            schedule = getattr(row, "scheduleData", None) if row else None
-            if schedule:
-                # Redis failures must not expose ungrounded legacy DB scenes
-                # through the conversation activity/status response.
-                from app.services.schedule_domain.schedule import _ground_schedule
-                agent = await db.aiagent.find_unique(where={"id": agent_id})
-                schedule = await _ground_schedule(agent, schedule)
-        except Exception:
-            schedule = None
-    if not schedule:
-        return None
-    status = get_current_status(schedule)
+    local_now = datetime.now(ZoneInfo(settings.schedule_timezone))
+    schedule = await _load_day_schedule(agent_id, local_now)
+    if schedule:
+        status = get_current_status(schedule, local_now)
+    else:
+        # 今天的作息要等 03:30 的任务或第一条消息才生成, 这之前顶部会整个消失,
+        # 而聊天那边已经现场生成了一份 —— 两边对不上。这段时间唯一能确定的是
+        # 「昨晚那一觉还没结束」: 只在昨天的作息推出睡眠时采用, 不拿昨天的白天
+        # 安排冒充今天。
+        previous = await _load_day_schedule(agent_id, local_now - timedelta(days=1))
+        status = get_current_status(previous, local_now) if previous else None
+        if not status or status.get("status") != "sleep":
+            return None
     code = str(status.get("status") or "")
     return {
         "ai_status": code or None,

@@ -10,6 +10,7 @@ import json
 import hashlib
 import logging
 import random
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -417,6 +418,12 @@ def _adj_key(agent_id: str) -> str:
     return f"schedule_adj:{agent_id}:{_local_now().strftime('%Y%m%d')}"
 
 
+async def has_cached_schedule(agent_id: str, date: datetime | None = None) -> bool:
+    """当天作息是否已经生成过 (只看键在不在, 不做 grounding, 给批量任务用)。"""
+    redis = await get_redis()
+    return bool(await redis.exists(_schedule_key(agent_id, date or _local_now())))
+
+
 async def get_cached_schedule(agent_id: str, date: datetime | None = None) -> list[dict] | None:
     """从Redis获取缓存的当日作息。"""
     date = date or _local_now()
@@ -462,30 +469,99 @@ def get_current_status(schedule: list[dict], now: datetime | None = None) -> dic
     Spec Part 1 §2.1：LLM 直接输出 4 个状态之一（空闲/忙碌/很忙碌/睡眠）。
     为了兼容旧缓存数据（字段 activity/type 的 6 值枚举），读取时统一规范化。
 
-    返回 {"event": str, "status": "idle"|"busy"|"very_busy"|"sleep",
+    返回 {"event": str, "activity": str (= event, 永不为空),
+          "status": "idle"|"busy"|"very_busy"|"sleep",
+          "status_source": "slot"|"unscheduled_night"|"unscheduled_gap",
           "upcoming": str}
+
+    没有命中任何一段时不再一律当空闲, 见 `_unscheduled_status`。顶部状态、当前状态
+    回复、主回复的状态约束、回复延迟都从这里取, 夜间判定只能在这一处改。
 
     `upcoming` 是接下来一两段安排的可读串 (可能为空)。放在这里而不是让调用方各自
     去算, 是因为聊天路径有两处构建 ai_status, 分开算下次新增调用点会漏 —— 而漏掉
     的表现是 AI 谈起未来时又开始现编, 不报错。
     """
     now = now or _local_now()
-    current_time = now.strftime("%H:%M")
+    minute = now.hour * 60 + now.minute
     upcoming = format_upcoming(get_upcoming_slots(schedule, now))
 
-    for slot in schedule:
-        start = slot.get("start", "00:00")
-        end = slot.get("end", "23:59")
+    spans = [(span, slot) for slot in schedule if (span := _slot_span(slot))]
+    for (start, end), slot in spans:
+        # 第二个条件是跨午夜段在今天凌晨的那一截 (23:00-07:00 在 01:00 也算命中)
+        if start <= minute < end or start <= minute + _DAY_MINUTES < end:
+            return {**_slot_to_status(slot), "status_source": "slot", "upcoming": upcoming}
 
-        # 处理跨午夜的时段（如23:00-07:00）
-        matched = (
-            (current_time >= start or current_time < end) if start > end
-            else (start <= current_time < end)
-        )
-        if matched:
-            return {**_slot_to_status(slot), "upcoming": upcoming}
+    return {**_unscheduled_status(spans, minute), "upcoming": upcoming}
 
-    return {"event": "自由时间", "status": "idle", "upcoming": upcoming}
+
+_DAY_MINUTES = 24 * 60
+_CLOCK_RE = re.compile(r"(\d{1,2})\s*[:：]\s*(\d{2})")
+_NEXT_DAY_MARKERS = ("次日", "第二天", "翌日", "隔天")
+
+
+def _clock_minutes(value: Any) -> tuple[int, bool] | None:
+    """"07:30" → (450, False); "次日 07:30" → (450, True); 认不出返回 None。
+
+    作息表的时刻是 LLM 写的: 生产 2026-10 的 172 份里有 44 份把结束时间写成
+    「次日07:30」「次日 07:30」。旧实现按字符串比较, 「次」的码位碰巧大于任何数字,
+    当天的比较歪打正着能用, 所以一直没人发现它其实不是时刻。
+    """
+    text = str(value or "").strip()
+    match = _CLOCK_RE.search(text)
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if minute >= 60 or hour > 24 or (hour == 24 and minute):
+        return None
+    return hour * 60 + minute, any(marker in text for marker in _NEXT_DAY_MARKERS)
+
+
+def _slot_span(slot: dict) -> tuple[int, int] | None:
+    """slot → 以当天 00:00 起算的 [start, end) 分钟数, 跨午夜的 end 落在 1440 之后。"""
+    start = _clock_minutes(slot.get("start"))
+    end = _clock_minutes(slot.get("end"))
+    if start is None or end is None:
+        return None
+    start_minute = start[0] + (_DAY_MINUTES if start[1] else 0)
+    end_minute = end[0] + (_DAY_MINUTES if end[1] else 0)
+    if end_minute <= start_minute:
+        end_minute += _DAY_MINUTES
+    return start_minute, end_minute
+
+
+def _unscheduled_status(spans: list[tuple[tuple[int, int], dict]], minute: int) -> dict:
+    """作息表没写到的时刻。
+
+    生成指令要的是「从早晨起床到晚上睡觉，不含凌晨时段」, 所以第一段之前、最后
+    一段之后本来就是睡着的。旧实现一律回落「自由时间/空闲」, 而且返回值缺
+    activity 键: 每天凌晨到起床、最后一段结束到午夜, 顶部显示「空闲」, 当前状态
+    回复拿到「你现在在，有空聊天。」这种空活动, 模型只好现编 —— 生产上就是前一句
+    还说在睡觉, 半小时后改口「上班摸鱼呢」。生产 2026-10 有 58% 的作息表不覆盖
+    夜间, 这不是个例。
+
+    只有两段之间漏掉的空档 (LLM 偶尔少写一刻钟) 才算自由时间。
+    """
+    if spans:
+        first_start = min(start for (start, _), _ in spans)
+        last_end = max(end for (_, end), _ in spans)
+        if minute < first_start or minute >= last_end:
+            return _status_with_activity("sleep", "", source="unscheduled_night")
+    return _status_with_activity("idle", "", source="unscheduled_gap")
+
+
+# 作息段没写事件时按状态补一个, 保证 activity 永远非空 —— 下游有的拿它拼句子
+# (「你现在在{activity}」), 有的拿它判断要不要注入状态约束段 (空就整段跳过)。
+_DEFAULT_ACTIVITY = {
+    "sleep": "睡觉",
+    "very_busy": "手头的事",
+    "busy": "忙手头的事",
+    "idle": "自由时间",
+}
+
+
+def _status_with_activity(status: str, event: str, *, source: str) -> dict:
+    event = str(event or "").strip() or _DEFAULT_ACTIVITY.get(status, "自由时间")
+    return {"event": event, "activity": event, "status": status, "status_source": source}
 
 
 # spec 的 4 个中文状态 → 代码内部 ASCII 枚举
@@ -534,6 +610,7 @@ def _slot_to_status(slot: dict) -> dict:
     # Keep `activity` alias for backward-compat with existing consumers
     # (proactive/context.py, proactive/sender.py). These will migrate to
     # `event` over time.
+    event = str(event or "").strip() or _DEFAULT_ACTIVITY.get(status, "自由时间")
     return {"event": event, "activity": event, "status": status}
 
 
@@ -786,11 +863,16 @@ def format_upcoming(slots: list[dict]) -> str:
 
 def format_schedule_context(status: dict) -> str:
     """格式化当前状态供Prompt注入。"""
-    activity = status.get("activity", "")
     s = status.get("status", "idle")
+    activity = (
+        str(status.get("activity") or status.get("event") or "").strip()
+        or _DEFAULT_ACTIVITY.get(s, "自由时间")
+    )
 
     if s == "sleep":
-        return f"你现在正在睡觉（{activity}），可能会延迟回复。"
+        # 夜间推断出来的睡眠只有「睡觉」二字, 别渲染成「正在睡觉（睡觉）」
+        detail = "" if activity == _DEFAULT_ACTIVITY["sleep"] else f"（{activity}）"
+        return f"你现在正在睡觉{detail}，可能会延迟回复。"
     elif s == "very_busy":
         return f"你现在正在忙{activity}，这是最忙的时段，回复会比较慢。"
     elif s == "busy":
