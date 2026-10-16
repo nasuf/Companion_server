@@ -745,3 +745,12 @@ async def test_silent_mode_rollup_still_runs_and_advances_checkpoint():
 
     run_rollup.assert_awaited_once()
     fake_redis.set.assert_awaited_once()
+
+
+@pytest.fixture(autouse=True)
+def _rule_test_source_boundary(monkeypatch):
+    # Source contract is exercised independently with real PostgreSQL and engine tests.
+    from app.services.achievements import source
+    async def identity(event):
+        return event, None
+    monkeypatch.setattr(source, "resolve_message_event", identity)

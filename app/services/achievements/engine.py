@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import overload
 
@@ -58,9 +59,26 @@ async def handle_achievement_event(event: IntentAchievementEvent) -> None: ...
 
 
 async def handle_achievement_event(event: AchievementEvent) -> None:
-    """Dispatch an application event to internal achievement rules."""
+    """Validate source before evaluating; a replay keeps the persisted clock."""
     if not await achievement_evaluation_enabled():
         return
+    from app.services.achievements.source import (
+        AchievementSourceUnavailable, current_source, resolve_message_event,
+    )
+    try:
+        event, source = await resolve_message_event(event)
+    except AchievementSourceUnavailable as exc:
+        logging.getLogger(__name__).info("[ACH] source rejected: %s", str(exc))
+        return
+    token = current_source.set(source)
+    try:
+        await _evaluate_event(event)
+    finally:
+        current_source.reset(token)
+
+
+async def _evaluate_event(event: AchievementEvent) -> None:
+    """Dispatch an application event to internal achievement rules."""
     if isinstance(event, AggregationAchievementEvent):
         await evaluate_aggregation(event)
         return
