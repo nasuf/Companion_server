@@ -30,13 +30,16 @@ _WEEKDAY_CHECK_MAX_SPAN_DAYS = 14
 # copy. "开放时间不太固定" is the same leak in disguise: the facts say the hours
 # were not provided, not that they vary.
 INPUT_DISCLOSURE = re.compile(
-    r"用户(?:记忆|喜好|偏好)库|(?:素材|原文|信息|介绍|偏好|时段|时间)[^。！？]{0,16}"
+    r"用户(?:记忆|喜好|偏好)库|(?:素材|资料|原文|信息|介绍|简介|偏好|时段|时间|价格|票价)[^。！？]{0,16}"
     r"(?:未(?:在[^。！？]{0,8})?(?:提供|提及|列出|写明|注明|说明|明确|确定|公布)|未定|不详|未知"
-    r"|没有(?:提供|提到|详细列出|写明|注明|说明))"
-    r"|没有(?:特别)?提到的偏好"
+    r"|没有(?:提供|提到|详细列出|写明|注明|说明)|没(?:有)?写(?![死过完])(?:明|清楚?|全|细|太细|具体)?"
+    r"|没(?:有)?(?:细说|说清楚?|具体说|详细说))"
+    r"|没(?:有)?(?:写|提|说|给)(?:具体|详细|明确)?的?(?:开放|营业|开门)(?:时间|时段)"
+    r"|没有(?:特别)?提到的偏好|没(?:有)?(?:特别|什么|具体)?的?(?:偏好|喜好)(?!的话|[^。！？，]{0,4}(?:也|都)(?:没关系|可以|行))"
+    r"|(?:偏好|喜好|聊天)记录"
     r"|(?:尚不清楚|暂不清楚|不清楚|未知)[^。！？]{0,8}(?:开放时间|开放时段|营业时间)"
     r"|(?:开放|营业|开门)(?:时间|时段)?[^。！？，]{0,4}(?:不(?:太|大)?固定|不确定|不一定|说不准)"
-    r"|没(?:有)?(?:具体|特别|怎么)?(?:聊|说|提|讲)(?:起)?过"
+    r"|没(?:有)?(?:具体|特别|专门|怎么|太)?(?:聊|说|提|讲)(?:起|到)?过"
 )
 DISCLOSURE_FEEDBACK = (
     "删除描述输入数据缺失的句子，只写活动推荐和普通出行建议。"
@@ -55,6 +58,30 @@ CO_PRESENCE = re.compile(
     # "陪你去" without a subject is the assistant; "叫上朋友陪你去" is not.
     r"|(?<!朋友)(?<!家人)(?<!同事)(?<!室友)(?<!对象)(?<!伙伴)陪你(?:一起)?(?:去(?!年)|过去|逛)"
 )
+# A recommendation comes from seeing a listing. "刚路过解放路那边" invents a
+# visit (production 10-17, a tea room); "要是刚路过" is the user's conditional.
+AI_VISIT = re.compile(
+    r"(?<![你您是果若要])(?:我|刚|刚刚)(?:才|也)?路过(?!的话)"
+    r"|我(?:之前|上次|以前|也|刚)?(?:去过|到过|逛过|来过|喝过|吃过)(?!吗)"
+)
+# Chat-voice copy only (it has a repair round). With no verified user quote
+# nothing can be said about the user's past or habits: production 10-17 wrote
+# "之前看你关注过这场", "想着你之前挺爱听流行歌的" and "你平时做软件费神"
+# with no evidence at all. "你之前要是听过" and "你最近要是有空" are conditional.
+_USER_CITED = re.compile(
+    r"你(?:之前|上次|以前|前两天|前几天|那天|昨天|最近)?(?:跟我|和我)?"
+    r"(?:说|提|聊|讲|关注|收藏|问|分享)(?:起|到)?过"
+    r"|你(?:之前|上次|以前|平时|平常|一直|向来|总是|经常|最近|前两天|前几天|那天|昨天)"
+    r"(?!要是|如果|若|有空|方便|想|愿意)"
+    r"|(?<!我)之前(?:你)?(?:提|说|聊)(?:到|起)?过"
+)
+# A place name says nothing about the district or transport ("反正就在市区，
+# 过去也方便" passed review on 10-17 for a stadium).
+_EASE_CLAIM = re.compile(r"市中心|就在市区|在市区里|交通(?:也|很|挺|还)?(?:方便|便利)|过去(?:也|很|挺|还)?方便")
+_EASE_FACT = re.compile(r"市中心|市区|交通|地铁|公交")
+# Category is not environment: a library or a temple is not "quiet" unless the
+# facts say so (the reviewer passed "安静角落" and "挺清静" on 10-17).
+_QUIET_CLAIM = re.compile(r"安静|清静|清幽|宁静|静谧|幽静|僻静")
 
 # "下周三之前把票买好" is a deadline, not the session date.
 _NOT_SESSION = r"(?!\s*(?:之前|以前|之后|以后|前(?!往)|后(?!天)))"
@@ -254,13 +281,31 @@ def access_issues(text: str, facts_text: str) -> list[str]:
     return issues
 
 
+def voice_issues(text: str, facts_text: str, user_references: int) -> list[str]:
+    issues: list[str] = []
+    cited = _USER_CITED.search(text) if not user_references else None
+    if cited:
+        issues.append(f"没有用户原文可依据，删除“{cited.group(0)}”开头这类说用户之前提过、平时怎样的话。")
+    quiet = _QUIET_CLAIM.search(text)
+    if quiet and not _QUIET_CLAIM.search(facts_text):
+        issues.append(f"资料没有写环境“{quiet.group(0)}”，删除这类环境描述，不要从类别推断环境。")
+    ease = _EASE_CLAIM.search(text)
+    if ease and not _EASE_FACT.search(facts_text):
+        issues.append(f"资料没有写“{ease.group(0)}”，地点名字不能说明位置或交通。")
+    return issues
+
+
 def copy_issues(
     text: str, card: dict[str, Any], now: datetime, *, facts_text: str | None = None,
+    user_references: int | None = None,
 ) -> list[str]:
     """Revision feedback for one draft; empty means no deterministic objection.
 
     ``facts_text`` is everything the copy may rely on; with it, access claims
     (全天/随时/免费) are checked against what the facts actually state.
+    ``user_references`` (verified quotes available) marks chat-voice copy —
+    the note and the invitation, which get a repair round — and adds the
+    environment and cited-user checks there.
     """
     issues: list[str] = []
     if INPUT_DISCLOSURE.search(text):
@@ -271,11 +316,16 @@ def copy_issues(
             f"删除“{together.group(0)}”这类暗示你会和用户一起去或线下见面的说法；"
             "推荐的是用户自己去，你只在线上陪伴。"
         )
+    visit = AI_VISIT.search(text)
+    if visit:
+        issues.append(f"删除“{visit.group(0)}”：你没有去过或路过那里，只是看到了这个推荐。")
     if re.search(r"https?://|www\.", text):
         issues.append("删除网址。")
     issues.extend(date_issues(text, card, now))
     if facts_text is not None:
         issues.extend(access_issues(text, facts_text))
+        if user_references is not None:
+            issues.extend(voice_issues(text, facts_text, user_references))
     return issues
 
 

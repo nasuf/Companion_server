@@ -14,10 +14,10 @@ from app.services.offline import activity_recommendation_message as note
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 from app.services.prompting.trace_components import ManagedPromptText
 
-TEXTS = {
+TEXTS = {  # The r2 follow-up overrides the keys it republishes.
     entry["key"]: entry["content"]
-    for entry in json.loads((Path(__file__).parents[1]
-                             / "scripts/prompt_releases/20261017_activity_copy_grounding.json").read_text())["prompts"]
+    for name in ("20261017_activity_copy_grounding.json", "20261017_activity_copy_grounding_r2.json")
+    for entry in json.loads((Path(__file__).parents[1] / "scripts/prompt_releases" / name).read_text())["prompts"]
 }
 NOW = datetime(2026, 10, 13, 23, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
 HISTORY = "[2026-10-10] 用户喜欢历史"
@@ -78,7 +78,8 @@ async def test_only_verified_dated_references_and_computed_dates_reach_the_write
 
 async def test_claims_from_assistant_lines_are_repaired_then_fall_back(invite):
     write, review, _ = invite
-    write.return_value = "你平时写代码挺费神，去大慈恩寺换换心情？"
+    # Phrased so no deterministic guard decides it: the model review must.
+    write.return_value = "写代码的人去大慈恩寺换换心情正合适？"
     review.return_value = {"supported": False, "relevant_indices": [],
                            "unsupported_claims": ["“你平时写代码”没有用户原文支持"]}
     card = activity()
@@ -100,10 +101,23 @@ async def test_going_along_is_repaired_without_spending_a_review(invite):
     assert card["discovery_metadata"]["invite_message_status"] == "verified_no_evidence"
 
 
+async def test_no_evidence_invitation_citing_the_user_is_repaired(invite):
+    """Production 10-17: "之前看你关注过这场" passed review with no user quote at all."""
+    write, review, _ = invite
+    write.side_effect = ["之前看你关注过大慈恩寺，那边挺清静，有空去转转？", "大慈恩寺挺有意思，有空去转转？"]
+    review.return_value = {"supported": True, "relevant_indices": [], "unsupported_claims": []}
+    card = activity()
+    assert await run(card) == "大慈恩寺挺有意思，有空去转转？"
+    feedback = write.await_args.args[1]
+    assert "没有用户原文可依据" in feedback and "环境“清静”" in feedback
+    assert review.await_count == 1
+    assert card["discovery_metadata"]["invite_message_status"] == "verified_no_evidence"
+
+
 async def test_unpublished_review_template_is_marked_unchecked(invite):
     write, review, texts = invite
     texts["offline.recommendation_message_check"] = PROMPT_DEFINITION_MAP["offline.recommendation_message_check"].default_text
-    card = activity()
+    card = activity(user_relevance=[{"kind": "memory", "text": HISTORY}])
     assert await run(card) == GOOD
     review.assert_not_awaited()
     assert card["discovery_metadata"]["invite_message_status"] == "unchecked"

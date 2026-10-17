@@ -6,12 +6,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.offline import activity_recommendation_message as note
+from app.services.offline import copy_guards as guards
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 from scripts.publish_offline_quality_prompts import validate_entry
 
-RELEASE = json.loads((Path(__file__).parents[1] /
-    "scripts/prompt_releases/20261017_activity_copy_grounding.json").read_text())
-TEXTS = {entry["key"]: entry["content"] for entry in RELEASE["prompts"]}
+RELEASES = [json.loads((Path(__file__).parents[1] / "scripts/prompt_releases" / name).read_text())
+            for name in ("20261017_activity_copy_grounding.json", "20261017_activity_copy_grounding_r2.json")]
+RELEASE = {"prompts": [entry for release in RELEASES for entry in release["prompts"]]}
+TEXTS = {entry["key"]: entry["content"] for entry in RELEASE["prompts"]}  # Later releases win.
 MEMORY = "我喜欢找咖啡馆看书。"
 DIALOGUE = "这周想换个地方看看，喝杯咖啡。"
 EVIDENCE = {"memory": [MEMORY, "我不喜欢热闹的酒吧。"], "preference": ["咖啡"], "dialogue": [DIALOGUE]}
@@ -22,6 +24,8 @@ MESSAGE = (
     "带不带书、待多久，都按你当天的心情来，具体安排也以现场规则为准。"
     "出发前看看当天的开放信息就好。要不要找个方便的时候去看看？暂时没空也没关系，先留着这个选择。"
 )
+# The same note without citing the user, for drafts written with no verified quote.
+NEUTRAL = MESSAGE.replace("你提过喜欢找咖啡馆看书，", "")
 
 
 def card(**kwargs):
@@ -56,6 +60,47 @@ def test_release_rendering_and_complete_original_quotes():
     assert len(note.exact_references([str(i) for i in range(10)], {"memory": [str(i) for i in range(10)]})) == 6
 
 
+def test_r2_republishes_on_top_of_the_published_r1():
+    import hashlib
+    first, follow_up = ({e["key"]: e for e in release["prompts"]} for release in RELEASES)
+    for key, entry in follow_up.items():
+        assert entry["expected_sha256"] == hashlib.sha256(first[key]["content"].strip().encode()).hexdigest()
+        assert entry["allowed_fields"] == first[key]["allowed_fields"]
+    check = follow_up["offline.recommendation_message_check"]["content"]
+    # Production 10-17: the one phase-agnostic example was copied into relevance verdicts.
+    assert "[0,1,2]" in check and check.count('"relevant_indices":[') == 3
+    assert "必须放行" in check and "若正好有空" in check and "今晚" in check
+    for prompt in (check, follow_up["offline.activity_recommendation_message"]["content"]):
+        assert "开放时段没写太细" in prompt and "资料里没细说" in prompt
+    # Production 10-17: what the reviewer passed is listed for rejection, and the writers are told too.
+    assert "必须拒绝" in check and "刚路过" in check and "挺清静" in check and "看你关注过这场" in check
+    for key in ("offline.activity_recommendation_message", "offline.activity_invite_message"):
+        assert "路过" in follow_up[key]["content"] and "清静" in follow_up[key]["content"]
+
+
+async def test_a_no_evidence_draft_citing_the_user_is_repaired(writer):
+    text, check = writer
+    check.return_value = {"supported": True, "unsupported_claims": [], "relevant_indices": []}
+    text.side_effect = [MESSAGE, NEUTRAL]
+    result = await note.attach_recommendation_message(card(), {})
+    assert "删除“你提过”" in text.call_args.args[1]
+    assert check.await_count == 1
+    assert result["discovery_metadata"]["recommendation_message"] == NEUTRAL
+    assert result["discovery_metadata"]["recommendation_message_status"] == "verified_no_evidence"
+
+
+@pytest.mark.parametrize("extra,feedback", [
+    ("刚路过伯先路那边，看到这家店。", "删除“刚路过”"),
+    ("那边环境挺清静的。", "环境“清静”"),
+])
+async def test_invented_visits_and_environment_are_repaired(writer, extra, feedback):
+    text, check = writer
+    text.side_effect = [MESSAGE + extra, MESSAGE]
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
+    assert feedback in text.call_args.args[1]
+    assert result["discovery_metadata"]["recommendation_message_status"] == "verified"
+
+
 async def test_only_selected_exact_evidence_is_written_and_kept_private(writer):
     text, check = writer
     result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE, "编造的记忆"]), EVIDENCE)
@@ -84,16 +129,56 @@ async def test_malformed_copy_never_reaches_page_or_guard(writer, raw):
 
 
 @pytest.mark.parametrize("checked", [None, {}, {"supported": False, "relevant_indices": [0, 1, 2]},
-    {"supported": True}, {"supported": True, "unsupported_claims": [], "relevant_indices": [0, 1]},
-    {"supported": True, "unsupported_claims": [], "relevant_indices": [0, 1, 1]},
-    {"supported": True, "unsupported_claims": [], "relevant_indices": [False, 1, 2]},
-    {"supported": True, "unsupported_claims": [], "relevant_indices": "0,1,2"}])
+    {"supported": True}, {"supported": True, "unsupported_claims": ["无依据"], "relevant_indices": [0, 1, 2]},
+    {"supported": False, "unsupported_claims": ["无依据"], "relevant_indices": [0, 1, 2]}])
 async def test_ungrounded_or_irrelevant_copy_falls_back(writer, checked):
     writer[1].return_value = checked
     result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
     assert result["discovery_metadata"]["recommendation_message_status"] == "fallback_invalid"
     assert result["discovery_metadata"]["user_relevance"] == []
     assert "你提过" not in result["discovery_metadata"]["recommendation_message"]
+
+
+@pytest.mark.parametrize("indices", [[0, 1], [0], [], [0, 1, 1], [False, 1, 2], "0,1,2", None])
+async def test_a_clear_verdict_is_not_overruled_by_a_copied_index_list(writer, indices):
+    """Production 10-17: "supported": true next to the example's "[]" or "[0]"."""
+    checked = {"supported": True, "unsupported_claims": []}
+    if indices is not None:
+        checked["relevant_indices"] = indices
+    writer[1].return_value = checked
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
+    meta = result["discovery_metadata"]
+    assert meta["recommendation_relevance_status"] == "verified"
+    assert meta["recommendation_message_status"] == "verified"
+    assert meta["user_relevance_count"] == 3
+
+
+@pytest.mark.parametrize("relevance", [
+    None, {"supported": True}, {"supported": True, "unsupported_claims": ["第 2 条无关"]},
+    {"supported": False, "unsupported_claims": [], "relevant_indices": [0, 1, 2]},
+    {"supported": False, "unsupported_claims": [], "relevant_indices": [0, 5]},
+    {"supported": False, "unsupported_claims": [], "relevant_indices": [0, 0]},
+    {"supported": False, "unsupported_claims": []},
+])
+async def test_unusable_relevance_verdict_writes_from_facts_alone(writer, relevance):
+    text, check = writer
+    text.return_value = NEUTRAL
+    check.side_effect = [relevance, {"supported": True, "unsupported_claims": [], "relevant_indices": []}]
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
+    meta = result["discovery_metadata"]
+    prompt = text.call_args.args[1]
+    assert MEMORY not in prompt and DIALOGUE not in prompt  # Unverified quotes never reach the writer.
+    assert meta["recommendation_relevance_status"] == "invalid"
+    assert meta["recommendation_message_status"] == "verified_no_evidence"
+    assert meta["user_relevance"] == [] and meta["user_relevance_count"] == 0
+
+
+def test_relevance_verdict_reading():
+    assert note.relevant_indices({"supported": True, "unsupported_claims": []}, 3) == [0, 1, 2]
+    assert note.relevant_indices({"supported": False, "unsupported_claims": ["x"], "relevant_indices": [2, 0]}, 3) == [0, 2]
+    assert note.relevant_indices({"supported": False, "unsupported_claims": ["x"], "relevant_indices": []}, 1) == []
+    assert note.relevant_indices({"supported": "true", "unsupported_claims": []}, 3) is None
+    assert note.relevant_indices([], 3) is None
 
 
 @pytest.mark.parametrize("which", [0, 1])
@@ -172,6 +257,7 @@ async def test_single_bounded_repair_or_factual_fallback(writer, repaired):
     "开放时间并未在介绍中写明。", "用户记忆库没有提供相关信息。",
     "具体开放时段未定。", "具体开放时段未在信息中注明。",
     "目前尚不清楚开放时间。", "营业时间不详。",
+    "开放时段没写太细，出发前确认一下。", "开放时间没写清楚。",  # Production 10-17, 叠滘.
 ])
 @pytest.mark.parametrize("repaired", [True, False])
 async def test_input_disclosure_is_blocked_even_if_model_guard_would_accept(writer, disclosure, repaired):
@@ -247,7 +333,7 @@ def test_quote_without_date_matches_whole_item_and_keeps_the_dated_original():
 async def test_writer_and_reviewer_get_today_and_code_computed_session_day(writer, monkeypatch):
     monkeypatch.setattr(note, "local_now", lambda: NOW)
     text, check = writer
-    text.return_value = MESSAGE
+    text.return_value = NEUTRAL
     check.return_value = {"supported": True, "unsupported_claims": [], "relevant_indices": []}
     await note.attach_recommendation_message(concert(), {})
     prompt = text.call_args.args[1]
@@ -260,8 +346,8 @@ async def test_writer_and_reviewer_get_today_and_code_computed_session_day(write
 async def test_wrong_year_and_going_along_are_repaired_before_any_model_review(writer, monkeypatch):
     monkeypatch.setattr(note, "local_now", lambda: NOW)
     text, check = writer
-    bad = MESSAGE + "时间是明年十月中旬，到时候要不要一起去凑个热闹？"
-    text.side_effect = [bad, MESSAGE]
+    bad = NEUTRAL + "时间是明年十月中旬，到时候要不要一起去凑个热闹？"
+    text.side_effect = [bad, NEUTRAL]
     check.return_value = {"supported": True, "unsupported_claims": [], "relevant_indices": []}
     result = await note.attach_recommendation_message(concert(), {})
     feedback = text.call_args.args[1]
@@ -302,9 +388,20 @@ async def test_dated_evidence_from_storage(monkeypatch):
 
 async def test_copied_example_index_without_evidence_is_not_a_rejection(writer):
     text, check = writer
+    text.return_value = NEUTRAL
     check.return_value = {"supported": True, "unsupported_claims": [], "relevant_indices": [0]}
     result = await note.attach_recommendation_message(card(), {})
     assert result["discovery_metadata"]["recommendation_message_status"] == "verified_no_evidence"
+
+
+def test_missing_hours_reach_writers_as_advice_not_as_a_data_state():
+    # Production 10-17: "开放时段未提供" came back as "开放时段没写太细" twice in a row.
+    facts = note.page_facts(card(discovery_metadata={"kind": "place"}), NOW)
+    assert facts["date_time"] == "固定地点；出发前确认开放时间"
+    assert note.page_facts(card(discovery_metadata={"kind": "place", "opening_hours": "08:30-18:00"}),
+                           NOW)["date_time"] == "固定地点；开放时间：08:30-18:00"
+    # Still no basis for all-day access.
+    assert guards.copy_issues("随时都能去。", card(), NOW, facts_text=json.dumps(facts, ensure_ascii=False))
 
 
 def test_page_facts_prefer_the_providers_own_introduction():

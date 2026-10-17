@@ -169,17 +169,34 @@ async def review_copy(
         return await invoke_json(model, prompt)
 
 
-def accepted_review(checked: Any, reference_count: int) -> bool:
-    if not (isinstance(checked, dict) and checked.get("supported") is True
-            and checked.get("unsupported_claims") == []):
-        return False
-    if not reference_count:
-        # Nothing to index: a copied example "[0]" is noise, not a verdict.
-        return True
+def relevant_indices(checked: Any, count: int) -> list[int] | None:
+    """Quotes the relevance review kept, or ``None`` when its verdict is unusable.
+
+    ``supported`` is the verdict ("all quotes are relevant"). Small models copy
+    the example index list next to it ("[]" for one quote, "[0]" for three);
+    in production that list overruled a clear verdict and sent the note to
+    the generic fallback.
+    """
+    if (not isinstance(checked, dict) or not isinstance(checked.get("supported"), bool)
+            or not isinstance(checked.get("unsupported_claims"), list)):
+        return None
+    if checked["supported"]:
+        return list(range(count)) if checked["unsupported_claims"] == [] else None
     indices = checked.get("relevant_indices")
-    return (isinstance(indices, list)
-            and all(type(i) is int and 0 <= i < reference_count for i in indices)
-            and len(set(indices)) == len(indices))
+    if (not isinstance(indices, list) or any(type(i) is not int or not 0 <= i < count for i in indices)
+            or len(set(indices)) != len(indices) or len(indices) == count):
+        return None
+    return sorted(indices)
+
+
+def accepted_review(checked: Any) -> bool:
+    """A message review passes on its verdict alone.
+
+    Its ``relevant_indices`` select nothing (the quotes were fixed by the
+    relevance phase), so a copied or malformed index list is noise.
+    """
+    return (isinstance(checked, dict) and checked.get("supported") is True
+            and checked.get("unsupported_claims") == [])
 
 
 async def attach_recommendation_message(
@@ -208,20 +225,14 @@ async def attach_recommendation_message(
             if references:
                 relevance = await review_copy(check_template, phase="relevance", facts=facts,
                                               references=references, message="")
-                indices = relevance.get("relevant_indices") if isinstance(relevance, dict) else None
-                if (not isinstance(indices, list) or any(type(i) is not int or
-                        i < 0 or i >= len(references) for i in indices)
-                        or len(set(indices)) != len(indices)
-                        or not isinstance(relevance.get("supported"), bool)
-                        or not isinstance(relevance.get("unsupported_claims"), list)
-                        or (relevance["supported"] is True and
-                            (len(indices) != len(references) or relevance["unsupported_claims"] != []))
-                        or (relevance["supported"] is False and len(indices) == len(references))):
-                    status = "fallback_invalid"
-                    issues = ["关联依据核验结果格式无效"]
-                    raise ValueError("Invalid relevance check")
-                relevance_status = "verified" if len(indices) == len(references) else "filtered"
-                references = [references[i] for i in sorted(indices)]
+                indices = relevant_indices(relevance, len(references))
+                if indices is None:
+                    # Unusable verdict: the quotes stay unverified, so write from
+                    # the activity facts alone instead of the generic template.
+                    relevance_status, references = "invalid", []
+                else:
+                    relevance_status = "verified" if len(indices) == len(references) else "filtered"
+                    references = [references[i] for i in indices]
             else:
                 relevance_status = "no_evidence"
             grouped = {kind: [r["text"] for r in references if r["kind"] == kind] for kind in EVIDENCE_KINDS}
@@ -245,7 +256,8 @@ async def attach_recommendation_message(
                     break
                 # Objections code can decide exactly never reach the model guard.
                 issues = copy_issues(candidate, card, now,
-                                     facts_text=json.dumps(facts, ensure_ascii=False))
+                                     facts_text=json.dumps(facts, ensure_ascii=False),
+                                     user_references=len(references))
                 if issues:
                     status, feedback, rejected = "fallback_invalid", issues, issues
                     if attempt:
@@ -253,7 +265,7 @@ async def attach_recommendation_message(
                     continue
                 checked = await review_copy(check_template, phase="message", facts=facts,
                                             references=references, message=candidate)
-                if accepted_review(checked, len(references)):
+                if accepted_review(checked):
                     message = candidate
                     status = "verified" if references else "verified_no_evidence"
                     issues = []

@@ -236,11 +236,10 @@ def test_fallback_does_not_invent_history_facilities_or_event_ticket_price():
 
 # --- Card copy and detail no longer share one verdict (2026-10-17) ---
 
-GROUNDED = {
+GROUNDED = {  # The r2 follow-up overrides the keys it republishes.
     p["key"]: p["content"]
-    for p in json.loads(
-        (Path(__file__).parents[1] / "scripts/prompt_releases/20261017_activity_copy_grounding.json").read_text()
-    )["prompts"]
+    for name in ("20261017_activity_copy_grounding.json", "20261017_activity_copy_grounding_r2.json")
+    for p in json.loads((Path(__file__).parents[1] / "scripts/prompt_releases" / name).read_text())["prompts"]
 }
 
 

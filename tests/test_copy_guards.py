@@ -86,9 +86,71 @@ def test_places_are_never_date_checked():
     "那边开放时间不太固定，记得确认。",
     "虽然咱们之前没具体聊过追星的事儿，但你应该会喜欢。",
     "具体开放时段素材里没有写明。",
+    "开放时段没写太细，出发前确认一下。", "开放时间没写清楚。", "门票价格没有写明。",
+    "既然没特别偏好，就单纯分享个去处。", "既然没有你之前的喜好记录，就单纯分享给你。",
 ])
 def test_input_state_disclosure_is_feedback(text):
     assert guards.DISCLOSURE_FEEDBACK in guards.copy_issues(text, PLACE, NOW)
+
+
+@pytest.mark.parametrize("text", ["有空写写日记也不错。", "你没写过信吧，这里能寄明信片。", "名字写得很有意思。",
+                                  "时间安排没写死，随你。",
+                                  "没什么偏好也没关系，随便逛逛。", "没什么偏好的话可以试试招牌。"])
+def test_ordinary_writing_words_are_not_disclosure(text):
+    assert guards.DISCLOSURE_FEEDBACK not in guards.copy_issues(text, PLACE, NOW)
+
+
+@pytest.mark.parametrize("text", [
+    "具体的开放时段资料里没细说，出发前确认。", "不过那边没写具体开放时段。", "没给具体的开放时间。",
+])
+def test_data_state_in_other_words_is_feedback(text):
+    assert guards.DISCLOSURE_FEEDBACK in guards.copy_issues(text, PLACE, NOW)
+
+
+@pytest.mark.parametrize("text,visit", [
+    ("刚路过解放路那边，看到个茶室。", True), ("我之前去过一次。", True), ("我也去过。", True),
+    ("你要是刚路过可以进去看看。", False), ("要是刚好路过就进去坐坐。", False),
+    ("顺路路过的话可以看看。", False), ("这个我去过吗？", False),
+])
+def test_invented_visits_are_feedback_everywhere(text, visit):
+    # No facts and no reference count: card copy gets this check too.
+    assert any("没有去过或路过" in item for item in guards.copy_issues(text, PLACE, NOW)) is visit
+
+
+@pytest.mark.parametrize("text,references,cited", [
+    ("之前看你关注过这场，若是有空去听听。", 0, True), ("演唱会今晚开唱。之前提过，想着能换换心情。", 0, True),
+    ("你之前说喜欢历史，可以去转转。", 0, True), ("你之前说喜欢历史，可以去转转。", 1, False),
+    ("想着你之前挺爱听流行歌的，会喜欢。", 0, True), ("你平时做软件费神，去换换脑子？", 0, True),
+    ("你最近要是有空，可以去看看。", 0, False), ("要是你今晚刚好没什么安排，去听听？", 0, False),
+    ("想着你之前要是听过她的歌，会喜欢现场。", 0, False), ("我之前提过的那家，可以去看看。", 0, False),
+])
+def test_citing_the_user_needs_a_verified_quote(text, references, cited):
+    issues = guards.copy_issues(text, PLACE, NOW, facts_text="{}", user_references=references)
+    assert any("没有用户原文可依据" in item for item in issues) is cited
+
+
+@pytest.mark.parametrize("text,facts,flagged", [
+    ("就当去安静角落待会儿。", '{"category": "寺庙"}', True), ("那边挺清静的。", "{}", True),
+    ("馆里很安静。", '{"description": "安静的阅读空间"}', False),
+])
+def test_environment_claims_need_the_facts(text, facts, flagged):
+    _environment_check(text, facts, flagged)
+
+
+@pytest.mark.parametrize("text,facts,flagged", [
+    ("反正就在市区，过去也方便。", '{"location": "镇江市体育会展中心-体育场 团山路33号"}', True),
+    ("地铁口出来就到，交通挺方便。", '{"description": "地铁2号线直达"}', False),
+])
+def test_location_ease_needs_the_facts(text, facts, flagged):
+    issues = guards.copy_issues(text, PLACE, NOW, facts_text=facts, user_references=1)
+    assert any("不能说明位置或交通" in item for item in issues) is flagged
+
+
+def _environment_check(text, facts, flagged):
+    issues = guards.copy_issues(text, PLACE, NOW, facts_text=facts, user_references=1)
+    assert any("资料没有写环境" in item for item in issues) is flagged
+    # Card copy has no repair round, so it keeps relying on the model review here.
+    assert not any("资料没有写环境" in item for item in guards.copy_issues(text, PLACE, NOW, facts_text=facts))
 
 
 @pytest.mark.parametrize("text", [

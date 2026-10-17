@@ -1095,11 +1095,10 @@ def _date_time_text(card: dict[str, Any]) -> str:
     if start:
         return start
     hours = (card.get("discovery_metadata") or {}).get("opening_hours")
-    return (
-        "固定地点；开放时间：" + str(hours)
-        if hours
-        else "固定地点；开放时段未提供，不能推断全天或随时营业"
-    )
+    # Missing hours are an instruction, not a fact: writers given "开放时段未提供"
+    # paraphrased it as "开放时段没写太细" even after two rounds of feedback
+    # (production 10-17). All-day claims stay blocked by copy_guards.
+    return "固定地点；开放时间：" + str(hours) if hours else "固定地点；出发前确认开放时间"
 
 
 _CARD_COPY_FIELDS = ("summary", "vibe", "suitable")
@@ -1346,14 +1345,15 @@ async def generate_activity_invite_message(
                     status, issues = "fallback_invalid", ["邀请语为空"]
                     break
                 issues = copy_issues(candidate, activity, now,
-                                     facts_text=json.dumps(facts, ensure_ascii=False))
+                                     facts_text=json.dumps(facts, ensure_ascii=False),
+                                     user_references=len(references))
                 if not issues:
                     if not reviewable:
                         text, status = candidate, "unchecked"
                         break
                     checked = await review_copy(check_template, phase="message", facts=facts,
                                                 references=references, message=candidate)
-                    if accepted_review(checked, len(references)):
+                    if accepted_review(checked):
                         text, status = candidate, "verified" if references else "verified_no_evidence"
                         issues = []
                         break
