@@ -324,11 +324,16 @@ async def test_consumer_process_crash_recovers_without_repeating_effect(followup
     # Prisma's child engine may inherit pipes beyond the killed worker's life.
     # Observe the worker exit itself; log files avoid waiting for descendant EOF.
     log_path=tmp_path/'crash-worker.log'
+    child_env=dict(os.environ)
+    if phase=='after_effect':
+        # Exercise the hostname spelling used by CI as well as literal local URLs.
+        for key in ('PROACTIVE_E2E_DATABASE_URL','RUNTIME_JOB_TEST_REDIS_URL'):
+            child_env[key]=child_env[key].replace('@127.0.0.1:','@localhost:').replace('://127.0.0.1:','://localhost:')
     with log_path.open('wb') as log:
         process=await asyncio.create_subprocess_exec(sys.executable,
             str(Path(__file__).parent/'fixtures/message_followup_crash_worker.py'),jid,phase,
             json.dumps({k:getattr(q,k) for k in fields}),stdout=log,stderr=log,
-            start_new_session=True)
+            start_new_session=True,env=child_env)
         try:
             await asyncio.wait_for(process.wait(),timeout=20)
             assert process.returncode==73,log_path.read_text()[-2000:]

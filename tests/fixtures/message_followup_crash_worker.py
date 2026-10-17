@@ -8,12 +8,18 @@ from urllib.parse import urlsplit
 
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
-url=os.environ['PROACTIVE_E2E_DATABASE_URL']
-redis_url=os.environ['RUNTIME_JOB_TEST_REDIS_URL']
-assert urlsplit(url).hostname in {'127.0.0.1','localhost'}
-assert urlsplit(url).path=='/companion_proactive_e2e'
-assert urlsplit(redis_url).hostname in {'127.0.0.1','localhost'}
-assert urlsplit(redis_url).path=='/15'
+def local_url(name,scheme,path):
+    parts=urlsplit(os.environ[name])
+    assert parts.scheme==scheme and parts.hostname in {'127.0.0.1','localhost'}
+    assert parts.port is not None and parts.path==path
+    assert not parts.query and not parts.fragment
+    # CI calls its loopback services localhost; the network fence requires a
+    # literal address. Normalize only this explicitly validated local alias.
+    credentials=parts.netloc.rsplit('@',1)[0]+'@' if '@' in parts.netloc else ''
+    return parts._replace(netloc=f'{credentials}127.0.0.1:{parts.port}').geturl()
+
+url=local_url('PROACTIVE_E2E_DATABASE_URL','postgresql','/companion_proactive_e2e')
+redis_url=local_url('RUNTIME_JOB_TEST_REDIS_URL','redis','/15')
 assert not (ROOT/'.env').exists()
 from evals.memory_baseline.safety import configure_isolation, loopback_network_fence
 configure_isolation(url.rsplit('/',1)[0]+'/companion_memory_eval_ci',redis_url.rsplit('/',1)[0]+'/13')
