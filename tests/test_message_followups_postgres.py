@@ -315,7 +315,7 @@ async def test_source_read_and_failure_receipt_errors_are_redacted(followups,mon
 
 @pytest.mark.parametrize('phase',['after_effect','before_ack'])
 async def test_consumer_process_crash_recovers_without_repeating_effect(followups,redis,phase,tmp_path):
-    import json,os,sys
+    import json,os,signal,sys
     from pathlib import Path
     db,msg,*_=followups
     await f.dispatch_message_followups(limit=1,message_id=msg.id)
@@ -327,13 +327,20 @@ async def test_consumer_process_crash_recovers_without_repeating_effect(followup
     with log_path.open('wb') as log:
         process=await asyncio.create_subprocess_exec(sys.executable,
             str(Path(__file__).parent/'fixtures/message_followup_crash_worker.py'),jid,phase,
-            json.dumps({k:getattr(q,k) for k in fields}),stdout=log,stderr=log)
+            json.dumps({k:getattr(q,k) for k in fields}),stdout=log,stderr=log,
+            start_new_session=True)
         try:
             await asyncio.wait_for(process.wait(),timeout=20)
             assert process.returncode==73,log_path.read_text()[-2000:]
         finally:
+            # os._exit intentionally bypasses Prisma.disconnect. Its query engine
+            # belongs to this dedicated group and must not leak into later tests.
+            try:
+                os.killpg(process.pid,signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             if process.returncode is None:
-                process.kill();await process.wait()
+                await asyncio.wait_for(process.wait(),timeout=5)
     assert (await q.inspect_runtime_job(jid))['status']=='running'
     assert len(await db.query_raw('SELECT id FROM achievement_events WHERE source_id=$1',msg.id))==1
     assert (await row(db,msg.id))['status']==('queued' if phase=='after_effect' else 'completed')
