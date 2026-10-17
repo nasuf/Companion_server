@@ -2619,6 +2619,8 @@ model MessageFollowupEvent {
 }
 
 // 后台「聊天管理 → 主动交流」参数的修改记录: 谁、何时、把哪几项从多少改到多少。
+// 只经 app/api/admin/proactive_tuning.py 的裸 SQL 读写; @@ignore 不生成客户端类型,
+// 守住每个 worker 导入生成代码的体积预算 (tests/test_prisma_client_runtime.py)。
 model ProactiveTuningChange {
   id        String   @id @default(uuid())
   adminId   String?  @map("admin_id")
@@ -2626,6 +2628,7 @@ model ProactiveTuningChange {
   changes   Json
   createdAt DateTime @default(now()) @map("created_at")
 
+  @@ignore
   @@index([createdAt(sort: Desc)])
   @@map("proactive_tuning_changes")
 }
