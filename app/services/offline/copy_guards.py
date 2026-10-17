@@ -39,6 +39,8 @@ INPUT_DISCLOSURE = re.compile(
     r"|(?:偏好|喜好|聊天)记录"
     r"|(?:尚不清楚|暂不清楚|不清楚|未知)[^。！？]{0,8}(?:开放时间|开放时段|营业时间)"
     r"|(?:开放|营业|开门)(?:时间|时段)?[^。！？，]{0,4}(?:不(?:太|大)?固定|不确定|不一定|说不准)"
+    # "这种地方时间不一定固定" (10-17); "时间不一定要长" is not about opening hours.
+    r"|(?:时间|时段)[^。！？，]{0,4}不(?:太|大|一定)?固定"
     r"|没(?:有)?(?:具体|特别|专门|怎么|太)?(?:聊|说|提|讲)(?:起|到)?过"
 )
 DISCLOSURE_FEEDBACK = (
@@ -77,7 +79,10 @@ _USER_CITED = re.compile(
 )
 # A place name says nothing about the district or transport ("反正就在市区，
 # 过去也方便" passed review on 10-17 for a stadium).
-_EASE_CLAIM = re.compile(r"市中心|就在市区|在市区里|交通(?:也|很|挺|还)?(?:方便|便利)|过去(?:也|很|挺|还)?方便")
+_EASE_CLAIM = re.compile(
+    r"市中心|就在市区|在市区里|交通(?:也|很|挺|还)?(?:方便|便利)|过去(?:也|很|挺|还)?方便"
+    r"|位置(?:也|很|挺|还|比较)?(?:方便|便利|优越)"
+)
 _EASE_FACT = re.compile(r"市中心|市区|交通|地铁|公交")
 # Category is not environment: a library or a temple is not "quiet" unless the
 # facts say so (the reviewer passed "安静角落" and "挺清静" on 10-17).

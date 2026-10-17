@@ -1303,8 +1303,13 @@ async def generate_activity_invite_message(
     """
     from app.services.offline.activity_message_context import message_context
 
-    place = clip_text(str(activity.get("location_name") or activity.get("title") or "这个地方"), 30)
-    text, status, issues = f"「{place}」要不要了解一下？", "fallback_unavailable", []
+    # An event is named by itself, not by its venue: the fallback for a concert
+    # read "「镇江市体育会展中心-体育场」要不要了解一下？" (production 10-17).
+    is_event = bool(activity.get("starts_at")) or (activity.get("discovery_metadata") or {}).get("kind") == "event"
+    names = ("title", "location_name") if is_event else ("location_name", "title")
+    place = clip_text(str(next((activity.get(k) for k in names if activity.get(k)), "这个地方")), 30)
+    label = place if "「" in place else f"「{place}」"
+    text, status, issues = f"{label}要不要了解一下？", "fallback_unavailable", []
     rejected: list[str] = []  # Reasons of the last rejected draft, kept across a repair.
     metadata = activity.get("discovery_metadata")
     if not isinstance(metadata, dict):

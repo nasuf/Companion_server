@@ -114,6 +114,20 @@ async def test_no_evidence_invitation_citing_the_user_is_repaired(invite):
     assert card["discovery_metadata"]["invite_message_status"] == "verified_no_evidence"
 
 
+@pytest.mark.parametrize("card,expected", [
+    (dict(title="张韶涵「玩家」2026 巡回演唱会镇江站", location_name="镇江市体育会展中心-体育场",
+          starts_at="2026-10-17T19:30:00+08:00", discovery_metadata={"kind": "event"}),
+     "张韶涵「玩家」2026 巡回演唱会镇江站要不要了解一下？"),
+    (dict(title="秋日手作市集", location_name="镇江市图书馆", discovery_metadata={"kind": "event"}),
+     "「秋日手作市集」要不要了解一下？"),
+    (dict(title="大慈恩寺", location_name="大慈恩寺", discovery_metadata={"kind": "place"}), "「大慈恩寺」要不要了解一下？"),
+])
+async def test_fallback_names_the_event_not_its_venue(invite, card, expected):
+    write, _, _ = invite
+    write.side_effect = TimeoutError()
+    assert await run(card) == expected
+
+
 async def test_unpublished_review_template_is_marked_unchecked(invite):
     write, review, texts = invite
     texts["offline.recommendation_message_check"] = PROMPT_DEFINITION_MAP["offline.recommendation_message_check"].default_text

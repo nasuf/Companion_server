@@ -88,6 +88,7 @@ def test_places_are_never_date_checked():
     "具体开放时段素材里没有写明。",
     "开放时段没写太细，出发前确认一下。", "开放时间没写清楚。", "门票价格没有写明。",
     "既然没特别偏好，就单纯分享个去处。", "既然没有你之前的喜好记录，就单纯分享给你。",
+    "不过这种地方时间不一定固定，出发前确认。",
 ])
 def test_input_state_disclosure_is_feedback(text):
     assert guards.DISCLOSURE_FEEDBACK in guards.copy_issues(text, PLACE, NOW)
@@ -95,7 +96,8 @@ def test_input_state_disclosure_is_feedback(text):
 
 @pytest.mark.parametrize("text", ["有空写写日记也不错。", "你没写过信吧，这里能寄明信片。", "名字写得很有意思。",
                                   "时间安排没写死，随你。",
-                                  "没什么偏好也没关系，随便逛逛。", "没什么偏好的话可以试试招牌。"])
+                                  "没什么偏好也没关系，随便逛逛。", "没什么偏好的话可以试试招牌。",
+                                  "停留时间不一定要长，逛逛就好。"])
 def test_ordinary_writing_words_are_not_disclosure(text):
     assert guards.DISCLOSURE_FEEDBACK not in guards.copy_issues(text, PLACE, NOW)
 
@@ -139,6 +141,7 @@ def test_environment_claims_need_the_facts(text, facts, flagged):
 
 @pytest.mark.parametrize("text,facts,flagged", [
     ("反正就在市区，过去也方便。", '{"location": "镇江市体育会展中心-体育场 团山路33号"}', True),
+    ("它就在运河路交叉口南边，位置也方便。", '{"location": "解放路辅路与运河路交叉口南"}', True),
     ("地铁口出来就到，交通挺方便。", '{"description": "地铁2号线直达"}', False),
 ])
 def test_location_ease_needs_the_facts(text, facts, flagged):
