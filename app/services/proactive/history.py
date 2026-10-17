@@ -13,15 +13,15 @@ from datetime import UTC, datetime, timedelta
 
 from app.db import db
 from app.redis_client import get_redis
+from app.services.proactive import tuning
 from app.services.runtime.tasks import fire_background
+from app.services.schedule_domain.sql_time import local_hour_sql
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
-MAX_DAILY_PROACTIVE = 3
 PROACTIVE_FATIGUE_BLOCK_THRESHOLD = 0.85
 _DAILY_TTL_SEC = 86400
-_RHYTHM_TZ = "Asia/Shanghai"
 
 
 def _today_key() -> str:
@@ -53,7 +53,7 @@ async def can_send_proactive(agent_id: str, user_id: str) -> bool:
     try:
         count = await redis.get(_proactive_count_key(agent_id, user_id))
         if count is not None:
-            return int(count) < MAX_DAILY_PROACTIVE
+            return int(count) < int(tuning.value("daily_max"))
     except Exception as e:
         logger.warning(f"[PROACTIVE-COUNT] Redis read failed: {e}")
 
@@ -64,7 +64,7 @@ async def can_send_proactive(agent_id: str, user_id: str) -> bool:
         await redis.set(_proactive_count_key(agent_id, user_id), total, ex=_DAILY_TTL_SEC)
     except Exception:
         pass
-    return total < MAX_DAILY_PROACTIVE
+    return total < int(tuning.value("daily_max"))
 
 
 async def get_proactive_fatigue_score(
@@ -128,7 +128,7 @@ async def get_proactive_fatigue_score(
     }
     score = min(
         1.0,
-        (today_count / MAX_DAILY_PROACTIVE) * 0.45
+        (today_count / max(1, int(tuning.value("daily_max")))) * 0.45
         + min(sent_72h / 6.0, 1.0) * 0.25
         + min(reply_timeout_72h / 2.0, 1.0) * 0.20
         + min(skipped_24h / 4.0, 1.0) * 0.10,
@@ -191,7 +191,7 @@ async def get_proactive_rhythm_adjustment(
             WHERE agent_id = $1
               AND user_id = $2
               AND created_at >= $3::timestamp
-              AND EXTRACT(HOUR FROM created_at AT TIME ZONE '{_RHYTHM_TZ}')::int = $4
+              AND {local_hour_sql("created_at")} = $4
               {workspace_clause}
             """,
             *params,

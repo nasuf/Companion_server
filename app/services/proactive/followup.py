@@ -39,6 +39,7 @@ from app.services.interaction.topic_continuity import (
     render_dialogue,
 )
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_text
+from app.services.proactive import tuning
 from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.gates import check_followup_gates, check_workspace
 from app.services.proactive.state import (
@@ -406,6 +407,8 @@ async def _followup_skip_reason(state: ProactiveStateRecord, now: datetime) -> s
     continuity = await topic_continuity.load_continuity(state.conversation_id)
     if continuity is None:
         return "continuity_unavailable"
+    if int(tuning.value("followup_max_per_session")) <= 0:
+        return "followup_disabled"
     if not continuity.followup_available:
         return "followup_used_this_session"
     return await check_followup_gates(state, now=now)

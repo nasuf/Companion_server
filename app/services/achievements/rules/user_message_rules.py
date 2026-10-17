@@ -31,6 +31,7 @@ from app.services.achievements.utils import (
     count_chars,
 )
 from app.services.relationship.intimacy import get_intimacy_data
+from app.services.schedule_domain.sql_time import local_date_sql
 
 FUTURE_PLAN_CUES = (
     "之后有什么安排",
@@ -527,10 +528,10 @@ async def _all_proactive_messages_replied_quickly(
 
 async def _check_daily_chat_day_milestones(user_id: str, agent_id: str, workspace_id: str | None, conversation_id: str) -> None:
     rows = await db.query_raw(
-        """
+        f"""
         SELECT COUNT(*) AS count
         FROM (
-            SELECT (m.created_at AT TIME ZONE 'Asia/Shanghai')::date AS d
+            SELECT {local_date_sql("m.created_at")} AS d
             FROM messages m
             JOIN conversations c ON c.id = m.conversation_id
             WHERE c.user_id = $1

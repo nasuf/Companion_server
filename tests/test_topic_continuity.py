@@ -42,6 +42,13 @@ class FakeRedis:
         for f in fields:
             self.store.get(key, {}).pop(f, None)
 
+    async def hincrby(self, key, field, amount):
+        if self.fail:
+            raise ConnectionError("redis down")
+        bucket = self.store.setdefault(key, {})
+        bucket[field] = str(int(bucket.get(field, 0)) + amount)
+        return int(bucket[field])
+
 
 class _Pipe:
     def __init__(self, redis: FakeRedis):
@@ -53,6 +60,9 @@ class _Pipe:
 
     def hdel(self, key, *fields):
         self.ops.append(("hdel", key, fields))
+
+    def hincrby(self, key, field, amount):
+        self.ops.append(("hincrby", key, (field, amount)))
 
     def expire(self, key, ttl):
         self.ops.append(("expire", key, ttl))
@@ -67,6 +77,9 @@ class _Pipe:
             elif op == "hdel":
                 for f in arg:
                     bucket.pop(f, None)
+            elif op == "hincrby":
+                field, amount = arg
+                bucket[field] = str(int(bucket.get(field, 0)) + amount)
 
 
 @pytest.fixture
@@ -267,3 +280,58 @@ async def test_verdict_roundtrip(redis):
     state = await tc.load_continuity("c1")
     assert state.verdict == verdict
     assert state.anchor_message_id == "ai-3"
+
+
+@pytest.fixture
+def max_followups(monkeypatch):
+    """把单会话追问上限换成指定值 (后台「聊天管理 → 主动交流」可调)."""
+    def _set(n):
+        monkeypatch.setattr(
+            "app.services.runtime_config.proactive_policy_overrides",
+            lambda: {"followup_max_per_session": n},
+        )
+    return _set
+
+
+async def test_followup_quota_counts_up_to_the_configured_max(redis, max_followups):
+    max_followups(2)
+    await tc.note_user_message("c1", now=NOW)
+    await tc.reserve_followup("c1", now=NOW)
+    state = await tc.load_continuity("c1")
+    # 追问过一次: 不再带回归承接话术 (规格), 但上限是 2 还能再追问一次
+    assert state.followup_used and state.followup_available
+    await tc.reserve_followup("c1", now=NOW)
+    assert (await tc.load_continuity("c1")).followup_available is False
+    await tc.release_followup("c1")
+    assert (await tc.load_continuity("c1")).followup_available is True
+
+
+async def test_zero_max_disables_followups(redis, max_followups):
+    max_followups(0)
+    await tc.note_user_message("c1", now=NOW)
+    assert (await tc.load_continuity("c1")).followup_available is False
+
+
+def test_legacy_hash_without_count_counts_as_one_followup():
+    """上线前写入的状态只有 followup_sent_at: 按已追问 1 次处理, 不会多追."""
+    state = tc._state_from_hash({"followup_sent_at": NOW.isoformat()})
+    assert state.followups_used == 1 and state.followup_available is False
+
+
+async def test_new_session_resets_followup_count(redis, max_followups):
+    max_followups(2)
+    await tc.note_user_message("c1", now=NOW)
+    await tc.reserve_followup("c1", now=NOW)
+    await tc.reserve_followup("c1", now=NOW)
+    await tc.note_user_message("c1", now=NOW + timedelta(hours=3, minutes=1))
+    state = await tc.load_continuity("c1")
+    assert state.followups_used == 0 and state.followup_available
+
+
+def test_return_line_gap_is_tunable(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.runtime_config.proactive_policy_overrides",
+        lambda: {"return_line_min_gap_minutes": 30},
+    )
+    assert resolve_cue(_state(), previous_assistant_id="ai-1", gap_seconds=20 * 60).return_line is False
+    assert resolve_cue(_state(), previous_assistant_id="ai-1", gap_seconds=31 * 60).return_line is True

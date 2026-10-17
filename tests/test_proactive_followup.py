@@ -139,6 +139,38 @@ async def test_followup_only_once_per_session(harness):
     assert "restart_cycle" not in harness.advance.await_args.kwargs
 
 
+async def test_zero_max_per_session_disables_followup(harness, monkeypatch):
+    """后台把单会话追问上限设为 0: 判定照跑 (被动承接要用), 但不追问."""
+    monkeypatch.setattr(
+        "app.services.runtime_config.proactive_policy_overrides",
+        lambda: {"followup_max_per_session": 0},
+    )
+    await followup.process_followup_window(_state(), now=NOW)
+    harness.record.assert_awaited_once()
+    harness.generate.assert_not_awaited()
+    assert harness.advance_reason() == "followup_disabled"
+
+
+async def test_night_followup_allowed_when_active_hours_not_enforced(harness, monkeypatch):
+    """关闭「追问遵守主动时段」后, 深夜还在聊时也会追问 (A 模式不受影响)."""
+    from app.services.proactive import gates
+
+    monkeypatch.setattr(
+        "app.services.runtime_config.proactive_policy_overrides",
+        lambda: {"followup_respect_active_hours": False},
+    )
+    monkeypatch.setattr(followup, "check_followup_gates", gates.check_followup_gates)
+    monkeypatch.setattr(gates, "offline_activity_owns_channel", AsyncMock(return_value=False))
+    monkeypatch.setattr(gates, "has_recent_game_activity", AsyncMock(return_value=False))
+    monkeypatch.setattr(gates, "has_recent_proactive_or_reminder", AsyncMock(return_value=False))
+    monkeypatch.setattr(gates, "_patience_is_normal", AsyncMock(return_value=True))
+    monkeypatch.setattr(gates, "_reminder_due_soon", AsyncMock(return_value=False))
+    night = datetime(2026, 9, 29, 15, 30, tzinfo=UTC)  # 北京时间 23:30
+    assert not gates.is_in_active_hours(night)
+    await followup.process_followup_window(_state(), now=night)
+    harness.emit.assert_awaited_once()
+
+
 async def test_unknown_continuity_never_risks_a_second_followup(harness):
     harness.continuity.return_value = None  # Redis 不可用
     await followup.process_followup_window(_state(), now=NOW)

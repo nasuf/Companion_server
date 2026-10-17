@@ -30,6 +30,7 @@ from app.observability.events import EVT_PROACTIVE_SENT, EVT_PROACTIVE_SKIPPED
 from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.memory.recording.pipeline import process_memory_pipeline
+from app.services.proactive import tuning
 from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.history import (
     can_send_proactive,
@@ -80,6 +81,11 @@ _ADMIN_UNLOCKABLE_STATUSES = frozenset({
 
 _MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2", "relationship"})
 _DIALOGUE_APPROACHES = ("关心追问后续", "话题轻度延伸")
+
+
+def _pick_dialogue_approach() -> str:
+    care = random.random() < float(tuning.value("recent_dialogue_care_followup"))
+    return _DIALOGUE_APPROACHES[0] if care else _DIALOGUE_APPROACHES[1]
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -385,8 +391,8 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
             "personality_brief": personality_brief,
             "recent_dialogue": ctx.get("recent_dialogue") or "（无）",
             "current_time": format_clock(_now_corrected()),
-            # 提示词规定"随机二选一": 由代码掷骰, 让模型自己选并不随机
-            "approach": random.choice(_DIALOGUE_APPROACHES),
+            # 提示词规定"随机二选一": 由代码掷骰, 让模型自己选并不随机; 比例后台可调
+            "approach": _pick_dialogue_approach(),
         },
         "proactive.scheduled_scene": {
             "personality_brief": personality_brief,
@@ -543,7 +549,7 @@ async def _persist_proactive_state(
 def _should_use_music_source(trigger_type: str) -> bool:
     if trigger_type != "silence_wakeup":
         return False
-    return random.random() < 0.04
+    return random.random() < float(tuning.value("music_probability"))
 
 
 async def _prepare_music_recommendation_source(

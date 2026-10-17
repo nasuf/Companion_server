@@ -6,11 +6,12 @@ import random
 from datetime import datetime, timezone
 from typing import Any
 
-from app.services.proactive.state import ProactiveStateRecord, PROACTIVE_WINDOWS, is_same_local_day
+from app.services.proactive import tuning
+from app.services.proactive.state import ProactiveStateRecord, is_same_local_day
 
 UTC = timezone.utc
 
-# spec §1.2 base hit rates 严格使用 PROACTIVE_WINDOWS 表: 0/5/12/25/35%.
+# spec §1.2 base hit rates 默认 0/5/12/25/35% (后台「聊天管理 → 主动交流」可调).
 # spec §8.3 第一阶段 n=1-4 要求 "正常概率, 最多 4 次", 4 次上限由
 # _escalate_silence_level 的 n+1 升级机制保证 (n=5 后走强制触发路径,
 # 不再进此函数), 频率维度不做额外折扣.
@@ -21,13 +22,9 @@ def should_hit_window(
     *,
     rate_multiplier: float = 1.0,
 ) -> tuple[bool, float]:
-    base_rate = 0.0
-    for window in PROACTIVE_WINDOWS:
-        if int(window["index"]) == int(state.current_window_index or 0):
-            base_rate = float(window["hit_rate"])
-            break
-
-    final_rate = max(0.0, min(0.50, base_rate * rate_multiplier))
+    base_rate = tuning.window_rate(int(state.current_window_index or 0))
+    cap = float(tuning.value("a_window_rate_cap"))
+    final_rate = max(0.0, min(cap, base_rate * rate_multiplier))
     return random.random() < final_rate, final_rate
 
 
@@ -45,24 +42,31 @@ def scene_candidate_available(
     return True
 
 
+_TRIGGER_TYPES = ("silence_wakeup", "memory_proactive", "scheduled_scene")
+_FALLBACK_TRIGGER_TYPES = ("silence_wakeup", "memory_proactive")
+
+
 def select_trigger_type() -> str:
-    """spec §1.3 触发类型基础配比: 沉默唤醒 30% / 记忆主动 30% / 定时情景 40%.
+    """spec §1.3 触发类型基础配比: 默认沉默唤醒 30% / 记忆主动 30% / 定时情景 40%.
 
     抽中 scheduled_scene 后, **调用方**再校验 scene 可用性 (AI 睡眠 / 当日已用),
     不可用走 `fallback_trigger_type()` 兜底. 不在此函数预校验 — 否则在 scene
     不可用时段会偏到 50/50, 错失 30/30 配比.
     """
-    r = random.random()
-    if r < 0.30:
-        return "silence_wakeup"
-    if r < 0.60:
-        return "memory_proactive"
-    return "scheduled_scene"
+    values = tuning.current()
+    return _weighted_choice(
+        {name: float(values[f"trigger_{name}"]) for name in _TRIGGER_TYPES},
+        default="silence_wakeup",
+    )
 
 
 def fallback_trigger_type() -> str:
-    """spec §1.3 兜底: 定时情景不可用或抽取失败时, 在沉默/记忆之间 50/50."""
-    return random.choice(["silence_wakeup", "memory_proactive"])
+    """spec §1.3 兜底: 定时情景不可用或抽取失败时, 在沉默/记忆之间 (默认 50/50)."""
+    values = tuning.current()
+    return _weighted_choice(
+        {name: float(values[f"fallback_{name}"]) for name in _FALLBACK_TRIGGER_TYPES},
+        default="silence_wakeup",
+    )
 
 
 # ── spec §3.4.7 话题范围分级库 (P1-P5) ──
@@ -112,72 +116,39 @@ def select_topic_theme(stage: str) -> str:
 
 
 # ── spec §4.1 沉默唤醒 / §4.2 记忆主动 话题来源配比 ──
-# spec §5 把 P1+P2 合并成一档配比, 所以 p1_cold / p2_cold / cold_start 共用
-# 同一份分布. 来源: ai_l1 / ai_l2 / ai_schedule / user_l1 / user_l2 / greeting.
-_SILENCE_COLD = {
-    "ai_l1": 0.20, "ai_l2": 0.00, "ai_schedule": 0.10,
-    "user_l1": 0.00, "user_l2": 0.00, "greeting": 0.70,
-}
+# 实际生效值由后台「聊天管理 → 主动交流」调整, 默认值与说明见 proactive/tuning.py:
+#   - spec §5 把 P1+P2 合并成一档配比 → p1_cold / p2_cold / cold_start 共用「冷启动」表
+#   - 记忆主动 Phase 2 关系记忆: warming/intimate 给 "relationship" (我们之间的共同经历)
+#     分一份权重; 冷启动没有共同历史, 不分
+#   - 《主动交流提示词》提示词3「带时间感知历史对话搭话」= recent_dialogue (近两天带
+#     时间戳的聊天记录): 沉默唤醒从 greeting 匀出, 记忆主动从 ai_l1 匀出; 冷启动不分 ——
+#     还不熟就追问对方的事, 像查户口; 近两天没聊过时 context 兜底回落
+# 下面两张是规格默认值 (只读视图), 运行时请走 select_topic_source。
+_STAGES = ("p1_cold", "p2_cold", "cold_start", "warming", "intimate")
 SILENCE_SOURCE_DIST: dict[str, dict[str, float]] = {
-    "p1_cold": _SILENCE_COLD,
-    "p2_cold": _SILENCE_COLD,
-    "cold_start": _SILENCE_COLD,
-    # recent_dialogue (近两天带时间戳的聊天记录, 见下方 MEMORY_SOURCE_DIST 注释) 从
-    # greeting 匀出: 沉默后接一句"昨天说的面试怎么样啦"比泛泛的"在干嘛呢"像真朋友得多
-    "warming": {
-        "ai_l1": 0.10, "ai_l2": 0.00, "ai_schedule": 0.10,
-        "user_l1": 0.05, "user_l2": 0.05, "greeting": 0.60,
-        "recent_dialogue": 0.10,
-    },
-    "intimate": {
-        "ai_l1": 0.05, "ai_l2": 0.05, "ai_schedule": 0.10,
-        "user_l1": 0.10, "user_l2": 0.10, "greeting": 0.50,
-        "recent_dialogue": 0.10,
-    },
-}
-
-# 记忆主动独立 100% 不参与抽签
-# Phase 2 关系记忆: warming/intimate 阶段给 "relationship" 来源 (memories_ai
-# 生活/交互 — 我们之间的共同经历) 分一份权重. 冷启动阶段没有共同历史, 不分.
-# 《主动交流提示词》提示词3 A 模式新来源「带时间感知历史对话搭话」= recent_dialogue
-# (近两天带时间戳的聊天记录)。权重从 ai_l1 匀出; 近两天没聊过时 context 兜底回
-# ai_l1, 不会让本次主动落空。冷启动不分 —— 还不熟就追问对方的事, 像查户口。
-_MEMORY_COLD = {
-    "ai_l1": 1.00, "ai_l2": 0.00,
-    "user_l1": 0.00, "user_l2": 0.00,
+    stage: tuning.default_distribution("silence", tuning.stage_tier(stage)) for stage in _STAGES
 }
 MEMORY_SOURCE_DIST: dict[str, dict[str, float]] = {
-    "p1_cold": _MEMORY_COLD,
-    "p2_cold": _MEMORY_COLD,
-    "cold_start": _MEMORY_COLD,
-    "warming": {
-        "ai_l1": 0.50, "ai_l2": 0.05,
-        "user_l1": 0.10, "user_l2": 0.10,
-        "relationship": 0.10,
-        "recent_dialogue": 0.15,
-    },
-    "intimate": {
-        "ai_l1": 0.30, "ai_l2": 0.10,
-        "user_l1": 0.15, "user_l2": 0.15,
-        "relationship": 0.15,
-        "recent_dialogue": 0.15,
-    },
+    stage: tuning.default_distribution("memory", tuning.stage_tier(stage)) for stage in _STAGES
 }
 
 
-def _weighted_choice(weights: dict[str, float]) -> str:
+def _weighted_choice(weights: dict[str, float], *, default: str = "greeting") -> str:
     total = sum(w for w in weights.values() if w > 0)
     if total <= 0:
-        return "greeting"
+        return default
     r = random.random() * total
     acc = 0.0
+    last = default
     for name, w in weights.items():
         if w <= 0:
             continue
         acc += w
+        last = name
         if r <= acc:
             return name
-    return next(iter(weights))
+    # 浮点累加误差让 r 落在最后一点点外: 归给最后一个有权重的项 (不能是权重 0 的项)
+    return last
 
 
 def select_topic_source(stage: str, trigger_type: str) -> str:
@@ -192,7 +163,7 @@ def select_topic_source(stage: str, trigger_type: str) -> str:
     if trigger_type == "scheduled_scene":
         return "ai_schedule"
     if trigger_type == "silence_wakeup":
-        return _weighted_choice(SILENCE_SOURCE_DIST.get(stage, _SILENCE_COLD))
+        return _weighted_choice(tuning.distribution("silence", stage))
     if trigger_type == "memory_proactive":
-        return _weighted_choice(MEMORY_SOURCE_DIST.get(stage, _MEMORY_COLD))
+        return _weighted_choice(tuning.distribution("memory", stage), default="ai_l1")
     return "greeting"

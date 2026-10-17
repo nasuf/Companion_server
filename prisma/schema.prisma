@@ -2215,6 +2215,9 @@ model SystemConfig {
   replyDelayMaxSeconds           Int?     @map("reply_delay_max_seconds")
   // Short-message / turn-window aggregation before replying. null = env default.
   userMessageAggregationEnabled  Boolean? @map("user_message_aggregation_enabled")
+  // 后台「聊天管理 → 主动交流」改过的参数 (只存与默认不同的项; 登记表见
+  // app/services/proactive/tuning.py). null = 全部用默认。
+  proactivePolicy                Json?    @map("proactive_policy")
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String?  @map("default_template_agent_id")
@@ -2613,4 +2616,16 @@ model MessageFollowupEvent {
   @@index([createdAt(sort: Desc), messageId(sort: Desc)], map: "message_followup_recent_idx")
   @@index([status, createdAt(sort: Desc), messageId(sort: Desc)], map: "message_followup_status_recent_idx")
   @@map("message_followup_events")
+}
+
+// 后台「聊天管理 → 主动交流」参数的修改记录: 谁、何时、把哪几项从多少改到多少。
+model ProactiveTuningChange {
+  id        String   @id @default(uuid())
+  adminId   String?  @map("admin_id")
+  // [{key, before, after}]; before/after 为 null 表示默认值
+  changes   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt(sort: Desc)])
+  @@map("proactive_tuning_changes")
 }

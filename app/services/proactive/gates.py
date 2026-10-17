@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from app.db import db
+from app.services.proactive import tuning
 from app.services.proactive.state import (
     ProactiveStateRecord,
     has_recent_game_activity,
@@ -36,10 +37,8 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
-# spec §1.2: 主动交流仅在每日 8:00-22:00 之间发送
-ACTIVE_HOUR_START = 8
-ACTIVE_HOUR_END = 22
-COOLDOWN_MINUTES = 30
+# spec §1.2 主动交流时段 (默认 8:00-22:00) 与全局冷却 (默认 30 分钟) 由后台
+# 「聊天管理 → 主动交流」调整, 登记表见 proactive/tuning.py
 USER_ACTIVE_MINUTES = 30
 # B 追问时对局只要在最近这么久内有动静就算"人在玩", 不插话
 FOLLOWUP_GAME_WINDOW_MINUTES = 10
@@ -59,8 +58,15 @@ class Gate:
 
 
 def is_in_active_hours(now: datetime) -> bool:
-    local = now.astimezone(_TZ)
-    return ACTIVE_HOUR_START <= local.hour < ACTIVE_HOUR_END
+    values = tuning.current()
+    return values["active_hour_start"] <= now.astimezone(_TZ).hour < values["active_hour_end"]
+
+
+async def _in_global_cooldown(state: ProactiveStateRecord, now: datetime | None) -> bool:
+    minutes = int(tuning.value("cooldown_minutes"))
+    return minutes > 0 and await has_recent_proactive_or_reminder(
+        state.workspace_id, now=now, window_minutes=minutes,
+    )
 
 
 async def check_workspace(state: ProactiveStateRecord) -> Gate | None:
@@ -127,9 +133,7 @@ async def check_window_gates(
         return Gate("defer", "recent_user_activity")
     # 全局冷却。两个独立调度器 (trigger_scan 15s + 本扫描 1min) 不互相协调时,
     # 没有这道门会出现 reminder + scheduled_scene 同分钟双发 (生产 2026-05-03 14:00)。
-    if await has_recent_proactive_or_reminder(
-        state.workspace_id, now=now, window_minutes=COOLDOWN_MINUTES,
-    ):
+    if await _in_global_cooldown(state, now):
         return Gate("defer", "recent_proactive_activity")
     if await _topic_fatigued(state.workspace_id):
         return Gate("defer", "topic_fatigue")
@@ -178,7 +182,7 @@ async def check_followup_gates(
     延续, 不是冷启动搭话; 单会话仅一次已经把频率压住了。
     """
     now_ts = now or datetime.now(UTC)
-    if not is_in_active_hours(now_ts):
+    if tuning.value("followup_respect_active_hours") and not is_in_active_hours(now_ts):
         return "off_hours"
     if await offline_activity_owns_channel(state):
         return "offline_activity_active"
@@ -186,9 +190,7 @@ async def check_followup_gates(
         state.workspace_id, now=now, window_minutes=FOLLOWUP_GAME_WINDOW_MINUTES,
     ):
         return "game_in_progress"
-    if await has_recent_proactive_or_reminder(
-        state.workspace_id, now=now, window_minutes=COOLDOWN_MINUTES,
-    ):
+    if await _in_global_cooldown(state, now):
         return "cooldown"
     if not await _patience_is_normal(state):
         return "patience_low"

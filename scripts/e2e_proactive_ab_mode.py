@@ -342,8 +342,8 @@ async def scenario_unfinished_then_b_once():
         "判定 prompt 填了用户最后发送时间 + 当前时间",
     )
     fu_prompt = next(p for k, p in SCRIPT.prompts if k == "followup")
-    check("【通用回复规则】" in fu_prompt and "AI: 好呀，你想去哪儿？" in fu_prompt,
-          "B prompt (提示词2) 带回复前置 + 对话上下文")
+    check("【主动交流通用前提】" in fu_prompt and "AI: 好呀，你想去哪儿？" in fu_prompt,
+          "B prompt (提示词2) 带主动交流通用前提 + 对话上下文")
     check(
         re.search(r"AI最后发送时间：\d\d-\d\d 周. \d\d:\d\d", fu_prompt) is not None
         and re.search(r"当前时间场景：周.(?:凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)", fu_prompt) is not None,
@@ -767,9 +767,9 @@ async def scenario_real_chat_turn():
 
     events = []
     with (
-        patch.object(models, "_build_chat_model", lambda _k: fake),
-        patch.object(models, "_build_utility_model", lambda _k: fake),
-        patch.object(models, "_build_fallback_chat_model", lambda _k: fake),
+        patch.object(models, "_build_chat_model", lambda *_a: fake),
+        patch.object(models, "_build_utility_model", lambda *_a: fake),
+        patch.object(models, "_build_fallback_chat_model", lambda *_a: fake),
         patch("app.services.memory.storage.embedding.get_embedding_model", lambda: _Emb()),
     ):
         async for evt in stream_chat_response(
@@ -842,9 +842,9 @@ async def scenario_upset_user_gets_no_playful_lines():
     before = len(_RoutedFakeLLM.main_prompts)
     events = []
     with (
-        patch.object(models, "_build_chat_model", lambda _k: fake),
-        patch.object(models, "_build_utility_model", lambda _k: fake),
-        patch.object(models, "_build_fallback_chat_model", lambda _k: fake),
+        patch.object(models, "_build_chat_model", lambda *_a: fake),
+        patch.object(models, "_build_utility_model", lambda *_a: fake),
+        patch.object(models, "_build_fallback_chat_model", lambda *_a: fake),
         patch("app.services.memory.storage.embedding.get_embedding_model", lambda: _Emb()),
     ):
         async for evt in stream_chat_response(
@@ -866,16 +866,56 @@ async def scenario_upset_user_gets_no_playful_lines():
     check(bool(main) and "## 话题接续" not in main, "主 prompt 不带话题接续段")
 
 
+async def scenario_admin_tuning():
+    print("\n[S12] 后台「聊天管理 → 主动交流」: 深夜也追问 + 单会话追问 2 次 (真实配置读取链路)")
+    from app.services.runtime_config import load_caches
+
+    async def set_policy(policy: dict | None):
+        await db.execute_raw(
+            "UPDATE system_config SET proactive_policy = $1::jsonb WHERE id = 1",
+            json.dumps(policy) if policy else None,
+        )
+        await load_caches()
+
+    await load_caches()  # 首次加载会补建 system_config 行
+    await set_policy({"followup_respect_active_hours": False, "followup_max_per_session": 2})
+    try:
+        w = await World("s12").create()
+        with patch("app.services.proactive.gates.is_in_active_hours", lambda _now: False):  # 深夜
+            await w.user_says("我在想要不要养只猫")
+            await w.ai_replies("养猫挺好的呀，你想养什么品种？")
+            SCRIPT.judge.append("未完结")
+            SCRIPT.followup.append("要是我的话会选橘猫哈哈")
+            await w.advance(5)
+            await scan()
+            check(len(await w.messages("assistant")) == 2, "关闭「追问遵守主动时段」后深夜也追问")
+
+            await w.advance(31)  # 等过 30 分钟全局冷却 (追问也算主动消息)
+            await w.user_says("橘猫好胖哈哈")
+            await w.ai_replies("胖才可爱嘛，你家附近有猫舍吗？")
+            SCRIPT.judge.append("未完结")
+            SCRIPT.followup.append("我听说领养也很不错")
+            await w.advance(5)
+            await scan()
+            check(len(await w.messages("assistant")) == 4, "单会话上限 2: 同一会话第二次追问照发")
+
+            await w.advance(31)
+            await w.user_says("回头看看")
+            await w.ai_replies("好呀，看中了记得给我看照片？")
+            SCRIPT.judge.append("未完结")
+            before = SCRIPT.count("followup")
+            await w.advance(5)
+            await scan()
+            check(SCRIPT.count("followup") == before and len(await w.messages("assistant")) == 5,
+                  "第三次: 名额用完不再追问")
+    finally:
+        await set_policy(None)
+
+
 async def scenario_prompt_sync():
     print("\n[S0] 启动同步: 新增 prompt key 已入库")
     from app.services.prompting.store import ensure_prompt_templates, get_prompt_text
 
-    # 模拟上一版部署留下的行 (本次已从 registry 删除)
-    if await db.prompttemplate.find_unique(where={"key": "proactive.memory_timed"}) is None:
-        await db.prompttemplate.create(data={
-            "key": "proactive.memory_timed", "stage": "proactive", "category": "proactive",
-            "title": "旧模板", "content": "旧文案", "defaultContent": "旧文案",
-        })
     await ensure_prompt_templates()
     for key in (
         "proactive.topic_completion_judge", "proactive.followup_unfinished",
@@ -887,12 +927,6 @@ async def scenario_prompt_sync():
         row = await db.prompttemplate.find_unique(where={"key": key})
         text = await get_prompt_text(key)
         check(row is not None and len(text) > 20, f"{key} 已同步且可取")
-    # 旧版本的 key 从 registry 删掉后, 部署同步把行连同版本历史一起清掉
-    for key in (
-        "proactive.memory_timed", "proactive.trending_user_interest",
-        "proactive.trending_ai_persona", "proactive.trending_socially_hot",
-    ):
-        check(await db.prompttemplate.find_unique(where={"key": key}) is None, f"{key} 已作为孤儿删除")
 
 
 async def main() -> int:
@@ -942,6 +976,7 @@ async def main() -> int:
         await scenario_passive_return_and_jump()
         await scenario_real_chat_turn()
         await scenario_upset_user_gets_no_playful_lines()
+        await scenario_admin_tuning()
     finally:
         for p in patches:
             p.stop()

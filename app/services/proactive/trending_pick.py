@@ -21,13 +21,13 @@ from typing import Any, Literal
 
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.storage import repo as memory_repo
+from app.services.proactive import tuning
 from app.services.prompting.utils import render_prompt
 
 logger = logging.getLogger(__name__)
 
 PickMode = Literal["interest", "random"]
 
-INTEREST_FIRST_PROBABILITY = 0.5
 _PICK_TIMEOUT_S = 10.0
 _MAX_CANDIDATES = 12
 _SUMMARY_MAX_CHARS = 100
@@ -138,7 +138,7 @@ async def pick_trending(
     formatted = _format_candidates(pool)
 
     hobbies = await _load_user_hobbies(user_id, workspace_id)
-    if hobbies and random.random() < INTEREST_FIRST_PROBABILITY:
+    if hobbies and random.random() < float(tuning.value("trending_interest_first")):
         raw = await _run_pick("proactive.trending_pick_interest", {
             "user_hobbies": "\n".join(f"- {h}" for h in hobbies),
             "candidates": formatted,

@@ -683,4 +683,4 @@ def test_memory_source_distributions_sum_to_one():
     for stage, dist in MEMORY_SOURCE_DIST.items():
         assert abs(sum(dist.values()) - 1.0) < 1e-9, stage
     # 冷启动还不熟, 不追问对方的事
-    assert "recent_dialogue" not in MEMORY_SOURCE_DIST["p1_cold"]
+    assert MEMORY_SOURCE_DIST["p1_cold"].get("recent_dialogue", 0.0) == 0.0

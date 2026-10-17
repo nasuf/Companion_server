@@ -40,13 +40,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
 from app.db import db
+from app.services.schedule_domain.sql_time import (  # noqa: F401 — 偏移量供测试/调用方沿用
+    LOCAL_UTC_OFFSET_HOURS,
+    local_date_sql,
+    local_hour_sql,
+)
 
 logger = logging.getLogger(__name__)
 
-# 数据库里的时间戳是不带时区的 UTC。转本地时间只用这一个偏移量, 不要在 SQL 里写
-# AT TIME ZONE —— 对 `timestamp without time zone` 它的方向跟直觉相反 (会减而不是
-# 加), 而算错的时段会变成一条"用户总在凌晨找我"的永久记忆。
-LOCAL_UTC_OFFSET_HOURS = 8
+# 数据库里的时间戳是不带时区的 UTC。转本地时间统一走 schedule_domain.sql_time,
+# 不要在 SQL 里写 AT TIME ZONE —— 对 `timestamp without time zone` 它的方向跟直觉
+# 相反 (会减而不是加), 而算错的时段会变成一条"用户总在凌晨找我"的永久记忆。
 
 # 样本量下限。低于它就不产出对应事实 —— 三条消息看不出"作息", 五次对话看不出"趋势"。
 MIN_MESSAGES_FOR_TIMING = 20
@@ -81,18 +85,12 @@ class BehaviouralFact:
 
 
 def _local_hour_expr(column: str) -> str:
-    """把 UTC 列换算成本地小时。
-
-    刻意用加固定偏移而不是 `AT TIME ZONE`: 后者对 `timestamp without time zone`
-    的语义是"把这个值当作该时区的时间, 转成 UTC", 方向跟这里要的正好相反。
-    """
-    return (
-        f"EXTRACT(HOUR FROM {column} + INTERVAL '{LOCAL_UTC_OFFSET_HOURS} hours')::int"
-    )
+    """把 UTC 列换算成本地小时 (加固定偏移, 见 schedule_domain.sql_time)."""
+    return local_hour_sql(column)
 
 
 def _local_date_expr(column: str) -> str:
-    return f"({column} + INTERVAL '{LOCAL_UTC_OFFSET_HOURS} hours')::date"
+    return local_date_sql(column)
 
 
 def _as_date(value) -> date | None:

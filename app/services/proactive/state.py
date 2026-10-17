@@ -29,6 +29,7 @@ from typing import Any
 
 from app.db import db
 from app.observability.events import EVT_PROACTIVE_STATE_TRANSITION
+from app.services.proactive import tuning
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,10 @@ STATUS_PROCESSING = "processing"
 STATUS_WAITING_USER = "waiting_user"
 STATUS_PROCESSING_TIMEOUT = "processing_timeout"
 
-# window 0 不参与概率抽签: 它是 AI 说完最后一句后固定 5 分钟的「话题完结判定窗」
-# (proactive/followup.py), 判完进入 window 1 起的 A 模式窗口。
+# window 0 不参与概率抽签: 它是 AI 说完最后一句后的「话题完结判定窗」(默认 5 分钟,
+# 后台「聊天管理 → 主动交流」可调; proactive/followup.py), 判完进入 window 1 起的 A 模式窗口。
 JUDGE_WINDOW_INDEX = 0
-FOLLOWUP_JUDGE_DELAY_S = 5 * 60
+FOLLOWUP_JUDGE_DELAY_S = 5 * 60  # 默认值; 运行时读 tuning.followup_judge_delay_minutes
 
 # arm 原因 (写进 metadata.reason, 判定窗据此决定要不要做 B 追问)
 ARM_REASON_REPLY = "assistant_reply"
@@ -75,11 +76,12 @@ def short_circuit_arm_reason(kind: str | None) -> str | None:
 
 
 PROACTIVE_WINDOWS: tuple[dict[str, float | int | str], ...] = (
-    {"index": 0, "name": "0-30m", "start_sec": 0, "end_sec": 1800, "hit_rate": 0.00},
-    {"index": 1, "name": "30m-1h", "start_sec": 1800, "end_sec": 3600, "hit_rate": 0.05},
-    {"index": 2, "name": "1h-2h", "start_sec": 3600, "end_sec": 7200, "hit_rate": 0.12},
-    {"index": 3, "name": "2h-4h", "start_sec": 7200, "end_sec": 14400, "hit_rate": 0.25},
-    {"index": 4, "name": "4h-6h", "start_sec": 14400, "end_sec": 21600, "hit_rate": 0.35},
+    # 各窗命中率见 proactive/tuning.py (后台可调), 这里只定义时间区间
+    {"index": 0, "name": "0-30m", "start_sec": 0, "end_sec": 1800},
+    {"index": 1, "name": "30m-1h", "start_sec": 1800, "end_sec": 3600},
+    {"index": 2, "name": "1h-2h", "start_sec": 3600, "end_sec": 7200},
+    {"index": 3, "name": "2h-4h", "start_sec": 7200, "end_sec": 14400},
+    {"index": 4, "name": "4h-6h", "start_sec": 14400, "end_sec": 21600},
 )
 
 
@@ -527,7 +529,7 @@ async def start_or_restart_proactive_session(
     now_ts = _now(now)
     stage = await determine_proactive_stage(agent_id, user_id)
     if first_window_index == JUDGE_WINDOW_INDEX:
-        due_at = now_ts + timedelta(seconds=FOLLOWUP_JUDGE_DELAY_S)
+        due_at = now_ts + timedelta(minutes=int(tuning.value("followup_judge_delay_minutes")))
     else:
         due_at = _pick_random_due_at(now_ts, first_window_index, now_ts)
 

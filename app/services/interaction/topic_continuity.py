@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from app.redis_client import get_redis
+from app.services.proactive import tuning
 from app.services.prompting.utils import is_skip_output
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,6 @@ UTC = timezone.utc
 # 会话边界 & 承接上限。≥3h 的重逢由「重逢感知 + 上次聊到」接管 (且 3h 前的
 # 逐字历史已被裁掉), 那时再"接着刚才的话题"反而不自然。
 SESSION_GAP_SECONDS = 3 * 3600
-# spec: 用户隔 >10 分钟回来才带「回归承接短句」
-RETURN_CUE_MIN_GAP_SECONDS = 10 * 60
 _TTL_SECONDS = 7 * 86400
 
 # B 模式追问消息的 trigger_type (metadata.trigger_type), 聊天侧据此认出"上一句是追问"
@@ -63,13 +62,26 @@ class TopicVerdict:
 class ContinuityState:
     verdict: TopicVerdict | None
     anchor_message_id: str | None
+    # 本次会话最近一次 B 追问的时间
     followup_sent_at: datetime | None
     last_user_at: datetime | None
     session_closed: bool
+    # 本次会话已追问次数 (旧数据只有 followup_sent_at → 按 1 次算)
+    followup_count: int = 0
+
+    @property
+    def followups_used(self) -> int:
+        return max(self.followup_count, 1 if self.followup_sent_at is not None else 0)
+
+    @property
+    def followup_used(self) -> bool:
+        """本次会话追问过 —— 规格: 回归承接话术要求「从未触发过 B」."""
+        return self.followups_used > 0
 
     @property
     def followup_available(self) -> bool:
-        return self.followup_sent_at is None
+        """本次会话还能再追问 (单会话上限默认 1, 后台可调; 0 = 关闭 B 追问)."""
+        return self.followups_used < int(tuning.value("followup_max_per_session"))
 
 
 @dataclass(frozen=True)
@@ -188,7 +200,15 @@ def _state_from_hash(raw: dict[str, str]) -> ContinuityState:
         followup_sent_at=_parse_dt(raw.get("followup_sent_at")),
         last_user_at=_parse_dt(raw.get("last_user_at")),
         session_closed=raw.get("session_closed") == "1",
+        followup_count=_parse_int(raw.get("followup_count")),
     )
+
+
+def _parse_int(value: str | None) -> int:
+    try:
+        return max(0, int(value or 0))
+    except ValueError:
+        return 0
 
 
 async def load_continuity(conversation_id: str | None) -> ContinuityState | None:
@@ -234,15 +254,28 @@ async def record_verdict(
 
 
 async def reserve_followup(conversation_id: str, *, now: datetime | None = None) -> bool:
-    """发 B 之前先占名额: 写不进去就不发 —— 宁可少追问一次, 不能记账失败导致追问两次."""
-    return await _hset(conversation_id, {"followup_sent_at": _now(now).isoformat()})
+    """发 B 之前先占名额: 写不进去就不发 —— 宁可少追问一次, 不能记账失败导致多追问."""
+    try:
+        redis = await get_redis()
+        key = _key(conversation_id)
+        pipe = redis.pipeline()
+        pipe.hincrby(key, "followup_count", 1)
+        pipe.hset(key, mapping={"followup_sent_at": _now(now).isoformat()})
+        pipe.expire(key, _TTL_SECONDS)
+        await pipe.execute()
+    except Exception as e:
+        logger.warning(f"[CONTINUITY] reserve followup failed conv={conversation_id[:8]}: {e}")
+        return False
+    return True
 
 
 async def release_followup(conversation_id: str) -> None:
     """占了名额但最终没发出去 (用户恰好回来 / 生成失败): 还回去."""
     try:
         redis = await get_redis()
-        await redis.hdel(_key(conversation_id), "followup_sent_at")
+        key = _key(conversation_id)
+        if await redis.hincrby(key, "followup_count", -1) <= 0:
+            await redis.hdel(key, "followup_count", "followup_sent_at")
     except Exception as e:
         logger.warning(f"[CONTINUITY] release followup failed conv={conversation_id[:8]}: {e}")
 
@@ -255,7 +288,7 @@ async def close_session(conversation_id: str | None) -> None:
 
 # 只重置 B 名额。判定结论不随会话清掉 —— 它靠 anchor 自证有效期, 而「晚安」后
 # 隔两小时回来这种跨会话的第一句, 恰恰要靠"上一轮已完结"压掉重逢寒暄。
-_SESSION_FIELDS = ("followup_sent_at", "session_closed")
+_SESSION_FIELDS = ("followup_sent_at", "followup_count", "session_closed")
 
 
 def starts_new_session(state: ContinuityState, now: datetime) -> bool:
@@ -322,6 +355,9 @@ def resolve_cue(
         return ContinuationCue(unfinished=False, return_line=False, gap_seconds=gap_seconds)
     return ContinuationCue(
         unfinished=True,
-        return_line=gap_seconds > RETURN_CUE_MIN_GAP_SECONDS and state.followup_available,
+        return_line=(
+            gap_seconds > float(tuning.value("return_line_min_gap_minutes")) * 60
+            and not state.followup_used
+        ),
         gap_seconds=gap_seconds,
     )

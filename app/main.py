@@ -273,6 +273,7 @@ from app.api.admin.bug_reports import router as admin_bug_reports_router
 from app.api.admin.user_feedback import router as admin_user_feedback_router
 from app.api.admin.stats import router as admin_stats_router
 from app.api.admin.runtime_config import router as admin_runtime_config_router
+from app.api.admin.proactive_tuning import router as admin_proactive_tuning_router
 from app.api.admin.model_registry import router as admin_model_registry_router
 from app.api.admin.memory_repairs import router as admin_memory_repairs_router
 from app.api.admin.runtime_jobs import router as admin_runtime_jobs_router
@@ -342,6 +343,7 @@ app.include_router(admin_bug_reports_router)
 app.include_router(admin_user_feedback_router)
 app.include_router(admin_stats_router)
 app.include_router(admin_runtime_config_router)
+app.include_router(admin_proactive_tuning_router)
 app.include_router(admin_model_registry_router)
 app.include_router(admin_memory_repairs_router)
 app.include_router(admin_runtime_jobs_router)

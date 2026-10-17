@@ -36,6 +36,7 @@ class TestStaleClientGuard:
             # proactiveTrending* 全部缺
             replyDelayEnabled=False, replyDelayMaxSeconds=300,
             userMessageAggregationEnabled=True,
+            proactivePolicy=None,
         )
         with caplog.at_level(logging.ERROR, logger="app.services.runtime_config"):
             runtime_config._verify_prisma_client_fields(row)

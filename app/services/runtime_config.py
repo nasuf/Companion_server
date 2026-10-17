@@ -232,6 +232,7 @@ _SYSTEM_CONFIG_REQUIRED_FIELDS: tuple[str, ...] = (
     "proactiveTrendingLinkProbability", "proactiveTrendingCacheTtlS",
     "replyDelayEnabled", "replyDelayMaxSeconds",
     "userMessageAggregationEnabled",
+    "proactivePolicy",
 )
 
 _STALE_CLIENT_VERIFIED = False  # 一进程只发一条告警, 别刷屏
@@ -324,6 +325,21 @@ async def refresh_worker_config() -> None:
     while True:
         await asyncio.sleep(2)
         await ensure_loaded()
+
+
+_EMPTY_POLICY: dict = {}
+
+
+def proactive_policy_overrides() -> dict:
+    """后台「聊天管理 → 主动交流」存下的覆盖值 (只含改过的项), 由 proactive.tuning 解析.
+
+    与 resolve_config_sync 同源: 绑定了快照的请求读快照, 否则读模块缓存。
+    返回值的对象身份随配置刷新才变, tuning 据此缓存解析结果。
+    """
+    snapshot = _current_snapshot.get()
+    glob = (snapshot.global_config if snapshot else _GLOBAL_CACHE) or {}
+    raw = glob.get("proactivePolicy")
+    return raw if isinstance(raw, dict) else _EMPTY_POLICY
 
 
 def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:

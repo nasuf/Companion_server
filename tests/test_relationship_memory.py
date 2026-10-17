@@ -127,7 +127,7 @@ class TestProactiveWiring:
             assert sum(dist.values()) == pytest.approx(1.0)
         # Cold-start stages have no shared history yet.
         for stage in ("p1_cold", "p2_cold", "cold_start"):
-            assert "relationship" not in MEMORY_SOURCE_DIST[stage]
+            assert MEMORY_SOURCE_DIST[stage].get("relationship", 0.0) == 0.0
 
     def test_sender_maps_relationship_to_memory_ai_prompt(self):
         from app.services.proactive.sender import _MEMORY_SOURCES, _PROMPT_KEY_BY_SOURCE
