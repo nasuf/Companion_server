@@ -987,6 +987,13 @@ async def _run_runtime_job_queue():
             await dispatch_location_events(limit=10)
         except Exception as e:
             _job_failed("Location memory dispatch", e)
+        try:
+            from app.services.runtime.message_followups import dispatch_message_followups, prune_message_followups
+            await dispatch_message_followups(limit=10)
+            await prune_message_followups()
+        except Exception as e:
+            _job_failed("Message statistics dispatch", e)
+
 
     await _run_local_job("runtime_job_queue", _body)
 

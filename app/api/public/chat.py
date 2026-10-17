@@ -70,13 +70,7 @@ async def _persist_user_message(
         }
     )
     await mark_user_replied_for_conversation(conversation_id)
-    from app.services.interaction_streak import record_user_message_day_for_conversation
-
-    fire_background(
-        record_user_message_day_for_conversation(
-            conversation_id, message_id=saved.id, workspace_id=workspace_id, user_id=user_id,
-        )
-    )
+    # The message INSERT registers durable statistics in the same transaction.
     return saved.id
 
 

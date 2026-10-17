@@ -187,18 +187,6 @@ async def save_replies(
                 first_created_at = getattr(created, "createdAt", None)
                 first_metadata = metadata
             assistant_texts.append(text)
-            try:
-                from app.services.achievements.service import handle_assistant_message_event
-
-                fire_background(handle_assistant_message_event(
-                    conversation_id=conversation_id,
-                    message_id=created.id,
-                    text=text,
-                    metadata=metadata,
-                    occurred_at=getattr(created, "createdAt", None),
-                ))
-            except Exception as achievement_err:
-                logger.debug(f"[ACH] assistant message hook skipped: {achievement_err}")
         if achievement_turn_final and first_message_id and assistant_texts:
             try:
                 from app.services.achievements.service import handle_assistant_turn_event

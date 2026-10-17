@@ -79,18 +79,7 @@ async def stream_graph_response(
                 }
             )
             user_message_id = saved.id
-            from app.services.interaction_streak import (
-                record_user_message_day_for_conversation,
-            )
-
-            services._fire_background(
-                record_user_message_day_for_conversation(
-                    conversation_id,
-                    message_id=user_message_id,
-                    workspace_id=workspace_id,
-                    user_id=getattr(conversation, "userId", None),
-                )
-            )
+            # Statistics registration commits with the message INSERT.
         agent_token = await bind_agent_context(agent_id)
         usage_token = usage_tracker.start_session()
         tracer = services.create_tracer(

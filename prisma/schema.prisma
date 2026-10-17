@@ -324,6 +324,7 @@ model Message {
   linkBinding ChatLinkMessageBinding? @ignore
 
   locationMemoryEvent LocationMemoryEvent? @ignore
+  messageFollowupEvent MessageFollowupEvent? @ignore
 
   @@index([conversationId, createdAt(sort: Desc)])
   // admin 监控聚合 (分时段/每日活跃/句子区间/DAU-WAU-MAU) 都按 role='user' +
@@ -2591,4 +2592,25 @@ model LocationMemoryEvent {
   @@ignore
   @@index([createdAt(sort: Desc), messageId(sort: Desc)], map: "location_memory_recent_idx")
   @@map("location_memory_events")
+}
+
+// SQL registration is atomic with message persistence; the queue carries IDs only.
+model MessageFollowupEvent {
+  messageId String @id @map("message_id")
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  scope Json
+  sourceVersion String @map("source_version")
+  status String @default("pending_dispatch")
+  generation Int @default(0)
+  jobId String? @map("job_id")
+  dispatchAttempts Int @default(0) @map("dispatch_attempts")
+  lastError String? @map("last_error")
+  outcome String?
+  nextDispatchAt DateTime @default(now()) @map("next_dispatch_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@ignore
+  @@index([createdAt(sort: Desc), messageId(sort: Desc)], map: "message_followup_recent_idx")
+  @@index([status, createdAt(sort: Desc), messageId(sort: Desc)], map: "message_followup_status_recent_idx")
+  @@map("message_followup_events")
 }

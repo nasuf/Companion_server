@@ -166,7 +166,9 @@ def test_authorized_chat_preserves_sse_and_queue_payload(secured_chat, auth_head
     saved = s.db.message.create.await_args.kwargs["data"]
     assert saved["content"] == "hello" and saved["role"] == "user"
     s.business["mark_user_replied_for_conversation"].assert_awaited_once_with("conv-1")
-    s.business["fire_background"].assert_called_once()
+    # Registration is part of the message INSERT (real PostgreSQL coverage in
+    # test_message_followups_postgres), with no volatile post-save callback.
+    s.business["fire_background"].assert_not_called()
     if route == "aggregated":
         assert '"status": "aggregating"' in response.text
         s.business["enqueue_or_append_delayed"].assert_not_called()

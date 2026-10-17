@@ -99,11 +99,17 @@ async def test_dispatch_failure_does_not_starve_other_runtime_jobs(monkeypatch):
         "dispatch_location_events",
         AsyncMock(side_effect=RuntimeError("synthetic")),
     )
+    from app.services.runtime import message_followups
+    statistics = AsyncMock()
+    monkeypatch.setattr(message_followups, "dispatch_message_followups", statistics)
+    monkeypatch.setattr(message_followups, "prune_message_followups", AsyncMock())
     failed = Mock()
     monkeypatch.setattr(scheduler, "_job_failed", failed)
     await scheduler._run_runtime_job_queue()
     processed.assert_awaited_once_with(max_jobs=20)
+    assert failed.call_count == 1
     assert failed.call_args.args[0] == "Location memory dispatch"
+    statistics.assert_awaited_once_with(limit=10)
 
 
 async def test_admin_requires_admin_token_and_bounded_query(monkeypatch):

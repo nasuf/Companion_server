@@ -104,10 +104,11 @@ def test_registration_uses_service_without_router_imports(monkeypatch):
     monkeypatch.setattr(job_queue, '_HANDLERS', {})
     monkeypatch.setattr(job_queue, '_RECOVERY_DELAYS', {})
     monkeypatch.setattr(job_queue, '_LEGACY_NO_DELAY_HANDLERS', set())
-    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory')
-    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory')
+    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics')
+    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics')
     from app.services.location_memory import write_location_share_memories
-    assert job_queue._HANDLERS == {'agent_initialization': _run_agent_initialization_job, 'location_share_memory': write_location_share_memories}
+    from app.services.runtime.message_followups import run_message_followup
+    assert job_queue._HANDLERS == {'agent_initialization': _run_agent_initialization_job, 'location_share_memory': write_location_share_memories, 'message_statistics': run_message_followup}
     assert job_queue._RECOVERY_DELAYS['agent_initialization'] == MEMORY_GENERATION_LOCK_TTL_S
     assert job_queue._LEGACY_NO_DELAY_HANDLERS == {'agent_initialization'}
 
@@ -189,6 +190,25 @@ async def test_stop_required_is_never_retried_in_same_worker(monkeypatch):
     with pytest.raises(WorkerStopRequired):
         await runtime.consume_background_jobs(health)
     fake.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_background_role_dispatches_statistics_and_retention(monkeypatch):
+    from jobs import runtime
+    from app.services.runtime import job_queue, message_followups
+    processed = AsyncMock()
+    dispatched = AsyncMock()
+    # Cancellation ends exactly one scan without changing global asyncio.sleep.
+    pruned = AsyncMock(side_effect=asyncio.CancelledError())
+    monkeypatch.setattr(job_queue, 'process_runtime_jobs', processed)
+    monkeypatch.setattr(message_followups, 'dispatch_message_followups', dispatched)
+    monkeypatch.setattr(message_followups, 'prune_message_followups', pruned)
+    health = RoleHealth('background', initialized=True, postgres=True, redis=True, last_probe=time.monotonic())
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.consume_background_jobs(health)
+    processed.assert_awaited_once_with(max_jobs=20)
+    dispatched.assert_awaited_once_with(limit=10)
+    pruned.assert_awaited_once()
 
 
 @pytest.mark.asyncio

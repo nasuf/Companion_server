@@ -44,12 +44,18 @@ async def monitor_dependencies(health, redis):
 
 async def consume_background_jobs(health):
     from app.services.runtime.job_queue import process_runtime_jobs
+    from app.services.runtime.message_followups import dispatch_message_followups, prune_message_followups
     from jobs.scheduler import _run_local_job
+
+    async def scan():
+        await process_runtime_jobs(max_jobs=20)
+        await dispatch_message_followups(limit=10)
+        await prune_message_followups()
 
     while True:
         if health.ready():
             try:
-                await _run_local_job("runtime_job_queue", lambda: process_runtime_jobs(max_jobs=20))
+                await _run_local_job("runtime_job_queue", scan)
             except WorkerStopRequired:
                 raise
             except Exception as error:

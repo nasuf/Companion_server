@@ -233,17 +233,9 @@ async def emit_proactive_message(
                 data={"metadata": Json(metadata)},
             )
     try:
-        from app.services.achievements.service import handle_assistant_message_event
         from app.services.notifications.service import notify_agent_message_created
         from app.services.runtime.tasks import fire_background
 
-        fire_background(handle_assistant_message_event(
-            conversation_id=conversation_id,
-            message_id=created_id,
-            text=message,
-            metadata=metadata,
-            occurred_at=created_at,
-        ))
         fire_background(notify_agent_message_created(
             conversation_id=conversation_id,
             message_id=created_id,

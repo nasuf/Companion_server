@@ -493,13 +493,7 @@ async def _persist_user_message(
         },
     )
     await mark_user_replied_for_conversation(conversation_id)
-    from app.services.interaction_streak import record_user_message_day_for_conversation
-
-    fire_background(
-        record_user_message_day_for_conversation(
-            conversation_id, message_id=saved.id, workspace_id=workspace_id, user_id=user_id,
-        )
-    )
+    # The message INSERT registers durable statistics in the same transaction.
     return saved.id
 
 
@@ -1577,9 +1571,7 @@ async def _handle_message(
             await _send_ack(ws, message_id=user_message_id, client_id=client_id)
             return
         await mark_user_replied_for_conversation(conversation_id)
-        from app.services.interaction_streak import record_user_message_day_for_conversation
-        fire_background(record_user_message_day_for_conversation(
-            conversation_id, message_id=user_message_id, workspace_id=workspace_id, user_id=user_id))
+        # Transactional message statistics also cover the location ingress.
     else:
         user_message_id = await _persist_user_message(conversation_id, persisted_text,
             metadata=message_metadata, workspace_id=workspace_id, user_id=user_id)
@@ -1672,23 +1664,6 @@ async def _handle_message(
         plan=plan,
         reply_context=current_context,
     )
-    try:
-        from app.services.achievements.service import handle_user_message_event
-
-        fire_background(handle_user_message_event(
-            user_id=user_id,
-            agent_id=agent.id,
-            workspace_id=workspace_id,
-            conversation_id=conversation_id,
-            message_id=user_message_id,
-            text=text,
-            agent_name=getattr(agent, "name", None),
-            reply_context=current_context,
-            aggregation_route=plan.route,
-            component_card=component_card,
-        ))
-    except Exception as achievement_err:
-        logger.debug(f"[ACH] user message hook skipped: {achievement_err}")
 
     if component_card and component_card.get("type") == "music_track":
         handled = await _handle_music_component_card(

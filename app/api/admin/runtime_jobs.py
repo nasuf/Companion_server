@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 
@@ -73,6 +73,36 @@ async def get_location_events(
         return await inspect_location_events(limit=limit)
     except Exception as error:
         raise HTTPException(status_code=503, detail="位置分享处理记录暂时不可用，请重试。") from error
+
+
+@router.get("/message-followups")
+async def get_message_followups(
+    limit: int = Query(20, ge=1, le=50),
+    status: str = Query("all", pattern="^(all|failed|pending_dispatch|queued|completed|cancelled)$"),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    from app.services.runtime.message_followups import inspect_message_followups
+    try:
+        return await inspect_message_followups(limit=limit, status=status)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="消息统计处理记录暂时不可用，请重试。") from error
+
+
+@router.post("/message-followups/{message_id}/retry")
+async def retry_message_followup(
+    message_id: str = Path(min_length=1, max_length=200),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    from app.services.runtime.message_followups import FollowupRetryConflict, retry_message_followup as retry
+    try:
+        found = await retry(message_id)
+    except FollowupRetryConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="消息统计恢复暂时不可用，请刷新后重试。") from error
+    if not found:
+        raise HTTPException(status_code=404, detail="message_followup_not_found")
+    return {"status": "pending_dispatch", "message_id": message_id}
 
 
 @router.get("/{job_id}")
