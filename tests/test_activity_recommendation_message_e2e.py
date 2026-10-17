@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from app.services.auth import create_jwt
 from app.services.offline import activity_generation as generation
+from app.services.offline.evidence_text import undated
 from app.services.offline import activity_recommendation_message as note
 from app.services.offline import repository as repo, cleversee_discovery as discovery
 from app.services.offline.discovery_facts import native_place
@@ -58,7 +59,9 @@ async def test_selected_relevance_web_versions_scoping_and_public_api_consistenc
     assert "我明天要处理报销" not in writing.call_args.args[1]
     stored = await repo.get_activity(public["id"], j.user)
     meta = stored["discovery_metadata"]
-    assert [r["text"] for r in meta["user_relevance"]] == [MEMORY, "咖啡", DIALOGUE]
+    # Stored references keep the dated original the writer saw.
+    assert [undated(r["text"]) for r in meta["user_relevance"]] == [MEMORY, "咖啡", DIALOGUE]
+    assert all(r["text"].startswith("[20") for r in meta["user_relevance"] if r["kind"] != "preference")
     assert meta["recommendation_message_status"] == "verified"
     assert meta["recommendation_evidence_status"] == {"memory": "collected", "preference": "collected", "dialogue": "collected"}
     path = "/offline/activities/" + public["id"]
@@ -119,7 +122,8 @@ async def test_foreign_conversation_is_never_evidence(native):
     from app.services.offline.activity_message_context import recommendation_dialogue
     assert await recommendation_dialogue(user_id="someone-else", workspace_id=j.workspace, conversation_id=j.conversation) == []
     assert await recommendation_dialogue(user_id=j.user, workspace_id=None, conversation_id=j.conversation) == []
-    assert await recommendation_dialogue(user_id=j.user, workspace_id=j.workspace, conversation_id=j.conversation) == [DIALOGUE]
+    own = await recommendation_dialogue(user_id=j.user, workspace_id=j.workspace, conversation_id=j.conversation)
+    assert [undated(item) for item in own] == [DIALOGUE] and own[0].startswith("[20")
 
 
 async def test_legacy_source_keeps_selected_place_relevance(native, monkeypatch):
@@ -150,4 +154,4 @@ async def test_legacy_source_keeps_selected_place_relevance(native, monkeypatch)
     stored = await repo.get_activity(result.json()["id"], j.user)
     assert stored["location_name"] == j.raw["name"]
     assert stored["recommendation_message"] == MESSAGE
-    assert stored["discovery_metadata"]["user_relevance"] == [{"kind": "memory", "text": MEMORY}]
+    assert [(r["kind"], undated(r["text"])) for r in stored["discovery_metadata"]["user_relevance"]] == [("memory", MEMORY)]

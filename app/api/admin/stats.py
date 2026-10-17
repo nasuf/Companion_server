@@ -1799,6 +1799,21 @@ async def reply_effect(
     }
 
 
+@router.get("/activity-copy-quality")
+async def activity_copy_quality(
+    days: int = 7,
+    _: dict = Depends(require_admin_jwt),
+):
+    """活动推荐文案质量: 用户看到的是核验通过的模型文案, 还是退回的代码模板.
+
+    退回模板时页面照样能读, 不会有人察觉; 这里按生成当时记录的状态汇总摘要、
+    详情、寄语、聊天邀请语四段, 旧数据没有状态时显示「未记录」而不是算作成功。
+    """
+    from app.services.offline.copy_quality import collect_copy_quality
+
+    return await collect_copy_quality(days)
+
+
 @router.post("/cron-health/invariants")
 async def rerun_invariants(_: dict = Depends(require_admin_jwt)):
     """手动重跑不变量巡检.

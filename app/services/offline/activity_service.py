@@ -268,6 +268,15 @@ async def create_recommendation_for_user(
                 user_id=user_id,
                 workspace_id=ctx["workspace_id"],
             )
+            # The row predates the invitation here; record its outcome for the
+            # admin view. Message metadata reaches clients, so reasons live only
+            # in the activity row.
+            invite_outcome = {key: value for key, value in (activity.get("discovery_metadata") or {}).items()
+                              if key in ("invite_message_status", "invite_message_issues")}
+            try:
+                await repo.merge_discovery_metadata(activity["id"], user_id, invite_outcome)
+            except Exception as exc:
+                logger.warning("[offline] invite outcome not recorded (%s)", type(exc).__name__)
         if publication_guard is not None:
             await publication_guard(ctx)
         await emit_assistant(
@@ -285,6 +294,10 @@ async def create_recommendation_for_user(
                 "recommendation_message_status": (activity.get("discovery_metadata") or {}).get("recommendation_message_status", "not_generated"),
                 "user_relevance_count": (activity.get("discovery_metadata") or {}).get("user_relevance_count", 0),
                 "recommendation_evidence_status": (activity.get("discovery_metadata") or {}).get("recommendation_evidence_status", {}),
+                # Read by the admin copy-quality view; "not_recorded" marks a
+                # path that bypassed the invite generator, not a success. The
+                # reasons stay in the activity row: message metadata reaches clients.
+                "invite_message_status": (activity.get("discovery_metadata") or {}).get("invite_message_status", "not_recorded"),
             },
         )
         await emit_activity_card(

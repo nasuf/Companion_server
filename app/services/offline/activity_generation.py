@@ -17,8 +17,11 @@ from app.services.llm.models import invoke_text, invoke_json
 from app.services.offline.llm import get_offline_chat_model as get_chat_model, get_offline_small_model as get_utility_model
 from app.services.offline.activity_images import persist_activity_images
 from app.services.offline.activity_recommendation_message import (
-    attach_recommendation_message, evidence_inputs,
+    EVIDENCE_KINDS, accepted_review, attach_recommendation_message, evidence_inputs,
+    exact_references, is_published, page_facts, review_copy,
 )
+from app.services.offline.copy_guards import bounded_issues, copy_issues, date_relation, local_now, today_text
+from app.services.offline.evidence_text import mask_quotes
 from app.services.offline.image_evidence import indexed_image_evidence
 from app.services.offline.prompt_fields import clip_text, filled, parse_text_field
 from app.services.offline.recommendation_content import fallback_detail, fallback_summary, useful_detail
@@ -585,7 +588,10 @@ async def _verify_discovery_leads(proposals: list[dict], results: list[SearchRes
             facts = _fallback_card(city, tags, [matching])
             if facts and facts['location_name'] == name:
                 # Facts always come from the verified page, including dates and
-                # addresses. The published prompt owns the recommendation prose.
+                # addresses. The published prompt owns the recommendation prose,
+                # which replaces these defaults only after review.
+                facts['_copy_defaults'] = {field: facts.get(field) or ''
+                                           for field in ('title', 'description', *_CARD_COPY_FIELDS)}
                 for field in ('title', 'summary', 'description', 'vibe', 'suitable'):
                     value = card.get(field)
                     if isinstance(value, str) and value.strip():
@@ -711,7 +717,7 @@ async def _generate_activity_cards(
             if limit == 1:
                 card = await _native_card(candidates, user_id=user_id, city=native_city,
                     search_anchor=search_anchor, tags=tags, memory=memory, recent=recent_activities,
-                    dialogue_context=dialogue)
+                    dialogue_context=dialogue, evidence=evidence)
                 return [await attach_recommendation_message(card, evidence, source_statuses)]
             random.shuffle(candidates)
             selected, seen = [], set()
@@ -725,7 +731,7 @@ async def _generate_activity_cards(
             async def complete(candidate):
                 card = await _native_card([candidate], user_id=user_id, city=native_city,
                     search_anchor=search_anchor, tags=tags, memory=memory, recent=recent_activities,
-                    dialogue_context=dialogue)
+                    dialogue_context=dialogue, evidence=evidence)
                 return await attach_recommendation_message(card, evidence, source_statuses)
             # At most five complete, independently place-bound candidates.
             return await _complete_preview_batch([complete(c) for c in selected])
@@ -764,6 +770,7 @@ async def _generate_activity_cards(
                 dialogue_context=dialogue,
                 avoid_text=_avoid_text(recent_activities),
                 sources_json=json.dumps(sources, ensure_ascii=False),
+                today=today_text(local_now()),
             )
             if "{avoid_text}" not in prompt_template:
                 prompt_text += (
@@ -862,11 +869,22 @@ async def _generate_activity_cards(
         card["city"] = _display_city(city)
         card["source"] = source
         card.setdefault("expires_at", now + timedelta(days=14))
-        copy = await _recommendation_copy(card)
-        if copy:
-            card["description"] = plain_text(copy)
-        if not useful_detail(card["description"]):
-            card["description"] = fallback_detail(card)
+        # Model copy was laid over deterministic defaults (see
+        # _verify_discovery_leads); it is kept only after review. Cards without
+        # defaults never carried model copy.
+        defaults = card.pop("_copy_defaults", None)
+        proposal = None
+        if defaults is not None:
+            # Only what the model actually rewrote is reviewed; the model's
+            # description is never shown or given to the detail writer.
+            proposal = {field: card.get(field) for field in ("title", *_CARD_COPY_FIELDS)
+                        if card.get(field) and card.get(field) != defaults.get(field)} or None
+            card.update(defaults)
+        # Here the description may itself be model-written, so only the bound
+        # source pages count as facts.
+        facts = _check_facts({k: v for k, v in card.items() if k != "description"},
+                             [dict(title=s["title"], url=s["url"], text=s["content"]) for s in chosen_sources])
+        await _apply_reviewed_copy(card, proposal, facts, evidence, detail_context=card)
         return await attach_recommendation_message(card, evidence, source_statuses)
     if limit == 1:
         return [await complete(selected[0])]
@@ -883,6 +901,7 @@ async def _native_card(
     memory: str,
     recent: list[dict],
     dialogue_context: str = '[]',
+    evidence: dict[str, list[str]] | None = None,
 ) -> dict:
     # Model output selects an ID and supplies copy, never place/session facts.
     facts = [{**{k: v for k, v in c.items() if k != "native_images"},
@@ -896,6 +915,7 @@ async def _native_card(
         dialogue_context=dialogue_context,
         avoid_text=_avoid_text(recent),
         sources_json=json.dumps(facts, ensure_ascii=False),
+        today=today_text(local_now()),
     )
     selected, copy = candidates[0], {}
     try:
@@ -965,7 +985,7 @@ async def _native_card(
         dict(title=p.title, url=p.url, text=source_text(p)[:2200])
         for p in bound_sources
     ]
-    facts_for_copy = {**card, "verified_source_text": notes}
+    facts = _check_facts(card, notes)
     copy_context = {
         **card,
         "description": json.dumps(
@@ -1007,51 +1027,17 @@ async def _native_card(
         or card.get("ends_at")
         or (datetime.now(UTC) + timedelta(days=14)).isoformat()
     )
-    copy_text = await _recommendation_copy(copy_context)
-    card["description"] = fallback_detail(card)
-    copy_status = "fallback_unavailable"
-    if useful_detail(copy_text):
-        try:
-            summary = plain_text(copy.get("summary"))[:120] or card["summary"]
-            if normalized(summary) == normalized(f"可以去{card['location_name']}看看"):
-                summary = card["summary"]
-            vibe = plain_text(copy.get("vibe"))[:30]
-            check_prompt = (
-                await get_prompt_text("offline.recommendation_fact_check")
-            ).format(
-                facts_json=json.dumps(
-                    {
-                        k: v
-                        for k, v in facts_for_copy.items()
-                        if k not in {"native_images", "vibe", "image_provenance", "user_relevance"}
-                    },
-                    ensure_ascii=False,
-                ),
-                copy_text="推荐摘要："
-                + summary
-                + "\n氛围："
-                + vibe
-                + "\n\n推荐详情："
-                + copy_text,
-            )
-            async with asyncio.timeout(8):
-                checked = await invoke_json(get_utility_model(), check_prompt)
-            if isinstance(checked, dict) and checked.get("supported") is True:
-                card["description"] = plain_text(copy_text)
-                card["summary"] = summary
-                if vibe:
-                    card["vibe"] = vibe
-                copy_status = "verified"
-            else:
-                copy_status = "fallback_rejected"
-        except Exception as exc:
-            logger.info("[offline] factual copy fallback (%s)", type(exc).__name__)
-    elif copy_text:
-        copy_status = "fallback_too_short"
-    card["discovery_metadata"]["copy_status"] = copy_status
+    # Kept as the page facts' introduction: the description field becomes copy.
+    card["discovery_metadata"]["place_introduction"] = plain_text(facts.get("description"))[:600]
+    proposal = {field: copy.get(field) for field in _CARD_COPY_FIELDS} if copy else None
+    # No proposal here means selection failed or the place was substituted;
+    # either way users see a template, which the admin view must count.
+    await _apply_reviewed_copy(card, proposal, facts, evidence or {}, detail_context=copy_context,
+                               missing_status="fallback_no_proposal")
     logger.info(
-        "[offline] native detail copy=%s photos=%s",
-        copy_status,
+        "[offline] native card copy=%s detail copy=%s photos=%s",
+        card["discovery_metadata"]["card_copy_status"],
+        card["discovery_metadata"]["copy_status"],
         len(card["image_urls"]),
     )
     return card
@@ -1116,7 +1102,157 @@ def _date_time_text(card: dict[str, Any]) -> str:
     )
 
 
-async def _recommendation_copy(card: dict[str, Any]) -> str:
+_CARD_COPY_FIELDS = ("summary", "vibe", "suitable")
+# The legacy source path also proposes a title; the native path never does.
+_CARD_COPY_LIMITS = {"title": 60, "summary": 120, "vibe": 30, "suitable": 40}
+_CARD_COPY_LABELS = {"title": "标题", "summary": "推荐摘要", "vibe": "氛围", "suitable": "适合做什么"}
+# Generated copy and presentation-only fields: never evidence for themselves.
+_NON_FACT_FIELDS = frozenset({
+    "summary", "vibe", "suitable", "user_relevance", "native_images", "image_provenance",
+    "image_urls", "search_sources", "expires_at", "easter_egg_task", "task_hint",
+    "_copy_defaults", "_image_evidence_count", "source",
+})
+# Draft + review, plus one repair only when a fast first round leaves time. This
+# stage adds at most ~7 seconds over the single draft + review it replaced.
+_DETAIL_STAGE_BUDGET_S = 30
+_INVITE_BUDGET_S = 30
+
+
+def _check_facts(card: dict[str, Any], notes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Authoritative facts for review: provider and bound-page facts only."""
+    return {**{k: v for k, v in card.items() if k not in _NON_FACT_FIELDS}, "verified_source_text": notes}
+
+
+def _review_facts(card: dict[str, Any], facts: dict[str, Any], references: list[dict[str, str]],
+                  now: datetime) -> dict[str, Any]:
+    return {**facts, "user_references": references, "today": today_text(now),
+            "date_relation": date_relation(card, now)}
+
+
+async def _fact_check(facts: dict[str, Any], copy_text: str) -> tuple[bool | None, list[str]]:
+    """``None`` means the review itself was unavailable, not that the copy failed."""
+    try:
+        prompt = (await get_prompt_text("offline.recommendation_fact_check")).format(
+            facts_json=json.dumps(facts, ensure_ascii=False, default=str), copy_text=copy_text,
+        )
+        async with asyncio.timeout(8):
+            checked = await invoke_json(get_utility_model(), prompt)
+    except Exception as exc:
+        logger.info("[offline] copy review unavailable (%s)", type(exc).__name__)
+        return None, []
+    if not isinstance(checked, dict) or not isinstance(checked.get("supported"), bool):
+        return None, []
+    claims = bounded_issues(checked.get("unsupported_claims"), limit=5, length=200)
+    # "Supported" with listed problems is not a pass (same rule as the note review).
+    return checked["supported"] and not claims, claims
+
+
+async def _verified_card_copy(
+    card: dict[str, Any], proposal: dict[str, Any] | None, facts: dict[str, Any],
+    references: list[dict[str, str]], now: datetime, *, missing_status: str,
+) -> tuple[str, list[str]]:
+    """Summary, vibe and suitable get their own verdict.
+
+    They used to share one with the 500-character detail: a rejected detail
+    discarded them too, so the page top and the chat card showed templates for
+    14 of 20 recommendations. Claims about the user must match the dated
+    references, which the reviewer receives together with today's date.
+    """
+    if proposal is None:
+        return missing_status, []
+    values = {field: plain_text(value)[:_CARD_COPY_LIMITS[field]] if isinstance(value, str) else ""
+              for field, value in proposal.items() if field in _CARD_COPY_LIMITS}
+    if normalized(values.get("summary")) == normalized(f"可以去{card.get('location_name') or ''}看看"):
+        values["summary"] = ""  # Restating the destination is not a reason to go.
+    if not any(values.values()):
+        return "fallback_empty", []
+    text = "\n".join(f"{_CARD_COPY_LABELS[field]}：{value}" for field, value in values.items() if value)
+    issues = copy_issues(text, card, now, facts_text=json.dumps(facts, ensure_ascii=False, default=str))
+    if issues:
+        return "fallback_rejected", issues
+    supported, issues = await _fact_check(_review_facts(card, facts, references, now), text)
+    if supported is True:
+        card.update({field: value for field, value in values.items() if value})
+        return "verified", []
+    return ("fallback_rejected" if supported is False else "fallback_unavailable"), issues
+
+
+async def _verified_detail(
+    card: dict[str, Any], detail_context: dict[str, Any], facts: dict[str, Any], now: datetime,
+) -> tuple[str | None, str, list[str]]:
+    """Never raises: a failed detail must leave the card and its other copy usable."""
+    status, issues, feedback, rejected = "fallback_unavailable", [], [], []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _DETAIL_STAGE_BUDGET_S
+    try:
+        async with asyncio.timeout(_DETAIL_STAGE_BUDGET_S):
+            # Until the reviewed prompt version is published, a second draft
+            # would ignore the feedback and only cost time.
+            repairable = "{revision_feedback}" in str(
+                await get_prompt_text("offline.activity_recommendation_copy"))
+            for attempt in range(2):
+                text = await _recommendation_copy(detail_context, feedback=feedback, now=now)
+                if not useful_detail(text):
+                    status = "fallback_too_short" if text else "fallback_unavailable"
+                    break
+                issues = copy_issues(text, card, now,
+                                     facts_text=json.dumps(facts, ensure_ascii=False, default=str))
+                if not issues:
+                    # The detail writer never sees user evidence, so any claim
+                    # about the user in it is unsupported by construction.
+                    supported, issues = await _fact_check(
+                        _review_facts(card, facts, [], now), "推荐详情：" + text)
+                    if supported is True:
+                        return plain_text(text), "verified", []
+                    if supported is None:
+                        status = "fallback_unavailable"
+                        break
+                status, rejected = "fallback_rejected", issues
+                # A repair is a full draft + review; skip it rather than start
+                # one the deadline will cut off.
+                if attempt or not repairable or not issues or deadline - loop.time() < 18:
+                    break
+                feedback = issues
+    except TimeoutError:
+        # A repair cut off by the deadline: the first draft was still rejected.
+        if rejected:
+            status, issues = "fallback_rejected", rejected
+        else:
+            status = "fallback_unavailable"
+        logger.info("[offline] detail copy deadline reached")
+    except Exception as exc:
+        status = "fallback_unavailable"
+        logger.warning("[offline] detail copy unavailable (%s)", type(exc).__name__)
+    return None, status, issues
+
+
+async def _apply_reviewed_copy(
+    card: dict[str, Any], proposal: dict[str, Any] | None, facts: dict[str, Any],
+    evidence: dict[str, list[str]], *, detail_context: dict[str, Any],
+    missing_status: str = "deterministic",
+) -> None:
+    """Review card copy and detail independently; keep what passes, template the rest."""
+    now = local_now()
+    references = exact_references(card.get("user_relevance", []), evidence)
+    # The card copy review mutates the card; the detail writer reads a snapshot.
+    (card_status, card_issues), (detail, detail_status, detail_issues) = await asyncio.gather(
+        _verified_card_copy(card, proposal, facts, references, now, missing_status=missing_status),
+        _verified_detail(card, dict(detail_context), facts, now),
+    )
+    card["description"] = detail or fallback_detail(card)
+    private = [r["text"] for r in references]
+    card.setdefault("discovery_metadata", {}).update(
+        card_copy_status=card_status,
+        card_copy_issues=(mask_quotes(bounded_issues(card_issues), private)
+                          if card_status.startswith("fallback") else []),
+        copy_status=detail_status,
+        copy_issues=bounded_issues(detail_issues) if detail_status.startswith("fallback") else [],
+    )
+
+
+async def _recommendation_copy(
+    card: dict[str, Any], *, feedback: list[str] | None = None, now: datetime | None = None,
+) -> str:
     """Detail-page seed copy. The caller supplies a readable factual fallback."""
     try:
         prompt = (await get_prompt_text("offline.activity_recommendation_copy")).format(
@@ -1138,6 +1274,9 @@ async def _recommendation_copy(card: dict[str, Any]) -> str:
             official_link=filled(card.get("official_url"), empty="（无）"),
             activity_summary=filled(card.get("summary"), empty="（无）"),
             recommendation_blurb=filled(card.get("summary"), empty="（无）"),
+            today=today_text(now or local_now()),
+            date_relation=date_relation(card, now or local_now()),
+            revision_feedback=json.dumps(feedback or [], ensure_ascii=False),
         )
         async with asyncio.timeout(15):
             return clip_text(parse_text_field(await invoke_text(get_chat_model(), prompt)), 500)
@@ -1152,30 +1291,90 @@ async def generate_activity_invite_message(
     user_id: str,
     workspace_id: str | None,
 ) -> str:
-    place = clip_text(str(activity.get("location_name") or activity.get("title") or "这个地方"), 30)
-    fallback = f"「{place}」要不要了解一下？"
-    try:
-        from app.services.offline.activity_message_context import message_context
+    """The chat message sent with the activity card.
 
-        tags = await repo.list_user_tags(user_id, workspace_id, limit=6)
-        memory = await repo.memory_brief(user_id, workspace_id, limit=20, include_ai=False)
-        ctx = await repo.resolve_user_context(user_id, workspace_id)
-        context_fields = await message_context(ctx or {})
-        prompt_template = await get_prompt_text("offline.activity_invite_message")
-        prompt_text = prompt_template.format(
-            **context_fields,
-            title=activity.get("title") or "线下活动",
-            location=activity.get("location_name")
-            or activity.get("address")
-            or activity.get("city")
-            or "附近",
-            summary=activity.get("summary") or activity.get("description") or "",
-            tags=", ".join(tags) if tags else "暂无",
-            memory=memory or "暂无",
-        )
-        text = (await invoke_text(get_chat_model(), prompt_text)).strip()
-        text = re.sub(r"^['\"“”]+|['\"“”]+$", "", text).strip()
-        return clip_text(text, 80) or fallback
+    User-specific input is limited to the evidence the page note verified, with
+    dates, so chat and page tell the same story. The recent dialogue still
+    includes the assistant's own lines (needed to avoid repeating itself), which
+    once let an invented "你平时对着代码" become a fact the next invitation
+    repeated; every draft is therefore reviewed like the page note.
+
+    Records ``invite_message_status`` in ``activity["discovery_metadata"]`` for
+    the chat metadata and the admin quality view.
+    """
+    from app.services.offline.activity_message_context import message_context
+
+    place = clip_text(str(activity.get("location_name") or activity.get("title") or "这个地方"), 30)
+    text, status, issues = f"「{place}」要不要了解一下？", "fallback_unavailable", []
+    rejected: list[str] = []  # Reasons of the last rejected draft, kept across a repair.
+    metadata = activity.get("discovery_metadata")
+    if not isinstance(metadata, dict):
+        metadata = activity["discovery_metadata"] = {}
+    references = [item for item in metadata.get("user_relevance") or []
+                  if isinstance(item, dict) and item.get("kind") in EVIDENCE_KINDS
+                  and isinstance(item.get("text"), str)]
+    grouped = {kind: [item["text"] for item in references if item["kind"] == kind] for kind in EVIDENCE_KINDS}
+    now = local_now()
+    try:
+        async with asyncio.timeout(_INVITE_BUDGET_S):
+            ctx = await repo.resolve_user_context(user_id, workspace_id)
+            context_fields = await message_context(ctx or {})
+            # Managed objects keep trace attribution and safe rendering.
+            template = await get_prompt_text("offline.activity_invite_message")
+            check_template = await get_prompt_text("offline.recommendation_message_check")
+            reviewable = is_published("offline.recommendation_message_check", check_template)
+            repairable = "{revision_feedback}" in str(template)
+            facts = page_facts(activity, now)
+            feedback: list[str] = []
+            for attempt in range(2):
+                prompt = template.format(
+                    **context_fields,
+                    title=activity.get("title") or "线下活动",
+                    location=activity.get("location_name") or activity.get("address")
+                    or activity.get("city") or "附近",
+                    summary=activity.get("summary") or activity.get("description") or "",
+                    tags="、".join(grouped["preference"]) or "暂无",
+                    memory="\n".join(grouped["memory"]) or "暂无",
+                    user_references=json.dumps(references, ensure_ascii=False),
+                    today=facts["today"],
+                    date_relation=facts["date_relation"],
+                    revision_feedback=json.dumps(feedback, ensure_ascii=False),
+                )
+                raw = (await invoke_text(get_chat_model(), prompt)).strip()
+                candidate = clip_text(re.sub(r"^['\"“”]+|['\"“”]+$", "", raw).strip(), 80)
+                if not candidate:
+                    status, issues = "fallback_invalid", ["邀请语为空"]
+                    break
+                issues = copy_issues(candidate, activity, now,
+                                     facts_text=json.dumps(facts, ensure_ascii=False))
+                if not issues:
+                    if not reviewable:
+                        text, status = candidate, "unchecked"
+                        break
+                    checked = await review_copy(check_template, phase="message", facts=facts,
+                                                references=references, message=candidate)
+                    if accepted_review(checked, len(references)):
+                        text, status = candidate, "verified" if references else "verified_no_evidence"
+                        issues = []
+                        break
+                    issues = bounded_issues(checked.get("unsupported_claims") if isinstance(checked, dict)
+                                            else None, limit=5, length=200)
+                status = "fallback_invalid"
+                issues = rejected = issues or ["核验未通过且未给出原因"]
+                if attempt or not repairable or issues == ["核验未通过且未给出原因"]:
+                    break
+                feedback = issues
+    except TimeoutError:
+        # A repair cut off by the deadline: the first draft was still rejected.
+        if rejected:
+            status, issues = "fallback_invalid", rejected
+        else:
+            status = "fallback_unavailable"
+        logger.info("[offline] activity invite deadline reached")
     except Exception as exc:
+        status = "fallback_unavailable"
         logger.warning("[offline] activity invite message generation failed: %s", exc)
-        return fallback
+    metadata["invite_message_status"] = status
+    metadata["invite_message_issues"] = (mask_quotes(bounded_issues(issues), [r["text"] for r in references])
+                                         if status.startswith("fallback") else [])
+    return text

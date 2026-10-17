@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from app.db import db
 from app.services import profile_tags
+from app.services.offline.evidence_text import dated
 from app.services.offline.guidance import safe_guidance
 from app.services.offline.user_tags import derive_user_tags
 
@@ -435,10 +436,14 @@ async def memory_brief(
 
 
 async def recommendation_memory_items(user_id: str, workspace_id: str | None) -> list[str]:
-    """Bounded original user records; never truncate a quote or mix in AI memories."""
+    """Bounded original user records; never truncate a quote or mix in AI memories.
+
+    Each item carries the date the user said it, so a transient state ("今天出来
+    走走", "头疼好一些了") is not presented as true on a later day.
+    """
     rows = await db.query_raw(
         """
-        SELECT content FROM memories_user
+        SELECT content, COALESCE(statement_time, created_at) AS said_at FROM memories_user
         WHERE user_id = $1 AND workspace_id IS NOT DISTINCT FROM $2::text
           AND is_archived = FALSE AND COALESCE(sub_category, '') <> '提醒'
           AND length(content) BETWEEN 1 AND 1000
@@ -446,7 +451,7 @@ async def recommendation_memory_items(user_id: str, workspace_id: str | None) ->
         """,
         user_id, workspace_id,
     )
-    return [str(row['content']) for row in rows or []]
+    return [dated(str(row['content']), _field(row, 'said_at'), with_time=False) for row in rows or []]
 
 
 async def create_activity(data: dict[str, Any]) -> dict[str, Any]:
@@ -739,6 +744,21 @@ async def update_activity_status(
         status,
     )
     return activity_from_row(rows[0], reveal_task=True) if rows else None
+
+
+async def merge_discovery_metadata(activity_id: str, user_id: str, patch: dict) -> None:
+    """Add keys without replacing the document: a concurrent refresh may own the rest.
+
+    For private diagnostics only, so ``updated_at`` is left alone and clients do
+    not see the row as changed.
+    """
+    if not patch:
+        return
+    await db.execute_raw(
+        "UPDATE offline_activity_recommendations SET discovery_metadata = discovery_metadata || $3::jsonb "
+        "WHERE id = $1 AND user_id = $2",
+        activity_id, user_id, json.dumps(patch, ensure_ascii=False),
+    )
 
 
 async def save_discovery_metadata(activity_id: str, user_id: str, metadata: dict) -> dict | None:

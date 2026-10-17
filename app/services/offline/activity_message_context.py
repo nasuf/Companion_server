@@ -7,6 +7,7 @@ from typing import Any
 
 from app.db import db
 from app.services.mbti import build_personality_brief
+from app.services.offline.evidence_text import dated
 from app.services.proactive.dialogue import RECENT_MESSAGE_LIMIT, format_recent_turns
 
 logger = logging.getLogger(__name__)
@@ -46,12 +47,12 @@ async def message_context(ctx: dict[str, Any]) -> dict[str, str]:
 async def recommendation_dialogue(
     *, user_id: str, workspace_id: str | None, conversation_id: str | None,
 ) -> list[str]:
-    """Whole user utterances only: assistant statements are not user evidence."""
+    """Whole, dated user utterances only: assistant statements are not user evidence."""
     if not conversation_id:
         return []
     rows = await db.query_raw(
         """
-        SELECT m.content FROM messages m
+        SELECT m.content, m.created_at FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
         WHERE c.id = $1 AND c.user_id = $2
           AND c.workspace_id IS NOT DISTINCT FROM $3::text
@@ -63,4 +64,4 @@ async def recommendation_dialogue(
         """,
         conversation_id, user_id, workspace_id,
     )
-    return [str(row['content']) for row in reversed(rows or [])]
+    return [dated(str(row['content']), row.get('created_at'), with_time=True) for row in reversed(rows or [])]

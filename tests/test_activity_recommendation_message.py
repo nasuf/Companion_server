@@ -10,7 +10,7 @@ from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 from scripts.publish_offline_quality_prompts import validate_entry
 
 RELEASE = json.loads((Path(__file__).parents[1] /
-    "scripts/prompt_releases/20261010_activity_recommendation_message.json").read_text())
+    "scripts/prompt_releases/20261017_activity_copy_grounding.json").read_text())
 TEXTS = {entry["key"]: entry["content"] for entry in RELEASE["prompts"]}
 MEMORY = "我喜欢找咖啡馆看书。"
 DIALOGUE = "这周想换个地方看看，喝杯咖啡。"
@@ -111,7 +111,7 @@ async def test_no_evidence_uses_generic_voice_and_event_time(writer):
     event = card(discovery_metadata={"kind": "event"}, starts_at="2026-10-20T19:00:00+08:00", ends_at="2026-10-20T21:00:00+08:00")
     result = await note.attach_recommendation_message(event, {})
     prompt = text.call_args.args[1]
-    assert "用户记忆库：[]" in prompt and "对话上下文：[]" in prompt
+    assert "说这句话的日期）：[]" in prompt and "发送时间）：[]" in prompt
     assert "2026-10-20T19:00:00+08:00" in prompt
     assert result["discovery_metadata"]["recommendation_message_status"] == "verified_no_evidence"
     assert "活动时间和参与方式" in note.generic_message(event)
@@ -217,3 +217,122 @@ async def test_dashscope_check_uses_structured_primary_without_mutating_shared_m
         assert payload["seed"] == 7 and payload["response_format"] == {"type": "json_object"}
         assert not call.kwargs  # Provider-only options cannot reach the Ollama fallback.
     assert model.temperature == 0.7 and model.model_kwargs == {"response_format": {"type": "text"}}
+
+
+# --- Dated evidence, computed dates and deterministic objections (2026-10-17) ---
+
+STALE = "[2026-10-11] 用户今天出来走走"
+NOW = __import__("datetime").datetime(2026, 10, 13, 23, 47,
+                                      tzinfo=__import__("zoneinfo").ZoneInfo("Asia/Shanghai"))
+
+
+def concert():
+    return dict(title="张韶涵「玩家」2026 巡回演唱会镇江站", location_name="镇江市体育会展中心-体育场",
+                address="团山路33号", category="演出", description="演唱会在体育场举办。",
+                summary="可以留意这场演唱会。", starts_at="2026-10-17T19:30:00+08:00",
+                ends_at="2026-10-17T22:00:00+08:00", discovery_metadata={"kind": "event"})
+
+
+def test_quote_without_date_matches_whole_item_and_keeps_the_dated_original():
+    evidence = {"memory": [STALE], "dialogue": ["[2026-10-13 15:18] 想吃烧烤和金针菇"]}
+    assert note.exact_references(["用户今天出来走走", "想吃烧烤和金针菇", "用户今天出来"], evidence) == [
+        {"kind": "memory", "text": STALE},
+        {"kind": "dialogue", "text": "[2026-10-13 15:18] 想吃烧烤和金针菇"},
+    ]
+    # The date prefix is context: a full-length quote is not dropped for it.
+    long_item = "[2026-10-11] " + "m" * 1000
+    assert note._whole_items([long_item], 3000) == [long_item]
+
+
+async def test_writer_and_reviewer_get_today_and_code_computed_session_day(writer, monkeypatch):
+    monkeypatch.setattr(note, "local_now", lambda: NOW)
+    text, check = writer
+    text.return_value = MESSAGE
+    check.return_value = {"supported": True, "unsupported_claims": [], "relevant_indices": []}
+    await note.attach_recommendation_message(concert(), {})
+    prompt = text.call_args.args[1]
+    assert "今天：2026-10-13（星期二）" in prompt
+    assert "日期说明：2026-10-17（星期六，今天之后第 4 天，本周六）" in prompt
+    facts = check.call_args.args[1]
+    assert "2026-10-13（星期二）" in facts and "本周六" in facts
+
+
+async def test_wrong_year_and_going_along_are_repaired_before_any_model_review(writer, monkeypatch):
+    monkeypatch.setattr(note, "local_now", lambda: NOW)
+    text, check = writer
+    bad = MESSAGE + "时间是明年十月中旬，到时候要不要一起去凑个热闹？"
+    text.side_effect = [bad, MESSAGE]
+    check.return_value = {"supported": True, "unsupported_claims": [], "relevant_indices": []}
+    result = await note.attach_recommendation_message(concert(), {})
+    feedback = text.call_args.args[1]
+    assert "明年" in feedback and "线上陪伴" in feedback
+    assert check.await_count == 1  # The rejected draft never reached the reviewer.
+    assert result["discovery_metadata"]["recommendation_message_status"] == "verified_no_evidence"
+    assert result["discovery_metadata"]["recommendation_message_issues"] == []
+
+
+async def test_fallback_keeps_bounded_reasons_for_the_admin_view(writer):
+    text, check = writer
+    check.side_effect = [
+        {"supported": True, "relevant_indices": [0], "unsupported_claims": []},
+        {"supported": False, "relevant_indices": [0], "unsupported_claims": ["x" * 300, "b"]},
+        {"supported": False, "relevant_indices": [0], "unsupported_claims": ["c"]},
+    ]
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY]), EVIDENCE)
+    meta = result["discovery_metadata"]
+    assert meta["recommendation_message_status"] == "fallback_invalid"
+    assert meta["recommendation_message_issues"] == ["c"]
+    assert meta["user_relevance"] == []
+
+
+async def test_dated_evidence_from_storage(monkeypatch):
+    from datetime import datetime as dt
+    from app.services.offline import activity_message_context as context
+    from app.services.offline import repository
+    rows = AsyncMock(return_value=[{"content": "用户压力大", "said_at": dt(2026, 10, 10, 14, 36)}])
+    monkeypatch.setattr(repository.db, "query_raw", rows)
+    assert await repository.recommendation_memory_items("u", "w") == ["[2026-10-10] 用户压力大"]
+    assert "COALESCE(statement_time, created_at)" in rows.call_args.args[0]
+    rows.return_value = [{"content": "第二句", "created_at": dt(2026, 10, 13, 7, 19)},
+                         {"content": "第一句", "created_at": dt(2026, 10, 13, 7, 18)}]
+    monkeypatch.setattr(context.db, "query_raw", rows)
+    assert await context.recommendation_dialogue(user_id="u", workspace_id="w", conversation_id="c") == [
+        "[2026-10-13 15:18] 第一句", "[2026-10-13 15:19] 第二句"]
+
+
+async def test_copied_example_index_without_evidence_is_not_a_rejection(writer):
+    text, check = writer
+    check.return_value = {"supported": True, "unsupported_claims": [], "relevant_indices": [0]}
+    result = await note.attach_recommendation_message(card(), {})
+    assert result["discovery_metadata"]["recommendation_message_status"] == "verified_no_evidence"
+
+
+def test_page_facts_prefer_the_providers_own_introduction():
+    base = {**card(), "description": "📍 这次去哪里\n模型或模板写的详情"}
+    base["discovery_metadata"] = {"kind": "place", "place_introduction": "位于伯先路的咖啡馆。"}
+    assert note.page_facts(base, NOW)["description"] == "位于伯先路的咖啡馆。"
+    base["discovery_metadata"] = {"kind": "place", "copy_status": "verified"}
+    assert note.page_facts(base, NOW)["description"].endswith("模型或模板写的详情")
+    base["discovery_metadata"] = {"kind": "place", "copy_status": "fallback_rejected"}
+    assert note.page_facts(base, NOW)["description"] == ""  # Templates are not facts.
+
+
+def test_same_words_on_several_days_bind_to_the_earliest():
+    evidence = {"memory": ["[2026-10-12] 用户今天出来走走", "[2026-10-10] 用户今天出来走走"]}
+    assert note.exact_references(["用户今天出来走走"], evidence) == [
+        {"kind": "memory", "text": "[2026-10-10] 用户今天出来走走"}]
+    # An exact dated quote still wins.
+    assert note.exact_references(["[2026-10-12] 用户今天出来走走"], evidence)[0]["text"].startswith("[2026-10-12]")
+
+
+async def test_repair_cut_by_the_deadline_still_reports_the_rejection(writer):
+    text, check = writer
+    check.side_effect = [
+        {"supported": True, "relevant_indices": [0], "unsupported_claims": []},
+        {"supported": False, "relevant_indices": [0], "unsupported_claims": ["无依据"]},
+        TimeoutError(),
+    ]
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY]), EVIDENCE)
+    meta = result["discovery_metadata"]
+    assert meta["recommendation_message_status"] == "fallback_invalid"
+    assert meta["recommendation_message_issues"] == ["无依据"]

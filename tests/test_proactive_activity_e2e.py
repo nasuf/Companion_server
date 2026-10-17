@@ -23,6 +23,7 @@ from app.services.offline import activity_companion as companion
 from app.services.offline import activity_generation as generation
 from app.services.offline import activity_service as service
 from app.services.offline import activity_message_context as context
+from app.services.offline import activity_recommendation_message as note
 from app.services.offline import repository as repo
 from app.services.proactive import emit
 from app.services.prompting import store
@@ -125,7 +126,13 @@ async def test_web_publication_activity_generation_and_guarded_delivery(flow, mo
         # The model transport is stubbed; constructing a paid provider is also
         # outside this deterministic DB/Redis/HTTP/WS integration test.
         monkeypatch.setattr(module,'get_chat_model',lambda: None)
+    # The invitation is reviewed whenever the check prompt is published, which
+    # earlier tests in the same isolated database may already have done.
+    review = AsyncMock(return_value={'supported':True,'relevant_indices':[],'unsupported_claims':[]})
+    monkeypatch.setattr(note,'invoke_json',review)
+    monkeypatch.setattr(note,'get_utility_model',lambda: None)
     invite = await generation.generate_activity_invite_message(activity=activity,user_id=flow.user,workspace_id=flow.workspace)
+    assert activity['discovery_metadata']['invite_message_status'] in {'verified_no_evidence','unchecked'}
     arrival = await service._arrival_guide_text(activity,ctx)
     messages = await companion._recent_messages(flow.conversation)
     memory, preference = await companion._user_memory_and_preference(activity,ctx)
