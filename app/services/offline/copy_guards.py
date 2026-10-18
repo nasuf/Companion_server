@@ -289,8 +289,14 @@ def access_issues(text: str, facts_text: str) -> list[str]:
     return issues
 
 
-def voice_issues(text: str, facts_text: str, user_references: int) -> list[str]:
+def voice_issues(
+    text: str, facts_text: str, user_references: int, *, labels: tuple[str, ...] = (),
+) -> list[str]:
     issues: list[str] = []
+    # Category names are search buckets; one was "安静角落". They never prove
+    # what the place is like.
+    for label in filter(None, labels):
+        facts_text = facts_text.replace(label, "")
     cited = _USER_CITED.search(text) if not user_references else None
     if cited:
         issues.append(f"没有用户原文可依据，删除“{cited.group(0)}”开头这类说用户之前提过、平时怎样的话，"
@@ -315,9 +321,9 @@ def copy_issues(
 
     ``facts_text`` is everything the copy may rely on; with it, access claims
     (全天/随时/免费) are checked against what the facts actually state.
-    ``user_references`` (verified quotes available) marks copy with a repair
-    round — the detail, the note and the invitation — and adds the
-    environment and cited-user checks there. Card copy has no repair round.
+    ``user_references`` (verified quotes available) adds the environment,
+    crowd, location and cited-user checks. Every field of copy gets them now:
+    card copy drops only the offending field instead of the whole card.
     """
     issues: list[str] = []
     if INPUT_DISCLOSURE.search(text):
@@ -337,7 +343,8 @@ def copy_issues(
     if facts_text is not None:
         issues.extend(access_issues(text, facts_text))
         if user_references is not None:
-            issues.extend(voice_issues(text, facts_text, user_references))
+            issues.extend(voice_issues(text, facts_text, user_references,
+                                       labels=(str(card.get("category") or ""),)))
     return issues
 
 

@@ -24,6 +24,7 @@ _OUTCOME = {
     "fallback_too_short": "模板（输出过短）",
     "fallback_empty": "模板（模型没给文案）",
     "fallback_not_published": "代码文案（提示词未发布）",
+    "verified_partial": "模型文案（个别项改用默认）",
 }
 
 
@@ -53,6 +54,16 @@ def record_selection_fallback(reason: str, *, subject: str | None = None) -> Non
         display_name=_named("推荐卡生成 · 未拿到模型结果", subject),
         decision_label=f"{reason}，改用默认候选和模板摘要",
         inputs={"activity": subject},
+        outputs={"reason": reason},
+    )
+
+
+def record_evidence_withheld(reason: str | None) -> None:
+    """Recent dialogue and emotion memories are not used as recommendation reasons."""
+    record_manual_step(
+        name="offline_evidence_withheld",
+        display_name="用户依据 · 近期有危机照护" if reason == "crisis_care" else "用户依据 · 危机照护检查不可用",
+        decision_label="不用最近对话和情绪类记忆，只用长期兴趣",
         outputs={"reason": reason},
     )
 

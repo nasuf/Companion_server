@@ -214,6 +214,7 @@ async def test_evidence_limits_and_failed_source_is_not_empty(monkeypatch):
     memories = AsyncMock(return_value=[MEMORY, MEMORY, "", "x" * 1001, "m" * 1000, "n" * 1000, "o" * 1000])
     dialogue = AsyncMock(side_effect=TimeoutError())
     monkeypatch.setattr(note.repo, "recommendation_memory_items", memories)
+    monkeypatch.setattr(note.repo, "had_recent_crisis_care", AsyncMock(return_value=False))
     monkeypatch.setattr(note, "recommendation_dialogue", dialogue)
     inputs, statuses = await note.evidence_inputs(user_id="u", workspace_id="w", conversation_id="c", tags=["咖啡"])
     assert inputs["memory"] == [MEMORY, "m" * 1000, "n" * 1000]
@@ -484,3 +485,63 @@ def test_a_runtime_model_length_note_is_accepted():
     # doubao wrote 90 and 98 characters for a temple on 2026-10-18.
     assert note._NOTE_MIN_CHARS <= 90 <= note._NOTE_MAX_CHARS
     assert note._NOTE_MIN_CHARS > len("短句")
+
+
+
+# --- 2026-10-18 (2): after crisis care, low moments are not recommendation reasons ---
+
+@pytest.mark.parametrize("check,reason", [
+    (AsyncMock(return_value=True), "crisis_care"),
+    (AsyncMock(side_effect=RuntimeError("db")), "crisis_check_unavailable"),  # Unknown: stay careful.
+])
+async def test_recent_crisis_care_withholds_dialogue_and_emotion_memories(monkeypatch, check, reason):
+    memories = AsyncMock(return_value=["[2026-10-10] 用户喜欢带花香的茶"])
+    dialogue = AsyncMock(return_value=["[2026-10-11 00:26] 不该被读到"])
+    withheld = []
+    monkeypatch.setattr(note.repo, "had_recent_crisis_care", check)
+    monkeypatch.setattr(note.repo, "recommendation_memory_items", memories)
+    monkeypatch.setattr(note, "recommendation_dialogue", dialogue)
+    monkeypatch.setattr(note, "record_evidence_withheld", withheld.append)
+    inputs, statuses = await note.evidence_inputs(user_id="u", workspace_id="w", conversation_id="c", tags=["爱喝茶"])
+    assert inputs["dialogue"] == [] and dialogue.await_count == 0
+    assert memories.await_args.kwargs == {"exclude_emotions": True}
+    assert inputs["preference"] == ["爱喝茶"] and inputs["memory"] == ["[2026-10-10] 用户喜欢带花香的茶"]
+    # Client-visible statuses never say why; the reason stays private.
+    assert statuses["dialogue"] == "withheld" and "crisis" not in json.dumps(statuses)
+    assert inputs["_withheld"] == reason and withheld == [reason]
+    if check.side_effect is None:
+        assert check.await_args.kwargs == {"days": note.CRISIS_CARE_LOOKBACK_DAYS}
+
+
+async def test_without_crisis_care_nothing_is_withheld(monkeypatch):
+    memories = AsyncMock(return_value=[])
+    monkeypatch.setattr(note.repo, "had_recent_crisis_care", AsyncMock(return_value=False))
+    monkeypatch.setattr(note.repo, "recommendation_memory_items", memories)
+    monkeypatch.setattr(note, "recommendation_dialogue", AsyncMock(return_value=[]))
+    inputs, statuses = await note.evidence_inputs(user_id="u", workspace_id="w", conversation_id="c", tags=[])
+    assert "_withheld" not in inputs and memories.await_args.kwargs == {"exclude_emotions": False}
+    assert statuses["dialogue"] == "empty"
+
+
+async def test_the_withheld_reason_stays_in_the_private_activity_record(writer):
+    evidence = {**EVIDENCE, "_withheld": "crisis_care"}
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY]), evidence,
+                                                      {"preference": "collected", "memory": "collected", "dialogue": "withheld"})
+    meta = result["discovery_metadata"]
+    assert meta["evidence_withheld"] == "crisis_care"
+    assert meta["recommendation_evidence_status"]["dialogue"] == "withheld"
+
+
+async def test_crisis_care_query_and_emotion_filter(monkeypatch):
+    from app.services.offline import repository
+    rows = AsyncMock(return_value=[{"one": 1}])
+    monkeypatch.setattr(repository.db, "query_raw", rows)
+    assert await repository.had_recent_crisis_care("u", "w", days=14) is True
+    sql, *params = rows.await_args.args
+    assert "crisis_guard_status" in sql and "short_circuit_kind" in sql and "m.role = 'assistant'" in sql
+    assert params[:2] == ["u", "w"]
+    rows.return_value = []
+    assert await repository.had_recent_crisis_care("u", "w", days=14) is False
+    await repository.recommendation_memory_items("u", "w", exclude_emotions=True)
+    sql, *params = rows.await_args.args
+    assert "main_category" in sql and params == ["u", "w", True]

@@ -214,3 +214,13 @@ async def test_invitation_trace_shows_the_stop_and_the_outcome(invite, monkeypat
     await run(activity())
     assert [(stage, attempt) for stage, attempt, _ in blocks] == [("invite", 0)]
     assert outcomes == [({"invite": "verified_no_evidence"}, {"invite": []})]
+
+
+
+async def test_after_crisis_care_the_invitation_does_not_read_recent_dialogue(invite):
+    write, review, _ = invite
+    write.return_value = "大慈恩寺挺有意思，有空去转转？"
+    review.return_value = {"supported": True, "relevant_indices": [], "unsupported_claims": []}
+    await run(activity(evidence_withheld="crisis_care"))
+    prompt = write.await_args.args[1]
+    assert "AI：想着你平时对着代码" not in prompt and "（无）" in prompt

@@ -435,23 +435,48 @@ async def memory_brief(
     return "\n".join(parts)[:3000]
 
 
-async def recommendation_memory_items(user_id: str, workspace_id: str | None) -> list[str]:
+async def recommendation_memory_items(
+    user_id: str, workspace_id: str | None, *, exclude_emotions: bool = False,
+) -> list[str]:
     """Bounded original user records; never truncate a quote or mix in AI memories.
 
     Each item carries the date the user said it, so a transient state ("今天出来
     走走", "头疼好一些了") is not presented as true on a later day.
+    ``exclude_emotions`` leaves out the 情绪 category (after crisis care).
     """
     rows = await db.query_raw(
         """
         SELECT content, COALESCE(statement_time, created_at) AS said_at FROM memories_user
         WHERE user_id = $1 AND workspace_id IS NOT DISTINCT FROM $2::text
           AND is_archived = FALSE AND COALESCE(sub_category, '') <> '提醒'
+          AND ($3::boolean IS FALSE OR COALESCE(main_category, '') <> '情绪')
           AND length(content) BETWEEN 1 AND 1000
         ORDER BY importance DESC, updated_at DESC, id DESC LIMIT 30
         """,
-        user_id, workspace_id,
+        user_id, workspace_id, exclude_emotions,
     )
     return [dated(str(row['content']), _field(row, 'said_at'), with_time=False) for row in rows or []]
+
+
+async def had_recent_crisis_care(user_id: str, workspace_id: str | None, *, days: int) -> bool:
+    """Whether the assistant gave a crisis-care reply to this user in the last ``days``.
+
+    Same marker as the proactive recent-dialogue source (``crisis_guard_status``
+    or a crisis short circuit in the reply's diagnostics).
+    """
+    since = (datetime.now(UTC) - timedelta(days=days)).replace(tzinfo=None).isoformat()
+    rows = await db.query_raw(
+        """
+        SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.user_id = $1 AND c.workspace_id IS NOT DISTINCT FROM $2::text
+          AND m.role = 'assistant' AND m.created_at > $3::timestamp
+          AND (COALESCE(m.metadata->'response_diagnostics'->>'crisis_guard_status', 'none') <> 'none'
+               OR COALESCE(m.metadata->'response_diagnostics'->>'short_circuit_kind', '') LIKE 'crisis%')
+        LIMIT 1
+        """,
+        user_id, workspace_id, since,
+    )
+    return bool(rows)
 
 
 async def create_activity(data: dict[str, Any]) -> dict[str, Any]:

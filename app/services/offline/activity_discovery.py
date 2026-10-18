@@ -43,7 +43,9 @@ ACTIVITY_PLACE_CATEGORIES = (
     ActivityPlaceCategory('街区与市集', ('老街', '古街', '步行街', '文旅街区'), '城市', '逛街、看看街景'),
     ActivityPlaceCategory('市集夜市', ('夜市', '市集', '菜市场'), '城市', '逛摊位、看看日常'),
     ActivityPlaceCategory('城市观察', ('老建筑', '老厂房', '创意园', '渡口'), '城市', '走走看看、拍细节'),
-    ActivityPlaceCategory('安静角落', ('书院', '寺庙', '社区中心', '市民中心'), '城市', '安静走走、看看建筑'),
+    # A search bucket, not a fact about the place: named "安静角落" until 10-18,
+    # which writers and reviewers took as evidence that a 书院 was quiet.
+    ActivityPlaceCategory('人文空间', ('书院', '寺庙', '社区中心', '市民中心'), '城市', '慢慢走走、看看建筑'),
     ActivityPlaceCategory('手作与小店', ('陶艺', '手作店', '工坊', '画室'), '体验', '看看手作、尝试体验'),
     ActivityPlaceCategory('花艺文创', ('花店', '文创店', '杂货店', '花艺'), '体验', '逛小店、看看设计'),
     ActivityPlaceCategory('唱片与旧物', ('唱片店', '中古店', '旧物店', '古玩店'), '体验', '翻翻旧物、看看收藏'),

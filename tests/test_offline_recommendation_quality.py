@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -249,7 +250,7 @@ def card_review(prompt):
 
 async def test_card_copy_survives_a_rejected_detail(quality, monkeypatch):
     selection = {"candidate_id": "poi:one", "summary": "想把注意力从屏幕上挪开，可以去海棠陶艺挑一项手作。",
-                 "vibe": "安静专注", "suitable": "做陶艺、捏小物件"}
+                 "vibe": "专注放松", "suitable": "做陶艺、捏小物件"}
     monkeypatch.setattr(generation, "invoke_text", AsyncMock(side_effect=[
         json.dumps({"candidates": [selection]}, ensure_ascii=False), json.dumps({"text": DETAIL})]))
 
@@ -261,7 +262,7 @@ async def test_card_copy_survives_a_rejected_detail(quality, monkeypatch):
     monkeypatch.setattr(generation, "invoke_json", AsyncMock(side_effect=review))
     result = await generate([place()])
     assert result["summary"] == selection["summary"]
-    assert result["vibe"] == "安静专注" and result["suitable"] == "做陶艺、捏小物件"
+    assert result["vibe"] == "专注放松" and result["suitable"] == "做陶艺、捏小物件"
     assert "可以怎么安排" in result["description"]  # Only the detail fell back.
     meta = result["discovery_metadata"]
     assert (meta["card_copy_status"], meta["copy_status"]) == ("verified", "fallback_rejected")
@@ -307,16 +308,16 @@ async def test_detail_is_repaired_once_with_feedback_when_the_prompt_supports_it
 
 
 async def test_malformed_review_is_unavailable_and_restating_the_place_is_not_a_summary(quality, monkeypatch):
-    selection = {"candidate_id": "poi:one", "summary": "可以去海棠陶艺看看", "vibe": "安静专注"}
+    selection = {"candidate_id": "poi:one", "summary": "可以去海棠陶艺看看", "vibe": "专注放松"}
     monkeypatch.setattr(generation, "invoke_text", AsyncMock(side_effect=[
         json.dumps({"candidates": [selection]}, ensure_ascii=False), "{}"]))
     check = AsyncMock(return_value="not json")
     monkeypatch.setattr(generation, "invoke_json", check)
     result = await generate([place()])
     reviewed = check.await_args.args[1]
-    assert "氛围：安静专注" in reviewed and "推荐摘要" not in reviewed
+    assert "氛围：专注放松" in reviewed and "推荐摘要" not in reviewed
     assert result["discovery_metadata"]["card_copy_status"] == "fallback_unavailable"
-    assert result["summary"] != "可以去海棠陶艺看看" and result.get("vibe") != "安静专注"
+    assert result["summary"] != "可以去海棠陶艺看看" and result.get("vibe") != "专注放松"
 
 
 async def test_detail_stage_has_its_own_deadline(quality, monkeypatch):
@@ -482,3 +483,59 @@ def test_detail_review_release_keeps_must_reject_and_adds_must_pass():
         assert example in text
     from scripts.publish_offline_quality_prompts import validate_entry
     validate_entry(dict(entry))
+
+
+
+# --- 2026-10-18 (2): card copy drops a field, not the card ---
+
+async def test_an_unsupported_vibe_is_dropped_and_the_rest_of_the_card_copy_kept(quality, monkeypatch):
+    """小米美院艺术馆: a good summary next to "安静放松" with no environment facts."""
+    selection = {"candidate_id": "poi:one", "summary": "想把注意力从屏幕上挪开，可以去海棠陶艺挑一项手作。",
+                 "vibe": "安静放松", "suitable": "做陶艺、捏小物件"}
+    blocks = []
+    monkeypatch.setattr(generation, "record_guard_block", lambda *args, **_kw: blocks.append(args))
+    monkeypatch.setattr(generation, "invoke_text", AsyncMock(side_effect=[
+        json.dumps({"candidates": [selection]}, ensure_ascii=False), json.dumps({"text": DETAIL}, ensure_ascii=False)]))
+    check = AsyncMock(return_value={"supported": True, "unsupported_claims": []})
+    monkeypatch.setattr(generation, "invoke_json", check)
+    result = await generate([place()])
+    meta = result["discovery_metadata"]
+    assert meta["card_copy_status"] == "verified_partial"
+    assert result["summary"] == selection["summary"] and result["suitable"] == "做陶艺、捏小物件"
+    assert result.get("vibe") != "安静放松"
+    assert any("安静" in issue for issue in meta["card_copy_issues"])
+    assert "安静放松" not in check.await_args_list[0].args[1]  # The dropped field is not reviewed.
+    assert [(stage, attempt) for stage, attempt, _ in blocks][0] == ("card_copy", 0)
+
+
+@pytest.mark.parametrize("claims,status", [
+    ([{"claim": "专注放松", "reason": "没有环境描述"}], "verified_partial"),
+    (["“氛围：专注放松”：没有依据"], "verified_partial"),
+    (["能吃点东西"], "fallback_rejected"),  # Names no field: the whole card copy falls back.
+    (["“专注放松”：x", "“做陶艺、捏小物件”：x", "“想把注意力从屏幕上挪开”：x"], "fallback_rejected"),
+])
+async def test_review_claims_drop_only_the_fields_they_quote(quality, monkeypatch, claims, status):
+    selection = {"candidate_id": "poi:one", "summary": "想把注意力从屏幕上挪开，可以去海棠陶艺挑一项手作。",
+                 "vibe": "专注放松", "suitable": "做陶艺、捏小物件"}
+    monkeypatch.setattr(generation, "invoke_text", AsyncMock(side_effect=[
+        json.dumps({"candidates": [selection]}, ensure_ascii=False), json.dumps({"text": DETAIL}, ensure_ascii=False)]))
+
+    async def review(_model, prompt, **_kwargs):
+        return ({"supported": False, "unsupported_claims": claims} if card_review(prompt)
+                else {"supported": True, "unsupported_claims": []})
+
+    monkeypatch.setattr(generation, "invoke_json", review)
+    result = await generate([place()])
+    assert result["discovery_metadata"]["card_copy_status"] == status
+    if status == "verified_partial":
+        assert result["summary"] == selection["summary"] and result.get("vibe") != "专注放松"
+    else:
+        assert result["summary"] != selection["summary"]
+
+
+def test_search_buckets_never_name_an_environment():
+    """"安静角落" was a bucket name that writers and reviewers took as a fact."""
+    from app.services.offline.activity_discovery import ACTIVITY_PLACE_CATEGORIES
+    for category in ACTIVITY_PLACE_CATEGORIES:
+        for text in (category.name, category.suitable):
+            assert not re.search(r"安静|清静|幽静|人少|热闹|拥挤", text), text

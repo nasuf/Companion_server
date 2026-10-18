@@ -266,3 +266,15 @@ def test_anytime_access_in_other_words(text, flagged):
 def test_crowds_need_the_facts(text, facts, flagged):
     issues = guards.copy_issues(text, PLACE, NOW, facts_text=facts, user_references=0)
     assert any("人流" in item for item in issues) is flagged
+
+
+
+def test_a_category_name_is_not_evidence_for_the_environment():
+    card = {**PLACE, "category": "安静角落"}
+    issues = guards.copy_issues("这个安静的书院适合放空。", card, NOW,
+                                facts_text='{"category": "安静角落"}', user_references=1)
+    assert any("资料没有写环境" in item for item in issues)
+    # A provider fact still counts.
+    issues = guards.copy_issues("这个安静的书院适合放空。", card, NOW,
+                                facts_text='{"category": "安静角落", "description": "安静的阅读空间"}', user_references=1)
+    assert not any("资料没有写环境" in item for item in issues)

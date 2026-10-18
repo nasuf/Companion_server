@@ -23,7 +23,7 @@ from app.services.offline.copy_guards import (
     bounded_issues, copy_issues, date_relation, local_now, today_text,
 )
 from app.services.offline.evidence_text import mask_quotes, undated
-from app.services.offline.copy_trace import record_copy_outcome, record_guard_block
+from app.services.offline.copy_trace import record_copy_outcome, record_evidence_withheld, record_guard_block
 from app.services.offline.llm import (
     OFFLINE_WRITER_PROFILE,
     get_offline_chat_model as get_chat_model,
@@ -52,16 +52,38 @@ def _whole_items(items: list[str], budget: int) -> list[str]:
 async def evidence_inputs(
     *, user_id: str, workspace_id: str | None, conversation_id: str | None, tags: list[str],
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """User evidence for the card, the note and the invitation.
+
+    After crisis care, recommendations must not use what the user said in a
+    low moment as a reason to go out (10-18: "你之前说压力大想回上海" a week
+    after "我真的很想死"). Recent dialogue is withheld and emotion memories are
+    left out; long-term interests stay. ``statuses`` reaches client-visible
+    message metadata, so it only says "withheld"; the reason is kept in
+    ``evidence["_withheld"]`` for the private activity record and the trace.
+    """
     evidence = {"preference": _whole_items(tags[:9], 500), "memory": [], "dialogue": []}
     statuses = {"preference": "collected" if evidence["preference"] else "empty"}
+    try:
+        async with asyncio.timeout(3):
+            careful = await repo.had_recent_crisis_care(user_id, workspace_id, days=CRISIS_CARE_LOOKBACK_DAYS)
+        reason = "crisis_care" if careful else None
+    except Exception as exc:
+        careful, reason = True, "crisis_check_unavailable"  # Unknown: do not risk quoting a crisis.
+        logger.info("[offline] crisis-care check unavailable (%s)", type(exc).__name__)
+    if careful:
+        evidence["_withheld"] = reason
+        record_evidence_withheld(reason)
     # Failure to read one private source must not turn assistant memories into a
     # fallback source or prevent a factual recommendation.
     for kind, fetch, budget in (
-        ("memory", lambda: repo.recommendation_memory_items(user_id, workspace_id), 3000),
+        ("memory", lambda: repo.recommendation_memory_items(user_id, workspace_id, exclude_emotions=careful), 3000),
         ("dialogue", lambda: recommendation_dialogue(
             user_id=user_id, workspace_id=workspace_id, conversation_id=conversation_id,
         ), 3000),
     ):
+        if kind == "dialogue" and careful:
+            statuses[kind] = "withheld"
+            continue
         if kind == "dialogue" and not conversation_id:
             statuses[kind] = "not_available"
             continue
@@ -180,6 +202,9 @@ def structured_reviewer(model: Any) -> Any:
         update["model_kwargs"] = {**model.model_kwargs, "response_format": {"type": "json_object"}}
     return model.model_copy(update=update)
 
+
+# Crisis care makes recent low moments off-limits as recommendation reasons.
+CRISIS_CARE_LOOKBACK_DAYS = 14
 
 # Bounds that catch junk, not style: the runtime chat model writes 90-120
 # characters for a sparse venue, and those read fine in the page box. The
@@ -323,6 +348,8 @@ async def attach_recommendation_message(
         recommendation_relevance_status=relevance_status,
         recommendation_evidence_status=source_statuses or {kind: "not_collected" for kind in EVIDENCE_KINDS},
     )
+    if evidence.get("_withheld"):
+        metadata["evidence_withheld"] = evidence["_withheld"]  # Private: discovery_metadata never reaches clients.
     record_copy_outcome(
         {"card_copy": metadata.get("card_copy_status"), "detail": metadata.get("copy_status"), "note": status},
         {"card_copy": metadata.get("card_copy_issues") or [], "detail": metadata.get("copy_issues") or [],

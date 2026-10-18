@@ -1176,16 +1176,56 @@ async def _verified_card_copy(
         values["summary"] = ""  # Restating the destination is not a reason to go.
     if not any(values.values()):
         return "fallback_empty", []
+    # One unsupported field drops that field, not the card: card copy has no
+    # repair round, and 10-18 showed a good summary next to a "安静放松" vibe.
+    facts_text = json.dumps(facts, ensure_ascii=False, default=str)
+    dropped: list[str] = []
+    for field, value in values.items():
+        found = value and copy_issues(f"{_CARD_COPY_LABELS[field]}：{value}", card, now,
+                                      facts_text=facts_text, user_references=len(references))
+        if found:
+            values[field] = ""
+            dropped.extend(found)
+    if dropped:
+        record_guard_block("card_copy", 0, dropped, subject=card.get("title"))
+    if not any(values.values()):
+        return "fallback_rejected", dropped
     text = "\n".join(f"{_CARD_COPY_LABELS[field]}：{value}" for field, value in values.items() if value)
-    issues = copy_issues(text, card, now, facts_text=json.dumps(facts, ensure_ascii=False, default=str))
-    if issues:
-        record_guard_block("card_copy", 0, issues, subject=card.get("title"))
-        return "fallback_rejected", issues
-    supported, issues = await _fact_check(_review_facts(card, facts, references, now), text)
-    if supported is True:
-        card.update({field: value for field, value in values.items() if value})
-        return "verified", []
-    return ("fallback_rejected" if supported is False else "fallback_unavailable"), issues
+    supported, claims = await _fact_check(_review_facts(card, facts, references, now), text)
+    if supported is None:
+        return "fallback_unavailable", claims
+    if supported is False:
+        named = _fields_named_by(claims, values)
+        if named is None or all(not values[field] or field in named for field in values):
+            return "fallback_rejected", dropped + claims
+        for field in named:
+            values[field] = ""
+        dropped.extend(claims)
+    card.update({field: value for field, value in values.items() if value})
+    return ("verified_partial", dropped) if dropped else ("verified", [])
+
+
+_QUOTED = re.compile(r"[“\"]([^”\"]+)[”\"]")
+
+
+def _fields_named_by(claims: list[str], values: dict[str, str]) -> set[str] | None:
+    """The fields each review claim quotes, or ``None`` if any claim names none.
+
+    Reviewers quote the sentence they reject ("“安静放松”：资料没有环境描述").
+    A claim that cannot be pinned to one field rejects the whole card copy.
+    """
+    named: set[str] = set()
+    for claim in claims:
+        quoted = _QUOTED.search(claim)
+        snippet = normalized(quoted.group(1) if quoted else claim)
+        for field, label in _CARD_COPY_LABELS.items():
+            snippet = snippet.removeprefix(normalized(label))
+        hits = {field for field, value in values.items()
+                if value and snippet and (snippet in normalized(value) or normalized(value) in snippet)}
+        if not hits:
+            return None
+        named |= hits
+    return named
 
 
 async def _verified_detail(
@@ -1261,7 +1301,7 @@ async def _apply_reviewed_copy(
     card.setdefault("discovery_metadata", {}).update(
         card_copy_status=card_status,
         card_copy_issues=(mask_quotes(bounded_issues(card_issues), private)
-                          if card_status.startswith("fallback") else []),
+                          if card_status.startswith("fallback") or card_status == "verified_partial" else []),
         copy_status=detail_status,
         copy_issues=bounded_issues(detail_issues) if detail_status.startswith("fallback") else [],
     )
@@ -1342,6 +1382,10 @@ async def generate_activity_invite_message(
         async with asyncio.timeout(_INVITE_BUDGET_S):
             ctx = await repo.resolve_user_context(user_id, workspace_id)
             context_fields = await message_context(ctx or {})
+            if metadata.get("evidence_withheld"):
+                # Same rule as the card and the note: after crisis care the recent
+                # dialogue is not material for a recommendation.
+                context_fields["dialogue_context"] = "（无）"
             # Managed objects keep trace attribution and safe rendering.
             template = await get_prompt_text("offline.activity_invite_message")
             check_template = await get_prompt_text("offline.recommendation_message_check")

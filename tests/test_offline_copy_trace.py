@@ -36,3 +36,16 @@ def test_steps_name_the_activity_when_several_cards_share_a_trace(monkeypatch):
     assert calls[0]["display_name"] == "代码核验 · 详情文案第 1 稿 · 镇江新华书店京畿路店 京畿书"
     assert calls[1]["display_name"] == "推荐卡生成 · 未拿到模型结果 · 西津渡小剧场"
     assert calls[1]["decision_label"] == "25 秒内没有完成，改用默认候选和模板摘要"
+
+
+
+def test_withheld_evidence_and_partial_card_copy_read_plainly(monkeypatch):
+    calls = []
+    monkeypatch.setattr(copy_trace, "record_manual_step", lambda **kwargs: calls.append(kwargs))
+    copy_trace.record_evidence_withheld("crisis_care")
+    copy_trace.record_evidence_withheld("crisis_check_unavailable")
+    copy_trace.record_copy_outcome({"card_copy": "verified_partial"})
+    assert calls[0]["display_name"] == "用户依据 · 近期有危机照护"
+    assert calls[1]["display_name"] == "用户依据 · 危机照护检查不可用"
+    assert calls[0]["decision_label"] == "不用最近对话和情绪类记忆，只用长期兴趣"
+    assert calls[2]["decision_label"] == "卡片短文案：模型文案（个别项改用默认）"
