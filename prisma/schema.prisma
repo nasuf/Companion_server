@@ -1393,6 +1393,7 @@ model MemoryEvidenceLink {
   sourceRef            String   @map("source_ref")
   sourceMemorySide     String?  @map("source_memory_side")
   sourceVersion        String?  @map("source_version")
+  sourceCardVersion    String?  @map("source_card_version")
   sourceUserId         String?  @map("source_user_id")
   sourceWorkspaceId    String?  @map("source_workspace_id")
   sourceRole           String?  @map("source_role")

@@ -246,3 +246,84 @@ async def test_nonchat_reserved_input_has_no_progress_or_extraction(chat):
         'metadata':{'real_world_type':'gift'}}],None,side='ai',workspace_id=wid)
     assert result.status=='excluded' and result.source_count==0 and result.source_binding=='unlinked_input'
     pl.extract_memories.assert_not_awaited()
+
+
+def music_metadata(title='测试歌曲'):
+    return {'component_card': {'type': 'music_track', 'payload': {'intent': 'invite',
+        'track': {'id': 'track-1', 'title': title, 'artist': '测试歌手'}}}}
+
+
+@pytest.mark.parametrize('backlog', [False, True])
+async def test_card_only_music_keeps_persisted_track_as_source(chat, origins, backlog):
+    db,uid,wid,msg=chat
+    msg=await db.message.update(where={'id':msg.id},data={'content':'','metadata':Json(music_metadata())})
+    if backlog:await wm.set_watermark(msg.conversationId,'user',msg.createdAt-timedelta(seconds=1))
+    result=await p._bg_memory_pipeline(uid,[],msg.conversationId,wid,source_message_ids=[msg.id])
+    assert result[0].source_count==1 and result[0].status=='completed'
+    text=pl.extract_memories.await_args.args[0]
+    assert text=='user: 用户在这条消息中分享了歌曲《测试歌曲》，歌手：测试歌手'
+    sources=await e.snapshot_message_sources(user_id=uid,workspace_id=wid,side='user',
+        message_ids=[msg.id],extraction_input=text,conversation_id=msg.conversationId)
+    assert sources[0].expected_card_version is not None
+    assert await origins[5](*sources)==1
+    assert (await origins[6]())['items'][0]['availability']=='available'
+    assert (await db.message.find_unique(where={'id':msg.id})).content==''
+    await db.message.update(where={'id':msg.id},data={'metadata':Json(music_metadata('修改后的歌曲'))})
+    assert (await origins[6]())['items'][0]['availability']=='changed'
+    with pytest.raises(ValueError,match='card_changed'):await origins[5](*sources)
+
+
+async def test_music_card_change_during_empty_extraction_keeps_progress(chat):
+    db,uid,wid,msg=chat
+    await db.message.update(where={'id':msg.id},data={'content':'','metadata':Json(music_metadata())})
+    async def extract(*args,**kwargs):
+        card=music_metadata();card['component_card']['payload']['track']['id']='different-track-same-title'
+        await db.message.update(where={'id':msg.id},data={'metadata':Json(card)})
+        return {'memories':[]}
+    pl.extract_memories.side_effect=extract
+    result=await p._bg_memory_pipeline(uid,[],msg.conversationId,wid,source_message_ids=[msg.id])
+    assert result[0].reason=='source_invalid'
+    assert await wm.get_watermark(msg.conversationId,'user') is None
+
+
+async def test_music_card_snapshot_is_guarded_by_database_and_immutable(chat,origins):
+    from uuid import uuid4
+    from prisma.errors import RawQueryError
+    db,uid,wid,msg=chat
+    await db.message.update(where={'id':msg.id},data={'content':'','metadata':Json(music_metadata())})
+    text=s.extraction_text({'content':'','role':'user','metadata':music_metadata()})
+    sources=await e.snapshot_message_sources(user_id=uid,workspace_id=wid,side='user',
+        message_ids=[msg.id],extraction_input='user: '+text,conversation_id=msg.conversationId)
+    await origins[5](*sources)
+    with pytest.raises(RawQueryError,match='card_version_changed'):
+        await db.execute_raw("""INSERT INTO memory_evidence_links SELECT (jsonb_populate_record(
+            NULL::memory_evidence_links,to_jsonb(e)||jsonb_build_object('id',$1::text,'source_card_version',$2::text))).*
+            FROM memory_evidence_links e WHERE memory_id=$3 AND memory_source='user'""",uuid4().hex,'0'*64,origins[3])
+    with pytest.raises(RawQueryError,match='immutable'):
+        await db.execute_raw('UPDATE memory_evidence_links SET source_card_version=NULL WHERE memory_id=$1',origins[3])
+
+
+@pytest.mark.parametrize('card', [None, {}, {'payload':{}}, {'payload':{'track':{}}},
+    {'payload':{'track':{'title':' '}}}])
+async def test_incomplete_music_metadata_is_not_reported_as_noop(chat,card):
+    db,uid,wid,msg=chat
+    metadata={'component_card':dict(card or {},type='music_track')}
+    await db.message.update(where={'id':msg.id},data={'content':'','metadata':Json(metadata)})
+    result=await p._bg_memory_pipeline(uid,[],msg.conversationId,wid,source_message_ids=[msg.id])
+    assert result[0].reason=='source_invalid'
+    pl.extract_memories.assert_not_awaited()
+
+
+def test_music_text_keeps_user_words_without_inventing_agent_acceptance():
+    card=music_metadata();del card['component_card']['payload']['track']['artist']
+    text=s.extraction_text({'role':'user','content':'你听过吗','metadata':card})
+    assert text=='你听过吗\n用户在这条消息中分享了歌曲《测试歌曲》'
+    assert s.extraction_text({'role':'assistant','content':'普通回复','metadata':card})=='普通回复'
+
+
+async def test_empty_plain_message_cannot_be_claimed_as_structured_source(chat):
+    db,uid,wid,msg=chat
+    await db.message.update(where={'id':msg.id},data={'content':''})
+    with pytest.raises(ValueError,match='scope_or_content_mismatch'):
+        await e.snapshot_message_sources(user_id=uid,workspace_id=wid,side='user',
+            message_ids=[msg.id],extraction_input='user: ',conversation_id=msg.conversationId)

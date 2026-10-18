@@ -25,6 +25,7 @@ class EvidenceSource:
     expected_version: str | None = None
     expected_role: str | None = None
     expected_conversation_id: str | None = None
+    expected_card_version: str | None = None
 
 
 def content_version(content: str) -> str:
@@ -51,24 +52,36 @@ async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Sid
         raise ValueError("invalid_evidence_batch")
     role = "user" if side == "user" else "assistant"
     rows = await db.query_raw(
-        """SELECT m.id,m.content,m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id
+        """SELECT m.id,m.content,m.metadata,
+           encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex') AS card_version FROM messages m JOIN conversations c ON c.id=m.conversation_id
            JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
            WHERE m.id=ANY($1::text[]) AND c.user_id=$2 AND c.workspace_id=$3
            AND NOT c.is_deleted AND m.role=$4
            AND ($5::text IS NULL OR (c.id=$5 AND w.status='active'))
            AND COALESCE(m.metadata->>'human_takeover','false')<>'true'
            AND COALESCE(m.metadata->>'memory_confirmation','false')<>'true'""", ids,user_id,workspace_id,role,conversation_id)
-    by_id = {row["id"]: row["content"] for row in rows}
-    if len(by_id) != len(ids) or any(not text.strip() or text.strip() not in extraction_input for text in by_id.values()):
+    by_id = {row["id"]: dict(row, role=role) for row in rows}
+    if len(by_id) != len(ids):
         raise ValueError("evidence_input_scope_or_content_mismatch")
     if conversation_id is not None:
-        from app.services.memory.recording.chat_sources import excluded_from_chat_extraction
-        if (extraction_input != '\n'.join(f'{role}: {by_id[mid]}' for mid in ids)
-                or any(excluded_from_chat_extraction(dict(row, role=role)) for row in rows)):
+        from app.services.memory.recording.chat_sources import excluded_from_chat_extraction, extraction_text, has_music_card
+        try:
+            texts = [extraction_text(by_id[mid]) for mid in ids]
+            if any(not text.strip() for text in texts):
+                raise ValueError("evidence_input_scope_or_content_mismatch")
+            expected_input = '\n'.join(f'{role}: {text}' for text in texts)
+        except RuntimeError as exc:
+            raise ValueError("evidence_input_scope_or_content_mismatch") from exc
+        if (extraction_input != expected_input
+                or any(excluded_from_chat_extraction(row) for row in by_id.values())):
             raise ValueError("evidence_input_scope_or_content_mismatch")
+    elif any(not row["content"].strip() or row["content"].strip() not in extraction_input for row in rows):
+        raise ValueError("evidence_input_scope_or_content_mismatch")
     return tuple(EvidenceSource("message", mid, relation="extracted_from", expected_role=role,
-                                expected_version=content_version(by_id[mid]),
-                                expected_conversation_id=conversation_id) for mid in ids)
+                                expected_version=content_version(by_id[mid]["content"]),
+                                expected_conversation_id=conversation_id,
+                                expected_card_version=by_id[mid]["card_version"]
+                                    if conversation_id is not None and has_music_card(by_id[mid]) else None) for mid in ids)
 
 
 async def _resolve_source(database, source: EvidenceSource, target: dict) -> dict:
@@ -81,7 +94,8 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
     if kind == "message":
         query = """SELECT c.user_id, c.workspace_id, c.agent_id, c.id AS conversation_id,
                    m.role, m.content AS version_text, 'recorded' AS status, m.metadata,
-                   w.status AS workspace_status
+                   w.status AS workspace_status,
+                   encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex') AS card_version
                    FROM messages m JOIN conversations c ON c.id=m.conversation_id
                    JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
                    WHERE m.id=$1 AND NOT c.is_deleted
@@ -126,6 +140,8 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
             raise ValueError('evidence_source_changed_or_unavailable')
     if kind == "message" and source.relation == "extracted_from" and (row.get("metadata") or {}).get("memory_confirmation"):
         raise ValueError("evidence_message_reserved_for_confirmation")
+    if source.expected_card_version is not None and row.get("card_version") != source.expected_card_version:
+        raise ValueError("evidence_source_card_changed")
     if source.expected_role and row.get("role") != source.expected_role:
         raise ValueError("evidence_source_role_mismatch")
     same_scope = (row["user_id"], row["workspace_id"], row["agent_id"]) == (
@@ -142,8 +158,11 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
     version = content_version(row["version_text"])
     if source.expected_version and source.expected_version != version:
         raise ValueError("evidence_source_version_changed")
-    return {"kind": kind, "ref": ref, "version": version, "role": row.get("role"),
-            "status": row["status"], "user_id": row["user_id"], "workspace_id": row["workspace_id"]}
+    origin = {"kind": kind, "ref": ref, "version": version, "role": row.get("role"),
+              "status": row["status"], "user_id": row["user_id"], "workspace_id": row["workspace_id"]}
+    if source.expected_card_version is not None:
+        origin["card_version"] = source.expected_card_version
+    return origin
 
 
 async def bind_memory_evidence(
@@ -182,8 +201,8 @@ async def bind_memory_evidence(
                (id,memory_id,memory_source,user_memory_id,ai_memory_id,user_id,workspace_id,agent_id,
                 content_version,source_kind,source_ref,source_version,source_user_id,source_workspace_id,
                 source_role,source_status,source_message_id,parent_user_memory_id,parent_ai_memory_id,
-                relation,extractor_version,source_memory_side,source_profile_id,source_input_id)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+                relation,extractor_version,source_memory_side,source_profile_id,source_input_id,source_card_version)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
                ON CONFLICT (id) DO NOTHING""",
             eid, memory_id, side, memory_id if side == "user" else None,
             memory_id if side == "ai" else None, user_id, workspace_id, target["agent_id"], version,
@@ -195,5 +214,6 @@ async def bind_memory_evidence(
             source.relation, extractor_version, source.side if source.kind == "memory" else None,
             source.ref if source.kind == "profile" else None,
             source.ref if source.kind == "input" else None,
+            origin.get("card_version"),
         )
     return inserted

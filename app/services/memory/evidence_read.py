@@ -114,6 +114,8 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
                     WHEN c.user_id IS DISTINCT FROM e.user_id OR c.workspace_id IS DISTINCT FROM e.workspace_id
                          OR c.agent_id IS DISTINCT FROM e.agent_id OR c.is_deleted THEN 'unavailable'
                     WHEN encode(sha256(convert_to(m.content,'UTF8')),'hex')<>e.source_version THEN 'changed'
+                    WHEN e.source_card_version IS NOT NULL AND e.source_card_version IS DISTINCT FROM
+                         encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex') THEN 'changed'
                     ELSE 'available' END
              WHEN e.source_kind='memory' THEN
                CASE WHEN p.id IS NULL THEN 'deleted'

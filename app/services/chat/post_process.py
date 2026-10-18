@@ -452,12 +452,12 @@ async def _pipeline_with_watermark(
 
     def _add_target(m: dict) -> None:
         nonlocal max_side_ts
-        from app.services.memory.recording.chat_sources import excluded_from_chat_extraction
+        from app.services.memory.recording.chat_sources import excluded_from_chat_extraction, extraction_text
         excluded = excluded_from_chat_extraction(m)
         ts = _parse_ts(m)
         if conversation_id and (not m.get("id") or ts is None):
             raise MemoryProgressError("source_identity_missing")
-        if not excluded and (m.get("content") or "").strip():
+        if not excluded and extraction_text(m).strip():
             new_target_msgs.append(m)
         effective = ts if ts is not None else fallback_now
         if max_side_ts is None or effective > max_side_ts:
@@ -630,7 +630,8 @@ def _fmt_conversation(msgs: list[dict]) -> str:
         role = m.get("role")
         if role not in ("user", "assistant"):
             continue
-        content = m.get("content", "")
+        from app.services.memory.recording.chat_sources import extraction_text
+        content = extraction_text(m)
         lines.append(f"{role}: {content}")
     return "\n".join(lines)
 

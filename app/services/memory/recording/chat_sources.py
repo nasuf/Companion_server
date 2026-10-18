@@ -31,6 +31,29 @@ def excluded_from_chat_extraction(message: dict) -> bool:
     return False
 
 
+def has_music_card(message: dict) -> bool:
+    """Only persisted user music cards provide this structured source."""
+    card = (message.get("metadata") or {}).get("component_card")
+    return message.get("role") == "user" and isinstance(card, dict) and card.get("type") == "music_track"
+
+
+def extraction_text(message: dict) -> str:
+    """Render recorded card data without changing the user-visible message."""
+    content = message.get("content") or ""
+    if not has_music_card(message):
+        return content
+    card = message["metadata"]["component_card"]
+    payload = card.get("payload")
+    track = payload.get("track") if isinstance(payload, dict) else None
+    if not isinstance(track, dict) or not isinstance(track.get("title"), str) or not track["title"].strip():
+        raise MemoryProgressError("source_invalid")
+    title = track["title"].strip()[:300]
+    artist = track.get("artist")
+    artist = artist.strip()[:300] if isinstance(artist, str) else ""
+    line = f"用户在这条消息中分享了歌曲《{title}》" + (f"，歌手：{artist}" if artist else "")
+    return content + "\n" + line if content.strip() else line
+
+
 async def load_chat_sources(*, conversation_id: str, user_id: str, workspace_id: str,
                             messages: list[dict], source_message_ids: list[str] | None = None,
                             reply_turn_id: str | None = None) -> list[dict]:
