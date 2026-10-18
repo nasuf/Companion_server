@@ -597,3 +597,38 @@ def test_exact_render_metadata_overrides_misleading_fingerprint_label():
     assert step["display_name"] == "主回复"
     assert step["category"] == "reply"
     assert step["decision_label"] == "synthetic reply"
+
+
+def test_a_repair_draft_is_labelled_not_shown_as_a_duplicate():
+    """Trace b4f089ca: two identical "活动推荐寄语" steps were a draft and its repair."""
+    import json
+    from pathlib import Path
+    release = json.loads((Path(__file__).parents[1] / "scripts/prompt_releases"
+                          / "20261017_activity_copy_grounding_r2.json").read_text())
+    template = next(e["content"] for e in release["prompts"] if e["key"] == "offline.activity_recommendation_message")
+
+    def shown(feedback: str) -> str:
+        prompt = template.replace("{revision_feedback}", feedback)
+        step = trace_enrich.enrich_step(_fake_llm_step(prompt))
+        trace_enrich.apply_prompt_render_traces([step], [{
+            "prompt_hash": trace_enrich.prompt_hash(prompt), "prompt_key": "offline.activity_recommendation_message",
+            "source": "managed", "components": []}])
+        trace_enrich.apply_prompt_render_traces([step], [{  # Idempotent: no double suffix.
+            "prompt_hash": trace_enrich.prompt_hash(prompt), "prompt_key": "offline.activity_recommendation_message",
+            "source": "managed", "components": []}])
+        return step["display_name"]
+
+    first, repair = shown("[]"), shown('["删除“你之前”开头的话"]')
+    assert repair == first + "（修订稿）" and not first.endswith("（修订稿）")
+
+
+def test_non_llm_steps_without_display_metadata_keep_their_name():
+    step = trace_enrich.enrich_step({"name": "main_chat", "run_type": "chain", "extra": {"metadata": {}}})
+    assert (step["display_name"], step["category"], step["decision_label"]) == ("main_chat", "chain", None)
+
+
+def test_unreadable_feedback_never_mislabels_a_step():
+    step = {"display_name": "活动推荐寄语"}
+    trace_enrich._mark_revision(step, "需要修正的上一稿问题：[不是 JSON")
+    trace_enrich._mark_revision(step, "需要修正的上一稿问题：[不是, JSON]")
+    assert step["display_name"] == "活动推荐寄语"

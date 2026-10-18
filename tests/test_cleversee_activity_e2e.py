@@ -248,7 +248,7 @@ async def native(journey, monkeypatch, tmp_path):  # noqa: F811 — imported pyt
 
     monkeypatch.setattr(cleversee, "_sdk_query", sdk)
 
-    async def model(_model, prompt):
+    async def model(_model, prompt, **_kwargs):
         if "候选原始ID" in prompt:
             return json.dumps(
                 {
@@ -708,7 +708,7 @@ async def test_unverified_generated_business_claims_fall_back_to_place_facts(
     )
     original = generation.invoke_text
 
-    async def unsafe_copy(model, prompt):
+    async def unsafe_copy(model, prompt, **_kwargs):
         if "候选原始ID" in prompt:
             return await original(model, prompt)
         return json.dumps(

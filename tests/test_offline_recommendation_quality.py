@@ -95,7 +95,7 @@ async def test_failed_detail_never_collapses_to_an_address(
             ]
         ),
     )
-    async def review(_model, prompt):
+    async def review(_model, prompt, **_kwargs):
         if failure == "checker_error":
             raise TimeoutError()
         # The invented "全天免费" summary is rejected on its own merits now.
@@ -253,7 +253,7 @@ async def test_card_copy_survives_a_rejected_detail(quality, monkeypatch):
     monkeypatch.setattr(generation, "invoke_text", AsyncMock(side_effect=[
         json.dumps({"candidates": [selection]}, ensure_ascii=False), json.dumps({"text": DETAIL})]))
 
-    async def review(_model, prompt):
+    async def review(_model, prompt, **_kwargs):
         if card_review(prompt):
             return {"supported": True, "unsupported_claims": []}
         return {"supported": False, "unsupported_claims": ["“专治纠结”没有依据"]}
@@ -322,7 +322,7 @@ async def test_malformed_review_is_unavailable_and_restating_the_place_is_not_a_
 async def test_detail_stage_has_its_own_deadline(quality, monkeypatch):
     import asyncio
 
-    async def slow(_model, prompt):
+    async def slow(_model, prompt, **_kwargs):
         if "候选原始ID" in prompt:
             return "{}"
         await asyncio.sleep(1)
@@ -368,3 +368,117 @@ async def test_supported_with_listed_problems_is_not_a_pass(monkeypatch):
     monkeypatch.setattr(generation, "invoke_json", AsyncMock(return_value={
         "supported": True, "unsupported_claims": ["“安静”没有依据"]}))
     assert await generation._fact_check({}, "氛围：安静") == (False, ["“安静”没有依据"])
+
+
+# --- 2026-10-18: reviewer objects, repair room, long-output profile, trace steps ---
+
+async def test_object_shaped_review_claims_are_kept_and_never_pass(monkeypatch):
+    """Production trace b4f089ca: claims came back as {"claim", "reason"} objects."""
+    monkeypatch.setattr(generation, "get_prompt_text", AsyncMock(return_value="{facts_json}{copy_text}"))
+    monkeypatch.setattr(generation, "get_utility_model", lambda: object())
+    claims = [{"claim": "像是喧嚣中预留的一处静谧留白", "reason": "事实中未提供现场环境描述"}, {"reason": "只有原因"}, {"x": 1}]
+    monkeypatch.setattr(generation, "invoke_json", AsyncMock(return_value={"supported": True, "unsupported_claims": claims}))
+    assert await generation._fact_check({}, "推荐详情：x") == (
+        False, ["“像是喧嚣中预留的一处静谧留白”：事实中未提供现场环境描述", "只有原因"])
+
+
+async def test_object_shaped_rejection_drives_the_detail_repair(quality, monkeypatch):
+    async def prompt(key):
+        return GROUNDED.get(key) or PROMPTS.get(key, "核验事实：{facts_json}\n文案：{copy_text}")
+
+    monkeypatch.setattr(generation, "get_prompt_text", prompt)
+    texts = AsyncMock(side_effect=["{}", json.dumps({"text": DETAIL}, ensure_ascii=False),
+                                   json.dumps({"text": DETAIL}, ensure_ascii=False)])
+    monkeypatch.setattr(generation, "invoke_text", texts)
+    monkeypatch.setattr(generation, "invoke_json", AsyncMock(side_effect=[
+        {"supported": False, "unsupported_claims": [{"claim": "招牌很出片", "reason": "没有外观描述"}]},
+        {"supported": True, "unsupported_claims": []},
+    ]))
+    result = await generate([place()])
+    assert result["discovery_metadata"]["copy_status"] == "verified"
+    assert "“招牌很出片”：没有外观描述" in texts.await_args_list[2].args[1]
+
+
+async def test_long_offline_writers_get_the_long_output_profile(quality, monkeypatch):
+    texts = AsyncMock(side_effect=["{}", json.dumps({"text": DETAIL}, ensure_ascii=False)])
+    monkeypatch.setattr(generation, "invoke_text", texts)
+    monkeypatch.setattr(generation, "invoke_json", AsyncMock(return_value={"supported": True, "unsupported_claims": []}))
+    await generate([place()])
+    # A pinned offline model would otherwise run under the 12-second small-model profile.
+    assert [call.kwargs.get("profile") for call in texts.await_args_list] == ["chat_extract", "chat_extract"]
+
+
+def test_a_production_speed_first_round_still_leaves_room_for_the_repair():
+    # 10-18: 11.5 s draft + 3.3 s review, then the repair was skipped (15 s left < 18 s).
+    assert generation._DETAIL_STAGE_BUDGET_S - (11.5 + 3.3) >= generation._DETAIL_REPAIR_MIN_S
+    # The same day both 12-second selection attempts were cut inside an 18-second budget.
+    assert generation._SELECTION_BUDGET_S >= 20
+
+
+async def test_code_level_rejections_become_trace_steps(quality, monkeypatch):
+    blocks = []
+    monkeypatch.setattr(generation, "record_guard_block", lambda *args, **_kw: blocks.append(args))
+    selection = {"candidate_id": "poi:one", "summary": "去海棠陶艺挑一项手作吧，我们现场见！"}
+    together = DETAIL.replace("出发前也可以问问是否需要预约。", "出发前也可以问问是否需要预约，我们现场见！")
+    monkeypatch.setattr(generation, "invoke_text", AsyncMock(side_effect=[
+        json.dumps({"candidates": [selection]}, ensure_ascii=False),
+        json.dumps({"text": together}, ensure_ascii=False)]))
+    monkeypatch.setattr(generation, "invoke_json", AsyncMock(return_value={"supported": True, "unsupported_claims": []}))
+    await generate([place()])
+    assert sorted((stage, attempt) for stage, attempt, _ in blocks) == [("card_copy", 0), ("detail", 0)]
+    assert all(any("线上陪伴" in issue for issue in issues) for *_, issues in blocks)
+
+
+@pytest.mark.parametrize("outcome,reason", [
+    (TimeoutError(), "25 秒内没有完成"), ("{}", "模型结果里没有可用候选"), (RuntimeError("boom"), "RuntimeError"),
+])
+async def test_a_selection_without_model_result_explains_itself_in_the_trace(quality, monkeypatch, outcome, reason):
+    """Trace b4f089ca only showed two pending selection calls and then template copy."""
+    fallbacks = []
+    monkeypatch.setattr(generation, "record_selection_fallback",
+                        lambda why, **kwargs: fallbacks.append((why, kwargs["subject"])))
+    monkeypatch.setattr(generation, "invoke_text", AsyncMock(side_effect=[outcome, "{}"]))
+    monkeypatch.setattr(generation, "invoke_json", AsyncMock())
+    result = await generate([place()])
+    assert result["discovery_metadata"]["card_copy_status"] == "fallback_no_proposal"
+    assert fallbacks == [(reason, place()["title"])]
+
+
+async def test_a_usable_selection_records_no_fallback(quality, monkeypatch):
+    fallbacks = []
+    monkeypatch.setattr(generation, "record_selection_fallback", lambda *a, **k: fallbacks.append(a))
+    selection = {"candidate_id": "poi:one", "summary": "想把注意力从屏幕上挪开，可以去海棠陶艺挑一项手作。"}
+    monkeypatch.setattr(generation, "invoke_text", AsyncMock(side_effect=[
+        json.dumps({"candidates": [selection]}, ensure_ascii=False), json.dumps({"text": DETAIL}, ensure_ascii=False)]))
+    monkeypatch.setattr(generation, "invoke_json", AsyncMock(return_value={"supported": True, "unsupported_claims": []}))
+    await generate([place()])
+    assert fallbacks == []
+
+
+
+async def test_detail_review_uses_the_deterministic_json_reviewer(monkeypatch):
+    """Production 10-18: the same draft was rejected, then passed; once the reply was not JSON."""
+    from langchain_openai import ChatOpenAI
+    model = ChatOpenAI(model="qwen3.5-flash", api_key="fixture-key", temperature=0.7)
+    object.__setattr__(model, "_companion_provider", "dashscope")
+    monkeypatch.setattr(generation, "get_prompt_text", AsyncMock(return_value="{facts_json}{copy_text}"))
+    monkeypatch.setattr(generation, "get_utility_model", lambda: model)
+    check = AsyncMock(return_value={"supported": True, "unsupported_claims": []})
+    monkeypatch.setattr(generation, "invoke_json", check)
+    assert await generation._fact_check({}, "x") == (True, [])
+    used = check.await_args.args[0]
+    assert used.temperature == 0 and used.model_kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_detail_review_release_keeps_must_reject_and_adds_must_pass():
+    release = json.loads((Path(__file__).parents[1] / "scripts/prompt_releases"
+                          / "20261018_activity_detail_review.json").read_text())
+    (entry,) = release["prompts"]
+    import hashlib
+    assert entry["expected_sha256"] == hashlib.sha256(GROUNDED["offline.recommendation_fact_check"].strip().encode()).hexdigest()
+    text = entry["content"]
+    assert "【必须放行，不算断言】" in text and "【必须拒绝】" in text
+    for example in ("喜欢拍照的话", "不到两公里", "按名称或按分类描述都不算错", "风裹着水汽", "随时能去"):
+        assert example in text
+    from scripts.publish_offline_quality_prompts import validate_entry
+    validate_entry(dict(entry))

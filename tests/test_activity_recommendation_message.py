@@ -433,3 +433,54 @@ async def test_repair_cut_by_the_deadline_still_reports_the_rejection(writer):
     meta = result["discovery_metadata"]
     assert meta["recommendation_message_status"] == "fallback_invalid"
     assert meta["recommendation_message_issues"] == ["无依据"]
+
+
+# --- 2026-10-18: runtime models write shorter; trace shows each stop and the outcome ---
+
+async def test_a_short_draft_gets_one_repair_instead_of_the_template(writer, monkeypatch):
+    text, check = writer
+    blocks = []
+    monkeypatch.setattr(note, "record_guard_block", lambda *args, **_kw: blocks.append(args))
+    text.side_effect = ["你提过喜欢找咖啡馆看书，小岛咖啡可以去看看。", MESSAGE]
+    result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
+    assert result["discovery_metadata"]["recommendation_message_status"] == "verified"
+    assert "120—260 字" in text.call_args.args[1]
+    assert text.call_args.kwargs["profile"] == "chat_extract"
+    assert [(stage, attempt) for stage, attempt, _ in blocks] == [("note", 0)]
+
+
+async def test_trace_gets_each_code_stop_and_the_copy_outcome(writer, monkeypatch):
+    text, check = writer
+    blocks, outcomes = [], []
+    monkeypatch.setattr(note, "record_guard_block", lambda *args, **_kw: blocks.append(args))
+    monkeypatch.setattr(note, "record_copy_outcome", lambda statuses, issues, **_kw: outcomes.append((statuses, issues)))
+    text.side_effect = [MESSAGE + "我们现场见！", MESSAGE + "我们现场见！"]
+    meta = {"card_copy_status": "fallback_no_proposal", "copy_status": "fallback_rejected", "copy_issues": ["静谧留白"]}
+    result = await note.attach_recommendation_message(
+        card(user_relevance=[MEMORY, "咖啡", DIALOGUE], discovery_metadata=meta), EVIDENCE)
+    assert result["discovery_metadata"]["recommendation_message_status"] == "fallback_invalid"
+    assert [attempt for _, attempt, _ in blocks] == [0, 1]
+    statuses, issues = outcomes[0]
+    assert statuses == {"card_copy": "fallback_no_proposal", "detail": "fallback_rejected", "note": "fallback_invalid"}
+    assert issues["detail"] == ["静谧留白"] and any("线上陪伴" in item for item in issues["note"])
+
+
+
+def test_reviewer_is_deterministic_on_any_openai_compatible_small_model():
+    """The small model follows model management; a provider switch must not bring back random verdicts."""
+    from langchain_openai import ChatOpenAI
+    model = ChatOpenAI(model="deepseek-v4-flash", api_key="fixture-key", temperature=0.7)
+    object.__setattr__(model, "_companion_provider", "deepseek")
+    reviewer = note.structured_reviewer(model)
+    assert reviewer is not model and reviewer.temperature == 0
+    assert "response_format" not in reviewer.model_kwargs  # JSON mode only where known to work.
+    assert model.temperature == 0.7
+    plain = object()
+    assert note.structured_reviewer(plain) is plain
+
+
+
+def test_a_runtime_model_length_note_is_accepted():
+    # doubao wrote 90 and 98 characters for a temple on 2026-10-18.
+    assert note._NOTE_MIN_CHARS <= 90 <= note._NOTE_MAX_CHARS
+    assert note._NOTE_MIN_CHARS > len("短句")

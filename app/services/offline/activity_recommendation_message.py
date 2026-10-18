@@ -23,7 +23,9 @@ from app.services.offline.copy_guards import (
     bounded_issues, copy_issues, date_relation, local_now, today_text,
 )
 from app.services.offline.evidence_text import mask_quotes, undated
+from app.services.offline.copy_trace import record_copy_outcome, record_guard_block
 from app.services.offline.llm import (
+    OFFLINE_WRITER_PROFILE,
     get_offline_chat_model as get_chat_model,
     get_offline_small_model as get_utility_model,
 )
@@ -156,17 +158,34 @@ async def review_copy(
         references_json=json.dumps(references, ensure_ascii=False),
         message=json.dumps(message, ensure_ascii=False),
     )
-    model = get_utility_model()
-    if provider_name(model) == "dashscope" and isinstance(model, ChatOpenAI):
-        # Configure this call's primary model without mutating the shared cached
-        # instance or leaking provider-only options into invoke_json's
-        # independent Ollama fallback.
-        model = model.model_copy(update={
-            "temperature": 0,
-            "model_kwargs": {**model.model_kwargs, "response_format": {"type": "json_object"}},
-        })
     async with asyncio.timeout(8):
-        return await invoke_json(model, prompt)
+        return await invoke_json(structured_reviewer(get_utility_model()), prompt)
+
+
+def structured_reviewer(model: Any) -> Any:
+    """A deterministic JSON reviewer: same draft, same verdict.
+
+    At the default temperature the detail reviewer rejected a draft and passed
+    it on the next call, and once answered with non-JSON (production 10-18).
+    Configures this call's primary model without mutating the shared cached
+    instance or leaking provider-only options into invoke_json's independent
+    Ollama fallback.
+    """
+    if not isinstance(model, ChatOpenAI):
+        return model
+    update: dict[str, Any] = {"temperature": 0}
+    # The small model follows model management, so it may be any provider;
+    # JSON mode is set only where it is known to be supported.
+    if provider_name(model) == "dashscope":
+        update["model_kwargs"] = {**model.model_kwargs, "response_format": {"type": "json_object"}}
+    return model.model_copy(update=update)
+
+
+# Bounds that catch junk, not style: the runtime chat model writes 90-120
+# characters for a sparse venue, and those read fine in the page box. The
+# prompt (and the repair feedback) still asks for 120-260.
+_NOTE_MIN_CHARS = 80
+_NOTE_MAX_CHARS = 320
 
 
 def relevant_indices(checked: Any, count: int) -> list[int] | None:
@@ -248,17 +267,21 @@ async def attach_recommendation_message(
                     revision_feedback=json.dumps(feedback, ensure_ascii=False),
                 )
                 async with asyncio.timeout(15):
-                    raw = (await invoke_text(get_chat_model(), prompt)).strip()
+                    raw = (await invoke_text(get_chat_model(), prompt, profile=OFFLINE_WRITER_PROFILE)).strip()
                 candidate = re.sub(r"\s+", " ", raw)
-                if (not 100 <= len(candidate) <= 320 or re.search(r"https?://|www\.", candidate)
-                        or candidate.startswith(("{", "[", "```"))):
-                    status, issues = "fallback_invalid", ["寄语长度或格式不符合要求"]
+                if re.search(r"https?://|www\.", candidate) or candidate.startswith(("{", "[", "```")):
+                    status, issues = "fallback_invalid", ["寄语格式不符合要求"]
                     break
-                # Objections code can decide exactly never reach the model guard.
-                issues = copy_issues(candidate, card, now,
-                                     facts_text=json.dumps(facts, ensure_ascii=False),
-                                     user_references=len(references))
+                if not _NOTE_MIN_CHARS <= len(candidate) <= _NOTE_MAX_CHARS:
+                    # Length is fixable: models differ in how much they write.
+                    issues = [f"寄语这一稿 {len(candidate)} 字，请写成 120—260 字的一段话。"]
+                else:
+                    # Objections code can decide exactly never reach the model guard.
+                    issues = copy_issues(candidate, card, now,
+                                         facts_text=json.dumps(facts, ensure_ascii=False),
+                                         user_references=len(references))
                 if issues:
+                    record_guard_block("note", attempt, issues, subject=card.get("title"))
                     status, feedback, rejected = "fallback_invalid", issues, issues
                     if attempt:
                         break
@@ -299,6 +322,12 @@ async def attach_recommendation_message(
         user_relevance_count=len(references),
         recommendation_relevance_status=relevance_status,
         recommendation_evidence_status=source_statuses or {kind: "not_collected" for kind in EVIDENCE_KINDS},
+    )
+    record_copy_outcome(
+        {"card_copy": metadata.get("card_copy_status"), "detail": metadata.get("copy_status"), "note": status},
+        {"card_copy": metadata.get("card_copy_issues") or [], "detail": metadata.get("copy_issues") or [],
+         "note": metadata["recommendation_message_issues"]},
+        subject=card.get("title"),
     )
     logger.info("[offline] recommendation message=%s references=%d", status, len(references))
     return card

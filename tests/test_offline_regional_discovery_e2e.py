@@ -105,7 +105,7 @@ async def discovery(journey, monkeypatch, tmp_path):
             kwargs['transport'] = httpx.MockTransport(transport)
             super().__init__(*args, **kwargs)
     monkeypatch.setattr(httpx, 'AsyncClient', ExternalClient)
-    async def model(_, prompt):
+    async def model(_, prompt, **_kwargs):
         j.prompts.append(prompt)
         assert 'candidates' in prompt and '搜索位置锚点：镇江市 京口区' in prompt
         assert '{sources_json}' not in prompt and '{search_anchor}' not in prompt

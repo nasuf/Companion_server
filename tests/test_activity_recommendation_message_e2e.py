@@ -37,7 +37,7 @@ async def test_selected_relevance_web_versions_scoping_and_public_api_consistenc
     captured = []
     original = generation.invoke_text
 
-    async def select(model, prompt):
+    async def select(model, prompt, **_kwargs):
         if "候选原始ID" not in prompt:
             return await original(model, prompt)
         captured.append(str(prompt))
@@ -99,7 +99,7 @@ async def test_same_category_image_substitution_discards_original_personalizatio
     monkeypatch.setattr(discovery, "discover", AsyncMock(return_value=[first, second]))
     original = generation.invoke_text
 
-    async def select(model, prompt):
+    async def select(model, prompt, **_kwargs):
         if "候选原始ID" in prompt:
             return json.dumps({"candidates": [{"candidate_id": first["candidate_id"], "user_relevance": [MEMORY]}]})
         return await original(model, prompt)
@@ -140,7 +140,7 @@ async def test_legacy_source_keeps_selected_place_relevance(native, monkeypatch)
     monkeypatch.setattr(service, "geocode_address", AsyncMock(return_value=None))
     original = generation.invoke_text
 
-    async def select(model, prompt):
+    async def select(model, prompt, **_kwargs):
         if "候选原始ID" in prompt:
             return json.dumps({"candidates": [{"title": j.raw["name"], "location_name": j.raw["name"],
                 "city": "镇江市", "official_url": source.url, "user_relevance": [MEMORY]}]})

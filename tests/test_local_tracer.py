@@ -329,6 +329,71 @@ class TestManualRunRecording:
         assert step["decision_label"]
 
 
+class TestManualStepRecording:
+    """Code-level decisions (no LLM call) shown between writer steps."""
+
+    async def test_step_is_written_as_a_chain_row_with_display_metadata(self, monkeypatch):
+        from app.services.chat import local_tracer
+
+        monkeypatch.setattr(settings, "trace_backend", "local")
+        fake = _fake_db()
+        import app.db
+        with patch.object(app.db, "db", fake):
+            tracer = local_tracer.LocalTracer("[offline:activity_invite]", "conv-1").enter()
+            local_tracer.record_manual_step(
+                name="offline_copy_guard", display_name="代码核验 · 推荐寄语第 1 稿",
+                decision_label="拦下：没有用户原文可依据", inputs={"stage": "note", "draft": 1},
+                outputs={"issues": ["没有用户原文可依据"]},
+            )
+            await asyncio.sleep(0.05)
+            tracer.close()
+            await asyncio.sleep(0.05)
+        row = next(call.kwargs["data"] for call in fake.tracerun.create.await_args_list
+                   if call.kwargs["data"].get("name") == "offline_copy_guard")
+        assert row["traceId"] == tracer.trace_id and row["parentId"] == tracer.trace_id
+        assert (row["runType"], row["status"]) == ("chain", "success")
+        assert row["startedAt"] == row["endedAt"]
+        assert _unjson(row["outputsJson"]) == {"issues": ["没有用户原文可依据"]}
+        assert _unjson(row["extraJson"])["metadata"]["trace_display"] == {
+            "display_name": "代码核验 · 推荐寄语第 1 稿", "decision_label": "拦下：没有用户原文可依据",
+            "category": "decision"}
+
+    async def test_step_is_noop_without_open_trace(self, monkeypatch):
+        from app.services.chat import local_tracer
+
+        fake = _fake_db()
+        import app.db
+        with patch.object(app.db, "db", fake):
+            local_tracer.record_manual_step(name="x", display_name="x", decision_label=None)
+            await asyncio.sleep(0.05)
+        assert fake.tracerun.create.await_count == 0
+
+    async def test_write_failure_never_reaches_the_caller(self, monkeypatch):
+        from app.services.chat import local_tracer
+
+        fake = _fake_db()
+        fake.tracerun.create = AsyncMock(side_effect=RuntimeError("db down"))
+        import app.db
+        with patch.object(app.db, "db", fake):
+            await local_tracer._write_manual_step(
+                trace_id="t", parent_id="t", name="x", inputs={}, outputs={},
+                display={"display_name": "x"}, at=datetime(2026, 10, 18, tzinfo=timezone.utc))
+        assert fake.tracerun.create.await_count == 1
+
+    def test_step_read_back_shows_its_label(self):
+        from app.services.chat.local_tracer import _row_to_step
+        from app.services.chat.trace_enrich import enrich_step
+
+        row = _row(run_id="guard-1", name="offline_copy_guard", run_type="chain", model_name=None,
+                   inputs={"stage": "note"}, outputs={"issues": ["x"]},
+                   extra={"metadata": {"trace_display": {
+                       "display_name": "代码核验 · 推荐寄语第 1 稿", "decision_label": "拦下：x",
+                       "category": "decision"}}})
+        step = enrich_step(_row_to_step(row))
+        assert (step["display_name"], step["decision_label"], step["category"]) == (
+            "代码核验 · 推荐寄语第 1 稿", "拦下：x", "decision")
+
+
 class TestCreateTracerFactory:
     def test_local_backend_returns_local_tracer(self, monkeypatch):
         from app.services.chat.local_tracer import LocalTracer

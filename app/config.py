@@ -355,7 +355,11 @@ class Settings(BaseSettings):
     cleversee_poi_coordinate_system: Literal["gcj02", "wgs84"] = "gcj02"
     offline_discovery_radius_m: float = 15000
     offline_event_horizon_days: int = 30
-    offline_model_provider: str = "dashscope"
+    # "runtime": activity copy uses the system chat and small models chosen in
+    # the admin model management page (offline jobs bind no agent, so per-agent
+    # overrides do not apply). A provider name pins offline_chat_model /
+    # offline_small_model instead.
+    offline_model_provider: str = "runtime"
     offline_chat_model: str = "qwen3.5-plus"
     offline_small_model: str = "qwen3.5-flash"
     tavily_api_key: str = ""

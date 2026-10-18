@@ -474,6 +474,62 @@ def record_manual_llm_run(
     ))
 
 
+def record_manual_step(
+    *,
+    name: str,
+    display_name: str,
+    decision_label: str | None,
+    inputs: dict[str, Any] | None = None,
+    outputs: dict[str, Any] | None = None,
+    category: str = "decision",
+) -> None:
+    """Record a code-level decision (not an LLM call) as a step of the current trace.
+
+    Deterministic checks are otherwise invisible: a draft rejected by code and
+    its repair show up as two identical writer steps with nothing between
+    them. ``trace_enrich`` shows ``display_name`` / ``decision_label`` from
+    ``extra.metadata.trace_display``. No-op without an open trace; never raises.
+    """
+    handler = _local_trace_handler.get()
+    if handler is None:
+        return
+    graph_parent = _graph_node_parent.get()
+    parent_id = graph_parent[1] if graph_parent and graph_parent[0] == handler.local_trace_id else handler.local_root_run_id
+    _fire(_write_manual_step(
+        trace_id=handler.local_trace_id,
+        parent_id=parent_id,
+        name=name,
+        inputs=inputs or {},
+        outputs=outputs or {},
+        display={"display_name": display_name, "decision_label": decision_label, "category": category},
+        at=_utcnow(),
+    ))
+
+
+async def _write_manual_step(
+    *, trace_id: str, parent_id: str, name: str, inputs: dict[str, Any],
+    outputs: dict[str, Any], display: dict[str, Any], at: datetime,
+) -> None:
+    try:
+        from app.db import db
+
+        await db.tracerun.create(data={
+            "id": str(uuid.uuid4()),
+            "traceId": trace_id,
+            "parentId": parent_id,
+            "name": name,
+            "runType": "chain",
+            "status": "success",
+            "startedAt": at,
+            "endedAt": at,
+            "inputsJson": Json(_json_safe(inputs) or {}),
+            "outputsJson": Json(_json_safe(outputs) or {}),
+            "extraJson": Json({"metadata": {"trace_display": _json_safe(display) or {}}}),
+        })
+    except Exception as e:
+        logger.debug(f"[local-trace] manual step write failed: {type(e).__name__}: {e}")
+
+
 async def _write_manual_run(
     *,
     trace_id: str,

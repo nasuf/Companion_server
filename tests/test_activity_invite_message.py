@@ -202,3 +202,15 @@ async def test_merge_adds_keys_without_replacing_the_document(monkeypatch):
     sql, *params = run.await_args.args
     assert "discovery_metadata || $3::jsonb" in sql and "updated_at" not in sql
     assert params == ["a", "u", '{"invite_message_status": "verified"}']
+
+
+async def test_invitation_trace_shows_the_stop_and_the_outcome(invite, monkeypatch):
+    write, review, _ = invite
+    blocks, outcomes = [], []
+    monkeypatch.setattr(generation, "record_guard_block", lambda *args, **_kw: blocks.append(args))
+    monkeypatch.setattr(generation, "record_copy_outcome", lambda statuses, issues, **_kw: outcomes.append((statuses, issues)))
+    write.side_effect = ["大慈恩寺挺有意思，到时候我们现场见！", "大慈恩寺挺有意思，有空去转转？"]
+    review.return_value = {"supported": True, "relevant_indices": [], "unsupported_claims": []}
+    await run(activity())
+    assert [(stage, attempt) for stage, attempt, _ in blocks] == [("invite", 0)]
+    assert outcomes == [({"invite": "verified_no_evidence"}, {"invite": []})]

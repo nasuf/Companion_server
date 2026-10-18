@@ -87,6 +87,9 @@ _EASE_FACT = re.compile(r"市中心|市区|交通|地铁|公交")
 # Category is not environment: a library or a temple is not "quiet" unless the
 # facts say so (the reviewer passed "安静角落" and "挺清静" on 10-17).
 _QUIET_CLAIM = re.compile(r"安静|清静|清幽|宁静|静谧|幽静|僻静")
+# Crowds are a current state no provider fact covers ("不用挤人潮扎堆的路线"
+# passed review on 10-18 for a riverside pier).
+_CROWD_CLAIM = re.compile(r"人潮|人少|人不多|人很多|人挺多|人多|扎堆|人流|排队|拥挤|冷清")
 
 # "下周三之前把票买好" is a deadline, not the session date.
 _NOT_SESSION = r"(?!\s*(?:之前|以前|之后|以后|前(?!往)|后(?!天)))"
@@ -96,7 +99,7 @@ _NOT_SESSION = r"(?!\s*(?:之前|以前|之后|以后|前(?!往)|后(?!天)))"
 # In recommendation copy a bare "全天" is an access claim ("全天免费", "全天都能去").
 _ALL_DAY_CLAIM = re.compile(
     r"全天|24\s*小时|通宵(?:营业|开放)"
-    r"|(?:随时|任何时候)(?:都)?(?:可以|能|可)?(?:去|过去|进去|进场|入园|逛)"
+    r"|(?:随时|任何时候)(?:都)?(?:可以|能|可)?(?:拐|走|顺道|顺路)?(?:去|过去|进去|进来|来|进场|入园|逛)"
 )
 _ALL_DAY_FACT = re.compile(r"全天|24\s*小时|0?0:00\s*[-—~至]\s*24:00|通宵")
 # Facts that negate access ("开放时段未提供，不能推断全天或随时营业", "非全天开放")
@@ -290,10 +293,14 @@ def voice_issues(text: str, facts_text: str, user_references: int) -> list[str]:
     issues: list[str] = []
     cited = _USER_CITED.search(text) if not user_references else None
     if cited:
-        issues.append(f"没有用户原文可依据，删除“{cited.group(0)}”开头这类说用户之前提过、平时怎样的话。")
+        issues.append(f"没有用户原文可依据，删除“{cited.group(0)}”开头这类说用户之前提过、平时怎样的话，"
+                      "直接从这个地方本身说起；也不要改写成“你之前没提过”这类说法。")
     quiet = _QUIET_CLAIM.search(text)
     if quiet and not _QUIET_CLAIM.search(facts_text):
         issues.append(f"资料没有写环境“{quiet.group(0)}”，删除这类环境描述，不要从类别推断环境。")
+    crowd = _CROWD_CLAIM.search(text)
+    if crowd and not _CROWD_CLAIM.search(facts_text):
+        issues.append(f"资料没有写人流情况，删除“{crowd.group(0)}”这类说法。")
     ease = _EASE_CLAIM.search(text)
     if ease and not _EASE_FACT.search(facts_text):
         issues.append(f"资料没有写“{ease.group(0)}”，地点名字不能说明位置或交通。")
@@ -308,9 +315,9 @@ def copy_issues(
 
     ``facts_text`` is everything the copy may rely on; with it, access claims
     (全天/随时/免费) are checked against what the facts actually state.
-    ``user_references`` (verified quotes available) marks chat-voice copy —
-    the note and the invitation, which get a repair round — and adds the
-    environment and cited-user checks there.
+    ``user_references`` (verified quotes available) marks copy with a repair
+    round — the detail, the note and the invitation — and adds the
+    environment and cited-user checks there. Card copy has no repair round.
     """
     issues: list[str] = []
     if INPUT_DISCLOSURE.search(text):
@@ -334,8 +341,25 @@ def copy_issues(
     return issues
 
 
+def _issue_text(item: Any) -> str:
+    """Reviewers also answer with objects ({"claim": ..., "reason": ...}).
+
+    Keeping only strings dropped them (production 10-18): the detail fell back
+    with no recorded reason, so it was never repaired.
+    """
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return ""
+    def first(*keys: str) -> str:
+        return next((item[k].strip() for k in keys if isinstance(item.get(k), str) and item[k].strip()), "")
+    claim = first("claim", "text", "quote", "sentence")
+    reason = first("reason", "problem", "missing", "evidence")
+    return f"“{claim}”：{reason}" if claim and reason else claim or reason
+
+
 def bounded_issues(items: Any, *, limit: int = 3, length: int = 120) -> list[str]:
     """Diagnostics for the admin view: short, few, never raw model payloads."""
     if not isinstance(items, list):
         return []
-    return [item.strip()[:length] for item in items if isinstance(item, str) and item.strip()][:limit]
+    return [text[:length] for text in map(_issue_text, items) if text][:limit]

@@ -280,7 +280,7 @@ jobs:
             OFFLINE_SEARCH_PROVIDER=${{ vars.OFFLINE_SEARCH_PROVIDER || 'cleversee' }}
             OFFLINE_TAVILY_FALLBACK=${{ vars.OFFLINE_TAVILY_FALLBACK || 'false' }}
             CLEVERSEE_POI_COORDINATE_SYSTEM=${{ vars.CLEVERSEE_POI_COORDINATE_SYSTEM || 'gcj02' }}
-            OFFLINE_MODEL_PROVIDER=${{ vars.OFFLINE_MODEL_PROVIDER || 'dashscope' }}
+            OFFLINE_MODEL_PROVIDER=${{ vars.OFFLINE_MODEL_PROVIDER || 'runtime' }}
             OFFLINE_CHAT_MODEL=${{ vars.OFFLINE_CHAT_MODEL || 'qwen3.5-plus' }}
             OFFLINE_SMALL_MODEL=${{ vars.OFFLINE_SMALL_MODEL || 'qwen3.5-flash' }}
             # DailyHot source and freshness controls; independent of offline search.

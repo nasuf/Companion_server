@@ -784,6 +784,13 @@ def enrich_step(step: dict[str, Any]) -> dict[str, Any]:
         step["category"] = "chain" if step.get("run_type") == "chain" else "other"
         step["prompt_key"] = None
         step["decision_label"] = None
+        # Code-level decisions recorded by local_tracer.record_manual_step.
+        display = ((step.get("extra") or {}).get("metadata") or {}).get("trace_display")
+        if isinstance(display, dict) and isinstance(display.get("display_name"), str):
+            step["display_name"] = display["display_name"]
+            step["category"] = str(display.get("category") or "decision")
+            label = display.get("decision_label")
+            step["decision_label"] = label if isinstance(label, str) else None
         return step
 
     user_msg = _extract_first_user_message(step.get("inputs"))
@@ -823,7 +830,26 @@ def enrich_step(step: dict[str, Any]) -> dict[str, Any]:
     elif meta.prompt_key in _BOUNDARY_BODY_PROMPT_KEYS:
         step["prompt_components"] = _boundary_prompt_components(meta.prompt_key)
     step["decision_label"] = label
+    _mark_revision(step, user_msg)
     return step
+
+
+# Writer prompts carry the previous draft's rejection reasons. A non-empty list
+# means this call is the repair, not a duplicate of the step before it.
+_REVISION_FEEDBACK_RE = re.compile(r"(?:需要修正的上一稿问题|【上一版核验反馈】)[：:]?\s*(\[[^\n]*\])")
+
+
+def _mark_revision(step: dict[str, Any], rendered_prompt: str) -> None:
+    match = _REVISION_FEEDBACK_RE.search(rendered_prompt or "")
+    if not match:
+        return
+    try:
+        feedback = json.loads(match.group(1))
+    except ValueError:
+        return
+    name = step.get("display_name")
+    if feedback and isinstance(name, str) and not name.endswith("（修订稿）"):
+        step["display_name"] = name + "（修订稿）"
 
 
 def enrich_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -890,6 +916,7 @@ def apply_prompt_render_traces(
                 step["display_name"] = semantic.display_name
                 step["category"] = semantic.category
                 step["decision_label"] = _decision_label(semantic, step.get("outputs"))
+                _mark_revision(step, rendered_prompt)
 
         components = matched.get("components")
         if isinstance(components, list):

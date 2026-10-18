@@ -1,4 +1,4 @@
-"""Activity routing reuses configured providers without coupling to chat balance."""
+"""Activity copy follows model management by default; a pinned provider stays possible."""
 
 from unittest.mock import Mock
 
@@ -20,6 +20,11 @@ def test_activity_model_route_is_explicit_and_content_addressed(monkeypatch):
     monkeypatch.setattr(settings, "offline_chat_model", "another-model")
     assert llm.get_offline_chat_model() == ("dashscope", "another-model")
     llm._model.cache_clear()
+
+
+def test_activity_models_follow_model_management_by_default():
+    from app.config import Settings
+    assert Settings.model_fields["offline_model_provider"].default == "runtime"
 
 
 def test_runtime_route_remains_an_explicit_option(monkeypatch):

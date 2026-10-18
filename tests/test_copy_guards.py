@@ -234,3 +234,35 @@ def test_stored_reasons_do_not_repeat_the_users_words():
     reasons = ["“你头疼刚好些”与“[2026-10-10] 用户头疼好一些了”不符", "日期不符"]
     assert mask_quotes(reasons, ["[2026-10-10] 用户头疼好一些了"]) == ["“你头疼刚好些”与“[2026-10-10] 〔用户原文〕”不符", "日期不符"]
     assert mask_quotes(["x"], []) == ["x"]
+
+
+def test_object_shaped_reviewer_claims_become_readable_reasons():
+    items = [{"claim": "静谧留白", "reason": "没有环境描述"}, {"text": "招牌很出片"}, {"problem": "日期不对"},
+             {"x": 1}, 3, "  ", "直接写的原因"]
+    assert guards.bounded_issues(items, limit=5) == [
+        "“静谧留白”：没有环境描述", "招牌很出片", "日期不对", "直接写的原因"]
+
+
+def test_cited_user_feedback_says_what_to_write_instead():
+    issues = guards.copy_issues("想着你之前好像挺喜欢逛这种地方。", PLACE, NOW, facts_text="{}", user_references=0)
+    cited = next(item for item in issues if "没有用户原文可依据" in item)
+    # The second draft of trace b4f089ca swapped the claim for "你之前也没提过特别偏好".
+    assert "直接从这个地方本身说起" in cited and "你之前没提过" in cited
+
+
+
+@pytest.mark.parametrize("text,flagged", [
+    ("逛累了随时能拐进去歇脚。", True), ("随时来坐坐。", True), ("有空随时跟我说说。", False),
+])
+def test_anytime_access_in_other_words(text, flagged):
+    issues = guards.copy_issues(text, PLACE, NOW, facts_text='{"opening_hours": "10:30-22:00"}')
+    assert any("随时" in item for item in issues) is flagged
+
+
+@pytest.mark.parametrize("text,facts,flagged", [
+    ("不用挤人潮扎堆的路线，慢慢晃。", "{}", True), ("周末不用排队。", "{}", True),
+    ("人均消费参考约17元。", "{}", False), ("周末人比较多，早点去。", '{"description": "周末人多需排队"}', False),
+])
+def test_crowds_need_the_facts(text, facts, flagged):
+    issues = guards.copy_issues(text, PLACE, NOW, facts_text=facts, user_references=0)
+    assert any("人流" in item for item in issues) is flagged

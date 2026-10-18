@@ -14,10 +14,13 @@ from urllib.parse import urlparse
 
 from app.config import settings
 from app.services.llm.models import invoke_text, invoke_json
-from app.services.offline.llm import get_offline_chat_model as get_chat_model, get_offline_small_model as get_utility_model
+from app.services.offline.llm import (
+    OFFLINE_WRITER_PROFILE, get_offline_chat_model as get_chat_model, get_offline_small_model as get_utility_model,
+)
+from app.services.offline.copy_trace import record_copy_outcome, record_guard_block, record_selection_fallback
 from app.services.offline.activity_images import persist_activity_images
 from app.services.offline.activity_recommendation_message import (
-    EVIDENCE_KINDS, accepted_review, attach_recommendation_message, evidence_inputs,
+    EVIDENCE_KINDS, accepted_review, attach_recommendation_message, evidence_inputs, structured_reviewer,
     exact_references, is_published, page_facts, review_copy,
 )
 from app.services.offline.copy_guards import bounded_issues, copy_issues, date_relation, local_now, today_text
@@ -778,8 +781,8 @@ async def _generate_activity_cards(
                     f"{_avoid_text(recent_activities)}\n"
                     "不要重复推荐同一地点、同一场馆或高度相似主题。"
                 )
-            async with asyncio.timeout(18):
-                raw = await invoke_text(get_chat_model(), prompt_text)
+            async with asyncio.timeout(_SELECTION_BUDGET_S):
+                raw = await invoke_text(get_chat_model(), prompt_text, profile=OFFLINE_WRITER_PROFILE)
             parsed = _json_object(raw) or {}
             pool = parsed.get("candidates")
             proposals = [c for c in pool[:8] if isinstance(c, dict)] if isinstance(pool, list) else [parsed]
@@ -917,10 +920,10 @@ async def _native_card(
         sources_json=json.dumps(facts, ensure_ascii=False),
         today=today_text(local_now()),
     )
-    selected, copy = candidates[0], {}
+    selected, copy, failure = candidates[0], {}, "模型结果里没有可用候选"
     try:
-        async with asyncio.timeout(18):
-            raw = await invoke_text(get_chat_model(), prompt)
+        async with asyncio.timeout(_SELECTION_BUDGET_S):
+            raw = await invoke_text(get_chat_model(), prompt, profile=OFFLINE_WRITER_PROFILE)
         payload = _json_object(raw) or {}
         proposed = payload.get("candidates", [])
         by_id = {c["candidate_id"]: c for c in candidates}
@@ -929,7 +932,10 @@ async def _native_card(
                 selected, copy = by_id[item["candidate_id"]], item
                 break
     except Exception as exc:
+        failure = f"{_SELECTION_BUDGET_S} 秒内没有完成" if isinstance(exc, TimeoutError) else type(exc).__name__
         logger.info("[offline] candidate selection fallback (%s)", type(exc).__name__)
+    if not copy:
+        record_selection_fallback(failure, subject=selected.get("title"))
     card, bound_sources, source = None, [], None
     # A valid but unillustrated POI must not beat an equally relevant POI with
     # a verified album. Keep the selected event/session and user category intact.
@@ -1111,9 +1117,14 @@ _NON_FACT_FIELDS = frozenset({
     "image_urls", "search_sources", "expires_at", "easter_egg_task", "task_hint",
     "_copy_defaults", "_image_evidence_count", "source",
 })
-# Draft + review, plus one repair only when a fast first round leaves time. This
-# stage adds at most ~7 seconds over the single draft + review it replaced.
-_DETAIL_STAGE_BUDGET_S = 30
+# Card selection writes up to three candidates' copy: 5-12 s on qwen3.5-plus,
+# which an 18 s budget with 12 s attempts cut twice on 2026-10-18.
+_SELECTION_BUDGET_S = 25
+# Detail: draft + review, plus one repair when the first round leaves room for
+# a full second one. With a 30 s stage a 11.5 s draft + 3.3 s review never did.
+_DETAIL_DRAFT_BUDGET_S = 25
+_DETAIL_STAGE_BUDGET_S = 45
+_DETAIL_REPAIR_MIN_S = 20
 _INVITE_BUDGET_S = 30
 
 
@@ -1135,7 +1146,7 @@ async def _fact_check(facts: dict[str, Any], copy_text: str) -> tuple[bool | Non
             facts_json=json.dumps(facts, ensure_ascii=False, default=str), copy_text=copy_text,
         )
         async with asyncio.timeout(8):
-            checked = await invoke_json(get_utility_model(), prompt)
+            checked = await invoke_json(structured_reviewer(get_utility_model()), prompt)
     except Exception as exc:
         logger.info("[offline] copy review unavailable (%s)", type(exc).__name__)
         return None, []
@@ -1168,6 +1179,7 @@ async def _verified_card_copy(
     text = "\n".join(f"{_CARD_COPY_LABELS[field]}：{value}" for field, value in values.items() if value)
     issues = copy_issues(text, card, now, facts_text=json.dumps(facts, ensure_ascii=False, default=str))
     if issues:
+        record_guard_block("card_copy", 0, issues, subject=card.get("title"))
         return "fallback_rejected", issues
     supported, issues = await _fact_check(_review_facts(card, facts, references, now), text)
     if supported is True:
@@ -1194,9 +1206,15 @@ async def _verified_detail(
                 if not useful_detail(text):
                     status = "fallback_too_short" if text else "fallback_unavailable"
                     break
+                # The writer never sees user evidence (zero references), and the
+                # stage has a repair round, so the chat-voice checks apply too:
+                # one reviewer passed "安静角落" for a temple.
                 issues = copy_issues(text, card, now,
-                                     facts_text=json.dumps(facts, ensure_ascii=False, default=str))
-                if not issues:
+                                     facts_text=json.dumps(facts, ensure_ascii=False, default=str),
+                                     user_references=0)
+                if issues:
+                    record_guard_block("detail", attempt, issues, subject=card.get("title"))
+                else:
                     # The detail writer never sees user evidence, so any claim
                     # about the user in it is unsupported by construction.
                     supported, issues = await _fact_check(
@@ -1209,7 +1227,7 @@ async def _verified_detail(
                 status, rejected = "fallback_rejected", issues
                 # A repair is a full draft + review; skip it rather than start
                 # one the deadline will cut off.
-                if attempt or not repairable or not issues or deadline - loop.time() < 18:
+                if attempt or not repairable or not issues or deadline - loop.time() < _DETAIL_REPAIR_MIN_S:
                     break
                 feedback = issues
     except TimeoutError:
@@ -1277,8 +1295,9 @@ async def _recommendation_copy(
             date_relation=date_relation(card, now or local_now()),
             revision_feedback=json.dumps(feedback or [], ensure_ascii=False),
         )
-        async with asyncio.timeout(15):
-            return clip_text(parse_text_field(await invoke_text(get_chat_model(), prompt)), 500)
+        async with asyncio.timeout(_DETAIL_DRAFT_BUDGET_S):
+            return clip_text(parse_text_field(
+                await invoke_text(get_chat_model(), prompt, profile=OFFLINE_WRITER_PROFILE)), 500)
     except Exception as exc:
         logger.warning("[offline] recommendation copy failed: %s", exc)
         return ""
@@ -1352,7 +1371,9 @@ async def generate_activity_invite_message(
                 issues = copy_issues(candidate, activity, now,
                                      facts_text=json.dumps(facts, ensure_ascii=False),
                                      user_references=len(references))
-                if not issues:
+                if issues:
+                    record_guard_block("invite", attempt, issues, subject=activity.get("title"))
+                else:
                     if not reviewable:
                         text, status = candidate, "unchecked"
                         break
@@ -1382,4 +1403,6 @@ async def generate_activity_invite_message(
     metadata["invite_message_status"] = status
     metadata["invite_message_issues"] = (mask_quotes(bounded_issues(issues), [r["text"] for r in references])
                                          if status.startswith("fallback") else [])
+    record_copy_outcome({"invite": status}, {"invite": metadata["invite_message_issues"]},
+                        subject=activity.get("title"))
     return text
