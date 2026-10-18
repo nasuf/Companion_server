@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from app.observability.events import (
@@ -75,6 +75,8 @@ class BoundaryPhaseCtx:
     # 不读 (boundary_handled_pipeline=True 跳过兜底). 跟 ShortCircuitCtx/PreflightCtx
     # 同模式存在主要为契约一致性 (减少未来扩展时遗漏风险).
     last_short_circuit_reply: str | None = None
+    source_message_ids: list[str] = field(default_factory=list)
+    workspace_id: str | None = None
 
 
 def _personality_brief(agent: Any) -> str:
@@ -108,14 +110,15 @@ async def _maybe_llm_banned_check(
 
 
 def _fire_memory_pipeline(ctx: BoundaryPhaseCtx, reply: str) -> None:
-    """短路路径把 (user_msg, reply) 送进记忆管线, 共用三处调用点."""
+    """Resolve persisted apology messages; reply text is not an extraction source."""
+    from app.services.chat.message_utils import _achievement_turn_id
     ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(
         ctx.user_id,
-        [
-            {"role": "user", "content": ctx.user_message},
-            {"role": "assistant", "content": reply},
-        ],
+        [],
         conversation_id=ctx.conversation_id,
+        workspace_id=ctx.workspace_id,
+        source_message_ids=ctx.source_message_ids,
+        reply_turn_id=_achievement_turn_id(ctx.source_message_ids),
     ))
 
 
@@ -135,6 +138,7 @@ async def _emit_short_circuit(
         reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
         extra_metadata=extra_metadata,
         trace_id=ctx.tracer.safe_trace_id,
+        turn_user_message_ids=ctx.source_message_ids,
     )
     ctx.last_short_circuit_reply = delivered_reply_text(events) or reply
     for evt in events:

@@ -24,6 +24,7 @@ class EvidenceSource:
     relation: str = "recorded_from"
     expected_version: str | None = None
     expected_role: str | None = None
+    expected_conversation_id: str | None = None
 
 
 def content_version(content: str) -> str:
@@ -37,7 +38,8 @@ def _table(side: str) -> str:
 
 
 async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Side,
-                                   message_ids: list[str], extraction_input: str) -> tuple[EvidenceSource, ...]:
+                                   message_ids: list[str], extraction_input: str,
+                                   conversation_id: str | None = None) -> tuple[EvidenceSource, ...]:
     """Pin the actual input versions before a model call, without holding locks.
 
     The write transaction rechecks these hashes. An edited, deleted or rebound
@@ -49,17 +51,24 @@ async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Sid
         raise ValueError("invalid_evidence_batch")
     role = "user" if side == "user" else "assistant"
     rows = await db.query_raw(
-        """SELECT m.id,m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id
+        """SELECT m.id,m.content,m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id
            JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
            WHERE m.id=ANY($1::text[]) AND c.user_id=$2 AND c.workspace_id=$3
            AND NOT c.is_deleted AND m.role=$4
+           AND ($5::text IS NULL OR (c.id=$5 AND w.status='active'))
            AND COALESCE(m.metadata->>'human_takeover','false')<>'true'
-           AND COALESCE(m.metadata->>'memory_confirmation','false')<>'true'""", ids,user_id,workspace_id,role)
+           AND COALESCE(m.metadata->>'memory_confirmation','false')<>'true'""", ids,user_id,workspace_id,role,conversation_id)
     by_id = {row["id"]: row["content"] for row in rows}
     if len(by_id) != len(ids) or any(not text.strip() or text.strip() not in extraction_input for text in by_id.values()):
         raise ValueError("evidence_input_scope_or_content_mismatch")
+    if conversation_id is not None:
+        from app.services.memory.recording.chat_sources import excluded_from_chat_extraction
+        if (extraction_input != '\n'.join(f'{role}: {by_id[mid]}' for mid in ids)
+                or any(excluded_from_chat_extraction(dict(row, role=role)) for row in rows)):
+            raise ValueError("evidence_input_scope_or_content_mismatch")
     return tuple(EvidenceSource("message", mid, relation="extracted_from", expected_role=role,
-                                expected_version=content_version(by_id[mid])) for mid in ids)
+                                expected_version=content_version(by_id[mid]),
+                                expected_conversation_id=conversation_id) for mid in ids)
 
 
 async def _resolve_source(database, source: EvidenceSource, target: dict) -> dict:
@@ -70,10 +79,13 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
         raise ValueError("invalid_evidence_relation")
     params = [ref]
     if kind == "message":
-        query = """SELECT c.user_id, c.workspace_id, c.agent_id, m.role, m.content AS version_text,
-                   'recorded' AS status, m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id
+        query = """SELECT c.user_id, c.workspace_id, c.agent_id, c.id AS conversation_id,
+                   m.role, m.content AS version_text, 'recorded' AS status, m.metadata,
+                   w.status AS workspace_status
+                   FROM messages m JOIN conversations c ON c.id=m.conversation_id
+                   JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
                    WHERE m.id=$1 AND NOT c.is_deleted
-                   AND COALESCE(m.metadata->>'human_takeover','false')<>'true' FOR SHARE OF m,c"""
+                   AND COALESCE(m.metadata->>'human_takeover','false')<>'true' FOR SHARE OF m,c,w"""
     elif kind == "memory":
         query = f"""SELECT m.user_id,m.workspace_id,w.agent_id,m.content AS version_text,
                     CASE WHEN m.is_archived THEN 'archived' ELSE 'active' END AS status
@@ -107,6 +119,11 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
     if not rows:
         raise ValueError("evidence_source_not_found")
     row = rows[0]
+    if source.expected_conversation_id is not None:
+        from app.services.memory.recording.chat_sources import excluded_from_chat_extraction
+        if (kind != 'message' or row.get('conversation_id') != source.expected_conversation_id
+                or row.get('workspace_status') != 'active' or excluded_from_chat_extraction(row)):
+            raise ValueError('evidence_source_changed_or_unavailable')
     if kind == "message" and source.relation == "extracted_from" and (row.get("metadata") or {}).get("memory_confirmation"):
         raise ValueError("evidence_message_reserved_for_confirmation")
     if source.expected_role and row.get("role") != source.expected_role:

@@ -13,6 +13,8 @@ class MemorySideOutcome:
     # notably when a multi-memory write failed after a partial commit.
     memory_count: int | None = None
     progress: Literal["advanced", "unchanged", "not_applicable", "unknown"] = "unchanged"
+    source_count: int | None = None
+    source_binding: Literal["persisted_messages", "unlinked_input", "unknown"] = "unknown"
 
 
 class MemoryProgressError(RuntimeError):

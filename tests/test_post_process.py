@@ -450,3 +450,19 @@ async def test_memory_pipeline_skips_batch_on_distributed_lock_timeout():
         )
 
     do_pipeline.assert_not_called()
+
+
+async def test_memory_uses_persisted_identity_but_expression_learning_keeps_reply(monkeypatch):
+    from app.services.chat import post_process as p
+    for name in ('_bg_user_emotion','_bg_memory_pipeline','_bg_trait_adjustment',
+                 '_bg_positive_recovery','_bg_offering_followup_memory','_bg_expression_learning'):
+        monkeypatch.setattr(p,name,AsyncMock())
+    messages=[{'id':'u-1','role':'user','content':'hello'}]
+    await p.run_post_process(user_id='u',agent_id='a',conversation_id='c',user_message='hello',
+        user_message_id='u-1',full_response='temporary reply',messages_dicts=messages,
+        source_message_ids=['u-1'],reply_turn_id='turn-1',workspace_id='w')
+    assert p._bg_memory_pipeline.await_args.args[1] == messages
+    assert p._bg_memory_pipeline.await_args.kwargs['source_message_ids'] == ['u-1']
+    assert p._bg_memory_pipeline.await_args.kwargs['reply_turn_id'] == 'turn-1'
+    assert p._bg_expression_learning.await_args.args[2] == messages + [{'role':'assistant','content':'temporary reply'}]
+    assert len(messages) == 1

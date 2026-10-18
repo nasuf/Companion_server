@@ -226,6 +226,7 @@ async def process_memory_pipeline(
     side: Side = "user",
     workspace_id: str | None = None,
     evidence_message_ids: list[str] | None = None,
+    evidence_conversation_id: str | None = None,
     prev_ai_line: str | None = None,
 ) -> list[str]:
     """Run the full memory extraction and storage pipeline for one side.
@@ -244,6 +245,27 @@ async def process_memory_pipeline(
     """
     workspace_id = await resolve_workspace_id(workspace_id=workspace_id, user_id=user_id)
 
+    from app.services.memory.evidence import EvidenceSource, snapshot_message_sources
+    origins = (EvidenceSource("unlinked", "chat_without_message_ids"),)
+    async def snapshot_sources():
+        try:
+            return await snapshot_message_sources(user_id=user_id, workspace_id=workspace_id,
+                side=side, message_ids=evidence_message_ids, extraction_input=new_conversation,
+                conversation_id=evidence_conversation_id)
+        except ValueError as exc:
+            raise MemoryExtractionError("Memory source validation failed", kind="source_invalid") from exc
+
+    if evidence_conversation_id and not evidence_message_ids:
+        raise MemoryExtractionError("Chat source identities missing", kind="source_invalid")
+    if evidence_message_ids:
+        # Even a filtered/no-op input must be a valid source before the caller
+        # may acknowledge progress. Pin the exact input before either model.
+        origins = await snapshot_sources()
+
+    async def validate_sources():
+        if evidence_message_ids and await snapshot_sources() != origins:
+            raise MemoryExtractionError("Memory source changed", kind="source_invalid")
+
     # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
     # 只对 new_conversation 判定, 历史上下文已经抽过了
     if not should_extract_memory(new_conversation):
@@ -254,28 +276,22 @@ async def process_memory_pipeline(
     # Uses registered prompt `memory.judgement_{side}` via should_memorize.
     from app.config import settings
     if settings.enable_memory_prefilter:
+        memorize = True
         try:
-            if not await should_memorize(
+            memorize = await should_memorize(
                 new_conversation, side=side,
                 prev_ai=(
                     prev_ai_line
                     if prev_ai_line is not None
                     else _last_ai_line(context_conversation)
                 ),
-            ):
-                logger.debug(f"[MEM-{side}] pre-filter: 不记")
-                return []
+            )
         except Exception as e:
             logger.warning(f"[MEM-{side}] pre-filter failed ({e}), proceeding")
-
-    from app.services.memory.evidence import EvidenceSource, snapshot_message_sources
-    origins = (EvidenceSource("unlinked", "chat_without_message_ids"),)
-    if evidence_message_ids:
-        try:
-            origins = await snapshot_message_sources(user_id=user_id, workspace_id=workspace_id,
-                side=side, message_ids=evidence_message_ids, extraction_input=new_conversation)
-        except ValueError as exc:
-            raise MemoryExtractionError("Memory source validation failed", kind="source_invalid") from exc
+        if not memorize:
+            await validate_sources()
+            logger.debug(f"[MEM-{side}] pre-filter: 不记")
+            return []
 
     # Step 2 (spec §2.1.3 / §2.2.3): Big model extraction
     extraction = await extract_memories(
@@ -293,6 +309,7 @@ async def process_memory_pipeline(
             "watermark must not advance", kind=kind,
         )
     memories = extraction.get("memories", [])
+    await validate_sources()
 
     if not memories:
         logger.info(f"[MEM-{side}] no memories extracted")

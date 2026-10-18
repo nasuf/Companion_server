@@ -355,6 +355,7 @@ async def test_boundary_phase_records_delivered_text():
         conversation_id="c1", agent_id=None, user_id="u1",
         tracer=MagicMock(safe_trace_id=None),
         last_short_circuit_reply=None,
+        source_message_ids=[],
     )
     with (
         patch("app.services.chat.multi_intent._fire_background", side_effect=lambda c: c.close()),

@@ -397,6 +397,8 @@ class ChatGraphContext:
                     or parent.location_share_context or bool(parent.contradiction_inquiry)
                     or bool(parent.preflight_ctx and parent.preflight_ctx.memory_confirmation),
                     workspace_id=parent.workspace_id,
+                    source_message_ids=sorted(parent.current_turn_ids),
+                    reply_turn_id=parent.current_achievement_turn_id,
                 )
             )
             self.background_submitted = True

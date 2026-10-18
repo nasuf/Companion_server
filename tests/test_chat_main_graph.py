@@ -41,6 +41,8 @@ async def test_graph_ordinary_turn_saves_and_finishes_once(chat_io):
     assert chat._save_replies.await_args.kwargs["achievement_turn_final"] is False
     chat_io.achievement.assert_called_once()
     chat._background_post_process.assert_called_once()
+    assert chat._background_post_process.call_args.kwargs['source_message_ids'] == ['u-new']
+    assert chat._background_post_process.call_args.kwargs['reply_turn_id'] == chat._save_replies.await_args.kwargs['achievement_turn_id']
     chat_io.tracer.close.assert_called_once()
     chat.detect_intent_unified.assert_awaited_once_with(
         "今晚想聊天", context="synthetic context"
@@ -71,6 +73,8 @@ async def test_explicit_fragments_share_parent_lifecycle(chat_io, monkeypatch, p
     assert chat_io.achievement.await_args.kwargs["user_message_ids"] == ["u-new"]
     assert "assistant_texts" not in chat_io.achievement.await_args.kwargs
     chat._background_post_process.assert_called_once()
+    assert chat._background_post_process.call_args.kwargs['source_message_ids'] == ['u-new']
+    assert chat._background_post_process.call_args.kwargs['reply_turn_id'] == chat._save_replies.await_args.kwargs['achievement_turn_id']
     assert (
         chat._background_post_process.call_args.kwargs["user_message"]
         == "心情一般，不聊了"
@@ -631,3 +635,49 @@ async def test_current_state_fast_path_still_skips_classifier_and_full_fetch(
     chat.detect_intent_unified.assert_not_called()
     chat.fetch_parallel_context.assert_not_called()
     assert chat._background_post_process.call_args.kwargs["skip_ai_memory"] is True
+
+
+@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+async def test_background_sources_cover_all_fragments_before_submission(chat_io,monkeypatch,executor):
+    monkeypatch.setattr(settings,'chat_executor',executor)
+    chat.detect_intent_unified.return_value=IntentResult(intent=IntentType.NONE,confidence=.9,
+        metadata={'fragments':{'日常交流':'今天开心','终结意图':'先不聊了'}})
+    async def farewell(text,ctx,*args,**kwargs):
+        async for event in ctx.finalize('farewell',kind='conversation_end'):
+            yield event
+    monkeypatch.setattr(chat,'handle_conversation_end',farewell)
+    saved=[]
+    async def save(conversation,replies,**kwargs):
+        saved.append(kwargs['achievement_turn_id'])
+        return 'reply-'+str(len(saved))
+    monkeypatch.setattr(chat,'_save_replies',AsyncMock(side_effect=save))
+    async def noop():pass
+    def background(**kwargs):
+        assert len(saved)==2
+        assert kwargs['source_message_ids']==['u-new']
+        assert all(turn==kwargs['reply_turn_id'] for turn in saved)
+        return noop()
+    submit=MagicMock(side_effect=background)
+    monkeypatch.setattr(chat,'_background_post_process',submit)
+    events=await run(chat_io,text='今天开心，先不聊了')
+    assert sum(event['event']=='done' for event in events)==1
+    submit.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_legacy_interrupted_subintent_keeps_saved_parent_background(chat_io, monkeypatch, failure):
+    monkeypatch.setattr(settings, 'chat_executor', 'legacy')
+    chat.detect_intent_unified.return_value = IntentResult(intent=IntentType.NONE, confidence=.9,
+        metadata={'fragments': {'日常交流': '今天开心', '终结意图': '先不聊了'}})
+    async def interrupted(*args, **kwargs):
+        raise failure('subintent interrupted')
+        yield  # async generator contract
+    monkeypatch.setattr(chat, '_process_sub_intents', interrupted)
+    with pytest.raises(failure):
+        await run(chat_io, text='今天开心，先不聊了')
+    chat._save_replies.assert_awaited_once()
+    chat._background_post_process.assert_called_once()
+    source = chat._background_post_process.call_args.kwargs
+    assert source['source_message_ids'] == ['u-new']
+    assert source['reply_turn_id'] == chat._save_replies.await_args.kwargs['achievement_turn_id']
+    chat.finish_assistant_turn.assert_not_awaited()

@@ -688,15 +688,10 @@ async def _handle_music_component_card(
 
         fire_background(_bg_memory_pipeline(
             user_id,
-            [
-                {
-                    "role": "user",
-                    "content": f"我给你推荐了《{track.title}》- {track.artist}，想和你一起听。",
-                },
-                {"role": "assistant", "content": reply},
-            ],
+            [],
             conversation_id=conversation_id,
             workspace_id=workspace_id,
+            source_message_ids=[user_message_id, assistant_message_id],
         ))
         fire_background(notify_agent_message_created(
             conversation_id=conversation_id,

@@ -166,6 +166,8 @@ class ShortCircuitCtx:
             {} if self.consumed_full_message else self.pending_sub_fragments
         )
         extra_metadata: dict[str, Any] | None = dict(metadata or {})
+        if kind in {"schedule_query", "current_state"}:
+            extra_metadata["memory_extraction_exclusion"] = kind
         if self.covered_until_user_ts is not None:
             extra_metadata.setdefault(
                 "covered_until_user_ts",

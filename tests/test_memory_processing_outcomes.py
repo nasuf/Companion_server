@@ -16,6 +16,9 @@ from tests.test_memory_evidence_postgres import origins
 @pytest.fixture
 def unit(monkeypatch):
     monkeypatch.setattr(d, '_write', AsyncMock())
+    from app.services.memory.recording import chat_sources
+    # Selection/coordination only; real source resolution is tested on PostgreSQL.
+    monkeypatch.setattr(chat_sources, 'load_chat_sources', AsyncMock(side_effect=lambda **kw: kw['messages']))
     monkeypatch.setattr(p, '_resolve_workspace_id_for_conversation', AsyncMock(return_value='workspace'))
     monkeypatch.setattr(p, 'get_watermark', AsyncMock(return_value=None))
     monkeypatch.setattr(p, 'set_watermark', AsyncMock())
@@ -28,7 +31,7 @@ def unit(monkeypatch):
 async def test_failure_and_disabled_are_not_successful_empty(unit, monkeypatch, kind, status):
     p.process_memory_pipeline.side_effect = MemoryExtractionError('PRIVATE_CHAT_AND_TOKEN', kind=kind)
     result = await p._bg_memory_pipeline('user', unit, 'conversation', 'workspace')
-    assert result[0] == MemorySideOutcome('user', status, kind)
+    assert result[0] == MemorySideOutcome('user', status, kind, source_count=1, source_binding='persisted_messages')
     assert result[1].status == 'no_new_messages'
     p.set_watermark.assert_not_awaited()
     assert 'PRIVATE' not in str(d._write.await_args_list)
@@ -37,7 +40,7 @@ async def test_failure_and_disabled_are_not_successful_empty(unit, monkeypatch, 
 
 async def test_successful_empty_is_completed_and_advances(unit):
     result = await p._bg_memory_pipeline('user', unit, 'conversation', 'workspace')
-    assert result[0] == MemorySideOutcome('user', 'completed', 'processed', 0, 'advanced')
+    assert result[0] == MemorySideOutcome('user', 'completed', 'processed', 0, 'advanced', 1, 'persisted_messages')
     p.set_watermark.assert_awaited_once()
     assert d._write.await_args.args[0]['status'] == 'completed'
 
@@ -46,7 +49,7 @@ async def test_write_then_progress_failure_preserves_known_count(unit):
     p.process_memory_pipeline.return_value = ['one', 'two']
     p.set_watermark.side_effect = MemoryProgressError('watermark_write_unavailable')
     result = await p._bg_memory_pipeline('user', unit, 'conversation', 'workspace')
-    assert result[0] == MemorySideOutcome('user','failed','watermark_write_unavailable',2,'unknown')
+    assert result[0] == MemorySideOutcome('user','failed','watermark_write_unavailable',2,'unknown',1,'persisted_messages')
     p.process_memory_pipeline.assert_awaited_once()
     p.manager.send_event.assert_awaited_once()
 
@@ -167,10 +170,11 @@ async def test_redis_outage_retains_safe_log_and_never_reports_zero_success(unit
 
 
 async def test_intentionally_skipped_progress_write_failure_is_unknown(unit):
-    unit.append({'role':'assistant','content':'synthetic skipped'})
+    unit.append({'id':'excluded','role':'assistant','content':'persisted excluded','createdAt':datetime.now(UTC),
+        'metadata':{'memory_extraction_exclusion':'current_state'}})
     p.set_watermark.side_effect=MemoryProgressError('watermark_write_unavailable')
     result=await p._bg_memory_pipeline('user',unit,'conv','workspace',skip_ai_side=True)
-    assert result[1]==MemorySideOutcome('ai','failed','watermark_write_unavailable',0,'unknown')
+    assert result[1]==MemorySideOutcome('ai','failed','watermark_write_unavailable',0,'unknown',0,'persisted_messages')
 
 
 async def test_no_conversation_side_runs_and_refresh_failure_does_not_change_success(unit):

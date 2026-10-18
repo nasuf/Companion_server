@@ -117,6 +117,8 @@ async def guard(ctx):
             fire_background_fn=services._fire_background,
             bg_memory_pipeline_fn=services._bg_memory_pipeline,
             recent_context=ctx.recent_context_text,
+            source_message_ids=sorted(ctx.current_turn_ids),
+            workspace_id=ctx.workspace_id,
         )
         async for evt in services.run_boundary(ctx.boundary_ctx):
             yield evt

@@ -25,6 +25,9 @@ def scoped_window_unit_dependencies(monkeypatch):
     monkeypatch.setattr(post_process, "_resolve_workspace_id_for_conversation",
         AsyncMock(side_effect=lambda conversation_id, user_id, workspace_id: workspace_id or "ws-1"))
     monkeypatch.setattr(diagnostics, "_write", AsyncMock())
+    from app.services.memory.recording import chat_sources
+    # Selection/coordination only; real source resolution is tested on PostgreSQL.
+    monkeypatch.setattr(chat_sources, 'load_chat_sources', AsyncMock(side_effect=lambda **kw: kw['messages']))
 
 UTC = timezone.utc
 
@@ -33,6 +36,7 @@ def _win_msg(role: str, content: str, ts: datetime | None) -> dict:
     msg: dict = {"role": role, "content": content}
     if ts is not None:
         msg["createdAt"] = ts.isoformat()
+        msg["id"] = f"{role}:{ts.isoformat()}"
     return msg
 
 
@@ -137,7 +141,7 @@ async def test_synthetic_reply_skipped_when_persisted_rows_exist():
 
 
 @pytest.mark.asyncio
-async def test_synthetic_reply_extracted_when_backlog_empty():
+async def test_synthetic_reply_never_fills_an_empty_persisted_backlog():
     """回复尚未持久化 (DB 增量为空) → 合成消息仍要当场抽取."""
     from app.services.chat.post_process import _bg_memory_pipeline
 
@@ -151,10 +155,8 @@ async def test_synthetic_reply_extracted_when_backlog_empty():
                AsyncMock(return_value=[])) as mock_pipeline:
         await _bg_memory_pipeline("u1", window, conversation_id="c1", workspace_id="ws-1")
 
-    assert "刚生成还没落库的回复" in mock_pipeline.await_args.kwargs["new_conversation"]
-    # Watermark advances (fallback now) so the persisted copy isn't re-extracted.
-    ai_set = next(c for c in mock_set.await_args_list if c.args[1] == "ai")
-    assert ai_set.args[2] > wm
+    mock_pipeline.assert_not_awaited()
+    mock_set.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -1168,6 +1168,7 @@ async def test_user_invite_joins_agent_only_music_session(
         track=MusicTrack(id="track-1", title="Quiet Realm"),
     ))
     music_status = AsyncMock(return_value="music-status-1")
+    memory = MagicMock(return_value=None)
 
     with (
         patch.object(
@@ -1196,7 +1197,7 @@ async def test_user_invite_joins_agent_only_music_session(
         ),
         patch(
             "app.services.chat.post_process._bg_memory_pipeline",
-            new=lambda *_args, **_kwargs: None,
+            new=memory,
         ),
         patch(
             "app.services.notifications.service.notify_agent_message_created",
@@ -1226,6 +1227,11 @@ async def test_user_invite_joins_agent_only_music_session(
     projected = [call.kwargs["shared_session"] for call in music_status.await_args_list
                  if call.kwargs["shared_session"] is not None]
     assert projected == [start_co.return_value]
+
+    memory.assert_called_once()
+    assert memory.call_args.args == ("user-1", [])
+    assert memory.call_args.kwargs["source_message_ids"] == ["user-message-1", "assistant-music-1"]
+    assert memory.call_args.kwargs["workspace_id"] == "ws-1"
 
 
 @pytest.mark.asyncio

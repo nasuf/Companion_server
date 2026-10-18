@@ -635,6 +635,8 @@ async def _stream_legacy_response(
                 fire_background_fn=_fire_background,
                 bg_memory_pipeline_fn=_bg_memory_pipeline,
                 recent_context=recent_context_text,
+                source_message_ids=sorted(current_turn_ids),
+                workspace_id=workspace_id,
             )
             async for evt in run_boundary(boundary_ctx):
                 yield evt
@@ -1872,33 +1874,37 @@ async def _stream_legacy_response(
                 data={"title": title},
             ))
 
-        # --- BACKGROUND: fire-and-forget post-processing ---
-        _fire_background(_background_post_process(
-            user_id=user_id,
-            agent_id=agent_id,
-            conversation_id=conversation_id,
-            user_message=user_message,
-            user_message_id=user_message_id,
-            full_response=full_response,
-            messages_dicts=messages_dicts,
-            user_emotion=prompt_user_emotion,
-            skip_ai_memory=False,
-            skip_memory=bool(offering_context) or location_share_context or bool(contradiction_inquiry),
-            workspace_id=workspace_id,
-        ))
-        post_process_fired = True
-
-        # spec §3.3 step 3: 主意图回复完成后，依次处理拆分出的子意图片段
-        if pending_sub_fragments:
-            start_idx = reply_index_offset + len(emitted_replies)
-            async for evt in _process_sub_intents(
-                pending_sub_fragments, conversation_id, agent, user_id,
-                reply_context, start_index=start_idx,
-                parent_patience=cached_patience,
-                parent_trace_id=tracer.trace_id,
-                memory_usage_event_id=memory_usage_event_id,
-            ):
-                yield evt
+        try:
+            # spec §3.3 step 3: 主意图回复完成后，依次处理拆分出的子意图片段
+            if pending_sub_fragments:
+                start_idx = reply_index_offset + len(emitted_replies)
+                async for evt in _process_sub_intents(
+                    pending_sub_fragments, conversation_id, agent, user_id,
+                    reply_context, start_index=start_idx,
+                    parent_patience=cached_patience,
+                    parent_trace_id=tracer.trace_id,
+                    memory_usage_event_id=memory_usage_event_id,
+                ):
+                    yield evt
+        finally:
+            # Collect persisted fragments after completion or interruption. The
+            # primary reply already exists; a failed child must not drop its work.
+            _fire_background(_background_post_process(
+                user_id=user_id,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                user_message_id=user_message_id,
+                full_response=full_response,
+                messages_dicts=messages_dicts,
+                user_emotion=prompt_user_emotion,
+                skip_ai_memory=False,
+                skip_memory=bool(offering_context) or location_share_context or bool(contradiction_inquiry),
+                workspace_id=workspace_id,
+                source_message_ids=sorted(current_turn_ids),
+                reply_turn_id=current_achievement_turn_id,
+            ))
+            post_process_fired = True
 
         await finish_assistant_turn(
             conversation_id=conversation_id,
@@ -1993,6 +1999,8 @@ async def _stream_legacy_response(
                     and sc_ctx.last_short_circuit_kind in {"schedule_query", "current_state"}
                 ),
                 workspace_id=workspace_id,
+                source_message_ids=sorted(current_turn_ids),
+                reply_turn_id=current_achievement_turn_id,
             ))
 
         # 兜底关闭 trace (幂等): 正常/短路路径都已 close, 这里只兜异常中断.

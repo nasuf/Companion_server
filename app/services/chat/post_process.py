@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -245,6 +244,9 @@ async def _bg_memory_pipeline(
     conversation_id: str | None = None,
     workspace_id: str | None = None,
     skip_ai_side: bool = False,
+    *,
+    source_message_ids: list[str] | None = None,
+    reply_turn_id: str | None = None,
 ) -> list[MemorySideOutcome]:
     """Serialize the dual-side extraction and retain bounded, content-free diagnostics.
 
@@ -257,7 +259,7 @@ async def _bg_memory_pipeline(
         try:
             if conversation_id is None:
                 results = await _do_memory_pipeline(user_id, messages, None, workspace_id,
-                    skip_ai_side=skip_ai_side)
+                    skip_ai_side=skip_ai_side, source_message_ids=source_message_ids, reply_turn_id=reply_turn_id)
             else:
                 async with _get_pipeline_lock(conversation_id):
                     if settings.is_production():
@@ -270,10 +272,12 @@ async def _bg_memory_pipeline(
                             retry_interval_s=0.5, fail_open=False,
                         ):
                             results = await _do_memory_pipeline(user_id, messages,
-                                conversation_id, workspace_id, skip_ai_side=skip_ai_side)
+                                conversation_id, workspace_id, skip_ai_side=skip_ai_side,
+                                source_message_ids=source_message_ids, reply_turn_id=reply_turn_id)
                     else:
                         results = await _do_memory_pipeline(user_id, messages,
-                            conversation_id, workspace_id, skip_ai_side=skip_ai_side)
+                            conversation_id, workspace_id, skip_ai_side=skip_ai_side,
+                            source_message_ids=source_message_ids, reply_turn_id=reply_turn_id)
         except (DistributedLockNotAcquired, DistributedLockUnavailable):
             results = [MemorySideOutcome(side, "failed", "lock_unavailable") for side in ("user", "ai")]
         except Exception as exc:
@@ -299,9 +303,10 @@ async def _run_memory_side(
     side: Literal["user", "ai"], workspace_id: str | None, excluded: bool = False,
 ) -> MemorySideOutcome:
     try:
-        if excluded:
-            progress = await _advance_side_watermark_without_extraction(recent, conversation_id, side=side)
-            return MemorySideOutcome(side, "excluded", "intentional_skip", 0, progress)
+        if excluded and conversation_id is None:
+            return MemorySideOutcome(side, "excluded", "intentional_skip", 0, "not_applicable")
+        # Chat exclusions are attached to persisted messages. Skipping this
+        # entire side could jump over an older failed batch of ordinary replies.
         return await _pipeline_with_watermark(user_id, recent, conversation_id,
             side=side, workspace_id=workspace_id)
     except Exception as exc:
@@ -320,11 +325,17 @@ async def _do_memory_pipeline(
     workspace_id: str | None,
     *,
     skip_ai_side: bool = False,
+    source_message_ids: list[str] | None = None,
+    reply_turn_id: str | None = None,
 ) -> list[MemorySideOutcome]:
     """Keep the conversation lock until both sides have stopped, including cancellation."""
     recent = messages[-6:]
     if conversation_id:
         workspace_id = await _resolve_workspace_id_for_conversation(conversation_id, user_id, workspace_id)
+        from app.services.memory.recording.chat_sources import load_chat_sources
+        recent = await load_chat_sources(conversation_id=conversation_id, user_id=user_id,
+            workspace_id=workspace_id, messages=recent, source_message_ids=source_message_ids,
+            reply_turn_id=reply_turn_id)
     tasks = [asyncio.create_task(_run_memory_side(user_id, recent, conversation_id,
         side=side, workspace_id=workspace_id, excluded=side == "ai" and skip_ai_side))
         for side in ("user", "ai")]
@@ -414,8 +425,8 @@ async def _pipeline_with_watermark(
     返回明确结果；返回的记忆ID数量包含更新，并非新建行数。
 
     新消息来源优先 DB 增量 (createdAt > watermark, 上限 30 条)。
-    DB 失败保持进度；首次无水位线只处理窗口，不回填历史。 调用方窗口里无时间戳的合成消息 (刚生成还未持久化的回复)
-    仅在 DB 增量为空时作为抽取目标, 避免与已持久化的拆分回复重复抽取.
+    DB 失败保持进度；首次无水位线只处理已验证窗口，不回填历史。
+    会话抽取只使用已落库消息，不能用合成文本或当前时间推进进度。
     """
     # An older AI job can finish after an administrator claims the chat. Its
     # backlog/context must never turn later human messages into AI memories.
@@ -425,10 +436,7 @@ async def _pipeline_with_watermark(
         await get_watermark(conversation_id, side) if conversation_id else None
     )
 
-    # Cross-role NEW msgs go to context_msgs, not new_target_msgs — prevents
-    # AI's just-generated reply from being extracted as a user fact (and vice versa).
-    # target_role NEW msgs without ts (boundary short-circuit, fresh reply) use now()
-    # so the watermark still advances; otherwise next round would re-extract them.
+    # Cross-role rows provide context only; they never change memory ownership.
     target_role = "user" if side == "user" else "assistant"
     fallback_now = datetime.now(UTC)
 
@@ -444,34 +452,27 @@ async def _pipeline_with_watermark(
 
     def _add_target(m: dict) -> None:
         nonlocal max_side_ts
-        metadata = m.get("metadata") or {}
-        excluded = (
-            metadata.get("human_takeover")
-            or metadata.get("memory_confirmation")
-            or _memory_written_by_lifecycle(m)
-        )
+        from app.services.memory.recording.chat_sources import excluded_from_chat_extraction
+        excluded = excluded_from_chat_extraction(m)
+        ts = _parse_ts(m)
+        if conversation_id and (not m.get("id") or ts is None):
+            raise MemoryProgressError("source_identity_missing")
         if not excluded and (m.get("content") or "").strip():
             new_target_msgs.append(m)
-        ts = _parse_ts(m)
         effective = ts if ts is not None else fallback_now
         if max_side_ts is None or effective > max_side_ts:
             max_side_ts = effective
 
     if db_backlog is not None:
-        backlog_text = _comparable_text("".join(m.get("content") or "" for m in db_backlog))
         for m in db_backlog:
             _add_target(m)
-        # The window contributes context plus synthetic (un-persisted) targets.
+        # Once progress exists, only the bounded persisted backlog supplies
+        # targets. A recent-window reply cannot leap over an earlier page.
         for m in recent:
             ts = _parse_ts(m)
             is_new_target = m.get("role") == target_role and (ts is None or ts > wm)
             if not is_new_target or _memory_written_by_lifecycle(m):
                 context_msgs.append(m)
-            elif not db_backlog and ts is None and _comparable_text(m.get("content")) not in backlog_text:
-                # A synthetic latest reply must not advance the cursor beyond
-                # a bounded page of older persisted messages. Preserve the
-                # legacy window fallback only when the DB has no backlog.
-                _add_target(m)
     else:
         for m in recent:
             ts = _parse_ts(m)
@@ -481,15 +482,23 @@ async def _pipeline_with_watermark(
             if not (is_new and m.get("role") == target_role) or _memory_written_by_lifecycle(m):
                 context_msgs.append(m)
 
+    def outcome(status, reason, count=None, progress="unchanged"):
+        return MemorySideOutcome(side, status, reason, count, progress,
+            source_count=len(new_target_msgs),
+            source_binding="persisted_messages" if conversation_id else "unlinked_input")
+
     if max_side_ts is None:
-        return MemorySideOutcome(side, "no_new_messages", "no_new_messages", 0)
+        return outcome("no_new_messages", "no_new_messages", 0)
     if not new_target_msgs:
         # A bounded page of reserved messages must not starve later messages.
         # These rows were intentionally handled outside generic extraction.
         if conversation_id and (wm is None or max_side_ts > wm):
-            await set_watermark(conversation_id, side, max_side_ts)
-            return MemorySideOutcome(side, "excluded", "reserved_messages", 0, "advanced")
-        return MemorySideOutcome(side, "excluded", "reserved_messages", 0)
+            try:
+                await set_watermark(conversation_id, side, max_side_ts)
+            except MemoryProgressError as exc:
+                return outcome("failed", exc.reason, 0, "unknown")
+            return outcome("excluded", "reserved_messages", 0, "advanced")
+        return outcome("excluded", "reserved_messages", 0)
     context_msgs = _context_before_targets(context_msgs, new_target_msgs, recent, target_role)
     evidence_message_ids = [
         str(m.get("id"))
@@ -506,12 +515,13 @@ async def _pipeline_with_watermark(
             side=side,
             workspace_id=workspace_id,
             evidence_message_ids=evidence_message_ids,
+            evidence_conversation_id=conversation_id,
             prev_ai_line=_ai_line_before(
                 recent, new_target_msgs[0] if new_target_msgs else None
             ),
         )
     except MemoryExtractionError as exc:
-        return MemorySideOutcome(side, "disabled" if exc.kind == "prompt_disabled" else "failed", exc.kind)
+        return outcome("disabled" if exc.kind == "prompt_disabled" else "failed", exc.kind)
 
     progress = "not_applicable" if not conversation_id else "unchanged"
     if conversation_id and (wm is None or max_side_ts > wm):
@@ -519,41 +529,8 @@ async def _pipeline_with_watermark(
             await set_watermark(conversation_id, side, max_side_ts)
             progress = "advanced"
         except MemoryProgressError as exc:
-            return MemorySideOutcome(side, "failed", exc.reason, len(stored_ids), "unknown")
-    return MemorySideOutcome(side, "completed", "processed", len(stored_ids), progress)
-
-
-async def _advance_side_watermark_without_extraction(
-    recent: list[dict],
-    conversation_id: str | None,
-    *,
-    side: Literal["user", "ai"],
-) -> Literal["advanced", "unchanged", "not_applicable"]:
-    """Advance watermark for a side intentionally skipped from extraction.
-
-    Schedule/current-state replies are ephemeral answers. If we skip AI memory
-    extraction without moving the AI watermark, a later non-skipped turn would
-    see this assistant reply as "new" and extract it retroactively.
-    """
-    if conversation_id is None:
-        return "not_applicable"
-    target_role = "user" if side == "user" else "assistant"
-    fallback_now = datetime.now(UTC)
-    max_side_ts: datetime | None = None
-    for msg in recent:
-        if msg.get("role") != target_role:
-            continue
-        effective = _parse_ts(msg) or fallback_now
-        if max_side_ts is None or effective > max_side_ts:
-            max_side_ts = effective
-    if max_side_ts is None:
-        return "unchanged"
-
-    wm = _ensure_aware(await get_watermark(conversation_id, side))
-    if wm is None or max_side_ts > wm:
-        await set_watermark(conversation_id, side, max_side_ts)
-        return "advanced"
-    return "unchanged"
+            return outcome("failed", exc.reason, len(stored_ids), "unknown")
+    return outcome("completed", "processed", len(stored_ids), progress)
 
 
 def _parse_ts(m: dict) -> datetime | None:
@@ -608,11 +585,6 @@ def _ai_line_before(messages: list[dict], first_new_target: dict | None) -> str:
     return " ".join(reply)
 
 
-def _comparable_text(text: Any) -> str:
-    """Text with whitespace, punctuation, emoji and the || splitter removed."""
-    return re.sub(r"[\W_]+", "", str(text or ""))
-
-
 def _context_before_targets(
     context_msgs: list[dict],
     new_target_msgs: list[dict],
@@ -623,10 +595,9 @@ def _context_before_targets(
 
     The extraction prompt renders 【历史上下文】 above 【待抽取消息】, so a later
     row there reads as having happened first: the user side showed the AI's
-    reply to "我喜欢你" above "我喜欢你" itself (2026-10-15 trace). Rows without
-    a timestamp are the just-generated synthetic ones: they are placed by their
-    position in the window, and an un-timestamped target is the newest row, so
-    it lifts the time bound entirely.
+    reply to "我喜欢你" above "我喜欢你" itself (2026-10-15 trace). Chat targets
+    now require persisted timestamps. Non-chat compatibility inputs without a
+    timestamp retain their window ordering.
     """
     target_ts = [_parse_ts(m) for m in new_target_msgs]
     timed = [ts for ts in target_ts if ts is not None]
@@ -742,6 +713,8 @@ async def run_post_process(
     skip_ai_memory: bool = False,
     skip_memory: bool = False,
     workspace_id: str | None = None,
+    source_message_ids: list[str] | None = None,
+    reply_turn_id: str | None = None,
 ) -> None:
     """后台任务并发：写用户情绪 / 记忆抽取 / 性格反馈 / 耐心恢复。
 
@@ -756,7 +729,9 @@ async def run_post_process(
         scope="post_process", conversation_id=conversation_id,
         agent_id=agent_id, user_id=user_id,
     ):
-        full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
+        # The response string is for other post-processing only. Extraction
+        # resolves actual persisted bubbles from this completed parent turn.
+        expression_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
         tasks: list[Any] = [
             _bg_user_emotion(user_message_id, user_emotion),
         ]
@@ -767,10 +742,12 @@ async def run_post_process(
             tasks.append(
                 _bg_memory_pipeline(
                     user_id,
-                    full_messages,
+                    messages_dicts,
                     conversation_id=conversation_id,
                     workspace_id=workspace_id,
                     skip_ai_side=skip_ai_memory,
+                    source_message_ids=source_message_ids,
+                    reply_turn_id=reply_turn_id,
                 )
             )
         if agent_id:
@@ -788,7 +765,7 @@ async def run_post_process(
                     )
                 )
                 # E3 表达学习: 计数节流, 每 LEARN_EVERY_N 条用户消息批量学一次
-                tasks.append(_bg_expression_learning(agent_id, user_id, full_messages))
+                tasks.append(_bg_expression_learning(agent_id, user_id, expression_messages))
         await asyncio.gather(*tasks, return_exceptions=True)
 
 

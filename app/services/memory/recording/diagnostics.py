@@ -26,6 +26,7 @@ _REASONS = frozenset({
     "scope_unavailable", "scope_invalid", "lock_unavailable", "backlog_unavailable",
     "watermark_read_unavailable", "watermark_write_unavailable", "watermark_invalid",
     "timestamp_page_boundary",
+    "source_identity_missing", "source_identity_invalid", "source_read_unavailable", "source_batch_limit",
 })
 _WRITE = """
 local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[2] - ARGV[4])
@@ -54,6 +55,10 @@ def _safe_side(result: MemorySideOutcome) -> dict:
         item['progress'] = 'unknown'
     if type(result.memory_count) is not int or result.memory_count < 0:
         item['memory_count'] = None
+    if type(result.source_count) is not int or not 0 <= result.source_count <= 100:
+        item['source_count'] = None
+    if result.source_binding not in {'persisted_messages', 'unlinked_input', 'unknown'}:
+        item['source_binding'] = 'unknown'
     item['reason'] = result.reason if result.reason in _REASONS else 'processing_failed'
     return item
 
@@ -75,8 +80,10 @@ def _project_record(value: str, now: datetime) -> dict:
         status = 'unconfirmed'
     if not isinstance(item['sides'], list) or len(item['sides']) > 2:
         raise ValueError('invalid_side_count')
-    sides = [_safe_side(MemorySideOutcome(**{key: side[key] for key in (
-        'side', 'status', 'reason', 'memory_count', 'progress')})) for side in item['sides']]
+    sides = [_safe_side(MemorySideOutcome(
+        **{key: side[key] for key in ('side', 'status', 'reason', 'memory_count', 'progress')},
+        source_count=side.get('source_count'), source_binding=side.get('source_binding', 'unknown'),
+    )) for side in item['sides']]
     if len({side['side'] for side in sides}) != len(sides):
         raise ValueError('duplicate_side')
     return {key: item[key] for key in ('id', 'conversation_id', 'started_at', 'updated_at')} | {

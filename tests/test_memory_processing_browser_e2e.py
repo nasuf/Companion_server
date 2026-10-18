@@ -27,6 +27,8 @@ from tests.test_memory_processing_diagnostics import observations, redis
 async def test_browser_reads_real_dual_side_failure_and_success(origins, observations, monkeypatch):
     db,uid,wid,_,msg,*_=origins
     monkeypatch.setattr(p,'db',db)
+    from app.services.memory.recording import chat_sources
+    monkeypatch.setattr(chat_sources,'db',db)
     monkeypatch.setattr(wm,'get_redis',AsyncMock(return_value=observations))
     from app.config import settings
     monkeypatch.setattr(settings,'enable_memory_prefilter',False)
@@ -36,7 +38,7 @@ async def test_browser_reads_real_dual_side_failure_and_success(origins, observa
     assistant=await db.message.create(data={'conversationId':msg.conversationId,'role':'assistant','content':'合成助手今天看见一只可爱的小猫咪'})
     baseline=msg.createdAt-timedelta(seconds=1)
     for side in ('user','ai'):await wm.set_watermark(msg.conversationId,side,baseline)
-    await p._bg_memory_pipeline(uid,[],msg.conversationId,wid)
+    await p._bg_memory_pipeline(uid,[],msg.conversationId,wid,source_message_ids=[msg.id,assistant.id])
     app = FastAPI(); app.include_router(router)
 
     @app.get('/', response_class=HTMLResponse)
@@ -83,6 +85,7 @@ async def test_browser_reads_real_dual_side_failure_and_success(origins, observa
                     row=result['data']['records'][0]
                     assert row['status']=='incomplete' and row['conversation_id']==msg.conversationId
                     user,ai=row['sides']
+                    assert all(r['source_count']==1 and r['source_binding']=='persisted_messages' for r in (user,ai))
                     assert user['status']=='completed' and user['memory_count']==0 and user['progress']=='advanced'
                     assert ai['status']=='failed' and ai['memory_count'] is None and ai['progress']=='unchanged'
                     assert ai['reason']=='extraction_failed'

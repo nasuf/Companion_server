@@ -25,6 +25,9 @@ def scoped_window_unit_dependencies(monkeypatch):
     monkeypatch.setattr(post_process, "_resolve_workspace_id_for_conversation",
         AsyncMock(side_effect=lambda conversation_id, user_id, workspace_id: workspace_id or "ws-1"))
     monkeypatch.setattr(diagnostics, "_write", AsyncMock())
+    from app.services.memory.recording import chat_sources
+    # Selection/coordination only; real source resolution is tested on PostgreSQL.
+    monkeypatch.setattr(chat_sources, 'load_chat_sources', AsyncMock(side_effect=lambda **kw: kw['messages']))
     # Supply a window-only selector input; DB failure is separately required
     # to fail closed by the actual-backlog tests.
     monkeypatch.setattr(post_process, "_fetch_new_side_messages", AsyncMock(return_value=None))
@@ -33,7 +36,7 @@ UTC = timezone.utc
 
 
 def _msg(role: str, content: str, ts: datetime) -> dict:
-    return {"role": role, "content": content, "createdAt": ts.isoformat()}
+    return {"id": f"{role}:{ts.isoformat()}", "role": role, "content": content, "createdAt": ts.isoformat()}
 
 
 def _msg_with_id(message_id: str, role: str, content: str, ts: datetime) -> dict:
@@ -195,34 +198,22 @@ async def test_no_conversation_id_falls_back_to_legacy_behavior():
 
 
 @pytest.mark.asyncio
-async def test_watermark_advances_past_ts_in_mixed_new_msgs():
-    """混合 ts 场景: 老 AI 回复有 ts + 新 AI 回复无 ts (主流程 full_response 刚生成).
-    水位线必须推进到 >= now(), 否则下轮新回复持久化后 createdAt > wm 会重抽."""
+async def test_missing_source_timestamp_does_not_advance_ai_progress():
     from app.services.chat.post_process import _bg_memory_pipeline
-
-    wm_old = datetime.now(UTC) - timedelta(hours=1)
-    old_ai_ts = datetime.now(UTC) - timedelta(minutes=5)
-    # ai 侧有两条: 一条来自 DB (有 ts), 一条是新 reply (无 ts)
-    msgs = [
-        {"role": "user", "content": "hello", "createdAt": (datetime.now(UTC) - timedelta(minutes=4)).isoformat()},
-        {"role": "assistant", "content": "old reply", "createdAt": old_ai_ts.isoformat()},
-        {"role": "assistant", "content": "new reply"},  # no createdAt
-    ]
-
-    with patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=wm_old)), \
-         patch("app.services.chat.post_process.set_watermark", AsyncMock()) as mock_set, \
+    base = datetime.now(UTC)
+    msgs = [_msg("user", "hello", base), _msg("assistant", "persisted", base),
+            {"id": "invalid", "role": "assistant", "content": "missing timestamp"}]
+    with patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=None)), \
+         patch("app.services.chat.post_process.set_watermark", AsyncMock()) as advance, \
          patch("app.services.chat.post_process.process_memory_pipeline", AsyncMock()):
-        await _bg_memory_pipeline("u1", msgs, conversation_id="c1")
-
-    # ai 水位线必须推进到 >= 现在 (覆盖无 ts 的新 reply), 不能停在 old_ai_ts
-    ai_call = next(c for c in mock_set.await_args_list if c.args[1] == "ai")
-    new_wm_ai = ai_call.args[2]
-    assert new_wm_ai > old_ai_ts, f"ai watermark {new_wm_ai} 应 > old_ai_ts {old_ai_ts}"
+        result = await _bg_memory_pipeline("u1", msgs, conversation_id="c1")
+    assert result[1].reason == "source_identity_missing"
+    assert all(c.args[1] != "ai" for c in advance.await_args_list)
 
 
 @pytest.mark.asyncio
-async def test_skip_ai_side_advances_ai_watermark_without_extraction():
-    """跳过 AI 自我记忆时也要推进 AI 水位线，防止下一轮被补抽。"""
+async def test_persisted_exclusion_advances_only_the_inspected_ai_page():
+    """A persisted per-message exclusion prevents future backlog extraction."""
     from app.services.chat.post_process import _bg_memory_pipeline
 
     wm_old = datetime.now(UTC) - timedelta(hours=1)
@@ -231,6 +222,7 @@ async def test_skip_ai_side_advances_ai_watermark_without_extraction():
         _msg("user", "你明天忙吗", base),
         _msg("assistant", "明天上午有点安排", base + timedelta(seconds=1)),
     ]
+    msgs[-1]["metadata"] = {"memory_extraction_exclusion": "schedule_query"}
 
     with patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=wm_old)), \
          patch("app.services.chat.post_process.set_watermark", AsyncMock()) as mock_set, \
@@ -247,29 +239,16 @@ async def test_skip_ai_side_advances_ai_watermark_without_extraction():
 
 
 @pytest.mark.asyncio
-async def test_watermark_advances_with_now_when_new_msgs_lack_timestamp():
-    """无 createdAt 的新消息 (新 AI reply / boundary 手工构造) 抽取后水位线仍推进到 now(),
-    否则下一轮持久化后 createdAt > 老 wm 会被重抽."""
+async def test_unpersisted_messages_do_not_create_progress():
     from app.services.chat.post_process import _bg_memory_pipeline
-
-    wm_old = datetime.now(UTC) - timedelta(hours=1)
-    # 所有消息无 createdAt (模拟 boundary 路径 或 刚生成未持久化)
-    msgs = [
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "hey"},
-    ]
-
-    with patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=wm_old)), \
-         patch("app.services.chat.post_process.set_watermark", AsyncMock()) as mock_set, \
-         patch("app.services.chat.post_process.process_memory_pipeline", AsyncMock()):
-        await _bg_memory_pipeline("u1", msgs, conversation_id="c1")
-
-    # 水位线必须被推进（fallback 到 now()），覆盖 user + ai 两侧
-    assert mock_set.await_count == 2
-    # 每次推进的 ts 都 > 老 wm（防回退）
-    for call in mock_set.await_args_list:
-        new_wm = call.args[2]
-        assert new_wm > wm_old
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hey"}]
+    with patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=None)), \
+         patch("app.services.chat.post_process.set_watermark", AsyncMock()) as advance, \
+         patch("app.services.chat.post_process.process_memory_pipeline", AsyncMock()) as extract:
+        result = await _bg_memory_pipeline("u1", msgs, conversation_id="c1")
+    assert all(r.reason == "source_identity_missing" for r in result)
+    advance.assert_not_awaited()
+    extract.assert_not_awaited()
 
 
 @pytest.mark.asyncio

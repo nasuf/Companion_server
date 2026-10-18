@@ -102,6 +102,7 @@ async def test_short_circuit_ctx_finalize_persists_response_diagnostics():
     assert payload["response_diagnostics"]["reply_path"] == "short_circuit"
     assert payload["response_diagnostics"]["short_circuit_kind"] == "current_state"
     assert payload["response_diagnostics"]["main_prompt_built"] is False
+    assert payload["memory_extraction_exclusion"] == "current_state"
 
 
 @pytest.mark.asyncio
@@ -205,6 +206,7 @@ async def test_handle_current_state_persists_intent_level_cooldown_metadata():
 
     payload = save_replies.call_args.args[1][0]
     assert payload["text"] == "我在吃晚饭"
+    assert payload["memory_extraction_exclusion"] == "current_state"
     assert payload["short_circuit_repeat"]["kind"] == "current_state"
     assert payload["short_circuit_repeat"]["key"] == "晚餐：香草烤鸡腿配烤蔬菜"
     assert payload["current_state_context"]["intent"] == "current_state"

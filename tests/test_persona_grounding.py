@@ -11,6 +11,7 @@ import pytest
 from app.services import persona_grounding as g
 from app.services.prompting import defaults
 from app.services.schedule_domain import schedule as s
+from tests.test_memory_evidence_postgres import origins
 
 
 def agent(city="云南省普洱市思茅区南屏镇凤凰路社区"):
@@ -483,16 +484,15 @@ async def test_proactive_anchor_and_final_guard_cover_retry(checker, monkeypatch
     assert checker.await_count == 1
 
 
-async def test_real_recording_failure_keeps_watermark_for_retry(checker, monkeypatch):
-    from app.services.memory.recording import pipeline as p
+async def test_real_recording_failure_keeps_watermark_for_retry(checker, monkeypatch, origins):
+    from app.services.memory.recording import pipeline as p, chat_sources
     from app.services.chat import post_process as post
-    from datetime import UTC
-    # Keep the real conversation-scope check; this unit fixture owns the
-    # synthetic conversation and does not connect the global Prisma client.
-    monkeypatch.setattr(post, "db", SimpleNamespace(conversation=SimpleNamespace(
-        find_unique=AsyncMock(return_value=SimpleNamespace(
-            id="conv", userId="owner", workspaceId="scope", isDeleted=False)))))
-    monkeypatch.setattr(p, "resolve_workspace_id", AsyncMock(return_value="scope"))
+    db,uid,wid,_,msg,*_=origins
+    source=await db.message.create(data={'conversationId':msg.conversationId,'role':'assistant',
+        'content':'清晨在镇江醒来'})
+    monkeypatch.setattr(post,'db',db)
+    monkeypatch.setattr(chat_sources,'db',db)
+    monkeypatch.setattr(p, "resolve_workspace_id", AsyncMock(return_value=wid))
     monkeypatch.setattr(p, "should_extract_memory", lambda _: True)
     monkeypatch.setattr(p, "should_memorize", AsyncMock(return_value=True))
     monkeypatch.setattr(p, "extract_memories", AsyncMock(return_value={"memories": [{
@@ -504,7 +504,9 @@ async def test_real_recording_failure_keeps_watermark_for_retry(checker, monkeyp
     watermark = AsyncMock()
     monkeypatch.setattr(post, "set_watermark", watermark)
     monkeypatch.setattr(post, "process_memory_pipeline", p.process_memory_pipeline)
-    results = await post._do_memory_pipeline("owner", [{"role": "assistant", "content": "清晨在镇江醒来", "createdAt": datetime.now(UTC).isoformat()}], "conv", "scope")
+    async def process():
+        return await post._do_memory_pipeline(uid, [], msg.conversationId, wid, source_message_ids=[source.id])
+    results = await process()
     assert results[1].status == "failed" and results[1].memory_count is None
     assert results[1].progress == "unchanged"
     watermark.assert_not_awaited()
@@ -512,7 +514,7 @@ async def test_real_recording_failure_keeps_watermark_for_retry(checker, monkeyp
     # Confirmed invalid content is intentionally rejected, then consumption can
     # advance; an unavailable verifier must not silently consume the batch.
     checker.side_effect = None
-    results = await post._do_memory_pipeline("owner", [{"role": "assistant", "content": "清晨在镇江醒来", "createdAt": datetime.now(UTC).isoformat()}], "conv", "scope")
+    results = await process()
     assert results[1].status == "completed" and results[1].memory_count == 0
     assert results[1].progress == "advanced"
     watermark.assert_awaited_once()
