@@ -85,8 +85,10 @@ async def test_location_retry_errors_are_scoped_and_do_not_close_socket(
     quota.assert_not_awaited()
 
 
-async def test_dispatch_failure_does_not_starve_other_runtime_jobs(monkeypatch):
+@pytest.mark.parametrize("failing_family", ["location", "message", "turn"])
+async def test_dispatch_failure_does_not_starve_other_runtime_jobs(monkeypatch, failing_family):
     from jobs import scheduler
+    from app.services.runtime import message_followups, turn_followups
 
     async def local(name, body):
         await body()
@@ -94,22 +96,32 @@ async def test_dispatch_failure_does_not_starve_other_runtime_jobs(monkeypatch):
     monkeypatch.setattr(scheduler, "_run_local_job", local)
     processed = AsyncMock(return_value=1)
     monkeypatch.setattr(scheduler, "process_runtime_jobs", processed)
-    monkeypatch.setattr(
-        loc,
-        "dispatch_location_events",
-        AsyncMock(side_effect=RuntimeError("synthetic")),
-    )
-    from app.services.runtime import message_followups
-    statistics = AsyncMock()
-    monkeypatch.setattr(message_followups, "dispatch_message_followups", statistics)
-    monkeypatch.setattr(message_followups, "prune_message_followups", AsyncMock())
+    dispatchers = {}
+    pruners = {}
+    for family, module, dispatch, prune in (
+        ("location", loc, "dispatch_location_events", None),
+        ("message", message_followups, "dispatch_message_followups", "prune_message_followups"),
+        ("turn", turn_followups, "dispatch_turn_followups", "prune_turn_followups"),
+    ):
+        dispatchers[family] = AsyncMock(side_effect=RuntimeError("synthetic") if family == failing_family else None)
+        monkeypatch.setattr(module, dispatch, dispatchers[family])
+        if prune:
+            pruners[family] = AsyncMock()
+            monkeypatch.setattr(module, prune, pruners[family])
     failed = Mock()
     monkeypatch.setattr(scheduler, "_job_failed", failed)
     await scheduler._run_runtime_job_queue()
     processed.assert_awaited_once_with(max_jobs=20)
     assert failed.call_count == 1
-    assert failed.call_args.args[0] == "Location memory dispatch"
-    statistics.assert_awaited_once_with(limit=10)
+    assert failed.call_args.args[0] == {
+        "location": "Location memory dispatch",
+        "message": "Message statistics dispatch",
+        "turn": "Turn statistics dispatch",
+    }[failing_family]
+    for dispatcher in dispatchers.values():
+        dispatcher.assert_awaited_once_with(limit=10)
+    for family, prune in pruners.items():
+        assert prune.await_count == (0 if family == failing_family else 1)
 
 
 async def test_admin_requires_admin_token_and_bounded_query(monkeypatch):

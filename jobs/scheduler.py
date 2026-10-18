@@ -993,6 +993,12 @@ async def _run_runtime_job_queue():
             await prune_message_followups()
         except Exception as e:
             _job_failed("Message statistics dispatch", e)
+        try:
+            from app.services.runtime.turn_followups import dispatch_turn_followups, prune_turn_followups
+            await dispatch_turn_followups(limit=10)
+            await prune_turn_followups()
+        except Exception as e:
+            _job_failed("Turn statistics dispatch", e)
 
 
     await _run_local_job("runtime_job_queue", _body)

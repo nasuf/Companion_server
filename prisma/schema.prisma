@@ -325,6 +325,7 @@ model Message {
 
   locationMemoryEvent LocationMemoryEvent? @ignore
   messageFollowupEvent MessageFollowupEvent? @ignore
+  turnFollowupEvents TurnFollowupEvent[] @ignore
 
   @@index([conversationId, createdAt(sort: Desc)])
   // admin 监控聚合 (分时段/每日活跃/句子区间/DAU-WAU-MAU) 都按 role='user' +
@@ -2631,4 +2632,28 @@ model ProactiveTuningChange {
   @@ignore
   @@index([createdAt(sort: Desc)])
   @@map("proactive_tuning_changes")
+}
+
+// Registration records a completed logical turn, distinct from each bubble.
+model TurnFollowupEvent {
+  turnId String @id @map("turn_id")
+  messageId String @map("message_id")
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  userMessageIds Json @map("user_message_ids")
+  scope Json
+  sourceVersion String @map("source_version")
+  status String @default("pending_dispatch")
+  generation Int @default(0)
+  jobId String? @map("job_id")
+  dispatchAttempts Int @default(0) @map("dispatch_attempts")
+  lastError String? @map("last_error")
+  outcome String?
+  nextDispatchAt DateTime @default(now()) @map("next_dispatch_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@ignore
+  @@index([createdAt(sort: Desc), turnId(sort: Desc)], map: "turn_followup_recent_idx")
+  @@index([status, createdAt(sort: Desc), turnId(sort: Desc)], map: "turn_followup_status_recent_idx")
+  @@index([messageId], map: "turn_followup_message_idx")
+  @@map("turn_followup_events")
 }

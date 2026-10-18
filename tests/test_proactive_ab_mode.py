@@ -362,7 +362,7 @@ async def test_short_circuit_reply_finishes_turn_with_reason(monkeypatch):
     monkeypatch.setattr(multi_intent, "_fire_background", lambda coro: coro.close())
 
     async def _save(*_a, **_k):
-        return None
+        return "saved-reply"
 
     await multi_intent.short_circuit_reply("😄", "c-1", "a-1", "u-1", _save)
     assert finish.await_args.kwargs["proactive_reason"] == "short_circuit"

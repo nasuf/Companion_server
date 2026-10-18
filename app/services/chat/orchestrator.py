@@ -1745,6 +1745,8 @@ async def _stream_legacy_response(
             achievement_turn_id=current_achievement_turn_id,
             achievement_turn_final=achievement_turn_final and not pending_sub_fragments,
         )
+        if not first_assistant_message_id:
+            raise RuntimeError("Legacy reply persistence failed")
         if offering_context and not sub_intent_mode:
             try:
                 from app.services import offerings as offerings_svc
@@ -2031,8 +2033,20 @@ async def stream_chat_response(
         achievement_turn_final=achievement_turn_final,
         memory_usage_event_id=memory_usage_event_id,
     )
+    from app.services.chat.legacy_completion import LegacyCompletion, current_completion
+    completion = LegacyCompletion(conversation_id) if executor == "legacy" and not sub_intent_mode else None
+    token = current_completion.set(completion) if completion is not None else None
     try:
         async for event in stream:
+            if completion is not None:
+                if event.get("event") == "error":
+                    completion.failed = True
+                elif event.get("event") == "done" and achievement_turn_final:
+                    await completion.finish()
             yield event
     finally:
-        await stream.aclose()
+        try:
+            await stream.aclose()
+        finally:
+            if token is not None:
+                current_completion.reset(token)

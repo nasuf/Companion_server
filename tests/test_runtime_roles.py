@@ -104,11 +104,12 @@ def test_registration_uses_service_without_router_imports(monkeypatch):
     monkeypatch.setattr(job_queue, '_HANDLERS', {})
     monkeypatch.setattr(job_queue, '_RECOVERY_DELAYS', {})
     monkeypatch.setattr(job_queue, '_LEGACY_NO_DELAY_HANDLERS', set())
-    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics')
-    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics')
+    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics', 'turn_statistics')
+    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics', 'turn_statistics')
     from app.services.location_memory import write_location_share_memories
     from app.services.runtime.message_followups import run_message_followup
-    assert job_queue._HANDLERS == {'agent_initialization': _run_agent_initialization_job, 'location_share_memory': write_location_share_memories, 'message_statistics': run_message_followup}
+    from app.services.runtime.turn_followups import run_turn_followup
+    assert job_queue._HANDLERS == {'agent_initialization': _run_agent_initialization_job, 'location_share_memory': write_location_share_memories, 'message_statistics': run_message_followup, 'turn_statistics': run_turn_followup}
     assert job_queue._RECOVERY_DELAYS['agent_initialization'] == MEMORY_GENERATION_LOCK_TTL_S
     assert job_queue._LEGACY_NO_DELAY_HANDLERS == {'agent_initialization'}
 

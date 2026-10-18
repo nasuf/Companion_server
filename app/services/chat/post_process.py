@@ -124,9 +124,6 @@ async def save_replies(
     """
     try:
         first_message_id: str | None = None
-        first_created_at: datetime | None = None
-        first_metadata: dict | None = None
-        assistant_texts: list[str] = []
         for i, reply in enumerate(replies):
             if isinstance(reply, dict):
                 text = str(reply.get("text", ""))
@@ -184,24 +181,10 @@ async def save_replies(
                     logger.debug(f"[PUSH] assistant reply notification skipped: {push_err}")
             if i == 0:
                 first_message_id = created.id
-                first_created_at = getattr(created, "createdAt", None)
-                first_metadata = metadata
-            assistant_texts.append(text)
-        if achievement_turn_final and first_message_id and assistant_texts:
-            try:
-                from app.services.achievements.service import handle_assistant_turn_event
-
-                fire_background(handle_assistant_turn_event(
-                    conversation_id=conversation_id,
-                    message_id=first_message_id,
-                    assistant_texts=assistant_texts,
-                    user_message_ids=turn_user_message_ids or [],
-                    turn_id=achievement_turn_id,
-                    metadata=first_metadata,
-                    occurred_at=first_created_at,
-                ))
-            except Exception as achievement_err:
-                logger.debug(f"[ACH] assistant turn hook skipped: {achievement_err}")
+        from app.services.chat.legacy_completion import current_completion
+        completion = current_completion.get()
+        if completion is not None:
+            completion.record(conversation_id, first_message_id, achievement_turn_id, turn_user_message_ids)
         if first_message_id:
             try:
                 from app.services.offline.activity_companion import note_passive_reply

@@ -68,7 +68,8 @@ async def test_explicit_fragments_share_parent_lifecycle(chat_io, monkeypatch, p
     chat.detect_intent_unified.assert_awaited_once()
     chat.finish_assistant_turn.assert_awaited_once()
     chat_io.achievement.assert_called_once()
-    assert len(chat_io.achievement.call_args.kwargs["assistant_texts"]) == 2
+    assert chat_io.achievement.await_args.kwargs["user_message_ids"] == ["u-new"]
+    assert "assistant_texts" not in chat_io.achievement.await_args.kwargs
     chat._background_post_process.assert_called_once()
     assert (
         chat._background_post_process.call_args.kwargs["user_message"]

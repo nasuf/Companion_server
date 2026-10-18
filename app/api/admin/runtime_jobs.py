@@ -105,6 +105,36 @@ async def retry_message_followup(
     return {"status": "pending_dispatch", "message_id": message_id}
 
 
+@router.get("/turn-followups")
+async def get_turn_followups(
+    limit: int = Query(20, ge=1, le=50),
+    status: str = Query("all", pattern="^(all|failed|pending_dispatch|queued|completed|cancelled)$"),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    from app.services.runtime.turn_followups import inspect_turn_followups
+    try:
+        return await inspect_turn_followups(limit=limit, status=status)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="整轮统计处理记录暂时不可用，请重试。") from error
+
+
+@router.post("/turn-followups/{turn_id}/retry")
+async def retry_turn_followup(
+    turn_id: str = Path(min_length=1, max_length=200),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    from app.services.runtime.turn_followups import FollowupRetryConflict, retry_turn_followup as retry
+    try:
+        found = await retry(turn_id)
+    except FollowupRetryConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="整轮统计恢复暂时不可用，请刷新后重试。") from error
+    if not found:
+        raise HTTPException(status_code=404, detail="turn_followup_not_found")
+    return {"status": "pending_dispatch", "turn_id": turn_id}
+
+
 @router.get("/{job_id}")
 async def get_job(
     job_id: str,

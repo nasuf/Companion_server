@@ -5,13 +5,16 @@ for memory extraction, personality, patience, complete turns or notifications.
 """
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timedelta, timezone
 import logging
 
 from app.db import db
 from app.services.runtime.job_queue import (
-    RuntimeJobOrphaned, enqueue_runtime_job, inspect_runtime_job,
+    enqueue_runtime_job, inspect_runtime_job,
+)
+
+from app.services.runtime.followup_queue import (
+    MESSAGE, FollowupRetryConflict, dispatch_followups, inspect_followups,
+    prune_followups, retry_followup,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,71 +27,8 @@ class MessageFollowupFailed(RuntimeError):
 
 
 async def dispatch_message_followups(*, limit: int = 10, message_id: str | None = None) -> int:
-    """Bounded admission/reconciliation. Failed jobs require explicit retry.
-
-    Lost Redis records can be re-admitted under a new generation because all
-    admitted effects use durable uniqueness. A stale generation cannot mark a
-    newer dispatch complete. Uncertain admission retries the same key.
-    """
-    dispatched = 0
-    for _ in range(max(1, min(int(limit), 10))):
-        async with db.tx(timeout=timedelta(seconds=8)) as tx:
-            rows = await tx.query_raw("""
-                SELECT * FROM message_followup_events
-                WHERE status IN ('pending_dispatch','queued') AND next_dispatch_at<=NOW()
-                  AND ($1::text IS NULL OR message_id=$1)
-                ORDER BY next_dispatch_at,message_id LIMIT 1 FOR UPDATE SKIP LOCKED
-            """, message_id)
-            if not rows:
-                break
-            row = rows[0]
-            mid, generation = row["message_id"], row["generation"]
-            try:
-                job = None
-                if row["job_id"]:
-                    job = await asyncio.wait_for(inspect_runtime_job(row["job_id"]), 3)
-                if job is not None:
-                    if (job["type"] != JOB_TYPE or job["payload"] !=
-                            {"message_id": mid, "generation": generation}):
-                        state, reason = "failed", "queue_identity_mismatch"
-                    elif job["status"] in {"dead_letter", "failed", "resolved", "succeeded"}:
-                        state, reason = "failed", "queue_" + job["status"]
-                    elif job["status"] in {"queued", "running"}:
-                        state, reason = "queued", row["last_error"]
-                    else:
-                        state, reason = "failed", "queue_state_unknown"
-                    await tx.execute_raw("""UPDATE message_followup_events SET status=$2,
-                        last_error=$3,next_dispatch_at=NOW()+INTERVAL '30 seconds',updated_at=NOW()
-                        WHERE message_id=$1""", mid, state, reason)
-                    continue
-                if row["job_id"]:
-                    generation += 1
-                job_id = await asyncio.wait_for(enqueue_runtime_job(
-                    JOB_TYPE, {"message_id": mid, "generation": generation},
-                    idempotency_key=f"message-statistics:{mid}:{generation}",
-                ), 3)
-            except RuntimeJobOrphaned:
-                # Admission's receipt survived but its job disappeared. No local
-                # execution: next scan uses another generation of the same event.
-                await tx.execute_raw("""UPDATE message_followup_events SET generation=generation+1,
-                    status='pending_dispatch',job_id=NULL,last_error='queue_record_missing',
-                    next_dispatch_at=NOW()+INTERVAL '30 seconds',updated_at=NOW(),
-                    dispatch_attempts=dispatch_attempts+1 WHERE message_id=$1""", mid)
-                break
-            except Exception as exc:
-                await tx.execute_raw("""UPDATE message_followup_events SET
-                    dispatch_attempts=dispatch_attempts+1,last_error=$2,
-                    next_dispatch_at=NOW()+INTERVAL '30 seconds',updated_at=NOW()
-                    WHERE message_id=$1""", mid, type(exc).__name__[:80])
-                logger.warning("Message followup dispatch deferred (%s)", type(exc).__name__)
-                break
-            else:
-                await tx.execute_raw("""UPDATE message_followup_events SET status='queued',
-                    job_id=$2,generation=$3,dispatch_attempts=dispatch_attempts+1,last_error=NULL,
-                    next_dispatch_at=NOW()+INTERVAL '30 seconds',updated_at=NOW()
-                    WHERE message_id=$1""", mid, job_id, generation)
-                dispatched += 1
-    return dispatched
+    return await dispatch_followups(db, MESSAGE, limit=limit, identity=message_id,
+        enqueue=enqueue_runtime_job, inspect=inspect_runtime_job)
 
 
 async def _load_event(message_id: str):
@@ -171,47 +111,12 @@ async def _run_bound_followup(mid: str, generation: int) -> None:
 
 
 async def prune_message_followups() -> int:
-    """Terminal diagnostics only, never messages, achievements or failed work."""
-    return await db.execute_raw("""DELETE FROM message_followup_events WHERE message_id IN (
-        SELECT message_id FROM message_followup_events WHERE status IN ('completed','cancelled')
-        AND updated_at<NOW()-INTERVAL '30 days' ORDER BY updated_at,message_id LIMIT 100
-        FOR UPDATE SKIP LOCKED)""")
+    return await prune_followups(db, MESSAGE)
 
 
 async def inspect_message_followups(*, limit: int = 20, status: str = "all") -> dict:
-    limit = max(1, min(int(limit), 50))
-    if status not in {"all", "failed", "pending_dispatch", "queued", "completed", "cancelled"}:
-        raise ValueError("invalid_message_followup_status")
-    where, params = ("", []) if status == "all" else ("WHERE status=$2", [status])
-    rows = await db.query_raw(f"""SELECT message_id,status,job_id,generation,dispatch_attempts,
-        last_error,outcome,created_at,updated_at FROM message_followup_events
-        {where} ORDER BY created_at DESC,message_id DESC LIMIT $1""", limit + 1, *params)
-    return {"sampled_at": datetime.now(timezone.utc).isoformat(), "limit": limit,
-        "has_more": len(rows) > limit, "denominator": "recent_sample_only",
-        "retention_days": 30, "status_filter": status, "items": rows[:limit]}
-
-
-class FollowupRetryConflict(ValueError):
-    pass
+    return await inspect_followups(db, MESSAGE, limit=limit, status=status)
 
 
 async def retry_message_followup(message_id: str) -> bool:
-    """Explicit operator recovery. Never reset running or completed work."""
-    async with db.tx(timeout=timedelta(seconds=8)) as tx:
-        rows = await tx.query_raw('SELECT * FROM message_followup_events WHERE message_id=$1 FOR UPDATE', message_id)
-        if not rows:
-            return False
-        row = rows[0]
-        if row['status'] != 'failed':
-            raise FollowupRetryConflict('只允许恢复失败记录，请刷新状态。')
-        if row['job_id']:
-            job = await asyncio.wait_for(inspect_runtime_job(row['job_id']), 3)
-            if job is not None:
-                if job['type'] != JOB_TYPE or job['payload'] != {'message_id': message_id, 'generation': row['generation']}:
-                    raise FollowupRetryConflict('队列关联不匹配，需要先核对任务来源。')
-                if job['status'] not in {'dead_letter', 'failed', 'resolved', 'succeeded'}:
-                    raise FollowupRetryConflict('任务仍在处理，请等待并刷新状态。')
-        await tx.execute_raw("""UPDATE message_followup_events SET status='pending_dispatch',
-            generation=generation+1,job_id=NULL,last_error=NULL,outcome=NULL,
-            next_dispatch_at=NOW(),updated_at=NOW() WHERE message_id=$1""", message_id)
-        return True
+    return await retry_followup(db, MESSAGE, message_id, inspect=inspect_runtime_job)

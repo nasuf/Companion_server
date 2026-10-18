@@ -16,6 +16,15 @@ from tests.g02_harness_support import configure_pair
 from evals.reply_register.cases import ALL_CASES
 
 
+@pytest.fixture(autouse=True)
+def identical_geography_verdict(monkeypatch):
+    # These fixed-model comparisons isolate orchestration, not model quality.
+    # Keep the shared harness real so persona tests and live evaluations still
+    # exercise grounding rather than silently inheriting this unit-test mock.
+    from app.services import persona_grounding
+    monkeypatch.setattr(persona_grounding, "verify_generated_locations", AsyncMock(return_value=[]))
+
+
 async def collect(io, text="今天有点累了", **kwargs):
     # Paired executions share the ingress clock, including a synthetic user row
     # absent from the mocked history. Never compare two wall-clock timestamps.

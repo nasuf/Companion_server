@@ -234,10 +234,10 @@ async def short_circuit_reply(
 
             await discard_prepared_voice_output(prepared_voice)
             prepared_voice = None
-    elif defer_turn_finalization:
-        assistant_message_id = await save_replies_fn(*save_args, **save_kwargs)
     else:
-        _fire_background(save_replies_fn(*save_args, **save_kwargs))
+        assistant_message_id = await save_replies_fn(*save_args, **save_kwargs)
+    if not assistant_message_id:
+        raise RuntimeError("Short-circuit reply persistence failed")
     # 图灵测试条数变化: 短路回复也计入"上一轮条数" (用户感知的是气泡数,
     # 不区分回复来自哪条管线). 累计 offset+气泡数, 最后一次写入即本轮总数.
     from app.services.chat.reply_count_state import save_last_reply_count

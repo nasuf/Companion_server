@@ -205,6 +205,7 @@ async def test_short_circuit_reply_limits_emojis(monkeypatch):
 
     async def fake_save(conversation_id, replies, **kwargs):
         saved.extend(replies)
+        return "saved-reply"
 
     events = await multi_intent.short_circuit_reply(
         "好嘞记上了😜😈明天见",
@@ -214,6 +215,7 @@ async def test_short_circuit_reply_limits_emojis(monkeypatch):
     import json as _json
     text = _json.loads(events[0]["data"])["text"]
     assert text == "好嘞记上了😜明天见"
+    assert saved == [text]
 
 
 @pytest.mark.asyncio

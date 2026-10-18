@@ -15,4 +15,6 @@ def register_runtime_handlers() -> tuple[str, ...]:
     register_job_handler(JOB_TYPE, write_location_share_memories)
     from app.services.runtime.message_followups import JOB_TYPE as STATS_JOB, run_message_followup
     register_job_handler(STATS_JOB, run_message_followup)
-    return ("agent_initialization", JOB_TYPE, STATS_JOB)
+    from app.services.runtime.turn_followups import JOB_TYPE as TURN_JOB, run_turn_followup
+    register_job_handler(TURN_JOB, run_turn_followup)
+    return ("agent_initialization", JOB_TYPE, STATS_JOB, TURN_JOB)

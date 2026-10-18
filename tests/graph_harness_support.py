@@ -141,9 +141,9 @@ def configure_chat(monkeypatch):
     from app.services.interaction import chat_management
 
     monkeypatch.setattr(chat_management, "reply_delay_enabled", lambda: False)
-    from app.services.achievements import service
+    from app.services.runtime import turn_followups
 
-    monkeypatch.setattr(service, "handle_assistant_turn_event", AsyncMock())
+    monkeypatch.setattr(turn_followups, "register_completed_turn", AsyncMock(return_value=True))
     tracer = MagicMock(trace_id="trace-1", safe_trace_id="trace-1", is_active=True)
     tracer.enter.return_value = tracer
     monkeypatch.setattr(chat, "create_tracer", lambda *_, **__: tracer)
@@ -155,6 +155,6 @@ def configure_chat(monkeypatch):
         tracer=tracer,
         decision=decision,
         background=background,
-        achievement=service.handle_assistant_turn_event,
+        achievement=turn_followups.register_completed_turn,
         agent=SimpleNamespace(id="a-1", name="Synthetic"),
     )

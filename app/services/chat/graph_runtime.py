@@ -361,6 +361,15 @@ class ChatGraphContext:
                 if parent.contradiction_inquiry
                 else services.ARM_REASON_REPLY
             )
+        if self.achievement_turn_final:
+            from app.services.runtime.turn_followups import register_completed_turn
+
+            await register_completed_turn(
+                conversation_id=parent.conversation_id,
+                message_id=self.persisted[0]["message_id"],
+                user_message_ids=sorted(parent.current_turn_ids),
+                turn_id=parent.current_achievement_turn_id,
+            )
         await services.finish_assistant_turn(
             conversation_id=parent.conversation_id,
             agent_id=parent.agent_id,
@@ -369,22 +378,6 @@ class ChatGraphContext:
             turn_message_ids=sorted(parent.current_turn_ids),
             proactive_reason=reason,
         )
-        if self.achievement_turn_final:
-            from app.services.achievements.service import handle_assistant_turn_event
-
-            first = self.persisted[0]
-            services._fire_background(
-                handle_assistant_turn_event(
-                    conversation_id=parent.conversation_id,
-                    message_id=first["message_id"],
-                    assistant_texts=[
-                        text for row in self.persisted for text in row["texts"]
-                    ],
-                    user_message_ids=sorted(parent.current_turn_ids),
-                    turn_id=parent.current_achievement_turn_id,
-                    metadata=first["metadata"],
-                )
-            )
         if not boundary_handled:
             # Submit once after all fragments and persistence have succeeded.
             services._fire_background(

@@ -30,7 +30,12 @@ from app.services.runtime import message_followups as f,job_queue as q,distribut
 from redis.asyncio import Redis
 
 jid,phase,keys=sys.argv[1],sys.argv[2],json.loads(sys.argv[3])
-assert phase in {'after_effect','before_ack'}
+family=sys.argv[4] if len(sys.argv)>4 else 'message'
+assert family in {'message','turn'}
+assert phase in {'after_effect','before_ack','after_registration'}
+if family=='turn':
+    from app.services.runtime import turn_followups as f
+    from app.services.achievements.rules.assistant_message_rules import evaluate_assistant_turn
 for name,value in keys.items():
     assert value.startswith('test:runtime-terminal:')
     setattr(q,name,value)
@@ -42,17 +47,25 @@ async def enabled():return True
 engine.achievement_evaluation_enabled=enabled
 mode.achievement_evaluation_enabled=enabled
 async def effect(event):
+    if family=='turn':
+        await evaluate_assistant_turn(event)
+        if phase=='after_effect':os._exit(73)
+        return
     s=source.current_source.get()
     await repository.record_event(user_id=s.user_id,agent_id=s.agent_id,workspace_id=s.workspace_id,
         conversation_id=s.conversation_id,event_type=s.role+'_message',source_id=s.message_id,value_int=2)
     if phase=='after_effect':os._exit(73)
 engine._evaluate_event=effect
 async def handler(payload):
-    await f.run_message_followup(payload)
+    await (f.run_turn_followup(payload) if family=='turn' else f.run_message_followup(payload))
     os._exit(73)
 q.register_job_handler(f.JOB_TYPE,handler)
 async def main():
     await db.connect()
+    if phase=='after_registration':
+        assert family=='turn'
+        assert await f.register_completed_turn(**json.loads(jid))
+        os._exit(73)
     await q._run_job(jid)
 with loopback_network_fence():asyncio.run(main())
 raise RuntimeError('crash boundary not reached')
