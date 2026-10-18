@@ -15,6 +15,20 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 
+
+@pytest.fixture(autouse=True)
+def scoped_window_unit_dependencies(monkeypatch):
+    # This module tests window/backlog selection. Actual conversation ownership
+    # and observation collection are covered by the processing integration tests.
+    from app.services.chat import post_process
+    from app.services.memory.recording import diagnostics
+    monkeypatch.setattr(post_process, "_resolve_workspace_id_for_conversation",
+        AsyncMock(side_effect=lambda conversation_id, user_id, workspace_id: workspace_id or "ws-1"))
+    monkeypatch.setattr(diagnostics, "_write", AsyncMock())
+    # Supply a window-only selector input; DB failure is separately required
+    # to fail closed by the actual-backlog tests.
+    monkeypatch.setattr(post_process, "_fetch_new_side_messages", AsyncMock(return_value=None))
+
 UTC = timezone.utc
 
 
@@ -280,8 +294,9 @@ async def test_watermark_redis_helpers():
 
 
 @pytest.mark.asyncio
-async def test_watermark_redis_down_degrades_gracefully():
-    """Redis 异常 → get 返 None (退化成"全部抽"), set 静默失败."""
+async def test_watermark_redis_down_is_not_missing_or_success():
+    """Unavailable progress must not initiate replay or claim successful advancement."""
+    from app.services.memory.recording.outcomes import MemoryProgressError
     from app.services.memory.recording.watermark import get_watermark, set_watermark
 
     fake_redis = AsyncMock()
@@ -289,6 +304,7 @@ async def test_watermark_redis_down_degrades_gracefully():
     fake_redis.set = AsyncMock(side_effect=Exception("redis down"))
 
     with patch("app.services.memory.recording.watermark.get_redis", AsyncMock(return_value=fake_redis)):
-        assert await get_watermark("c1", "user") is None
-        # set 不应抛异常
-        await set_watermark("c1", "user", datetime.now(UTC))
+        with pytest.raises(MemoryProgressError, match="watermark_read_unavailable"):
+            await get_watermark("c1", "user")
+        with pytest.raises(MemoryProgressError, match="watermark_write_unavailable"):
+            await set_watermark("c1", "user", datetime.now(UTC))

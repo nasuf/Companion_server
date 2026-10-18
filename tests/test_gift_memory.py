@@ -188,6 +188,7 @@ async def test_gift_chat_messages_are_context_not_extraction_targets(backlog_mod
          patch.object(post_process, "_fetch_new_side_messages", AsyncMock(return_value=[gift_card])), \
          patch.object(post_process, "process_memory_pipeline", pipeline), \
          patch.object(post_process, "set_watermark", set_wm):
-        assert await post_process._pipeline_with_watermark("user-1", [gift_card], "conv", side="user") == 0
+        outcome = await post_process._pipeline_with_watermark("user-1", [gift_card], "conv", side="user")
+        assert outcome.status == "excluded" and outcome.memory_count == 0 and outcome.progress == "advanced"
     pipeline.assert_not_awaited()
     assert set_wm.await_args.args[2] == now

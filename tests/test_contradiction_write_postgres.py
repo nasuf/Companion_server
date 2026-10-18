@@ -610,20 +610,16 @@ async def test_reserved_backlog_does_not_starve_later_regular_messages(
     monkeypatch.setattr(post, "set_watermark", set_wm)
     extract = AsyncMock(return_value=["synthetic"])
     monkeypatch.setattr(post, "process_memory_pipeline", extract)
-    assert (
-        await post._pipeline_with_watermark(
-            f.uid, [], f.convs[0], side="user", workspace_id=f.wid
-        )
-        == 0
+    outcome = await post._pipeline_with_watermark(
+        f.uid, [], f.convs[0], side="user", workspace_id=f.wid
     )
+    assert outcome.status == "excluded" and outcome.memory_count == 0 and outcome.progress == "advanced"
     extract.assert_not_awaited()
     assert wm == rows[-1].createdAt
-    assert (
-        await post._pipeline_with_watermark(
-            f.uid, [], f.convs[0], side="user", workspace_id=f.wid
-        )
-        == 1
+    outcome = await post._pipeline_with_watermark(
+        f.uid, [], f.convs[0], side="user", workspace_id=f.wid
     )
+    assert outcome.status == "completed" and outcome.memory_count == 1 and outcome.progress == "advanced"
     assert later.id in extract.await_args.kwargs["evidence_message_ids"]
     assert "确认片段" not in extract.await_args.kwargs["new_conversation"]
 

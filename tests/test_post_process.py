@@ -297,6 +297,7 @@ async def test_memory_pipeline_lock_serializes_same_conv():
         started_at.append(loop.time())
         await asyncio.sleep(0.10)  # 模拟 LLM 抽取耗时
         finished_at.append(loop.time())
+        return []
 
     with patch.object(post_process, "_do_memory_pipeline", side_effect=fake_do):
         # 同一 conv_id 并发两次
@@ -329,6 +330,7 @@ async def test_memory_pipeline_lock_parallel_across_convs():
         started_at.append(loop.time())
         await asyncio.sleep(0.10)
         finished_at.append(loop.time())
+        return []
 
     with patch.object(post_process, "_do_memory_pipeline", side_effect=fake_do):
         # 不同 conv 并发
@@ -360,6 +362,7 @@ async def test_memory_pipeline_no_lock_when_conversation_id_none():
         started_at.append(loop.time())
         await asyncio.sleep(0.05)
         finished_at.append(loop.time())
+        return []
 
     with patch.object(post_process, "_do_memory_pipeline", side_effect=fake_do):
         await asyncio.gather(

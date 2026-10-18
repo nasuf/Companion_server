@@ -37,6 +37,7 @@ from app.services.memory.recording.pipeline import (
     process_memory_pipeline,
 )
 from app.services.memory.recording.watermark import get_watermark, set_watermark
+from app.services.memory.recording.outcomes import MemoryProgressError, MemorySideOutcome
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     DistributedLockUnavailable,
@@ -91,22 +92,21 @@ def _get_pipeline_lock(conversation_id: str) -> asyncio.Lock:
     return lock
 
 
-async def _resolve_workspace_id_for_conversation(conversation_id: str | None) -> str | None:
-    """Best-effort conversation -> workspace lookup for memory writes.
-
-    The chat hot path already knows the conversation scope, so background memory
-    extraction must not fall back to "latest active workspace" for users who
-    have multiple companions. If lookup fails, callers still degrade to the
-    legacy user-level resolver inside process_memory_pipeline.
-    """
-    if not conversation_id:
-        return None
+async def _resolve_workspace_id_for_conversation(
+    conversation_id: str, user_id: str, workspace_id: str | None,
+) -> str:
+    """Bind extraction to its conversation; lookup failure must not select another Agent."""
     try:
         conv = await db.conversation.find_unique(where={"id": conversation_id})
-        return getattr(conv, "workspaceId", None) if conv else None
-    except Exception as e:
-        logger.debug(f"conversation workspace lookup failed for {conversation_id}: {e}")
-        return None
+    except Exception as exc:
+        raise MemoryProgressError("scope_unavailable") from exc
+    actual = getattr(conv, "workspaceId", None)
+    if (conv is None or getattr(conv, "isDeleted", False)
+            or getattr(conv, "userId", None) != user_id
+            or not isinstance(actual, str) or not actual
+            or (workspace_id is not None and actual != workspace_id)):
+        raise MemoryProgressError("scope_invalid")
+    return actual
 
 
 async def save_replies(
@@ -245,71 +245,72 @@ async def _bg_memory_pipeline(
     conversation_id: str | None = None,
     workspace_id: str | None = None,
     skip_ai_side: bool = False,
-) -> None:
-    """spec §2.1 / §2.2：用户侧与 AI 侧走两条独立管线，owner 由路径决定。
+) -> list[MemorySideOutcome]:
+    """Serialize the dual-side extraction and retain bounded, content-free diagnostics.
 
-    取最近 6 条（3 轮 user+assistant）作为 LLM 输入窗口（解指代/情境需要多轮）。
-    按 (conversation_id, side) 水位线把窗口切成【历史上下文】+【待抽取消息】:
-    仅从后者抽取记忆, 前者仅供 LLM 理解; 抽完推进水位线. 两条管线水位线独立,
-    同一条消息跨轮不再被重复抽取 ~3 次.
-
-    conversation_id 为 None 时退化回老行为 (无水位线, 全部当新消息抽), 兼容
-    proactive sender 等无会话上下文的入口. 每条 msg 必须含 createdAt (ISO) 才能
-    参与水位线切分, 没有则归为新消息.
-
-    抽取完成后, 若有 conversation_id 且确有新记忆入库, 通过 WS 推
-    `memory_extracted` 让 admin inspector 实时刷新 (前端按当前 filter 重拉).
-
-    并发控制: 同一 conversation 的连续 batch 串行执行 (per-conv asyncio.Lock).
-    避免 batch A 在跑 ~2min extraction 时 batch B 读到旧水位线 → 重复抽取
-    msg1 + 双层 race 导致 L1 SINGLETON 重复入库. 不同 conversation 完全并行.
+    These observations are not durable work receipts. In particular a failed
+    write may have committed some memories, so this function enables no replay.
     """
-    if conversation_id is not None:
-        async with _get_pipeline_lock(conversation_id):
-            if not settings.is_production():
-                await _do_memory_pipeline(
-                    user_id, messages, conversation_id, workspace_id,
-                    skip_ai_side=skip_ai_side,
-                )
-                return
-            try:
-                # 生产 fail-closed: Redis 锁不可用时**不**退回无锁执行 — 否则两
-                # 实例并发跑同一 conv 管线会重现 L1 SINGLETON 重复 (2026-05-07).
-                # 宁可跳过本批 (水位线未推进, 后续 batch 重新覆盖). 与 scheduler
-                # 的分布式锁策略一致。
-                async with distributed_lock(
-                    f"memory_pipeline:{conversation_id}",
-                    ttl_s=_PIPELINE_DISTRIBUTED_LOCK_TTL,
-                    wait_timeout_s=_PIPELINE_DISTRIBUTED_LOCK_TTL,
-                    retry_interval_s=0.5,
-                    fail_open=False,
-                ):
-                    await _do_memory_pipeline(
-                        user_id, messages, conversation_id, workspace_id,
-                        skip_ai_side=skip_ai_side,
-                    )
-            except (DistributedLockNotAcquired, DistributedLockUnavailable) as e:
-                # NotAcquired: 等满 wait_timeout 仍拿不到锁 = 另一实例的管线卡死或
-                # 超长运行. Unavailable: Redis 锁后端不可用. 两者都跳过本批: 水位线
-                # 未推进, 只要用户还在聊, 后续 batch 的窗口会重新覆盖这些消息;
-                # 宁可少抽一批, 不可重复入库 / 跨实例并发。
-                logger.error(
-                    f"Memory pipeline distributed lock unavailable ({type(e).__name__}); "
-                    "skipping batch (watermark not advanced, later batches re-cover)",
-                    extra={
-                        "event": EVT_BG_DONE,
-                        "kind": "memory_pipeline",
-                        "outcome": "distributed_lock_skip",
-                        "error_type": type(e).__name__,
-                        "conversation_id": conversation_id,
-                    },
-                )
-    else:
-        # proactive 等无 conv 入口: 调用方天然不并发同源, 无需上锁.
-        await _do_memory_pipeline(
-            user_id, messages, None, workspace_id,
-            skip_ai_side=skip_ai_side,
-        )
+    from app.services.memory.recording.diagnostics import observe_memory_run
+
+    async with observe_memory_run(conversation_id) as observation:
+        try:
+            if conversation_id is None:
+                results = await _do_memory_pipeline(user_id, messages, None, workspace_id,
+                    skip_ai_side=skip_ai_side)
+            else:
+                async with _get_pipeline_lock(conversation_id):
+                    if settings.is_production():
+                        # Production fail-closed: a lock outage must never fall back to
+                        # unlocked extraction across API workers.
+                        async with distributed_lock(
+                            f"memory_pipeline:{conversation_id}",
+                            ttl_s=_PIPELINE_DISTRIBUTED_LOCK_TTL,
+                            wait_timeout_s=_PIPELINE_DISTRIBUTED_LOCK_TTL,
+                            retry_interval_s=0.5, fail_open=False,
+                        ):
+                            results = await _do_memory_pipeline(user_id, messages,
+                                conversation_id, workspace_id, skip_ai_side=skip_ai_side)
+                    else:
+                        results = await _do_memory_pipeline(user_id, messages,
+                            conversation_id, workspace_id, skip_ai_side=skip_ai_side)
+        except (DistributedLockNotAcquired, DistributedLockUnavailable):
+            results = [MemorySideOutcome(side, "failed", "lock_unavailable") for side in ("user", "ai")]
+        except Exception as exc:
+            reason = exc.reason if isinstance(exc, MemoryProgressError) else "processing_failed"
+            results = [MemorySideOutcome(side, "failed", reason) for side in ("user", "ai")]
+        observation.extend(results or [])
+        incomplete = len(results) != 2 or any(r.status in {"failed", "disabled"} for r in results)
+        total = sum(r.memory_count or 0 for r in results)
+        # Redis is also the telemetry store. Keep a separate safe log so a
+        # lock/progress outage cannot erase its own failure evidence.
+        logger.log(logging.WARNING if incomplete else logging.INFO,
+            "Memory pipeline finished", extra={"event": EVT_BG_DONE,
+                "kind": "memory_pipeline", "outcome": "incomplete" if incomplete else "completed",
+                "n_stored_total": total if all(r.memory_count is not None for r in results) else None,
+                "n_confirmed_returned": total, "n_sides_run": len(results),
+                "side_outcomes": [{"side": r.side, "status": r.status, "reason": r.reason,
+                                   "progress": r.progress} for r in results]})
+        return results
+
+
+async def _run_memory_side(
+    user_id: str, recent: list[dict], conversation_id: str | None, *,
+    side: Literal["user", "ai"], workspace_id: str | None, excluded: bool = False,
+) -> MemorySideOutcome:
+    try:
+        if excluded:
+            progress = await _advance_side_watermark_without_extraction(recent, conversation_id, side=side)
+            return MemorySideOutcome(side, "excluded", "intentional_skip", 0, progress)
+        return await _pipeline_with_watermark(user_id, recent, conversation_id,
+            side=side, workspace_id=workspace_id)
+    except Exception as exc:
+        reason = exc.reason if isinstance(exc, MemoryProgressError) else "processing_failed"
+        if reason == "watermark_write_unavailable":
+            # Normal extraction catches this with its known count. Here it is
+            # an excluded/empty batch, but the Redis write may have committed.
+            return MemorySideOutcome(side, "failed", reason, 0, "unknown")
+        return MemorySideOutcome(side, "failed", reason)
 
 
 async def _do_memory_pipeline(
@@ -319,55 +320,28 @@ async def _do_memory_pipeline(
     workspace_id: str | None,
     *,
     skip_ai_side: bool = False,
-) -> None:
-    """_bg_memory_pipeline 的实现体. 由外层确保同 conv 不并发后被调用."""
+) -> list[MemorySideOutcome]:
+    """Keep the conversation lock until both sides have stopped, including cancellation."""
+    recent = messages[-6:]
+    if conversation_id:
+        workspace_id = await _resolve_workspace_id_for_conversation(conversation_id, user_id, workspace_id)
+    tasks = [asyncio.create_task(_run_memory_side(user_id, recent, conversation_id,
+        side=side, workspace_id=workspace_id, excluded=side == "ai" and skip_ai_side))
+        for side in ("user", "ai")]
     try:
-        recent = messages[-6:]
-        if not recent:
-            return
-        workspace_id = workspace_id or await _resolve_workspace_id_for_conversation(conversation_id)
-        roles = {m.get("role") for m in recent}
-        sides_to_run: list[tuple[Literal["user", "ai"], str]] = [
-            ("user", "user"),
-        ]
-        if not skip_ai_side:
-            sides_to_run.append(("ai", "assistant"))
-        elif conversation_id:
-            await _advance_side_watermark_without_extraction(
-                recent, conversation_id, side="ai",
-            )
-        tasks = [
-            _pipeline_with_watermark(
-                user_id, recent, conversation_id,
-                side=side, workspace_id=workspace_id,
-            )
-            for side, role in sides_to_run
-            if role in roles
-        ]
-        if not tasks:
-            return
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        total = sum(results)
-        logger.info(
-            f"[BG] memory_pipeline stored {total} memories across {len(tasks)} side(s)",
-            extra={
-                "event": EVT_BG_DONE, "kind": "memory_pipeline",
-                "n_stored_total": total,
-                "n_sides_run": len(tasks),
-            },
-        )
-        if total > 0 and conversation_id:
-            await manager.send_event(
-                conversation_id,
-                "memory_extracted",
-                {"count": total},
-            )
-    except Exception as e:
-        logger.error(
-            f"Background memory pipeline failed: {e}",
-            extra={"event": EVT_BG_DONE, "kind": "memory_pipeline", "outcome": "failed",
-                   "error_type": type(e).__name__},
-        )
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    total = sum(r.memory_count or 0 for r in results)
+    if total > 0 and conversation_id:
+        try:
+            await manager.send_event(conversation_id, "memory_extracted", {"count": total})
+        except Exception:
+            logger.warning("Memory refresh notification failed after processing")
+    return results
 
 
 _WATERMARK_BACKLOG_LIMIT = 30
@@ -385,7 +359,7 @@ async def _fetch_new_side_messages(
     conversation_id: str,
     wm: datetime,
     target_role: str,
-) -> list[dict] | None:
+) -> list[dict]:
     """Fetch the side's un-extracted backlog straight from the DB.
 
     The caller-provided window is only the last 6 messages. When a batch is
@@ -395,8 +369,9 @@ async def _fetch_new_side_messages(
     them, are silently never extracted. Fetching `createdAt > watermark` from
     the DB makes the pipeline self-healing regardless of window size.
 
-    Returns None on DB failure so the caller falls back to the window split
-    (legacy behavior, still correct for the common no-skip case).
+    A failed read must hold progress: a shorter fallback window could skip
+    older unprocessed rows forever. The lookahead prevents splitting a group
+    with an identical timestamp, since this legacy cursor has no ID tiebreaker.
     """
     try:
         rows = await db.message.find_many(
@@ -405,12 +380,16 @@ async def _fetch_new_side_messages(
                 "role": target_role,
                 "createdAt": {"gt": wm},
             },
-            order={"createdAt": "asc"},
-            take=_WATERMARK_BACKLOG_LIMIT,
+            order=[{"createdAt": "asc"}, {"id": "asc"}],
+            take=_WATERMARK_BACKLOG_LIMIT + 1,
         )
     except Exception as e:
-        logger.warning(f"[MEM-WM] backlog fetch failed conv={conversation_id[:8]}: {e}")
-        return None
+        raise MemoryProgressError("backlog_unavailable") from e
+    if len(rows) > _WATERMARK_BACKLOG_LIMIT:
+        boundary = rows[_WATERMARK_BACKLOG_LIMIT].createdAt
+        rows = [row for row in rows[:_WATERMARK_BACKLOG_LIMIT] if row.createdAt < boundary]
+        if not rows:
+            raise MemoryProgressError("timestamp_page_boundary")
     return [
         {
             "id": r.id,
@@ -420,7 +399,6 @@ async def _fetch_new_side_messages(
             "metadata": getattr(r, "metadata", None),
         }
         for r in rows
-        if (r.content or "").strip()
     ]
 
 
@@ -431,13 +409,12 @@ async def _pipeline_with_watermark(
     *,
     side: Literal["user", "ai"],
     workspace_id: str | None = None,
-) -> int:
+) -> MemorySideOutcome:
     """按 (conversation_id, side) 水位线切分, 调用 extraction pipeline.
-    返回该侧实际入库的记忆条数 (供 _bg_memory_pipeline 汇总后推 WS 事件).
+    返回明确结果；返回的记忆ID数量包含更新，并非新建行数。
 
-    新消息来源优先 DB 增量 (createdAt > watermark, 上限 30 条), 防止跳批期间
-    积压 >6 条时旧消息滑出调用方窗口被静默丢弃; DB 失败 / 首次无水位线时退回
-    旧的窗口切分行为. 调用方窗口里无时间戳的合成消息 (刚生成还未持久化的回复)
+    新消息来源优先 DB 增量 (createdAt > watermark, 上限 30 条)。
+    DB 失败保持进度；首次无水位线只处理窗口，不回填历史。 调用方窗口里无时间戳的合成消息 (刚生成还未持久化的回复)
     仅在 DB 增量为空时作为抽取目标, 避免与已持久化的拆分回复重复抽取.
     """
     # An older AI job can finish after an administrator claims the chat. Its
@@ -473,7 +450,7 @@ async def _pipeline_with_watermark(
             or metadata.get("memory_confirmation")
             or _memory_written_by_lifecycle(m)
         )
-        if not excluded:
+        if not excluded and (m.get("content") or "").strip():
             new_target_msgs.append(m)
         ts = _parse_ts(m)
         effective = ts if ts is not None else fallback_now
@@ -490,14 +467,10 @@ async def _pipeline_with_watermark(
             is_new_target = m.get("role") == target_role and (ts is None or ts > wm)
             if not is_new_target or _memory_written_by_lifecycle(m):
                 context_msgs.append(m)
-            elif ts is None and _comparable_text(m.get("content")) not in backlog_text:
-                # Synthetic fresh reply (just-generated, no persisted ts) that the
-                # DB backlog snapshot does NOT already contain — extract it now
-                # instead of deferring a whole turn. A reply that WAS persisted is
-                # stored as split bubbles while the synthetic copy is the whole
-                # text, so compare against the joined backlog: a per-row match
-                # missed it and fed the AI pre-filter the bubbles plus the whole
-                # reply again (2026-10-15 trace).
+            elif not db_backlog and ts is None and _comparable_text(m.get("content")) not in backlog_text:
+                # A synthetic latest reply must not advance the cursor beyond
+                # a bounded page of older persisted messages. Preserve the
+                # legacy window fallback only when the DB has no backlog.
                 _add_target(m)
     else:
         for m in recent:
@@ -509,13 +482,14 @@ async def _pipeline_with_watermark(
                 context_msgs.append(m)
 
     if max_side_ts is None:
-        return 0  # 该 side 无新消息, 跳过 LLM
+        return MemorySideOutcome(side, "no_new_messages", "no_new_messages", 0)
     if not new_target_msgs:
         # A bounded page of reserved messages must not starve later messages.
         # These rows were intentionally handled outside generic extraction.
         if conversation_id and (wm is None or max_side_ts > wm):
             await set_watermark(conversation_id, side, max_side_ts)
-        return 0
+            return MemorySideOutcome(side, "excluded", "reserved_messages", 0, "advanced")
+        return MemorySideOutcome(side, "excluded", "reserved_messages", 0)
     context_msgs = _context_before_targets(context_msgs, new_target_msgs, recent, target_role)
     evidence_message_ids = [
         str(m.get("id"))
@@ -536,38 +510,33 @@ async def _pipeline_with_watermark(
                 recent, new_target_msgs[0] if new_target_msgs else None
             ),
         )
-    except MemoryExtractionError as e:
-        # 抽取没有真正跑完 (LLM 失败, 或 admin 停用了抽取模板): 水位线原地不动,
-        # 让后续批次重新覆盖这些消息, 而不是静默丢掉.
-        #
-        # 两种成因的运维含义完全不同 —— LLM 失败会自愈, 模板停用要人去开回来,
-        # 所以异常里带 kind 并原样打进日志, 不要笼统说"失败".
-        logger.warning(
-            f"[BG] {e}; watermark held for retry",
-            extra={"event": EVT_BG_DONE, "kind": "memory_pipeline",
-                   "outcome": "extraction_error_watermark_held", "side": side},
-        )
-        return 0
+    except MemoryExtractionError as exc:
+        return MemorySideOutcome(side, "disabled" if exc.kind == "prompt_disabled" else "failed", exc.kind)
 
-    # 防时钟回退: 仅当新候选 > wm 才推进 (且抽取成功, 见上方 except)
+    progress = "not_applicable" if not conversation_id else "unchanged"
     if conversation_id and (wm is None or max_side_ts > wm):
-        await set_watermark(conversation_id, side, max_side_ts)
-
-    return len(stored_ids)
+        try:
+            await set_watermark(conversation_id, side, max_side_ts)
+            progress = "advanced"
+        except MemoryProgressError as exc:
+            return MemorySideOutcome(side, "failed", exc.reason, len(stored_ids), "unknown")
+    return MemorySideOutcome(side, "completed", "processed", len(stored_ids), progress)
 
 
 async def _advance_side_watermark_without_extraction(
     recent: list[dict],
-    conversation_id: str,
+    conversation_id: str | None,
     *,
     side: Literal["user", "ai"],
-) -> None:
+) -> Literal["advanced", "unchanged", "not_applicable"]:
     """Advance watermark for a side intentionally skipped from extraction.
 
     Schedule/current-state replies are ephemeral answers. If we skip AI memory
     extraction without moving the AI watermark, a later non-skipped turn would
     see this assistant reply as "new" and extract it retroactively.
     """
+    if conversation_id is None:
+        return "not_applicable"
     target_role = "user" if side == "user" else "assistant"
     fallback_now = datetime.now(UTC)
     max_side_ts: datetime | None = None
@@ -578,11 +547,13 @@ async def _advance_side_watermark_without_extraction(
         if max_side_ts is None or effective > max_side_ts:
             max_side_ts = effective
     if max_side_ts is None:
-        return
+        return "unchanged"
 
     wm = _ensure_aware(await get_watermark(conversation_id, side))
     if wm is None or max_side_ts > wm:
         await set_watermark(conversation_id, side, max_side_ts)
+        return "advanced"
+    return "unchanged"
 
 
 def _parse_ts(m: dict) -> datetime | None:

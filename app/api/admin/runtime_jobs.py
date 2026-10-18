@@ -135,6 +135,18 @@ async def retry_turn_followup(
     return {"status": "pending_dispatch", "turn_id": turn_id}
 
 
+@router.get("/memory-processing")
+async def get_memory_processing(
+    limit: int = Query(20, ge=1, le=50),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    from app.services.memory.recording.diagnostics import inspect_memory_processing
+    try:
+        return await inspect_memory_processing(limit=limit)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="记忆录入处理记录暂时不可用，请稍后重试。") from error
+
+
 @router.get("/{job_id}")
 async def get_job(
     job_id: str,

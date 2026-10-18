@@ -54,6 +54,12 @@ class MemoryExtractionError(RuntimeError):
     are lost forever. A later batch will re-cover them.
     """
 
+    def __init__(self, message: str, *, kind: str = "extraction_failed"):
+        super().__init__(message)
+        # Only documented categories reach admin diagnostics. Provider errors
+        # and source text must never be used as an API-visible reason.
+        self.kind = kind if kind in {"prompt_disabled", "source_invalid"} else "extraction_failed"
+
 async def _create_reminder_timetrigger(
     *,
     user_id: str,
@@ -269,7 +275,7 @@ async def process_memory_pipeline(
             origins = await snapshot_message_sources(user_id=user_id, workspace_id=workspace_id,
                 side=side, message_ids=evidence_message_ids, extraction_input=new_conversation)
         except ValueError as exc:
-            raise MemoryExtractionError(str(exc)) from exc
+            raise MemoryExtractionError("Memory source validation failed", kind="source_invalid") from exc
 
     # Step 2 (spec §2.1.3 / §2.2.3): Big model extraction
     extraction = await extract_memories(
@@ -284,7 +290,7 @@ async def process_memory_pipeline(
         kind = extraction.get("_extraction_error_kind", "llm_failure")
         raise MemoryExtractionError(
             f"extraction did not run for side={side} ({kind}); "
-            "watermark must not advance"
+            "watermark must not advance", kind=kind,
         )
     memories = extraction.get("memories", [])
 

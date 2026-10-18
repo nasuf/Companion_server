@@ -15,6 +15,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def scoped_window_unit_dependencies(monkeypatch):
+    # This module tests window/backlog selection. Actual conversation ownership
+    # and observation collection are covered by the processing integration tests.
+    from app.services.chat import post_process
+    from app.services.memory.recording import diagnostics
+    monkeypatch.setattr(post_process, "_resolve_workspace_id_for_conversation",
+        AsyncMock(side_effect=lambda conversation_id, user_id, workspace_id: workspace_id or "ws-1"))
+    monkeypatch.setattr(diagnostics, "_write", AsyncMock())
+
 UTC = timezone.utc
 
 
@@ -73,7 +84,7 @@ async def test_backlog_beyond_window_is_extracted():
 
 
 @pytest.mark.asyncio
-async def test_db_fetch_failure_falls_back_to_window_split():
+async def test_db_fetch_failure_holds_progress_without_window_fallback():
     from app.services.chat.post_process import _bg_memory_pipeline
 
     wm = datetime.now(UTC) - timedelta(minutes=30)
@@ -87,14 +98,14 @@ async def test_db_fetch_failure_falls_back_to_window_split():
 
     with patch("app.services.chat.post_process.db", mock_db), \
          patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=wm)), \
-         patch("app.services.chat.post_process.set_watermark", AsyncMock()), \
+         patch("app.services.chat.post_process.set_watermark", AsyncMock()) as advance, \
          patch("app.services.chat.post_process.process_memory_pipeline",
                AsyncMock(return_value=[])) as mock_pipeline:
-        await _bg_memory_pipeline("u1", window, conversation_id="c1", workspace_id="ws-1")
+        results = await _bg_memory_pipeline("u1", window, conversation_id="c1", workspace_id="ws-1")
 
-    new_conv = mock_pipeline.await_args.kwargs["new_conversation"]
-    assert "新消息" in new_conv
-    assert "老消息" not in new_conv  # pre-watermark stays context
+    mock_pipeline.assert_not_awaited()
+    advance.assert_not_awaited()
+    assert all(r.status == "failed" and r.reason == "backlog_unavailable" for r in results)
 
 
 @pytest.mark.asyncio

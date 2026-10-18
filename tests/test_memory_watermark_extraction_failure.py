@@ -61,7 +61,8 @@ async def test_watermark_held_when_extraction_raises():
             "u1", _msgs(), "c1", side="user", workspace_id="w1",
         )
 
-    assert n == 0
+    assert n.status == "failed" and n.reason == "extraction_failed"
+    assert n.memory_count is None and n.progress == "unchanged"
     mock_set.assert_not_called()
 
 
@@ -80,7 +81,8 @@ async def test_watermark_advances_on_empty_but_successful_extraction():
             "u1", _msgs(), "c1", side="user", workspace_id="w1",
         )
 
-    assert n == 0
+    assert n.status == "completed" and n.memory_count == 0
+    assert n.progress == "advanced"
     mock_set.assert_awaited_once()
 
 
