@@ -18,7 +18,7 @@ from app.services.llm.models import invoke_json, invoke_text
 from app.services.llm.resilience import provider_name
 from app.services.offline import repository as repo
 from app.services.offline.activity_message_context import recommendation_dialogue
-from app.services.offline.content import plain_text, normalized
+from app.services.offline.content import plain_text
 from app.services.offline.opening_hours import visit_context
 from app.services.offline.copy_guards import (
     bounded_issues, copy_issues, date_relation, local_now, today_text,
@@ -225,6 +225,9 @@ CRISIS_CARE_LOOKBACK_DAYS = 14
 # Matches the Web writer's target of about 200 characters, including punctuation.
 _NOTE_MIN_CHARS = 160
 _NOTE_MAX_CHARS = 260
+# Length is a writing target, not a reason to replace a useful, fact-checked
+# model paragraph with a generic template after bounded repairs are exhausted.
+_NOTE_MIN_RETAINED_CHARS = 120
 
 
 async def prepare_references(card: dict, references: list[dict], now: datetime) -> list[dict]:
@@ -303,7 +306,7 @@ async def attach_recommendation_message(
     rejected: list[str] = []  # Reasons of the last rejected draft, kept across a repair.
     length_repair = False
     writer_name = "not_run"
-    continuation_base = ""
+    best_short: tuple[str, str] | None = None
     try:
         async with asyncio.timeout(30):
             template = await get_prompt_text("offline.activity_recommendation_message")
@@ -342,7 +345,7 @@ async def attach_recommendation_message(
                     user_preference=json.dumps(grouped["preference"], ensure_ascii=False),
                     dialogue_context=json.dumps(grouped["dialogue"], ensure_ascii=False),
                     revision_feedback=json.dumps(feedback, ensure_ascii=False),
-                    writing_mode="append" if continuation_base else "full",
+                    writing_mode="full",
                 )
                 async with asyncio.timeout(15):
                     # Persona models may keep returning short invitations. One
@@ -354,21 +357,27 @@ async def attach_recommendation_message(
                     writer_name = str(getattr(writer, "model_name", "runtime"))
                     raw = (await invoke_text(writer, prompt, profile=OFFLINE_WRITER_PROFILE)).strip()
                 candidate = re.sub(r"\s+", " ", raw)
-                if continuation_base:
-                    candidate = continuation_base + (candidate if normalized(candidate) not in normalized(continuation_base) else "")
-                    continuation_base = ""
                 if re.search(r"https?://|www\.", candidate) or raw.startswith(("{", "[", "```")):
                     status, issues = "fallback_invalid", ["寄语格式不符合要求"]
                     break
                 if not _NOTE_MIN_CHARS <= len(candidate) <= _NOTE_MAX_CHARS:
                     length_repair = True
-                    if (attempt == 1 and 0 < len(candidate) < _NOTE_MIN_CHARS and "{writing_mode}" in str(template)
-                            and not copy_issues(candidate, card, now,
-                                facts_text=json.dumps({k: v for k, v in facts.items() if k != "activity_summary"}, ensure_ascii=False),
-                                user_references=len(references))):
-                        continuation_base = candidate
+                    short_issues: list[str] = []
+                    if _NOTE_MIN_RETAINED_CHARS <= len(candidate) < _NOTE_MIN_CHARS:
+                        short_issues = copy_issues(candidate, card, now,
+                            facts_text=json.dumps({k: v for k, v in facts.items() if k != "activity_summary"}, ensure_ascii=False),
+                            user_references=len(references))
+                        if not short_issues:
+                            checked = await review_copy(check_template, phase="message", facts=facts,
+                                                        references=references, message=candidate)
+                            if accepted_review(checked):
+                                if best_short is None or len(candidate) > len(best_short[0]):
+                                    best_short = candidate, writer_name
+                            else:
+                                short_issues = bounded_issues(checked.get("unsupported_claims") if isinstance(checked, dict) else None,
+                                                               limit=5, length=200)
                     # Length is fixable: models differ in how much they write.
-                    issues = [f"寄语这一稿 {len(candidate)} 字，请写成 160—260 字的一段话，目标约200字；补充已知事实或轻邀请，不编造细节。"]
+                    issues = [f"寄语这一稿 {len(candidate)} 字，请写成 160—260 字的一段话，目标约200字；补充已知事实或轻邀请，不编造细节。"] + short_issues
                 else:
                     # Objections code can decide exactly never reach the model guard.
                     issues = copy_issues(candidate, card, now,
@@ -403,6 +412,10 @@ async def attach_recommendation_message(
         logger.info("[offline] recommendation message deadline reached")
     except Exception as exc:
         logger.info("[offline] recommendation message fallback (%s)", type(exc).__name__)
+    if not status.startswith("verified") and best_short is not None:
+        message, writer_name = best_short
+        status = "verified_partial"
+        issues = [f"寄语{len(message)}字，修复后仍低于160—260字目标；已保留事实核验通过的模型原文。"]
     if status.startswith("fallback"):
         references = []  # Rejected assertions must not survive in storage.
     metadata = card.setdefault("discovery_metadata", {})
@@ -410,10 +423,11 @@ async def attach_recommendation_message(
         recommendation_message=message,
         recommendation_message_status=status,
         recommendation_message_issues=(mask_quotes(bounded_issues(issues), private_quotes)
-                                       if status.startswith("fallback") else []),
+                                       if status.startswith("fallback") or status == "verified_partial" else []),
         recommendation_message_generated_at=datetime.now(UTC).isoformat(),
         recommendation_message_length=len(message),
         recommendation_message_length_bounds=[_NOTE_MIN_CHARS, _NOTE_MAX_CHARS],
+        recommendation_message_length_status="within_target" if _NOTE_MIN_CHARS <= len(message) <= _NOTE_MAX_CHARS else "below_target_after_repair",
         recommendation_message_writer=writer_name,
         recommendation_message_repair_route="instruction_length_repair" if length_repair else "not_needed",
         user_relevance=references,

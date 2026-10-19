@@ -88,3 +88,33 @@ async def test_sparse_flower_store_is_enriched_without_flower_tea_analogy_and_al
     output = os.getenv("ACTIVITY_FIDELITY_E2E_PAYLOAD")
     if output:
         Path(output).write_text(json.dumps(public, ensure_ascii=False))
+
+
+async def test_fact_checked_short_note_is_persisted_and_returned_without_template_replacement(native, monkeypatch):
+    j = native
+    import tests.test_activity_copy_final_e2e as previous
+    monkeypatch.setattr(previous, "RELEASE", RELEASE)
+    await publish(j)
+    draft = ("这家小岛咖啡可以给下次出门多留一个选择。"
+             "如果想换条路线，可以先了解店里的具体内容，再决定要不要去看看。"
+             "不用为了推荐打乱原有安排，时间合适时再考虑就好。"
+             "出发前确认当天的开放安排，到了现场按自己的节奏决定停留多久。"
+             "若已有别的安排，把这个去处留到之后再考虑也可以。")
+    assert 120 <= len(draft) < 160
+    monkeypatch.setattr(note, "invoke_text", AsyncMock(return_value=draft))
+    monkeypatch.setattr(note, "invoke_json", AsyncMock(return_value={"supported": True, "unsupported_claims": []}))
+    steps = []
+    monkeypatch.setattr(copy_trace, "record_manual_step", lambda **kwargs: steps.append(kwargs))
+    response = await j.client.post("/offline/activities/recommend", params={"workspace_id": j.workspace})
+    assert response.status_code == 200, response.text
+    public = response.json();stored = await repo.get_activity(public["id"], j.user)
+    assert public["recommendation_message"] == stored["recommendation_message"] == draft
+    meta = stored["discovery_metadata"]
+    assert meta["recommendation_message_status"] == "verified_partial"
+    assert meta["recommendation_message_length_status"] == "below_target_after_repair"
+    assert "已保留事实核验通过" in meta["recommendation_message_issues"][0]
+    final = next(s["outputs"] for s in steps if s["name"] == "offline_copy_final")
+    assert final["fields"]["recommendation_message"]["text"] == draft
+    assert final["statuses"]["note"] == "verified_partial"
+    assert final["writing_inputs"]["recommendation_message_length_status"] == "below_target_after_repair"
+    assert "below_target" not in response.text and "discovery_metadata" not in response.text

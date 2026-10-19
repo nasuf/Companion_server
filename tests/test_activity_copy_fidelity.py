@@ -13,6 +13,8 @@ from app.services.offline.relevance_review import reference_indices
 from scripts.publish_offline_quality_prompts import validate_entry
 
 RELEASE = json.loads((Path(__file__).parents[1] / "scripts/prompt_releases/20261019_activity_copy_fidelity.json").read_text())
+FOLLOWUP = json.loads((Path(__file__).parents[1] / "scripts/prompt_releases/20261019_activity_copy_fidelity_review.json").read_text())
+RELEASE["prompts"] = list({e["key"]: e for e in RELEASE["prompts"] + FOLLOWUP["prompts"]}.values())
 PROMPTS = {p["key"]: p["content"] for p in RELEASE["prompts"]}
 NOW = datetime.fromisoformat("2026-10-19T13:47:00+08:00")
 TEA = "[2026-10-10] 用户喜欢带花香的茶"
@@ -127,13 +129,15 @@ async def test_notes_reuse_only_the_bound_relevance_decision_and_meet_length(set
 async def test_short_or_overlong_runtime_notes_cannot_be_labelled_verified(setup, monkeypatch, length):
     setup["user_relevance"] = []
     monkeypatch.setattr(note, "invoke_text", AsyncMock(return_value="句" * length))
-    checker = AsyncMock();monkeypatch.setattr(note, "invoke_json", checker)
+    checker = AsyncMock(return_value={"supported": False, "unsupported_claims": ["无意义重复"]})
+    monkeypatch.setattr(note, "invoke_json", checker)
     await note.attach_recommendation_message(setup, {})
     meta = setup["discovery_metadata"]
     assert meta["recommendation_message_status"] == "fallback_invalid"
     assert 160 <= meta["recommendation_message_length"] <= 260
     assert meta["recommendation_message_length_bounds"] == [160, 260]
-    checker.assert_not_called()
+    if length < 120 or length > 260:
+        checker.assert_not_called()
 
 
 def test_user_fragrance_preference_is_not_a_venue_environment_fact():
@@ -169,22 +173,27 @@ async def test_model_summary_cannot_be_its_own_venue_fragrance_evidence(setup, m
     checker.assert_not_called()
 
 
-async def test_short_note_expansion_preserves_draft_and_reviews_the_entire_combined_text(setup, monkeypatch):
+@pytest.mark.parametrize("last_draft", ["too_short", "timeout", "invalid", "facts_rejected"])
+async def test_fact_checked_short_model_note_survives_failed_length_repair(setup, monkeypatch, last_draft):
     setup["user_relevance"] = []
     base = ("常发广场这家花艺小店，可以给下次出门多留一个选择。"
             "如果想换条路线，可以先了解店里的具体内容，再决定要不要去看看。"
             "不用为了推荐打乱原有安排，时间合适时再考虑就好。"
-            "出发前确认当天的开放安排，到了现场按自己的节奏决定停留多久。")
-    tail = "如果有更感兴趣的事情，也可以先做自己的安排，把这个去处留到之后。要不要先了解一下，再挑个方便的时候去转转？"
-    assert len(base) < 160 and 160 <= len(base + tail) <= 260
-    monkeypatch.setattr(note, "invoke_text", AsyncMock(side_effect=[base[:80], base, tail]))
-    checker = AsyncMock(return_value={"supported": True, "unsupported_claims": []})
+            "出发前确认当天的开放安排，到了现场按自己的节奏决定停留多久。"
+            "若已有别的安排，把这个去处留到之后再考虑也可以。")
+    assert 120 <= len(base) < 160
+    last = {"too_short": "短", "timeout": TimeoutError(), "invalid": '{"text":"不是纯文本"}', "facts_rejected": note.generic_message(setup)}[last_draft]
+    monkeypatch.setattr(note, "invoke_text", AsyncMock(side_effect=[base[:80], base, last]))
+    checker = AsyncMock(side_effect=[{"supported": True, "unsupported_claims": []},
+        {"supported": False, "unsupported_claims": ["最后一稿有无依据断言"]}])
     monkeypatch.setattr(note, "invoke_json", checker)
     await note.attach_recommendation_message(setup, {})
-    assert setup["discovery_metadata"]["recommendation_message"] == base + tail
-    assert "append" in note.invoke_text.await_args.args[1]
-    assert base + tail in checker.await_args.args[1]
-    assert setup["discovery_metadata"]["recommendation_message_status"] == "verified_no_evidence"
+    meta = setup["discovery_metadata"]
+    assert meta["recommendation_message"] == base
+    assert meta["recommendation_message_status"] == "verified_partial"
+    assert meta["recommendation_message_length_status"] == "below_target_after_repair"
+    assert "已保留事实核验通过" in meta["recommendation_message_issues"][0]
+    assert base in checker.await_args_list[0].args[1]
 
 
 async def test_wrong_phase_schema_is_retried_but_valid_rejection_is_not(setup, monkeypatch):

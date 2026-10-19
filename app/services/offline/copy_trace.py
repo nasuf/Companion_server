@@ -111,6 +111,6 @@ def record_final_copy(activity: dict[str, Any], invite: str) -> None:
                  "writing_inputs": {key: metadata.get(key) for key in (
                      "detail_input_summary_status", "card_copy_accepted_fields", "card_copy_repair_writer", "context_source_status", "context_source_count",
                      "context_search_count", "context_read_count", "relevance_screen", "recommendation_message_length",
-                     "recommendation_message_length_bounds", "recommendation_message_writer", "recommendation_message_repair_route")},
+                     "recommendation_message_length_bounds", "recommendation_message_length_status", "recommendation_message_writer", "recommendation_message_repair_route")},
                  "visit_timing": metadata.get("visit_timing")},
     )
