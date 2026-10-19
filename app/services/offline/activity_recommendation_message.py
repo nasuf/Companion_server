@@ -19,6 +19,7 @@ from app.services.llm.resilience import provider_name
 from app.services.offline import repository as repo
 from app.services.offline.activity_message_context import recommendation_dialogue
 from app.services.offline.content import plain_text
+from app.services.offline.opening_hours import visit_context
 from app.services.offline.copy_guards import (
     bounded_issues, copy_issues, date_relation, local_now, today_text,
 )
@@ -127,7 +128,7 @@ def exact_references(raw: Any, evidence: dict[str, list[str]]) -> list[dict[str,
 def generic_message(card: dict[str, Any]) -> str:
     name = plain_text(card.get("title") or card.get("location_name")) or "这个去处"
     event = (card.get("discovery_metadata") or {}).get("kind") == "event"
-    timing = "先看看活动时间和参与方式，再按自己的安排决定" if event else "出发前看看开放时间，再按自己的安排决定"
+    timing = "先看看活动时间和参与方式，再按自己的安排决定" if event else "另选方便的开放时段，出发前再确认当天安排"
     return (
         f"想把{name}推荐给你，给下次出门多留一个选择。"
         f"{timing}，不用为了这次推荐特意挤出时间。"
@@ -155,8 +156,8 @@ def page_facts(card: dict[str, Any], now: datetime) -> dict[str, str]:
         description = card.get("description")
     return {
         "activity_name": card.get("title") or card.get("location_name") or "",
-        "date_time": _date_time_text(card),
-        "date_relation": date_relation(card, now),
+        "date_time": _date_time_text(card, now),
+        "date_relation": date_relation(card, now) + "；" + visit_context(card, now),
         "today": today_text(now),
         "location": " ".join(str(card.get(k) or "") for k in ("location_name", "address")).strip(),
         "category": card.get("category") or "",

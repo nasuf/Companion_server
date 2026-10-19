@@ -340,6 +340,8 @@ def copy_issues(
     if re.search(r"https?://|www\.", text):
         issues.append("删除网址。")
     issues.extend(date_issues(text, card, now))
+    from app.services.offline.opening_hours import visit_issues
+    issues.extend(visit_issues(text, card, now))
     if facts_text is not None:
         issues.extend(access_issues(text, facts_text))
         if user_references is not None:

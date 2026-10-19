@@ -47,6 +47,7 @@ from app.services.offline.chat_emit import (
     insert_user_component_message,
 )
 from app.services.offline.memory_hooks import remember_user_event
+from app.services.offline.copy_trace import record_final_copy
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +317,7 @@ async def create_recommendation_for_user(
             ctx["workspace_id"],
             repo.next_activity_due(datetime.now(UTC)),
         )
+        record_final_copy(activity, message)
         return activity
 
 

@@ -399,8 +399,8 @@ def test_missing_hours_reach_writers_as_advice_not_as_a_data_state():
     # Production 10-17: "开放时段未提供" came back as "开放时段没写太细" twice in a row.
     facts = note.page_facts(card(discovery_metadata={"kind": "place"}), NOW)
     assert facts["date_time"] == "固定地点；出发前确认开放时间"
-    assert note.page_facts(card(discovery_metadata={"kind": "place", "opening_hours": "08:30-18:00"}),
-                           NOW)["date_time"] == "固定地点；开放时间：08:30-18:00"
+    hours = note.page_facts(card(discovery_metadata={"kind": "place", "opening_hours": "08:30-18:00"}), NOW)["date_time"]
+    assert "08:30–18:00" in hours and str(NOW.date()) in hours and "出发前确认" in hours
     # Still no basis for all-day access.
     assert guards.copy_issues("随时都能去。", card(), NOW, facts_text=json.dumps(facts, ensure_ascii=False))
 

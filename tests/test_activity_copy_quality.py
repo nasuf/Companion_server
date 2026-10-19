@@ -56,3 +56,17 @@ async def test_endpoint_returns_the_bounded_report(monkeypatch):
     monkeypatch.setattr(copy_quality, "collect_copy_quality", collect)
     assert await stats.activity_copy_quality(days=3, _={}) == {"total": 0}
     collect.assert_awaited_once_with(3)
+
+
+async def test_partial_counts_and_visit_assessment_are_bounded_and_missing_is_not_zero(monkeypatch):
+    rows = [row(1, detail="verified_partial", section_count="3", kept_sections=[0, 1], dropped_sections=[2],
+                visit_timing={"status": "closed", "reason": "after_closing", "assessed_at": "2026-10-18T22:15:00+08:00", "secret": "never returned"}),
+            row(2, detail=None, section_count=None),
+            row(3, detail="verified_partial", section_count="3", kept_sections=[0, 0], dropped_sections=[2])]
+    monkeypatch.setattr(copy_quality.db, "query_raw", AsyncMock(return_value=rows))
+    report = await copy_quality.collect_copy_quality(7)
+    first, missing, malformed = report["recent"]
+    assert first["detail_sections"] == {"total": 3, "kept": 2, "dropped": 1}
+    assert first["visit_timing"]["status"] == "closed" and "secret" not in str(report)
+    assert missing["detail_sections"] is None and missing["visit_timing"] is None
+    assert malformed["detail_sections"] is None

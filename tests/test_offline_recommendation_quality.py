@@ -123,6 +123,8 @@ async def test_failed_detail_never_collapses_to_an_address(
 async def test_verified_summary_and_full_detail_use_same_native_facts(
     quality, monkeypatch
 ):
+    from datetime import datetime
+    monkeypatch.setattr(generation, "local_now", lambda: datetime.fromisoformat("2026-10-18T12:00:00+08:00"))
     summary = "想试试手作的话，可以先挑一项自己感兴趣的体验。"
     monkeypatch.setattr(
         generation,
@@ -144,12 +146,12 @@ async def test_verified_summary_and_full_detail_use_same_native_facts(
     assert result["discovery_metadata"]["copy_status"] == "verified"
     assert result["discovery_metadata"]["card_copy_status"] == "verified"
     prompt = generation.invoke_text.call_args_list[1].args[1]
-    assert "29.00" in prompt and "周二至周日" in prompt
+    assert "29.00" in prompt and "10:00–21:00" in prompt and "2026-10-18" in prompt
     reviewed = [call.args[1] for call in check.await_args_list]
     # Card copy and detail are reviewed separately, against the same facts.
     assert [summary in r for r in reviewed].count(True) == 1
     assert [DETAIL in r for r in reviewed].count(True) == 1
-    assert all("周二至周日" in r for r in reviewed)
+    assert all("10:00–21:00" in r for r in reviewed)
 
 
 async def test_empty_gallery_uses_illustrated_same_category_without_leaking_original_copy(

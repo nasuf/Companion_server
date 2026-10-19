@@ -34,6 +34,10 @@ SELECT a.id, a.created_at, a.title, a.source, a.status,
        a.discovery_metadata->'card_copy_issues' AS card_copy_issues,
        a.discovery_metadata->>'copy_status' AS detail,
        a.discovery_metadata->'copy_issues' AS detail_issues,
+       a.discovery_metadata->>'copy_section_count' AS section_count,
+       a.discovery_metadata->'copy_kept_sections' AS kept_sections,
+       a.discovery_metadata->'copy_dropped_sections' AS dropped_sections,
+       a.discovery_metadata->'visit_timing' AS visit_timing,
        a.discovery_metadata->>'recommendation_message_status' AS message,
        a.discovery_metadata->'recommendation_message_issues' AS message_issues,
        a.discovery_metadata->>'recommendation_relevance_status' AS relevance,
@@ -61,6 +65,32 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else (str(value) if value else None)
 
 
+def _section_counts(row: dict) -> dict | None:
+    try:
+        count = int(row.get("section_count"))
+        kept, dropped = row.get("kept_sections"), row.get("dropped_sections")
+        kept = json.loads(kept) if isinstance(kept, str) else kept
+        dropped = json.loads(dropped) if isinstance(dropped, str) else dropped
+        if not 1 <= count <= 8 or not isinstance(kept, list) or not isinstance(dropped, list):
+            return None
+        values = kept + dropped
+        if any(type(i) is not int for i in values) or len(values) != count or set(values) != set(range(count)):
+            return None
+        return {"total": count, "kept": len(kept), "dropped": len(dropped)}
+    except (TypeError, ValueError):
+        return None
+
+
+def _visit_status(value: Any) -> dict | None:
+    try:
+        value = json.loads(value) if isinstance(value, str) else value
+    except ValueError:
+        return None
+    if not isinstance(value, dict) or value.get("status") not in {"open", "closed", "unknown", "not_applicable"}:
+        return None
+    return {key: str(value.get(key) or "")[:60] for key in ("status", "reason", "assessed_at")}
+
+
 async def collect_copy_quality(days: int) -> dict[str, Any]:
     window = max(1, min(MAX_WINDOW_DAYS, int(days or 7)))
     rows = list(await db.query_raw(_QUERY, window, ROW_LIMIT + 1) or [])
@@ -78,6 +108,8 @@ async def collect_copy_quality(days: int) -> dict[str, Any]:
             "source": row.get("source"),
             "status": row.get("status"),
             "relevance": row.get("relevance") or NOT_RECORDED,
+            "detail_sections": _section_counts(row),
+            "visit_timing": _visit_status(row.get("visit_timing")),
             **{field: row.get(status_column) or NOT_RECORDED for field, (status_column, _) in FIELDS.items()},
             "issues": {field: _issues(row.get(issues_column)) for field, (_, issues_column) in FIELDS.items()},
         }

@@ -7,6 +7,7 @@ template (production 2026-10-18, trace b4f089ca).
 from __future__ import annotations
 
 from typing import Any
+import hashlib
 
 from app.services.chat.local_tracer import record_manual_step
 
@@ -76,7 +77,36 @@ def record_copy_outcome(
     record_manual_step(
         name="offline_copy_outcome",
         display_name=_named("活动文案结果", subject),
-        decision_label=" · ".join(f"{STAGES[k]}：{_OUTCOME.get(v, v)}" for k, v in shown.items()),
+        decision_label=" · ".join(f"{STAGES[k]}：" + (
+            "模型文案（已保留通过段落）" if k == "detail" and v == "verified_partial" else _OUTCOME.get(v, v))
+            for k, v in shown.items()),
         inputs={"activity": subject},
         outputs={"statuses": shown, "issues": issues or {}},
+    )
+
+
+def record_final_copy(activity: dict[str, Any], invite: str) -> None:
+    """Only persisted, client-visible copy, with hashes for exact comparisons.
+
+    No private evidence or raw provider payload is included. The existing trace
+    ownership checks still govern access to these user-visible messages.
+    """
+    metadata = activity.get("discovery_metadata") or {}
+    fields = {"summary": str(activity.get("summary") or ""),
+              "description": str(activity.get("description") or ""),
+              "recommendation_message": str(activity.get("recommendation_message") or metadata.get("recommendation_message") or ""),
+              "invite": invite}
+    record_manual_step(
+        name="offline_copy_final",
+        display_name=_named("活动最终展示文案", activity.get("title")),
+        decision_label="已入库并用于接口及消息展示；以此节点对照 App",
+        inputs={"activity_id": activity.get("id")},
+        outputs={"fields": {key: {"text": text[:2400], "length": len(text), "truncated": len(text) > 2400,
+                                     "sha256": hashlib.sha256(text.encode()).hexdigest()} for key, text in fields.items()},
+                 "statuses": {"detail": metadata.get("copy_status", "not_recorded"),
+                              "card_copy": metadata.get("card_copy_status", "not_recorded"),
+                              "note": metadata.get("recommendation_message_status", "not_recorded"),
+                              "invite": metadata.get("invite_message_status", "not_recorded")},
+                 "sections": {key: metadata.get(key) for key in ("copy_section_count", "copy_kept_sections", "copy_dropped_sections")},
+                 "visit_timing": metadata.get("visit_timing")},
     )

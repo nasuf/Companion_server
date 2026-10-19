@@ -28,6 +28,8 @@ from app.services.offline.evidence_text import mask_quotes
 from app.services.offline.image_evidence import indexed_image_evidence
 from app.services.offline.prompt_fields import clip_text, filled, parse_text_field
 from app.services.offline.recommendation_content import fallback_detail, fallback_summary, useful_detail
+from app.services.offline.opening_hours import assess_opening_hours, public_hours, visit_context
+from app.services.offline.detail_review import paragraphs, review_payload, review_result, retained_text
 from app.services.offline.providers.search import SearchResult, tavily_search
 from app.services.offline import repository as repo
 from app.services.offline.activity_discovery import (
@@ -918,7 +920,7 @@ async def _native_card(
         dialogue_context=dialogue_context,
         avoid_text=_avoid_text(recent),
         sources_json=json.dumps(facts, ensure_ascii=False),
-        today=today_text(local_now()),
+        today=today_text(local_now()) + local_now().strftime(" %H:%M（北京时间）"),
     )
     selected, copy, failure = candidates[0], {}, "模型结果里没有可用候选"
     try:
@@ -998,7 +1000,7 @@ async def _native_card(
             {
                 "place_introduction": card["description"],
                 "native_category": card["category"],
-                "opening_hours": card["discovery_metadata"].get("opening_hours", ""),
+                "opening_hours": public_hours(card, local_now()),
                 "average_spend_reference": card["discovery_metadata"].get(
                     "price_info", ""
                 ),
@@ -1088,7 +1090,7 @@ def _native_album_source(card: dict, city: str) -> SearchResult:
     )
 
 
-def _date_time_text(card: dict[str, Any]) -> str:
+def _date_time_text(card: dict[str, Any], now: datetime | None = None) -> str:
     from app.services.offline.event_schedule import schedule_label
 
     label = schedule_label((card.get("discovery_metadata") or {}).get("event") or {})
@@ -1104,7 +1106,7 @@ def _date_time_text(card: dict[str, Any]) -> str:
     # Missing hours are an instruction, not a fact: writers given "开放时段未提供"
     # paraphrased it as "开放时段没写太细" even after two rounds of feedback
     # (production 10-17). All-day claims stay blocked by copy_guards.
-    return "固定地点；开放时间：" + str(hours) if hours else "固定地点；出发前确认开放时间"
+    return "固定地点；" + public_hours(card, now or local_now()) if hours else "固定地点；出发前确认开放时间"
 
 
 _CARD_COPY_FIELDS = ("summary", "vibe", "suitable")
@@ -1135,21 +1137,29 @@ def _check_facts(card: dict[str, Any], notes: list[dict[str, Any]]) -> dict[str,
 
 def _review_facts(card: dict[str, Any], facts: dict[str, Any], references: list[dict[str, str]],
                   now: datetime) -> dict[str, Any]:
-    return {**facts, "user_references": references, "today": today_text(now),
-            "date_relation": date_relation(card, now)}
+    metadata = dict(facts.get("discovery_metadata") or {})
+    if metadata.get("opening_hours"):
+        metadata["opening_hours"] = public_hours(card, now)
+    return {**facts, "discovery_metadata": metadata, "user_references": references, "today": today_text(now),
+            "date_relation": date_relation(card, now), "visit_timing": assess_opening_hours(card, now),
+            "visit_instruction": visit_context(card, now)}
 
 
-async def _fact_check(facts: dict[str, Any], copy_text: str) -> tuple[bool | None, list[str]]:
-    """``None`` means the review itself was unavailable, not that the copy failed."""
+async def _raw_fact_check(facts: dict[str, Any], copy_text: str) -> Any:
     try:
         prompt = (await get_prompt_text("offline.recommendation_fact_check")).format(
             facts_json=json.dumps(facts, ensure_ascii=False, default=str), copy_text=copy_text,
         )
         async with asyncio.timeout(8):
-            checked = await invoke_json(structured_reviewer(get_utility_model()), prompt)
+            return await invoke_json(structured_reviewer(get_utility_model()), prompt)
     except Exception as exc:
         logger.info("[offline] copy review unavailable (%s)", type(exc).__name__)
-        return None, []
+        return None
+
+
+async def _fact_check(facts: dict[str, Any], copy_text: str) -> tuple[bool | None, list[str]]:
+    """``None`` means the review itself was unavailable, not that the copy failed."""
+    checked = await _raw_fact_check(facts, copy_text)
     if not isinstance(checked, dict) or not isinstance(checked.get("supported"), bool):
         return None, []
     claims = bounded_issues(checked.get("unsupported_claims"), limit=5, length=200)
@@ -1231,7 +1241,89 @@ def _fields_named_by(claims: list[str], values: dict[str, str]) -> set[str] | No
 async def _verified_detail(
     card: dict[str, Any], detail_context: dict[str, Any], facts: dict[str, Any], now: datetime,
 ) -> tuple[str | None, str, list[str]]:
-    """Never raises: a failed detail must leave the card and its other copy usable."""
+    """Enable partial review only after its Web prompt version is published."""
+    try:
+        if "section_results" in str(await get_prompt_text("offline.recommendation_fact_check")):
+            return await _verified_detail_sections(card, detail_context, facts, now)
+    except Exception:
+        return None, "fallback_unavailable", []
+    return await _verified_detail_legacy(card, detail_context, facts, now)
+
+
+async def _verified_detail_sections(card: dict[str, Any], detail_context: dict[str, Any],
+                                    facts: dict[str, Any], now: datetime) -> tuple[str | None, str, list[str]]:
+    """Keep explicitly accepted paragraphs, even if the repair fails or times out."""
+    accepted: dict[int, str] = {}
+    issues: list[str] = []
+    feedback: list[str] = []
+    original: list[str] = []
+    status = "fallback_unavailable"
+    deadline = asyncio.get_running_loop().time() + _DETAIL_STAGE_BUDGET_S
+    metadata = card.setdefault("discovery_metadata", {})
+    for key in ("copy_section_count", "copy_kept_sections", "copy_dropped_sections"):
+        metadata.pop(key, None)
+    try:
+        async with asyncio.timeout(_DETAIL_STAGE_BUDGET_S):
+            for attempt in range(2):
+                text = await _recommendation_copy(detail_context, feedback=feedback, now=now)
+                parts = paragraphs(text)
+                if not useful_detail(text) or not parts:
+                    status = "fallback_too_short" if text else "fallback_unavailable"
+                    break
+                if not accepted:
+                    original = parts
+                    metadata["copy_section_count"] = len(parts)
+                else:
+                    if len(parts) != len(original):
+                        break  # Cannot safely align a rewritten paragraph with its old verdict.
+                    parts = [accepted.get(i, part) for i, part in enumerate(parts)]
+                submitted = {i: part for i, part in enumerate(parts) if i not in accepted}
+                blocked: dict[int, list[str]] = {}
+                for i, part in submitted.items():
+                    found = copy_issues(part, card, now, facts_text=json.dumps(facts, ensure_ascii=False, default=str),
+                                        user_references=0)
+                    if found:
+                        blocked[i] = found
+                        record_guard_block("detail", attempt, found, subject=card.get("title"))
+                reviewable = {i: part for i, part in submitted.items() if i not in blocked}
+                verdict = review_result(await _raw_fact_check(
+                    _review_facts(card, facts, [], now), review_payload(reviewable)), set(reviewable)) if reviewable else None
+                if verdict is not None and verdict.supported is None:
+                    status = "fallback_unavailable"
+                    break
+                rejected = set(blocked)
+                issues = [f"第{i + 1}段：{issue}" for i, values in blocked.items() for issue in values]
+                if verdict is not None:
+                    issues.extend(verdict.issues)
+                    if verdict.supported is False and not verdict.rejected:
+                        # An old/malformed whole-text rejection cannot certify any other paragraph.
+                        rejected.update(reviewable)
+                    else:
+                        rejected.update(verdict.rejected)
+                        accepted.update({i: part for i, part in reviewable.items() if i not in verdict.rejected})
+                if not rejected:
+                    return plain_text("\n\n".join(parts)), "verified", []
+                status = "fallback_rejected"
+                if attempt or not issues or deadline - asyncio.get_running_loop().time() < _DETAIL_REPAIR_MIN_S:
+                    break
+                feedback = bounded_issues(issues, limit=8, length=220) + [
+                    "只修复被拒段落，保留通过段落逐字不变；按相同顺序和段落数返回全文。上一稿：\n" + text]
+    except Exception as exc:
+        logger.info("[offline] paragraph detail repair unavailable (%s)", type(exc).__name__)
+    finally:
+        metadata["copy_kept_sections"] = sorted(accepted)
+        metadata["copy_dropped_sections"] = [i for i in range(len(original)) if i not in accepted]
+    kept = retained_text(accepted)
+    if kept:
+        # Reliable practical information is assembled from code-normalised facts.
+        return plain_text(kept + "\n\n🧭 出门小提示\n" + public_hours(card, now)), "verified_partial", bounded_issues(issues)
+    return None, status, bounded_issues(issues)
+
+
+async def _verified_detail_legacy(
+    card: dict[str, Any], detail_context: dict[str, Any], facts: dict[str, Any], now: datetime,
+) -> tuple[str | None, str, list[str]]:
+    """Compatibility while a previous Web writer/reviewer is still enabled."""
     status, issues, feedback, rejected = "fallback_unavailable", [], [], []
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _DETAIL_STAGE_BUDGET_S
@@ -1296,14 +1388,15 @@ async def _apply_reviewed_copy(
         _verified_card_copy(card, proposal, facts, references, now, missing_status=missing_status),
         _verified_detail(card, dict(detail_context), facts, now),
     )
-    card["description"] = detail or fallback_detail(card)
+    card["description"] = detail or fallback_detail(card, now=now)
     private = [r["text"] for r in references]
     card.setdefault("discovery_metadata", {}).update(
         card_copy_status=card_status,
         card_copy_issues=(mask_quotes(bounded_issues(card_issues), private)
                           if card_status.startswith("fallback") or card_status == "verified_partial" else []),
         copy_status=detail_status,
-        copy_issues=bounded_issues(detail_issues) if detail_status.startswith("fallback") else [],
+        copy_issues=bounded_issues(detail_issues) if detail_status.startswith("fallback") or detail_status == "verified_partial" else [],
+        visit_timing=assess_opening_hours(card, now),
     )
 
 
@@ -1314,7 +1407,7 @@ async def _recommendation_copy(
     try:
         prompt = (await get_prompt_text("offline.activity_recommendation_copy")).format(
             activity_name=filled(card.get("title"), empty="这次外出"),
-            date_time=_date_time_text(card),
+            date_time=_date_time_text(card, now),
             location=filled(
                 " ".join(
                     part
@@ -1332,7 +1425,7 @@ async def _recommendation_copy(
             activity_summary=filled(card.get("summary"), empty="（无）"),
             recommendation_blurb=filled(card.get("summary"), empty="（无）"),
             today=today_text(now or local_now()),
-            date_relation=date_relation(card, now or local_now()),
+            date_relation=date_relation(card, now or local_now()) + "；" + visit_context(card, now or local_now()),
             revision_feedback=json.dumps(feedback or [], ensure_ascii=False),
         )
         async with asyncio.timeout(_DETAIL_DRAFT_BUDGET_S):

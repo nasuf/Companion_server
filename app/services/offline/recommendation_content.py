@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from app.services.offline.content import plain_text
 from app.services.offline.event_schedule import schedule_label
@@ -30,7 +31,7 @@ def fallback_summary(card: dict) -> str:
     return f"想换条路线走走，可以把{name}作为这次出门的一站。"
 
 
-def fallback_detail(card: dict) -> str:
+def fallback_detail(card: dict, *, now: datetime | None = None) -> str:
     """Never infer facilities, admission, access or historical facts from a name."""
     name = plain_text(card.get("location_name"))
     address = plain_text(card.get("address"))
@@ -92,7 +93,9 @@ def fallback_detail(card: dict) -> str:
     if label:
         practical.append("本场时间：" + label)
     elif metadata.get("opening_hours"):
-        practical.append("营业信息：" + plain_text(metadata["opening_hours"]))
+        from app.services.offline.copy_guards import local_now
+        from app.services.offline.opening_hours import public_hours
+        practical.append(public_hours(card, now or local_now()))
     price = str(metadata.get("price_info") or "").strip()
     if metadata.get("kind") != "event" and re.fullmatch(r"\d+(?:\.\d+)?", price):
         practical.append(f"人均消费参考：约{price}元，具体项目价格以店内为准")
