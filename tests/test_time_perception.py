@@ -1,6 +1,6 @@
 """Phase B 时间感知回归测试.
 
-B1: 历史消息注入绝对时间前缀 [MM-DD HH:MM] (UTC+8, cache 友好)
+B1: 历史消息注入绝对时间前缀 [YYYY-MM-DD HH:MM] (UTC+8, cache 友好)
 B2: 重逢感知段 — ≥30min 间隔按三档注入分级叙事
 B3: ≥3h 间隔清空话题栈, 防旧话题拖过长间隔
 """
@@ -32,14 +32,14 @@ PB = "app.services.chat.prompt_builder"
 class TestFormatMessageTimestamp:
     def test_utc_iso_converts_to_utc8(self):
         # UTC 03:05 = 北京时间 11:05
-        assert format_message_timestamp("2026-07-03T03:05:00+00:00") == "[07-03 11:05] "
+        assert format_message_timestamp("2026-07-03T03:05:00+00:00") == "[2026-07-03 11:05] "
 
     def test_naive_datetime_treated_as_utc(self):
-        assert format_message_timestamp("2026-07-03T03:05:00") == "[07-03 11:05] "
+        assert format_message_timestamp("2026-07-03T03:05:00") == "[2026-07-03 11:05] "
 
     def test_datetime_object_accepted(self):
         dt = datetime(2026, 7, 3, 3, 5, tzinfo=timezone.utc)
-        assert format_message_timestamp(dt) == "[07-03 11:05] "
+        assert format_message_timestamp(dt) == "[2026-07-03 11:05] "
 
     def test_none_and_invalid_return_empty(self):
         assert format_message_timestamp(None) == ""
@@ -65,8 +65,8 @@ class TestBuildChatMessagesTimestamps:
         ]
         out = build_chat_messages("SYS", msgs)
         assert out[0] == {"role": "system", "content": "SYS"}
-        assert out[1]["content"] == "[07-03 08:00] 早上好"
-        assert out[2]["content"] == "[07-03 08:00] 早呀"
+        assert out[1]["content"] == "[2026-07-03 08:00] 早上好"
+        assert out[2]["content"] == "[2026-07-03 08:00] 早呀"
 
     def test_message_without_created_at_has_no_prefix(self):
         out = build_chat_messages("SYS", [{"role": "user", "content": "hi"}])

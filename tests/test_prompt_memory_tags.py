@@ -59,9 +59,10 @@ async def test_memory_section_adds_lightweight_importance_tags():
 
     assert section is not None
     section_text = _body(section)
-    assert "(重要 · 多次提及 · 近期提到 · 和当前话题高度相关) 用户表达过强烈负面情绪" in section_text
+    assert "(重要 · 多次提及 · 和当前话题高度相关) 用户表达过强烈负面情绪" in section_text
     assert "不要复述分组标签或括号标记" in section_text
     assert "AI 喜欢手作" in section_text
+    assert "近期提到" not in section_text
 
 
 @pytest.mark.asyncio

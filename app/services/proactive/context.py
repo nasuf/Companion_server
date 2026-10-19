@@ -53,6 +53,7 @@ async def build_proactive_context(
     topic_theme: str | None = None,
     conversation_id: str | None = None,
 ) -> dict[str, Any]:
+    temporal = {}
     # 9 个独立 I/O 并发 (DB / Redis / LLM rerank). _load_proactive_memories
     # 含 utility LLM 调用是最长尾, 跟其余 DB 读并行可让 LLM 时间被吸收.
     (
@@ -72,7 +73,7 @@ async def build_proactive_context(
         ),
         get_topic_intimacy(agent_id, user_id),
         get_latest_portrait(user_id, agent_id),
-        _load_recent_context(workspace_id),
+        _load_recent_context(workspace_id, temporal=temporal),
         # AI 上一轮的残留情绪 (30min 半衰期衰减后). 主动消息的 current_mood 靠它 —
         # 没有它 ctx 里永远没 "emotion" 键, emotion_to_tone(None) 恒为中性语气.
         load_ai_mood(conversation_id),
@@ -121,13 +122,15 @@ async def build_proactive_context(
         "topic_theme": topic_theme or "",
         "user_portrait": user_portrait or "",
         "recent_context": recent_context,
+        "_followup_policy": temporal.get("policy"),
+        "temporal_context": temporal.get("temporal_context"),
         # 2026-09-14 task#12: _generate_message 用它做 anti-repetition (查 Redis
         # 里 workspace 最近 24h 的主动消息, 一模一样 or 高度相似的就重生成一次)
         "workspace_id": workspace_id,
     }
 
 
-async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LIMIT) -> str:
+async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LIMIT, *, temporal: dict | None = None) -> str:
     """Spec §4.1 step 4 汇总参考信息里的"近期对话上下文"。
 
     取工作空间有界消息窗口，保留最多十轮对话并标注时间戳。
@@ -135,7 +138,7 @@ async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LI
     try:
         rows = await db.query_raw(
             """
-            SELECT m.role, m.content, m.created_at
+            SELECT m.role, m.content, m.created_at, m.metadata
             FROM messages m
             JOIN conversations c ON c.id = m.conversation_id
             WHERE c.workspace_id = $1
@@ -150,7 +153,15 @@ async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LI
         return ""
     if not rows:
         return ""
-    return format_recent_turns(list(reversed(rows)))
+    from app.services.chat.temporal_context import dated_dialogue, prepare_reply_time
+    messages = [{"role": r["role"], "content": r["content"], "createdAt": r.get("created_at"),
+                 "metadata": r.get("metadata")} for r in reversed(rows)]
+    result = temporal if temporal is not None else {}
+    _, policy, instructions = await prepare_reply_time(
+        messages, exclude_ids=set(), current_message="", diagnostics=result, now=datetime.now(UTC),
+    )
+    result["policy"] = policy
+    return instructions + "\n" + dated_dialogue(messages, max_chars=3000)
 
 
 async def _rerank_memories_by_topic(
@@ -273,7 +284,9 @@ async def _load_proactive_memories(
         # 用户记忆带上"几天前聊到" —— 真人想起朋友说过的事会带时间感;
         # AI 人设记忆是建号时生成的, 没有"聊到"的时间, 不标。
         hint = _user_memory_time_hint(row, now) if owner == "user" else ""
-        texts.append(f"{label}{hint} {text}")
+        from app.services.memory.retrieval.context_selector import format_memory_record
+        timed_text = format_memory_record(row)
+        texts.append(f"{label}{hint} {timed_text}")
         ids.append(row.id)
     return texts[:6], ids[:6]
 

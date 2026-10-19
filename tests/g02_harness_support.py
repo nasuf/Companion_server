@@ -33,6 +33,8 @@ def configure_pair(patches):
     # Paired executors must not render different current-message timestamps if
     # their sequential runs happen to straddle a wall-clock minute boundary.
     patches.setattr(chat, "datetime", FixedClock)
+    from app.services.chat import temporal_context
+    patches.setattr(temporal_context, "datetime", FixedClock)
     from app.services.chat import intent_handlers, multi_intent
     # Handlers have their own imported DB/time aliases. Keep real handler and
     # model logic, but resolve current activity and repeat history synthetically.

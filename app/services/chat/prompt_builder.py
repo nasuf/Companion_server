@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 
 from app.services.chat.message_utils import _parse_message_created_at
-from app.services.memory.retrieval.context_selector import ClassifiedMemory
+from app.services.memory.retrieval.context_selector import ClassifiedMemory, format_memory_time
 from app.services.prompting.store import (
     PromptDisabledError,
     get_prompt_text,
@@ -352,35 +352,19 @@ async def _build_memory_section(
             return None
         return _PromptBody(str(anchor), "chat.memory_empty_anchor")
 
-    def _days_since(value: Any) -> int | None:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            try:
-                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                return None
-        if isinstance(value, datetime) and value.tzinfo:
-            return (datetime.now(timezone.utc) - value).days
-        if isinstance(value, datetime):
-            return (datetime.now() - value).days
-        return None
-
     def _format_memory(m: ClassifiedMemory) -> str:
         tags: list[str] = []
         if m.importance >= 0.85:
             tags.append("重要")
         if m.mention_count >= 3:
             tags.append("多次提及")
-        days = _days_since(m.last_accessed_at or m.created_at)
-        if days is not None and days < 30:
-            tags.append("近期提到")
         score = m.display_score or m.score
         if score >= 0.75:
             tags.append("和当前话题高度相关")
+        text = format_memory_time(m)
         if not tags:
-            return m.text
-        return f"({' · '.join(tags)}) {m.text}"
+            return text
+        return f"({' · '.join(tags)}) {text}"
 
     user_memory_items = [
         (m, _format_memory(m)) for m in memories if m.source != "ai"
@@ -683,6 +667,8 @@ async def build_system_prompt(
     reply_total: int = _MAX_TOTAL_CHARS,
     intimacy_stage: str | None = None,
     time_context: str | None = None,
+    temporal_instructions: str = "",
+    temporal_evidence: str = "",
     time_memories: list[str] | None = None,
     # 聚合类时间问题的事件时间线 (hybrid_retrieve 命中聚合特征时才产出)
     timeline: str | None = None,
@@ -921,6 +907,15 @@ async def build_system_prompt(
         _record_skipped_section(diagnostics, "时间")
 
     # ── 以下为轮级快变段 ──────────────────────────────────────────────
+
+    if temporal_instructions:
+        _append_section(sections, components, "回合时间与追问边界", temporal_instructions,
+                        prompt_key="chat.temporal_context")
+
+    if temporal_evidence:
+        _append_section(sections, components, "事件日期证据", temporal_evidence,
+                        prompt_key="chat.temporal_evidence")
+
 
     # W4 AI 情绪连续性: 上一轮情绪衰减后的"当下心情", 驱动语气/话量
     mood_section = await _build_ai_mood_section(ai_mood_text)
@@ -1202,9 +1197,13 @@ def compute_reengagement_gap_seconds(
     _CURRENT_TURN_GRACE_S 兜底排除刚落库的合成消息），间隔 = now − 它的
     createdAt。用户隔几小时回来时，这个间隔驱动「重逢感知」段注入。
     """
+    from app.services.chat.temporal_context import is_proactive
+
     exclude = exclude_ids or set()
     now = now or datetime.now(timezone.utc)
     for msg in reversed(messages):
+        if is_proactive(msg) or msg.get("synthetic_current"):
+            continue
         mid = msg.get("id")
         if mid and mid in exclude:
             continue
@@ -1298,7 +1297,7 @@ async def _build_session_recap_section(
 
 
 def format_message_timestamp(created_at: str | datetime | None) -> str:
-    """历史消息的时间前缀 `[MM-DD HH:MM] `（UTC+8，与 time_context 同基准）。
+    """历史消息的时间前缀 `[YYYY-MM-DD HH:MM] `（UTC+8，与 time_context 同基准）。
 
     用绝对时间而非 MaiBot 式相对时间（"5分钟前"）：相对时间每轮请求都变，
     会把 system prompt 之后整段历史的 prompt cache 打穿；绝对时间 append-only
@@ -1317,7 +1316,7 @@ def format_message_timestamp(created_at: str | datetime | None) -> str:
         )
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return f"[{dt.astimezone(_MSG_TZ).strftime('%m-%d %H:%M')}] "
+        return f"[{dt.astimezone(_MSG_TZ).strftime('%Y-%m-%d %H:%M')}] "
     except Exception:
         return ""
 
@@ -1414,7 +1413,7 @@ def build_chat_messages(
     - Short exchanges (嗯/好/哈哈) → more rounds of context.
     - Long messages (深度倾诉) → fewer rounds but full content.
 
-    每条带 createdAt 的历史消息前缀 `[MM-DD HH:MM]`，让 LLM 感知对话时间轴
+    每条带 createdAt 的历史消息前缀 `[YYYY-MM-DD HH:MM]`，让 LLM 感知对话时间轴
     （时区/缓存权衡见 format_message_timestamp docstring）。
 
     同一次回复被拆成的多个气泡先合并成一条再计预算（见 `_coalesce_bubbles`）。
@@ -1447,8 +1446,8 @@ def build_chat_messages(
     """
     from app.services.memory.retrieval.context_selector import estimate_tokens
 
-    coalesced = _coalesce_bubbles(messages)
-    if drop_older_than_seconds is not None and coalesced:
+    window = messages
+    if drop_older_than_seconds is not None and window:
         # cutoff = 最新那条 (通常是当前 user 消息) 的 createdAt 往回 threshold.
         # 用 max(createdAt) 而不是 datetime.now() —— eval 有固定时间轴, 生产也
         # 保持相对时间语义 (从 turn 起算, 不从 wall clock 起算), 两边行为一致.
@@ -1459,16 +1458,17 @@ def build_chat_messages(
         # (single emoji) after a ≥3h gap. Parse before comparing.
         timed = [
             (m, _parse_message_created_at(m.get("createdAt")))
-            for m in coalesced
+            for m in window
         ]
         latest_ts = max((ts for _, ts in timed if ts is not None), default=None)
         if latest_ts is not None:
             cutoff = latest_ts - timedelta(seconds=drop_older_than_seconds)
-            coalesced = [
+            window = [
                 m for m, ts in timed
                 if ts is None or ts >= cutoff or ts == latest_ts
             ]
 
+    coalesced = _coalesce_bubbles(window)
     rendered = [
         f"{format_message_timestamp(msg.get('createdAt'))}{msg.get('content', '')}"
         for msg in coalesced

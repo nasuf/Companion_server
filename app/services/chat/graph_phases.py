@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from app.services.chat.memory_usage import submit_memory_usage
 from app.services.chat.repetition_guard import find_repeated_ai_phrases
+from app.services.chat.temporal_context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
+from app.services.chat.followup_policy import guard_optional_questions
 
 
 async def load_turn(ctx):
@@ -53,8 +55,9 @@ async def load_turn(ctx):
         ctx.current_turn_ids
     )
     ctx.covered_until_user_ts = services._max_user_created_at(ctx.messages_dicts)
+    ctx.turn_clock = build_turn_clock(ctx.messages_dicts, exclude_ids=ctx.current_turn_ids)
     ctx.reengagement_gap_seconds = services.compute_reengagement_gap_seconds(
-        ctx.messages_dicts, exclude_ids=ctx.current_turn_ids
+        ctx.messages_dicts, exclude_ids=ctx.current_turn_ids, now=ctx.turn_clock.now
     )
     ctx.session_recap_task: services.asyncio.Task | None = None
     ctx.previous_assistant = None
@@ -229,6 +232,11 @@ async def prepare_reads(ctx):
         if ctx.crisis_decision.crisis_care_turn
         else None,
     }
+    ctx.turn_clock, ctx.followup_policy, ctx.temporal_instructions = await prepare_reply_time(
+        ctx.messages_dicts, exclude_ids=ctx.current_turn_ids,
+        current_message=ctx.user_message, diagnostics=ctx.response_diagnostics,
+        now=ctx.turn_clock.now,
+    )
     ctx.fetch_task: services.asyncio.Task | None = None
     ctx.crisis_memory_task: services.asyncio.Task | None = None
     ctx.crisis_portrait_task: services.asyncio.Task | None = None
@@ -429,7 +437,10 @@ async def prepare_routes(ctx):
         sub_intent_mode=ctx.sub_intent_mode,
         reply_index_offset=ctx.reply_index_offset,
         cached_patience=ctx.cached_patience,
-        recent_context=ctx.recent_context_text,
+        recent_context=(ctx.recent_context_text if ctx.crisis_care_turn else
+                        ctx.temporal_instructions + "\n" + dated_active_dialogue(
+                            ctx.messages_dicts, now=ctx.turn_clock.now, exclude_ids=ctx.current_turn_ids)),
+        followup_policy=ctx.followup_policy,
         response_diagnostics=ctx.response_diagnostics,
         covered_until_user_ts=ctx.covered_until_user_ts,
         achievement_turn_final=ctx.achievement_turn_final,
@@ -631,7 +642,11 @@ async def prepare_context(ctx):
             exclude_message_ids=ctx.current_turn_ids,
         )
     ctx.memory_relevance = ctx.fetched.memory_relevance
-    ctx.classified_memories = ctx.fetched.classified_memories
+    ctx.classified_memories = ctx.fetched.classified_memories if ctx.crisis_care_turn else scope_event_memories(
+        ctx.fetched.classified_memories, ctx.user_message,
+        now=ctx.turn_clock.now, diagnostics=ctx.response_diagnostics,
+    )
+    ctx.temporal_evidence = await render_event_scope(ctx.response_diagnostics)
     ctx.prompt_user_emotion = ctx.fetched.user_emotion
     ctx.portrait = ctx.fetched.portrait
     ctx.schedule = ctx.fetched.schedule
@@ -900,6 +915,8 @@ async def prepare_reply(ctx):
             reply_total=ctx.max_total,
             intimacy_stage=ctx.intimacy_stage,
             time_context=ctx.time_context,
+            temporal_instructions=ctx.temporal_instructions,
+            temporal_evidence=ctx.temporal_evidence,
             time_memories=ctx.time_memories or None,
             timeline=getattr(ctx.fetched, "timeline", None),
             l3_memories=ctx.l3_memories or None,
@@ -1035,6 +1052,8 @@ async def generate_reply(ctx):
         pipe_fallback_fn=services.split_and_validate_replies,
         reply_emotion_fn=services._ai_reply_emotion,
         reengagement_gap_seconds=ctx.reengagement_gap_seconds,
+        temporal_instructions=ctx.temporal_instructions,
+        temporal_evidence=ctx.temporal_evidence,
         force_main_prompt=bool(ctx.offering_context) or bool(ctx.continuation_lines),
         diagnostics=ctx.response_diagnostics,
     )
@@ -1053,6 +1072,25 @@ async def normalize_reply(ctx):
         ctx.full_response = guarded
         ctx.reply_emotion_pre = None
         ctx.response_diagnostics["persona_location_corrected"] = True
+    if not ctx.crisis_care_turn and not ctx.reply_is_fallback and not ctx.contradiction_inquiry:
+        from app.services.chat.temporal_guard import guard_temporal_reply
+        from app.services.memory.retrieval.context_selector import format_memory_time
+        temporal_checked = await guard_temporal_reply(
+            " ".join(ctx.replies), question=ctx.user_message,
+            evidence="\n".join([
+                dated_dialogue(ctx.messages_dicts, max_chars=3000),
+                *[format_memory_time(m) for m in (ctx.classified_memories or [])],
+                *(ctx.time_memories or []), *(ctx.l3_memories or []),
+            ]), diagnostics=ctx.response_diagnostics,
+        )
+        if temporal_checked != " ".join(ctx.replies):
+            ctx.replies = [temporal_checked]
+            ctx.reply_emotion_pre = None
+    if (ctx.followup_policy is not None and not ctx.crisis_care_turn
+            and not ctx.reply_is_fallback and not ctx.contradiction_inquiry):
+        ctx.replies, suppressed = guard_optional_questions(ctx.replies, ctx.followup_policy)
+        ctx.response_diagnostics["temporal_context"]["suppressed_question_count"] = suppressed
+    ctx.full_response = " ".join(ctx.replies)
     if ctx.reply_emotion_pre is not None:
         reply_emotion = ctx.reply_emotion_pre
     else:

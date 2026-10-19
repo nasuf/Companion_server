@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import logging
 
+from app.services.chat.temporal_context import dated_dialogue
+from app.services.temporal import local_clock, parse_time
+
 from app.observability.events import EVT_SESSION_RECAP
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_text
@@ -33,7 +36,7 @@ logger = logging.getLogger(__name__)
 # 话题栈都清了, 说明"上一段对话"已成为过去 — 正是需要摘要接续的时刻.
 RECAP_GAP_SECONDS = 3 * 3600
 
-_RECAP_KEY = "recap:{conversation_id}:{anchor_message_id}"
+_RECAP_KEY = "recap:v2-dated:{conversation_id}:{anchor_message_id}"
 _RECAP_TTL_S = 7 * 86400
 _RECAP_SOURCE_MESSAGES = 15   # 摘要输入: 间隔前最近 N 条
 _RECAP_MAX_LEN = 80           # 摘要长度硬上限 (LLM 超出则截断)
@@ -97,13 +100,10 @@ async def get_or_build_session_recap(
 
 async def _summarize(messages: list[dict]) -> str | None:
     """小模型生成 1-2 句对话摘要。失败返回 None。"""
-    lines = [
-        f"{'用户' if m.get('role') == 'user' else '你'}: {str(m.get('content', ''))[:120]}"
-        for m in messages
-    ]
+    dialogue = dated_dialogue(messages, max_chars=2400)
     try:
         tpl = await get_prompt_text("chat.session_recap")
-        prompt = safe_format(tpl, {"conversation": "\n".join(lines)})
+        prompt = safe_format(tpl, {"conversation": dialogue})
         raw = await invoke_text(get_utility_model(), prompt)
     except Exception as e:
         logger.warning(f"session recap generation failed: {e}")
@@ -111,4 +111,8 @@ async def _summarize(messages: list[dict]) -> str | None:
     recap = (raw or "").strip().strip("「」\"'")
     if not recap or len(recap) < 4:
         return None
-    return recap[:_RECAP_MAX_LEN]
+    times = [parse_time(m.get("createdAt")) for m in messages]
+    known = [t for t in times if t is not None]
+    period = (f"{local_clock(min(known))} 至 {local_clock(max(known))}"
+              if known else "时间未知")
+    return f"[历史对话 {period}] {recap[:_RECAP_MAX_LEN]}"

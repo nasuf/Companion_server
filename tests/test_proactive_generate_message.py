@@ -164,3 +164,23 @@ class TestAntiRepetitionShipsRetry:
                     result = await sender_mod._generate_message(ctx)
         assert result == "正常主动消息内容"
         assert invoke.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed,text,expected,reason", [
+    (False, "你这会儿在忙啥呀", None, "user_opted_out_of_questions"),
+    (False, "刚看到一朵好看的云，你这会儿在忙啥呀", "刚看到一朵好看的云", None),
+    (True, "你今天工作忙完了吗", None, "repeated_conversation_question"),
+    (True, "刚看到一朵好看的云", "刚看到一朵好看的云", None),
+])
+async def test_optional_questions_honor_conversation_policy(allowed, text, expected, reason):
+    from app.services.chat.followup_policy import FollowupPolicy
+    ctx = _build_ctx(_admin_test=True, temporal_context={},
+        _followup_policy=FollowupPolicy(allowed, recent_questions=("你今天工作忙完了吗？",)))
+    with (
+        patch.object(sender_mod, "get_prompt_text", AsyncMock(return_value="fake tpl {personality_brief}")),
+        patch.object(sender_mod, "invoke_text", AsyncMock(return_value=text)),
+        patch("app.services.persona_grounding.guard_reply", AsyncMock(return_value=(text, False))),
+    ):
+        assert await sender_mod._generate_message(ctx) == expected
+    assert ctx.get("_skip_reason_detail") == reason

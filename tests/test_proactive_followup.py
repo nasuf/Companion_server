@@ -40,8 +40,8 @@ def _state(reason: str = ARM_REASON_REPLY):
 
 def _turns(*, last_role: str = "assistant", last_proactive: bool = False) -> list:
     return [
-        Turn(id="u-0", role="user", text="我周末想出去玩", proactive=False),
-        Turn(id="ai-1", role=last_role, text="好呀，你想去哪儿？", proactive=last_proactive),
+        Turn(id="u-0", role="user", text="我周末想出去玩", proactive=False, created_at=NOW - timedelta(minutes=8)),
+        Turn(id="ai-1", role=last_role, text="好呀，你想去哪儿？", proactive=last_proactive, created_at=NOW - timedelta(minutes=6)),
     ]
 
 
@@ -166,6 +166,10 @@ async def test_night_followup_allowed_when_active_hours_not_enforced(harness, mo
     monkeypatch.setattr(gates, "_patience_is_normal", AsyncMock(return_value=True))
     monkeypatch.setattr(gates, "_reminder_due_soon", AsyncMock(return_value=False))
     night = datetime(2026, 9, 29, 15, 30, tzinfo=UTC)  # 北京时间 23:30
+    monkeypatch.setattr(followup, "_load_recent_turns", AsyncMock(return_value=[
+        Turn("u-night", "user", "晚上想聊聊", False, night - timedelta(minutes=8)),
+        Turn("a-night", "assistant", "好呀，想聊什么？", False, night - timedelta(minutes=6)),
+    ]))
     assert not gates.is_in_active_hours(night)
     await followup.process_followup_window(_state(), now=night)
     harness.emit.assert_awaited_once()
@@ -227,9 +231,9 @@ async def test_followup_not_sent_when_budget_cannot_be_recorded(harness):
 async def test_last_reply_itself_can_forbid_followup(harness, monkeypatch, metadata):
     """兜底: 即使 arm 原因过期, 最后一条是边界 / 危机 / 系统确认回复就不追问."""
     turns = [
-        Turn(id="u-0", role="user", text="……", proactive=False),
+        Turn(id="u-0", role="user", text="……", proactive=False, created_at=NOW - timedelta(minutes=8)),
         Turn(id="ai-1", role="assistant", text="你现在安全吗？", proactive=False,
-             no_followup=followup._blocks_followup(metadata)),
+             no_followup=followup._blocks_followup(metadata), created_at=NOW - timedelta(minutes=6)),
     ]
     monkeypatch.setattr(followup, "_load_recent_turns", AsyncMock(return_value=turns))
     await followup.process_followup_window(_state(), now=NOW)
@@ -399,7 +403,9 @@ async def test_generation_feeds_spec_inputs_and_keeps_all_segments(monkeypatch):
             return_value=SimpleNamespace(mbti=None, currentMbti=None),
         ))),
     )
-    text = await followup.generate_followup_message(_state(), _stamped_turns(), NOW)
+    monkeypatch.setattr(followup, "render_temporal_context", AsyncMock(return_value="时间规则"))
+    text = await followup.generate_followup_message(
+        _state(), _stamped_turns(), datetime(2026, 9, 29, 4, 0, tzinfo=UTC))
     assert text == "诶我先说，我肯定选火锅"
     assert render.await_args.kwargs["strip_split"] is False
     key, params = render.await_args.args[:2]
@@ -408,7 +414,8 @@ async def test_generation_feeds_spec_inputs_and_keeps_all_segments(monkeypatch):
         "conversation", "ai_last_time", "current_time", "time_scene", "personality_brief",
     }
     assert params["ai_last_time"].endswith("11:55")
-    assert "晚上" in params["time_scene"]  # 20:00 UTC+8
+    assert params["current_time"].endswith("12:00")
+    assert "2026-09-29 11:55" in params["conversation"]
 
 
 async def test_load_recent_turns_drops_noise_and_keeps_order(monkeypatch):

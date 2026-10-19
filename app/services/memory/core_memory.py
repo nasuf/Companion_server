@@ -7,6 +7,7 @@ facts (hard constraints the LLM must never contradict) from other memories
 
 from __future__ import annotations
 
+from app.services.memory.retrieval.context_selector import format_memory_record
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.taxonomy import l1_category_quotas
 
@@ -45,7 +46,7 @@ async def load_core_memory_strings(
             if not text or row.id in seen:
                 continue
             seen.add(row.id)
-            results.append((category, text))
+            results.append((category, format_memory_record(row) if category in {"生活", "情绪"} else text))
 
     if results:
         return results
@@ -63,7 +64,7 @@ async def load_core_memory_strings(
         take=20,
     )
     return [
-        (getattr(row, "mainCategory", "") or "生活", row.content)
+        (getattr(row, "mainCategory", "") or "生活", format_memory_record(row))
         for row in rows
         if row.content
     ]

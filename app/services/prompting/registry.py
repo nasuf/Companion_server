@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.prompting.defaults import (
+    CHAT_TEMPORAL_CONTEXT_PROMPT,
+    CHAT_TEMPORAL_EVIDENCE_PROMPT,
+    CHAT_TEMPORAL_CHECK_PROMPT,
     PERSONA_GROUNDING_CONTEXT_PROMPT,
     PERSONA_GROUNDING_CHECK_PROMPT,
     AI_REPLY_EMOTION_PROMPT,
@@ -222,6 +225,21 @@ class PromptDefinition:
 # 工程项以 【工程补丁】/【工程附加】/【工程扩展】/【工程主导】 前缀标识, 不带 spec 引用.
 
 PROMPT_DEFINITIONS = [
+    PromptDefinition(
+        "chat.temporal_check", "回复事件时间核验", "聊天热路径", "聊天",
+        "【工程】仅在日期查询存在证据缺口时核验具体事件断言。占位符 {date}/{question}/{evidence}/{reply}。",
+        CHAT_TEMPORAL_CHECK_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.temporal_evidence", "事件日期证据约束", "聊天热路径", "聊天",
+        "【工程】显式日期查询的事件证据边界。排除不匹配事件后不得编造替代经历。占位符 {date}/{matched}/{excluded}。",
+        CHAT_TEMPORAL_EVIDENCE_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.temporal_context", "回合时间与追问边界", "聊天热路径", "聊天",
+        "【工程】区分用户离开、主动消息及事件时间；尊重近期停止追问请求。时间缺失保持未知。",
+        CHAT_TEMPORAL_CONTEXT_PROMPT,
+    ),
     PromptDefinition(
         "persona.grounding_context", "角色事实与主体归属", "聊天热路径", "聊天",
         "【工程】角色档案优先于日程、模型自述和衍生记忆；用户事实不可变成角色事实。占位符 {facts}。",

@@ -119,7 +119,7 @@ class TestBubbleTimestamps:
              "createdAt": "2026-10-13T00:10:00+00:00"},
         ]
         merged = pb._coalesce_bubbles(rows)
-        assert merged[1]["content"] == "啊我骗你的 就是不想拍啦 [10-13 08:10] 好久没聊啦，最近怎么样？"
+        assert merged[1]["content"] == "啊我骗你的 就是不想拍啦 [2026-10-13 08:10] 好久没聊啦，最近怎么样？"
 
 
 class TestRepetitionGuard:
@@ -201,3 +201,24 @@ def test_trace_matches_components_over_the_split_prompt():
     }])
     assert step["prompt_render_source"] == "chat.system_prompt"
     assert step["prompt_components"][0]["prompt_key"] == "chat.time_context_section"
+
+
+@pytest.mark.asyncio
+async def test_temporal_sections_have_separate_editable_spans_after_stable_prefix():
+    from app.services.prompting.trace_components import (
+        start_prompt_render_trace, reset_prompt_render_trace, snapshot_prompt_render_traces,
+    )
+    token = start_prompt_render_trace()
+    try:
+        prompt = await _system_prompt(temporal_instructions="当前时间：2026-10-19 19:54",
+                                      temporal_evidence="今天没有该事件的来源证据")
+        lead, turn = pb.split_system_prompt(prompt)
+        assert "2026-10-19" not in lead
+        assert "当前时间：2026-10-19 19:54" in turn
+        components = [c for t in snapshot_prompt_render_traces() for c in t.get("components", [])]
+        selected = {c["prompt_key"]: str(prompt)[c["start"]:c["end"]]
+                    for c in components if c["prompt_key"] in {"chat.temporal_context", "chat.temporal_evidence"}}
+        assert selected == {"chat.temporal_context": "当前时间：2026-10-19 19:54",
+                            "chat.temporal_evidence": "今天没有该事件的来源证据"}
+    finally:
+        reset_prompt_render_trace(token)

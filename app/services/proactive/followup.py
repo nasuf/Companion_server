@@ -23,6 +23,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from app.services.chat.temporal_context import build_turn_clock, dated_dialogue, render_temporal_context, SESSION_SECONDS
+from app.services.chat.followup_policy import derive_followup_policy, repeats_recent_question
+from app.services.temporal import parse_time
 from app.db import db
 from app.observability.events import (
     EVT_PROACTIVE_FOLLOWUP_SENT,
@@ -136,6 +139,18 @@ async def _load_recent_turns(conversation_id: str) -> list[_Turn]:
     return last_user_turns(turns, _CONTEXT_USER_TURNS, lambda t: t.role)
 
 
+def _turn_messages(turns: list[_Turn]) -> list[dict]:
+    return [{"id": t.id, "role": t.role, "content": t.text,
+             "createdAt": t.created_at, "metadata": {"proactive": t.proactive}}
+            for t in turns]
+
+
+def _current_session(turns: list[_Turn], now: datetime) -> list[_Turn]:
+    reference = parse_time(now)
+    return [t for t in turns if (ts := parse_time(t.created_at)) is not None
+            and 0 <= (reference - ts).total_seconds() <= SESSION_SECONDS]
+
+
 def format_turns(turns: list[_Turn]) -> str:
     return render_dialogue((t.role, t.text, t.created_at) for t in turns)
 
@@ -202,9 +217,26 @@ async def generate_followup_message(
     state: ProactiveStateRecord,
     turns: list[_Turn],
     now: datetime,
+    *, diagnostics: dict | None = None,
 ) -> str | None:
     from app.services.mbti import build_personality_brief
 
+    turns = _current_session(turns, now)
+    if not turns:
+        return None
+    messages = _turn_messages(turns)
+    policy = derive_followup_policy(messages, now=now)
+    if not policy.optional_questions_allowed:
+        return None
+    clock = build_turn_clock(messages, now=now)
+    temporal = await render_temporal_context(clock, policy.prompt_value())
+    if diagnostics is not None:
+        diagnostics["temporal_context"] = {
+            **clock.diagnostics(), **policy.diagnostics(),
+            "prompt_status": "enabled" if temporal else "disabled",
+            "suppressed_question_count": 0, "out_of_window_event_count": 0,
+            "event_check_status": "not_requested",
+        }
     agent = await db.aiagent.find_unique(where={"id": state.agent_id})
     if not agent:
         return None
@@ -213,7 +245,7 @@ async def generate_followup_message(
             render_prompt(
                 "proactive.followup_unfinished",
                 {
-                    "conversation": format_turns(turns),
+                    "conversation": temporal + "\n" + dated_dialogue(messages, max_chars=5000),
                     "ai_last_time": _last_time(turns, "assistant"),
                     "current_time": format_clock(now),
                     "time_scene": describe_time_scene(now),
@@ -227,7 +259,11 @@ async def generate_followup_message(
     except asyncio.TimeoutError:
         logger.info("[FOLLOWUP] generation timed out")
         return None
-    return _clean_followup(raw)
+    message = _clean_followup(raw)
+    if message and repeats_recent_question(message, policy):
+        await _log(state, "followup_skipped", {"reason": "repeated_question"})
+        return None
+    return message
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -263,7 +299,8 @@ async def _send_followup(
     trace_id: str | None,
 ) -> str | None:
     """生成并发送; 返回 assistant message id, 没发出去返回 None."""
-    message = await generate_followup_message(state, turns, now)
+    diagnostic = {"version": 1, "reply_path": "proactive_followup"}
+    message = await generate_followup_message(state, turns, now, diagnostics=diagnostic)
     if not message:
         return None
     conversation_id = str(state.conversation_id)
@@ -276,7 +313,7 @@ async def _send_followup(
         workspace_id=state.workspace_id,
         message=message,
         trigger_type=FOLLOWUP_TRIGGER_TYPE,
-        extra_metadata={"followup_reason": verdict.reason},
+        extra_metadata={"followup_reason": verdict.reason, "response_diagnostics": diagnostic},
         trace_id=trace_id,
         # 生成期间用户回来了 → 不插入 (spec 任务互斥: 优先响应用户)
         abort_if_user_replied_since=now,
@@ -349,6 +386,11 @@ async def _judge_and_maybe_follow_up(
 ) -> None:
     conversation_id = state.conversation_id
     turns = await _load_recent_turns(conversation_id) if conversation_id else []
+    turns = _current_session(turns, now)
+    policy = derive_followup_policy(_turn_messages(turns), now=now)
+    if not policy.optional_questions_allowed:
+        await _enter_a_mode(state, now, "user_opted_out")
+        return
     last = turns[-1] if turns else None
     if last is None or last.role != "assistant" or last.proactive:
         await _enter_a_mode(state, now, "not_awaiting_user")

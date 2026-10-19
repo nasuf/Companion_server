@@ -378,7 +378,8 @@ async def _load_time_memories(
             content = r.get("content", "")
             if content and content not in seen:
                 seen.add(content)
-                results.append(content)
+                from app.services.memory.retrieval.context_selector import format_memory_row
+                results.append(format_memory_row(r))
                 selected_rows.append(r)
     selected = results[:10]
     record_retrieval_session(
@@ -542,7 +543,8 @@ async def maybe_awaken_l3(
     # 没有 trigger query 时再退回通用 enhanced_query / 原消息。
     search_query = trigger_query or enhanced_query or user_message
     l3_results = await search_l3_memories(search_query, user_id, workspace_id=workspace_id)
-    l3_memories = [r.get("content", "") for r in l3_results if r]
+    from app.services.memory.retrieval.context_selector import format_memory_row
+    l3_memories = [format_memory_row(r) for r in l3_results if r]
     record_retrieval_session(
         strategy="l3_awaken",
         query=search_query,

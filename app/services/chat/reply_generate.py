@@ -249,6 +249,8 @@ async def generate_reply(
     reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
     reengagement_gap_seconds: float | None = None,
     force_main_prompt: bool = False,
+    temporal_instructions: str = "",
+    temporal_evidence: str = "",
     user_id: str | None = None,
     workspace_id: str | None = None,
     needs_web_search: bool = False,
@@ -326,6 +328,8 @@ async def generate_reply(
         base_params = {
             "message": user_message,
             "context": context_text,
+            "temporal_instructions": temporal_instructions,
+            "temporal_evidence": temporal_evidence,
             "user_emotion": prompt_user_emotion,
             "user_portrait": portrait_text,
             # Phase: 让 tier reply 也享受 random 1-3 条 (跟主回复一致, 微信多条体感).

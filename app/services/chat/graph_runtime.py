@@ -103,6 +103,10 @@ class ChatFrame:
     recent_messages: list = None
     red_packet_context: dict | None = None
     reengagement_gap_seconds: float | None = None
+    turn_clock: Any = None
+    followup_policy: Any = None
+    temporal_instructions: str = ""
+    temporal_evidence: str = ""
     relational_context: Any = None
     replies: list[str] = None
     reply_count: int = None

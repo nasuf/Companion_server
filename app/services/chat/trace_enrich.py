@@ -54,6 +54,8 @@ _MAIN_PROMPT_SECTION_COMPONENTS = [
     ("## 一起听音乐", "chat.music_context_section"),
     ("## 当前线下活动", "chat.offline_activity_section"),
     ("## 时间\n", "chat.time_context_section"),
+    ("## 回合时间与追问边界", "chat.temporal_context"),
+    ("## 事件日期证据", "chat.temporal_evidence"),
     ("## 事件时间线", "chat.timeline_section"),
     ("## 你的隐性状态约束", "chat.ai_state_constraint"),
     ("## 联网结果使用", "chat.web_search_usage"),
@@ -75,6 +77,8 @@ _BOUNDARY_BODY_PROMPT_KEYS = {
 
 # Registry 中不作为独立 LangSmith LLM step 出现、但会作为组合 prompt 的可编辑片段出现.
 _COMPONENT_ONLY_PROMPT_KEYS = {
+    "chat.temporal_context",
+    "chat.temporal_evidence",
     "persona.grounding_context",
     "proactive.common_rules",
     "boundary.patience_instruction_blocked",
@@ -522,6 +526,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     tuple[str, str, Category, Callable[[str], str | None] | None]
 ] = [
     # Decision 类
+    ("chat.temporal_check", "事件日期依据校验", "decision", None),
     ("persona.grounding_check", "角色地点事实校验", "decision", _label_persona_grounding),
     ("memory.relevance", "记忆相关度判定", "decision", _label_passthrough),
     ("intent.unified", "统一意图识别", "decision", _label_intent_unified),

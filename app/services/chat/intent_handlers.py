@@ -138,6 +138,7 @@ class ShortCircuitCtx:
     # The graph parent owns fragment scheduling and the single turn completion.
     defer_turn_finalization: bool = False
     memory_usage_event_id: str | None = None
+    followup_policy: Any = None
 
     async def finalize(
         self,
@@ -148,6 +149,12 @@ class ShortCircuitCtx:
     ) -> AsyncGenerator[dict, None]:
         """`kind` 是该 handler 的 intent 名 (e.g. "apology_promise", "deletion_delete"),
         作为 EVT_INTENT_SHORT_CIRCUIT 的查询维度. 必填以防止 handler 漏标."""
+        if self.followup_policy is not None and kind in {"current_state", "schedule_query", "apology_promise"}:
+            from app.services.chat.followup_policy import guard_optional_questions
+            parts, suppressed = guard_optional_questions(reply.split("||"), self.followup_policy)
+            reply = "||".join(parts)
+            if self.response_diagnostics is not None:
+                self.response_diagnostics.setdefault("temporal_context", {})["suppressed_question_count"] = suppressed
         self.last_short_circuit_reply = reply
         self.last_short_circuit_kind = kind
         logger.info(

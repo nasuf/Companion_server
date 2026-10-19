@@ -40,9 +40,28 @@ class ClassifiedMemory:
     sub_category: str | None = None
     created_at: datetime | str | None = None
     last_accessed_at: datetime | str | None = None
+    occur_time: datetime | str | None = None
+    statement_time: datetime | str | None = None
     display_score: float = 0.0  # set by reranking in orchestrator
     rank_reasons: list[str] | None = None
     source: MemorySource = "user"  # 上游 vector_search 必填
+
+
+def format_memory_time(memory: ClassifiedMemory) -> str:
+    """Keep event time separate from statement/storage/access clocks."""
+    from app.services.temporal import local_clock, parse_time
+
+    if parse_time(memory.occur_time) is not None:
+        label = f"事件时间 {local_clock(memory.occur_time)}"
+    elif parse_time(memory.statement_time) is not None:
+        label = f"提及时间 {local_clock(memory.statement_time)}；事件时间未知"
+    elif parse_time(memory.created_at) is not None:
+        label = f"记录时间 {local_clock(memory.created_at)}；事件时间未知"
+    elif memory.main_category in {"生活", "情绪"}:
+        label = "事件时间未知"
+    else:
+        return memory.text
+    return f"[{label}] {memory.text}"
 
 
 def split_by_source(
@@ -52,7 +71,7 @@ def split_by_source(
     user_t: list[str] = []
     ai_t: list[str] = []
     for m in mems or []:
-        (ai_t if m.source == "ai" else user_t).append(m.text)
+        (ai_t if m.source == "ai" else user_t).append(format_memory_time(m))
     return user_t, ai_t
 
 
@@ -266,6 +285,8 @@ def _to_classified_memory(mem: dict) -> ClassifiedMemory:
         main_category=mem.get("main_category"),
         sub_category=mem.get("sub_category"),
         created_at=mem.get("created_at"),
+        occur_time=mem.get("occur_time"),
+        statement_time=mem.get("statement_time"),
         last_accessed_at=(
             mem.get("last_accessed_at")
             or mem.get("updated_at")
@@ -275,6 +296,22 @@ def _to_classified_memory(mem: dict) -> ClassifiedMemory:
         rank_reasons=list(mem.get("rank_reasons") or []),
         source=_memory_source(mem),
     )
+
+
+def format_memory_row(memory: dict) -> str:
+    return format_memory_time(_to_classified_memory(memory))
+
+
+def format_memory_record(row) -> str:
+    """ORM projection used by persistent L1 and proactive memory injection."""
+    return format_memory_row({
+        "content": row.content,
+        "main_category": getattr(row, "mainCategory", None),
+        "sub_category": getattr(row, "subCategory", None),
+        "occur_time": getattr(row, "occurTime", None),
+        "statement_time": getattr(row, "statementTime", None),
+        "created_at": getattr(row, "createdAt", None),
+    })
 
 
 def select_context(
@@ -357,6 +394,7 @@ def select_context(
             # ops/invariants.py 的 no_oversized_memories 巡检盯着。
             # 这里保持严格: 超限说明那条记忆本身有问题, 应该被修掉而不是被将就。
             return False
+        tokens = estimate_tokens(format_memory_time(_to_classified_memory(mem)))
         if used_tokens + tokens > TOTAL_MEMORY_TOKEN_BUDGET:
             return False
         if protected_reason:

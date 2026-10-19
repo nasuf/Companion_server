@@ -7,6 +7,8 @@ Background (fire-and-forget, after response):
   user emotion metadata + memory pipeline + trait/patience updates
 """
 
+from app.services.chat.temporal_context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
+from app.services.chat.followup_policy import guard_optional_questions
 import asyncio
 import functools
 import json
@@ -566,8 +568,9 @@ async def _stream_legacy_response(
         covered_until_user_ts = _max_user_created_at(messages_dicts)
         # 重逢感知 (拟人度): 当前轮距上一轮最后一条消息的间隔. ≥30min 时
         # build_system_prompt 注入分档「重逢感知」段, B3 同时用它重置话题上下文.
+        turn_clock = build_turn_clock(messages_dicts, exclude_ids=current_turn_ids)
         reengagement_gap_seconds = compute_reengagement_gap_seconds(
-            messages_dicts, exclude_ids=current_turn_ids,
+            messages_dicts, exclude_ids=current_turn_ids, now=turn_clock.now,
         )
         # W2 中期记忆: 摘要任务延后到主路径分支创建 (与 fetch_task 同处),
         # 避免 boundary/crisis/filler 短路回合白跑 LLM. 这里只声明.
@@ -749,6 +752,11 @@ async def _stream_legacy_response(
                 if crisis_decision.crisis_care_turn else None
             ),
         }
+
+        turn_clock, followup_policy, temporal_instructions = await prepare_reply_time(
+            messages_dicts, exclude_ids=current_turn_ids, current_message=user_message,
+            diagnostics=response_diagnostics, now=turn_clock.now,
+        )
 
         # P0-2: auto-intent 路径下提前 kick off fetch 与 intent 并行 (节省 600-1500ms).
         # 短路意图 (CONVERSATION_END/APOLOGY_PROMISE/DELETION) 命中时 cancel fetch_task
@@ -959,7 +967,10 @@ async def _stream_legacy_response(
             # LLM 看不到对话历史, 只能从 AI 当前作息编内容 (生产 bug 2026-05-05:
             # 用户问"你看到什么段子" → AI 编了一个跟自己当下划船活动巧合的段子,
             # 因为 prompt 里 {context} 是 "(无)").
-            recent_context=recent_context_text,
+            recent_context=(recent_context_text if crisis_care_turn else
+                            temporal_instructions + "\n" + dated_active_dialogue(
+                                messages_dicts, now=turn_clock.now, exclude_ids=current_turn_ids)),
+            followup_policy=followup_policy,
             response_diagnostics=response_diagnostics,
             covered_until_user_ts=covered_until_user_ts,
             achievement_turn_final=achievement_turn_final,
@@ -1160,7 +1171,11 @@ async def _stream_legacy_response(
                 exclude_message_ids=current_turn_ids,
             )
         memory_relevance = fetched.memory_relevance
-        classified_memories = fetched.classified_memories
+        classified_memories = fetched.classified_memories if crisis_care_turn else scope_event_memories(
+            fetched.classified_memories, user_message,
+            now=turn_clock.now, diagnostics=response_diagnostics,
+        )
+        temporal_evidence = await render_event_scope(response_diagnostics)
         prompt_user_emotion = fetched.user_emotion
         portrait = fetched.portrait
         schedule = fetched.schedule
@@ -1434,6 +1449,8 @@ async def _stream_legacy_response(
                 reply_total=max_total,
                 intimacy_stage=intimacy_stage,
                 time_context=time_context,
+                temporal_instructions=temporal_instructions,
+                temporal_evidence=temporal_evidence,
                 time_memories=time_memories or None,
                 timeline=getattr(fetched, "timeline", None),
                 l3_memories=l3_memories or None,
@@ -1575,6 +1592,8 @@ async def _stream_legacy_response(
             reply_emotion_fn=_ai_reply_emotion,
             # 时间感知收口: gap ≥3h 重逢轮禁走 tier (轻量 prompt 无重逢/摘要段)
             reengagement_gap_seconds=reengagement_gap_seconds,
+            temporal_instructions=temporal_instructions,
+            temporal_evidence=temporal_evidence,
             # 「话题接续」段 (告诉模型承接句已发, 别重复) 只在主 prompt 里有
             force_main_prompt=bool(offering_context) or bool(continuation_lines),
             diagnostics=response_diagnostics,
@@ -1596,6 +1615,24 @@ async def _stream_legacy_response(
             full_response = guarded
             reply_emotion_pre = None
             response_diagnostics["persona_location_corrected"] = True
+        if not crisis_care_turn and not reply_is_fallback and not contradiction_inquiry:
+            from app.services.chat.temporal_guard import guard_temporal_reply
+            from app.services.memory.retrieval.context_selector import format_memory_time
+            temporal_checked = await guard_temporal_reply(
+                " ".join(replies), question=user_message,
+                evidence="\n".join([
+                    dated_dialogue(messages_dicts, max_chars=3000),
+                    *[format_memory_time(m) for m in (classified_memories or [])],
+                    *(time_memories or []), *(l3_memories or []),
+                ]), diagnostics=response_diagnostics,
+            )
+            if temporal_checked != " ".join(replies):
+                replies = [temporal_checked]
+                reply_emotion_pre = None
+        if (not crisis_care_turn and not reply_is_fallback and not contradiction_inquiry):
+            replies, suppressed = guard_optional_questions(replies, followup_policy)
+            response_diagnostics["temporal_context"]["suppressed_question_count"] = suppressed
+        full_response = " ".join(replies)
         if reply_emotion_pre is not None:
             reply_emotion = reply_emotion_pre
         else:

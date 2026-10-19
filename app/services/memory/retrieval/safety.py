@@ -54,7 +54,7 @@ async def _search_crisis_keyword_memories(
         """
         SELECT id, content, level, importance, mention_count,
                type, main_category, sub_category,
-               created_at, updated_at,
+               created_at, updated_at, occur_time, statement_time,
                COALESCE(updated_at, created_at) AS last_accessed_at,
                'user' AS source,
                1.0 AS similarity

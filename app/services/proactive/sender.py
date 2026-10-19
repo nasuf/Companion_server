@@ -511,6 +511,19 @@ async def _generate_message(ctx: dict) -> str | None:
     if corrected:
         ctx["_skip_reason_detail"] = "persona_location_conflict_or_unverified"
         return None
+    from app.services.chat.followup_policy import guard_optional_questions, repeats_recent_question
+    policy = ctx.get("_followup_policy")
+    if policy is not None:
+        if policy.optional_questions_allowed and repeats_recent_question(response, policy):
+            ctx["_skip_reason_detail"] = "repeated_conversation_question"
+            return None
+        kept, count = guard_optional_questions([response], policy, fallback=None)
+        if isinstance(ctx.get("temporal_context"), dict):
+            ctx["temporal_context"]["suppressed_question_count"] = count
+        if not kept:
+            ctx["_skip_reason_detail"] = "user_opted_out_of_questions"
+            return None
+        response = " ".join(kept)
     return response
 
 
@@ -733,6 +746,10 @@ async def _prepare_attachments(
     """音乐卡 / 链接卡 (二选一)。"""
     source = ctx["source"]
     attachments = _Attachments(extra_metadata={"stage": ctx["stage"]})
+    if isinstance(ctx.get("temporal_context"), dict):
+        attachments.extra_metadata["response_diagnostics"] = {
+            "version": 1, "reply_path": "proactive", "temporal_context": ctx["temporal_context"],
+        }
     if source == "music" and ctx.get("music_track") is not None:
         from app.services.music_chat import card_from_track
 
