@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from app.api.admin.users import (
     _serialize_admin_user,
     _serialize_phone_identity,
@@ -170,23 +172,63 @@ def test_list_users_excludes_template_system_user(api_client):
         app.dependency_overrides.pop(require_admin_jwt, None)
 
 
-def test_list_users_keeps_exclusion_when_searching(api_client):
+@pytest.mark.parametrize("query", ["alice", "user-1", "七七", "1381234", "alice@example.com", "爱丽丝", "x' OR 1=1 --"])
+def test_list_users_searches_all_fields_with_pagination(api_client, query):
     app, require_admin_jwt = _admin_override()
     fake_db = MagicMock()
-    fake_db.user.count = AsyncMock(return_value=0)
-    fake_db.user.find_many = AsyncMock(return_value=[])
+    fake_db.query_raw = AsyncMock(side_effect=[[{"total": 41}], [{"id": "user-1"}]])
+    fake_db.user.find_many = AsyncMock(return_value=[_fake_user_row()])
     fake_db.authidentity.find_many = AsyncMock(return_value=[])
-
     try:
         with patch("app.api.admin.users.db", fake_db):
-            response = api_client.get("/admin-api/users", params={"search": "template"})
-
+            response = api_client.get("/admin-api/users", params={"search": f" {query} ", "limit": 30, "offset": 30})
         assert response.status_code == 200
-        where = fake_db.user.find_many.await_args.kwargs["where"]
-        assert {"username": {"not": TEMPLATE_SYSTEM_USERNAME}} in where["AND"]
-        assert {"username": {"contains": "template", "mode": "insensitive"}} in where["AND"]
+        assert response.json()["total"] == 41
+        assert response.json()["users"][0]["id"] == "user-1"
+        count_call, page_call = fake_db.query_raw.await_args_list
+        count_sql, page_sql = count_call.args[0], page_call.args[0]
+        assert count_call.args[1:] == (f"%{query}%", TEMPLATE_SYSTEM_USERNAME)
+        assert page_call.args[1:] == (f"%{query}%", TEMPLATE_SYSTEM_USERNAME, 30, 30)
+        predicate = count_sql[count_sql.index("FROM users"):]
+        assert predicate in page_sql
+        for field in ["u.username", "u.id", "u.display_name", "u.email", "ai.raw_profile->>'nickname'", "ai.provider_account_id"]:
+            assert f"{field} ILIKE $1" in predicate
+        assert "ai.provider = 'wechat'" in predicate
+        assert "ai.provider = 'phone'" in predicate
+        assert "EXISTS" in predicate
+        assert "LIMIT $3 OFFSET $4" in page_sql
+        kwargs = fake_db.user.find_many.await_args.kwargs
+        assert kwargs["where"]["AND"] == [
+            {"username": {"not": TEMPLATE_SYSTEM_USERNAME}}, {"id": {"in": ["user-1"]}}
+        ]
+        assert kwargs["skip"] == 0
+        assert kwargs["take"] == 30
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_list_users_empty_search_page_preserves_total(api_client):
+    app, require_admin_jwt = _admin_override()
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=[[{"total": 1}], []])
+    fake_db.user.find_many = AsyncMock(return_value=[])
+    fake_db.authidentity.find_many = AsyncMock(return_value=[])
+    try:
+        with patch("app.api.admin.users.db", fake_db):
+            response = api_client.get("/admin-api/users", params={"search": "七七", "offset": 30})
+        assert response.json() == {"users": [], "total": 1}
+        assert fake_db.user.find_many.await_args.kwargs["where"]["AND"][-1] == {"id": {"in": []}}
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_list_users_search_requires_admin(api_client, auth_header):
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock()
+    with patch("app.api.admin.users.db", fake_db):
+        response = api_client.get("/admin-api/users", params={"search": "1381234"}, headers=auth_header("user-1"))
+    assert response.status_code == 403
+    fake_db.query_raw.assert_not_awaited()
 
 
 def test_delete_user_refuses_template_system_user(api_client):

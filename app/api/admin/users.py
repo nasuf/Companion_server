@@ -301,18 +301,43 @@ async def list_users(
     # the admin user list so list-driven operations (e.g. batch delete) can
     # never touch it.
     conditions: list[dict] = [{"username": {"not": TEMPLATE_SYSTEM_USERNAME}}]
-    if search.strip():
-        conditions.append(
-            {"username": {"contains": search.strip(), "mode": "insensitive"}}
+    query = search.strip()
+    if query:
+        # EXISTS avoids duplicate users when several login identities match.
+        search_where = """
+            FROM users u
+            WHERE u.username <> $2 AND (
+                u.username ILIKE $1 OR u.id ILIKE $1
+                OR u.display_name ILIKE $1 OR u.email ILIKE $1
+                OR EXISTS (
+                    SELECT 1 FROM auth_identities ai
+                    WHERE ai.user_id = u.id AND (
+                        (ai.provider = 'wechat' AND ai.raw_profile->>'nickname' ILIKE $1)
+                        OR (ai.provider = 'phone' AND ai.provider_account_id ILIKE $1)
+                    )
+                )
+            )
+        """
+        pattern = f"%{query}%"
+        count_rows = await db.query_raw(
+            f"SELECT COUNT(*)::int AS total {search_where}",
+            pattern, TEMPLATE_SYSTEM_USERNAME,
         )
-    where = {"AND": conditions}
-
-    total = await db.user.count(where=where)
+        total = count_rows[0]["total"]
+        rows = await db.query_raw(
+            f"SELECT u.id {search_where} ORDER BY u.created_at DESC, u.id LIMIT $3 OFFSET $4",
+            pattern, TEMPLATE_SYSTEM_USERNAME, limit, offset,
+        )
+        conditions.append({"id": {"in": [row["id"] for row in rows]}})
+        skip = 0
+    else:
+        total = await db.user.count(where={"AND": conditions})
+        skip = offset
     users = await db.user.find_many(
-        where=where,
-        order={"createdAt": "desc"},
+        where={"AND": conditions},
+        order=[{"createdAt": "desc"}, {"id": "asc"}],
         take=limit,
-        skip=offset,
+        skip=skip,
         include={"agents": True},
     )
     identities_by_user = await _identities_by_user([u.id for u in users])
