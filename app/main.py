@@ -281,6 +281,7 @@ from app.api.admin.game_configs import router as admin_game_configs_router
 from app.api.admin.game_points import router as admin_game_points_router
 from app.api.admin.wallet import router as admin_wallet_router
 from app.api.admin.payments import router as admin_payments_router
+from app.api.admin.payment_settings import router as admin_payment_settings_router
 from app.api.public.vip_activation import router as vip_activation_router
 from app.api.admin.vip_activation import router as admin_vip_activation_router
 from app.api.admin.chat_quota import router as admin_chat_quota_router
@@ -351,6 +352,7 @@ app.include_router(admin_game_configs_router)
 app.include_router(admin_game_points_router)
 app.include_router(admin_wallet_router)
 app.include_router(admin_payments_router)
+app.include_router(admin_payment_settings_router)
 app.include_router(admin_vip_activation_router)
 app.include_router(admin_chat_quota_router)
 app.include_router(admin_offline_settings_router)

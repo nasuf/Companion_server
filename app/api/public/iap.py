@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.api.deps import require_redis
 from app.api.jwt_auth import require_user
 from app.observability import bind_context
 from app.observability.events import EVT_PAYMENT_VERIFY_FAIL, EVT_PAYMENT_VERIFY_OK
+from app.models.payment_settings import PaymentSettings
+from app.services.payments.availability import get_payment_settings, require_real_money_payments
 from app.models.iap import IapVerifyRequest, IapVerifyResponse
 from app.services.payments import grant, notifications
 from app.services.payments.errors import (
@@ -19,6 +21,19 @@ from app.services.payments.errors import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/iap/apple", tags=["iap"])
+
+
+@router.get("/availability", response_model=PaymentSettings)
+async def purchase_availability(response: Response, payload: dict = Depends(require_user)):
+    response.headers["Cache-Control"] = "no-store"
+    return await get_payment_settings()
+
+
+@router.post("/purchase-permission", response_model=PaymentSettings)
+async def authorize_new_purchase(payload: dict = Depends(require_user)):
+    # A fresh database read immediately before calling StoreKit. Verification,
+    # restoration and notifications below must still honour paid transactions.
+    return await require_real_money_payments()
 
 
 @router.post(

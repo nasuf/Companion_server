@@ -2228,6 +2228,8 @@ model SystemConfig {
   // 已有条目的读取/操作接口不受影响. 默认 false: 客户端 (H5) 无卡片 UI 前先暂停.
   offlineActivityEnabled Boolean  @default(false) @map("offline_activity_enabled")
   offlineGiftEnabled     Boolean  @default(false) @map("offline_gift_enabled")
+  // Only new real-money purchases; restoration and settlement remain available.
+  realMoneyPaymentsEnabled Boolean @default(false) @map("real_money_payments_enabled")
   // 成就系统全局模式 (admin 后台动态切换): on / silent / off; NULL = 跟随
   // .env ACHIEVEMENT_MODE. silent = H5 静默计算 (解锁照常落库, 成就页/积分
   // 正常可用, 仅静默聊天成就提示与系统推送); off = 应急停算 (页面隐藏,
