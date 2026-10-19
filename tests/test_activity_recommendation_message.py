@@ -25,7 +25,7 @@ MESSAGE = (
     "出发前看看当天的开放信息就好。要不要找个方便的时候去看看？暂时没空也没关系，先留着这个选择。"
 )
 # The same note without citing the user, for drafts written with no verified quote.
-NEUTRAL = MESSAGE.replace("你提过喜欢找咖啡馆看书，", "")
+NEUTRAL = MESSAGE.replace("你提过喜欢找咖啡馆看书，", "") + "具体什么时候出门，按你当天的安排来就好。"
 
 
 def card(**kwargs):
@@ -445,7 +445,7 @@ async def test_a_short_draft_gets_one_repair_instead_of_the_template(writer, mon
     text.side_effect = ["你提过喜欢找咖啡馆看书，小岛咖啡可以去看看。", MESSAGE]
     result = await note.attach_recommendation_message(card(user_relevance=[MEMORY, "咖啡", DIALOGUE]), EVIDENCE)
     assert result["discovery_metadata"]["recommendation_message_status"] == "verified"
-    assert "120—260 字" in text.call_args.args[1]
+    assert "160—260 字" in text.call_args.args[1]
     assert text.call_args.kwargs["profile"] == "chat_extract"
     assert [(stage, attempt) for stage, attempt, _ in blocks] == [("note", 0)]
 
@@ -481,9 +481,9 @@ def test_reviewer_is_deterministic_on_any_openai_compatible_small_model():
 
 
 
-def test_a_runtime_model_length_note_is_accepted():
-    # doubao wrote 90 and 98 characters for a temple on 2026-10-18.
-    assert note._NOTE_MIN_CHARS <= 90 <= note._NOTE_MAX_CHARS
+def test_runtime_short_notes_no_longer_pass_the_about_200_character_contract():
+    assert 90 < note._NOTE_MIN_CHARS == 160
+    assert note._NOTE_MAX_CHARS == 260
     assert note._NOTE_MIN_CHARS > len("短句")
 
 

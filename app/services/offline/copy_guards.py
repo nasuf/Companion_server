@@ -343,6 +343,10 @@ def copy_issues(
     from app.services.offline.opening_hours import visit_issues
     issues.extend(visit_issues(text, card, now))
     if facts_text is not None:
+        # User preferences are not evidence that a venue has a smell/atmosphere.
+        smell = re.search(r"(?:店里|店内|这里|这家店|空气|现场).{0,10}(花香|茶香|咖啡香|香气|香味)", text)
+        if smell and smell[1] not in facts_text:
+            issues.append("没有场所香气的事实依据，不能把用户的口味偏好写成店内环境，请删除这类描述。")
         issues.extend(access_issues(text, facts_text))
         if user_references is not None:
             issues.extend(voice_issues(text, facts_text, user_references,

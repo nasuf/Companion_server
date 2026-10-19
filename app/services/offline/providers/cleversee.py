@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 _slots = asyncio.Semaphore(2)
 
 
+class WebSearchResults(list):
+    """List-compatible diagnostics distinguish a real empty result from failure."""
+    def __init__(self, values=(), *, source_status: str):
+        super().__init__(values)
+        self.source_status = source_status
+
+
 async def _rate_slot() -> None:
     # Shared across HTTP workers. The purchased default service allows 5 QPS.
     redis = await get_redis()
@@ -172,7 +179,7 @@ async def qa_places(
 
 async def web_search(query: str, *, max_results: int = 8) -> list[SearchResult]:
     if not settings.ali_cleversee_api_key:
-        return []
+        return WebSearchResults(source_status="not_configured")
     body = dict(
         query=query[:500],
         engineType="CNAuto",
@@ -180,16 +187,20 @@ async def web_search(query: str, *, max_results: int = 8) -> list[SearchResult]:
         advancedParams={"numResults": min(max_results, 10)},
     )
     data = await _cached("web", body, lambda: _http("/search/unified", body), ttl=180)
-    return [
+    items = data.get("pageItems")
+    if not isinstance(items, list):
+        return WebSearchResults(source_status="failed")
+    results = [
         SearchResult(
             title=str(p.get("title") or ""),
             url=str(p["link"]),
             content=str(p.get("snippet") or "")[:2000],
             raw_content=str(p.get("mainText") or "")[:16000],
         )
-        for p in data.get("pageItems", [])
+        for p in items
         if isinstance(p, dict) and p.get("link")
     ]
+    return WebSearchResults(results, source_status="available" if results else "failed" if items else "empty")
 
 
 async def read_page(url: str, *, fresh: bool = False) -> str:

@@ -21,7 +21,7 @@ from app.services.offline.copy_trace import record_copy_outcome, record_guard_bl
 from app.services.offline.activity_images import persist_activity_images
 from app.services.offline.activity_recommendation_message import (
     EVIDENCE_KINDS, accepted_review, attach_recommendation_message, evidence_inputs, structured_reviewer,
-    exact_references, is_published, page_facts, review_copy,
+    exact_references, is_published, page_facts, prepare_references, review_copy,
 )
 from app.services.offline.copy_guards import bounded_issues, copy_issues, date_relation, local_now, today_text
 from app.services.offline.evidence_text import mask_quotes
@@ -1037,6 +1037,7 @@ async def _native_card(
     )
     # Kept as the page facts' introduction: the description field becomes copy.
     card["discovery_metadata"]["place_introduction"] = plain_text(facts.get("description"))[:600]
+    card["discovery_metadata"]["place_context"] = notes
     proposal = {field: copy.get(field) for field in _CARD_COPY_FIELDS} if copy else None
     # No proposal here means selection failed or the place was substituted;
     # either way users see a template, which the admin view must count.
@@ -1052,25 +1053,8 @@ async def _native_card(
 
 
 async def _native_context_sources(card: dict, city: str) -> list[SearchResult]:
-    if card["discovery_metadata"].get("kind") != "place":
-        return []
-    from app.services.offline.providers.cleversee import web_search
-
-    try:
-        async with asyncio.timeout(10):
-            pages = await web_search(
-                f"{city} {card['location_name']} 简介 开放时间",
-                max_results=4,
-            )
-        return [
-            p
-            for p in pages
-            if _source_is_usable(p, city)
-            and place_source_matches(card, p.title, p.content + p.raw_content)
-        ][:2]
-    except Exception as exc:
-        logger.info("[offline] place context unavailable (%s)", type(exc).__name__)
-        return []
+    from app.services.offline.place_context import load_context
+    return await load_context(card, city, _source_is_usable)
 
 
 def _native_album_source(card: dict, city: str) -> SearchResult:
@@ -1167,7 +1151,7 @@ async def _fact_check(facts: dict[str, Any], copy_text: str) -> tuple[bool | Non
     return checked["supported"] and not claims, claims
 
 
-async def _verified_card_copy(
+async def _review_card_fields(
     card: dict[str, Any], proposal: dict[str, Any] | None, facts: dict[str, Any],
     references: list[dict[str, str]], now: datetime, *, missing_status: str,
 ) -> tuple[str, list[str]]:
@@ -1186,8 +1170,8 @@ async def _verified_card_copy(
         values["summary"] = ""  # Restating the destination is not a reason to go.
     if not any(values.values()):
         return "fallback_empty", []
-    # One unsupported field drops that field, not the card: card copy has no
-    # repair round, and 10-18 showed a good summary next to a "安静放松" vibe.
+    # One unsupported field drops that field, not the card. A summary repair
+    # later cannot erase the other fields this pass accepted.
     facts_text = json.dumps(facts, ensure_ascii=False, default=str)
     dropped: list[str] = []
     for field, value in values.items():
@@ -1212,7 +1196,64 @@ async def _verified_card_copy(
             values[field] = ""
         dropped.extend(claims)
     card.update({field: value for field, value in values.items() if value})
+    card.setdefault("discovery_metadata", {})["card_copy_accepted_fields"] = [field for field, value in values.items() if value]
     return ("verified_partial", dropped) if dropped else ("verified", [])
+
+
+async def _verified_card_copy(
+    card: dict[str, Any], proposal: dict[str, Any] | None, facts: dict[str, Any],
+    references: list[dict[str, str]], now: datetime, *, missing_status: str,
+    references_filtered: bool = False,
+) -> tuple[str, list[str]]:
+    card.setdefault("discovery_metadata", {})["card_copy_accepted_fields"] = []
+    if references_filtered and proposal:
+        # Selection saw the original evidence. Do not let a paraphrase of a
+        # discarded preference survive a permissive factual check: rewrite from
+        # the filtered evidence and the now-enriched destination facts first.
+        status, issues = "fallback_rejected", ["原关联依据已筛选，请仅用当前保留依据和地点事实重新写摘要、氛围与建议。"]
+    else:
+        status, issues = await _review_card_fields(card, proposal, facts, references, now, missing_status=missing_status)
+    accepted = set(card["discovery_metadata"]["card_copy_accepted_fields"])
+    if (status not in {"fallback_rejected", "fallback_empty", "verified_partial"} or "summary" in accepted
+            or not card.get("candidate_id")):
+        return status, issues
+    # Reuse the Web card writer on this one verified destination. A failed
+    # repair cannot erase any fields that already passed.
+    try:
+        async with asyncio.timeout(18):
+            template = await get_prompt_text("offline.activity_card")
+            if "copy_revision_feedback" not in str(template):
+                return status, issues
+            # The repair is a constrained three-field JSON task, so use the
+            # runtime instruction/reviewer model rather than persona dialogue.
+            writer = structured_reviewer(get_utility_model())
+            card["discovery_metadata"]["card_copy_repair_writer"] = str(getattr(writer, "model_name", "runtime"))
+            for _attempt in range(2):
+                source = {**_check_facts(facts, facts.get("verified_source_text") or []),
+                          "candidate_id": card["candidate_id"], "copy_revision_feedback": issues}
+                prompt = template.format(city=card.get("city") or "", search_anchor=card.get("address") or "",
+                    tags=json.dumps([r["text"] for r in references if r["kind"] == "preference"], ensure_ascii=False),
+                    memory=json.dumps([r["text"] for r in references if r["kind"] == "memory"], ensure_ascii=False),
+                    dialogue_context=json.dumps([r["text"] for r in references if r["kind"] == "dialogue"], ensure_ascii=False),
+                    avoid_text="无", sources_json=json.dumps([source], ensure_ascii=False, default=str),
+                    today=today_text(now) + now.strftime(" %H:%M（北京时间）"))
+                payload = _json_object(await invoke_text(writer, prompt, profile=OFFLINE_WRITER_PROFILE)) or {}
+                candidate = next((v for v in payload.get("candidates", []) if isinstance(v, dict)
+                                  and v.get("candidate_id") == card["candidate_id"]), None)
+                if not candidate:
+                    break
+                fixed = {k: v for k, v in candidate.items() if k in _CARD_COPY_FIELDS and k not in accepted}
+                repaired, reasons = await _review_card_fields(card, fixed, facts, references, now, missing_status=missing_status)
+                accepted |= set(card["discovery_metadata"]["card_copy_accepted_fields"])
+                card["discovery_metadata"]["card_copy_accepted_fields"] = sorted(accepted)
+                if repaired.startswith("verified") and "summary" in accepted:
+                    return ("verified" if set(_CARD_COPY_FIELDS) <= accepted else "verified_partial"), reasons
+                status, issues = repaired, reasons
+                if not reasons or repaired == "fallback_unavailable":
+                    break
+    except Exception as exc:
+        logger.info("[offline] card copy repair unavailable (%s)", type(exc).__name__)
+    return status, issues
 
 
 _QUOTED = re.compile(r"[“\"]([^”\"]+)[”\"]")
@@ -1382,14 +1423,18 @@ async def _apply_reviewed_copy(
 ) -> None:
     """Review card copy and detail independently; keep what passes, template the rest."""
     now = local_now()
-    references = exact_references(card.get("user_relevance", []), evidence)
-    # The card copy review mutates the card; the detail writer reads a snapshot.
-    (card_status, card_issues), (detail, detail_status, detail_issues) = await asyncio.gather(
-        _verified_card_copy(card, proposal, facts, references, now, missing_status=missing_status),
-        _verified_detail(card, dict(detail_context), facts, now),
-    )
+    originals = exact_references(card.get("user_relevance", []), evidence)
+    references = await prepare_references(card, originals, now)
+    card_status, card_issues = await _verified_card_copy(
+        card, proposal, facts, references, now, missing_status=missing_status,
+        references_filtered=len(references) < len(originals))
+    context = dict(detail_context)
+    accepted = card["discovery_metadata"].get("card_copy_accepted_fields", [])
+    context["summary"] = card.get("summary", "") if "summary" in accepted else ""
+    card["discovery_metadata"]["detail_input_summary_status"] = "verified" if "summary" in accepted else "unavailable"
+    detail, detail_status, detail_issues = await _verified_detail(card, context, facts, now)
     card["description"] = detail or fallback_detail(card, now=now)
-    private = [r["text"] for r in references]
+    private = [r["text"] for r in originals]
     card.setdefault("discovery_metadata", {}).update(
         card_copy_status=card_status,
         card_copy_issues=(mask_quotes(bounded_issues(card_issues), private)
@@ -1506,7 +1551,7 @@ async def generate_activity_invite_message(
                     status, issues = "fallback_invalid", ["邀请语为空"]
                     break
                 issues = copy_issues(candidate, activity, now,
-                                     facts_text=json.dumps(facts, ensure_ascii=False),
+                                     facts_text=json.dumps({k: v for k, v in facts.items() if k != "activity_summary"}, ensure_ascii=False),
                                      user_references=len(references))
                 if issues:
                     record_guard_block("invite", attempt, issues, subject=activity.get("title"))

@@ -275,7 +275,8 @@ async def native(journey, monkeypatch, tmp_path):  # noqa: F811 — imported pyt
         "想把这家咖啡馆推荐给你，给下次出门多留一个选择。可以先看看这里的介绍，"
         "再决定是不是你想尝试的内容。如果想换一条平常走的路线，可以把它作为一站，"
         "不用安排得太满，也不用为了这次推荐特意挤出时间。出发前看看当天的开放安排，"
-        "按自己的节奏来就好。有兴趣的话，要不要找个方便的时候去看看？暂时不想去也没关系，先放着就好。"
+        "按自己的节奏来就好。到了现场再决定停留多久，想多看看就多留一会儿。"
+        "有兴趣的话，要不要找个方便的时候去看看？暂时不想去也没关系，先放着就好。"
     )))
     monkeypatch.setattr(recommendation, "invoke_json", AsyncMock(return_value={
         "supported": True, "unsupported_claims": [], "relevant_indices": [],
