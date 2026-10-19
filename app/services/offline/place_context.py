@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 
 from app.services.offline.content import canonical_url, is_collection_title, normalized, place_source_matches
 from app.services.offline.activity_discovery import source_text
 from app.services.offline.providers import cleversee
 from app.services.offline.providers.search import SearchResult
+from app.services.offline.reference_hygiene import factual_reference
 
 
 def context_matches(card: dict, title: str, body: str) -> bool:
@@ -41,7 +43,9 @@ async def load_context(card: dict, city: str, usable) -> list[SearchResult]:
     core = re.split(r"[（(]", name, maxsplit=1)[0]
     queries = [f"{city} {name} 介绍 体验", f"{city} {core} {address} 介绍"]
     kept: dict[str, SearchResult] = {}
+    seen: set[str] = set()
     searches = reads = 0
+    filtered = 0
     states = []
     status = "empty"
     try:
@@ -52,17 +56,21 @@ async def load_context(card: dict, city: str, usable) -> list[SearchResult]:
                 states.append(getattr(pages, "source_status", "available" if pages else "empty"))
                 for page in pages[:4]:
                     url = canonical_url(page.url)
-                    if (not url or url in kept or normalized(core) not in normalized(page.title + source_text(page)[:1200])):
+                    if (not url or url in seen or normalized(core) not in normalized(page.title + source_text(page)[:1200])):
                         continue
+                    seen.add(url)
                     body = source_text(page)
                     if reads < 2 and len(page.raw_content) < 120:
                         reads += 1
                         full = await cleversee.read_page(url)
                         if full:
-                            page = SearchResult(title=page.title, url=url, content=page.content, raw_content=full[:12000])
+                            page = replace(page, url=url, raw_content=full[:12000])
                             body = source_text(page)
                     if usable(page, city) and context_matches(card, page.title, body):
-                        kept[url] = page
+                        clean, removed = factual_reference(body)
+                        filtered += removed
+                        if clean:
+                            kept[url] = replace(page, content=clean, raw_content=clean)
                     if len(kept) == 2:
                         break
                 if kept and any(len(source_text(p)) >= 100 for p in kept.values()):
@@ -75,5 +83,5 @@ async def load_context(card: dict, city: str, usable) -> list[SearchResult]:
     except Exception:
         status = "partial_failure" if kept else "unavailable"
     metadata.update(context_source_status=status, context_source_count=len(kept),
-                    context_search_count=searches, context_read_count=reads)
+                    context_search_count=searches, context_read_count=reads, context_filtered_sentence_count=filtered)
     return list(kept.values())[:2]

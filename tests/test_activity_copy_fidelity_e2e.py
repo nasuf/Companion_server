@@ -16,7 +16,8 @@ from tests.test_activity_copy_fidelity import RELEASE, PROMPTS, TEA, EVIDENCE, r
 from tests.test_activity_detail_partial_review import verdict
 
 SUMMARY = "爱探店的话，可以了解常发广场这家花艺小店的作品展示和花艺沙龙。"
-SOURCE = "镇江常发广场里有一家春树•花艺，地址是黄山西路常发广场5号楼102。店铺介绍提到作品展示、花艺沙龙和蜡烛制作，具体项目可在出发前向店内了解。" * 2
+SOURCE = ("镇江常发广场里有一家春树•花艺，地址是黄山西路常发广场5号楼102。店铺介绍提到作品展示、花艺沙龙和蜡烛制作，具体项目可在出发前向店内了解。" * 2
+          + "鲜花盲盒9.9元。店内有鹦鹉和小狗。店里随便拍都好看。")
 DETAIL = ("🌿 常发广场的一家花艺小店\n" + SUMMARY + "\n\n"
           "✨ 介绍里可以了解什么\n店铺介绍提到作品展示、花艺沙龙和蜡烛制作，可以先了解具体内容，选自己感兴趣的部分。\n\n"
           "📍 位置与安排\n地点在黄山西路常发广场5号楼102，出发前确认当天开放和项目安排，按自己的节奏决定。")
@@ -40,7 +41,9 @@ async def test_sparse_flower_store_is_enriched_without_flower_tea_analogy_and_al
     monkeypatch.setattr(place_context.cleversee, "web_search", AsyncMock(return_value=WebSearchResults([
         SearchResult(title="镇江常发广场花店探店", url="https://example.com/spring", content=SOURCE, raw_content=SOURCE)], source_status="available")))
     captured = []
+    detail_calls = 0
     async def writer(_model, prompt, **_kwargs):
+        nonlocal detail_calls
         captured.append(prompt)
         if "候选原始ID" in prompt:
             repair = '"copy_revision_feedback":' in prompt
@@ -49,6 +52,13 @@ async def test_sparse_flower_store_is_enriched_without_flower_tea_analogy_and_al
                 "vibe": "花艺小店", "suitable": "了解作品与项目", "user_relevance": [TEA, "爱探店"]}]}, ensure_ascii=False)
         assert SUMMARY in prompt and "想换条路线走走，可以把" not in prompt
         assert "花艺沙龙" in prompt
+        detail_calls += 1
+        if detail_calls == 1:
+            assert all(ad not in prompt for ad in ("9.9", "店内有鹦鹉", "随便拍都好看"))
+            # The factual reviewer below approves everything. The code guard
+            # must still repair this hallucinated old offer, keeping other parts.
+            return json.dumps({"text": DETAIL.replace("选自己感兴趣的部分。", "选自己感兴趣的部分。鲜花盲盒9.9元。")}, ensure_ascii=False)
+        assert "旧探店特价" in prompt
         return json.dumps({"text": DETAIL}, ensure_ascii=False)
     async def checker(_model, prompt, **_kwargs):
         if "当前阶段：relevance" in prompt:
@@ -69,9 +79,11 @@ async def test_sparse_flower_store_is_enriched_without_flower_tea_analogy_and_al
     assert response.status_code == 200, response.text
     public = response.json();stored = await repo.get_activity(public["id"], j.user);metadata = stored["discovery_metadata"]
     assert public["summary"] == SUMMARY and public["description"] == DETAIL
+    assert detail_calls == 2
     assert public["recommendation_message"] == accepted_note and 160 <= len(accepted_note) <= 260
     assert metadata["user_relevance"] == [{"kind": "preference", "text": "爱探店"}]
     assert metadata["context_source_status"] == "available" and metadata["context_source_count"] == 1
+    assert metadata["context_filtered_sentence_count"] == 3
     assert metadata["detail_input_summary_status"] == "verified"
     assert TEA not in note_writer.await_args.args[1] and "160—260" in note_writer.await_args.args[1]
     assert metadata["recommendation_message_status"] == "verified"
@@ -80,6 +92,7 @@ async def test_sparse_flower_store_is_enriched_without_flower_tea_analogy_and_al
         assert final["outputs"]["fields"][field]["text"] == public[field]
         assert final["outputs"]["fields"][field]["sha256"] == hashlib.sha256(public[field].encode()).hexdigest()
     assert final["outputs"]["writing_inputs"]["recommendation_message_length"] == len(accepted_note)
+    assert final["outputs"]["writing_inputs"]["context_filtered_sentence_count"] == 3
     messages = await j.db.query_raw("SELECT content,metadata FROM messages WHERE conversation_id=$1 ORDER BY created_at DESC LIMIT 8", j.conversation)
     cards = [r["metadata"]["component_card"] for r in messages if (r.get("metadata") or {}).get("component_card")]
     assert next(c for c in cards if c["payload"].get("activity_id") == public["id"])["body"] == SUMMARY

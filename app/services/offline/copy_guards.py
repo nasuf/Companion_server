@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from app.services.offline.reference_hygiene import MONEY, PHOTO_GUARANTEE, PET_PRESENCE
+
 from app.config import settings
 
 _TZ = ZoneInfo(settings.schedule_timezone)
@@ -326,6 +328,19 @@ def copy_issues(
     card copy drops only the offending field instead of the whole card.
     """
     issues: list[str] = []
+    if PHOTO_GUARANTEE.search(text):
+        issues.append("删除随便拍都好看、随手出大片这类拍照效果保证；可以建议按现场规则拍照。")
+    metadata = card.get("discovery_metadata") or {}
+    if metadata.get("kind") == "place":
+        if PET_PRESENCE.search(text) and not PET_PRESENCE.search(str(metadata.get("place_introduction") or "")):
+            issues.append("没有原生场所事实支持动物当前在场或可互动，不能把旧探店中的宠物写成现在的保证。")
+        prices = {float(v) for v in re.findall(r"\d+(?:\.\d+)?", str(metadata.get("price_info") or ""))}
+        for price in MONEY.finditer(text):
+            amount = float(price[1] or price[2])
+            prefix = re.split(r"[，,。！？；;\n]", text[:price.start()])[-1]
+            if amount not in prices or "人均" not in prefix[-12:]:
+                issues.append("具体费用只能使用原生人均参考，并标明人均；旧探店特价或人均数据不能当作体验项目售价。")
+                break
     if INPUT_DISCLOSURE.search(text):
         issues.append(DISCLOSURE_FEEDBACK)
     together = CO_PRESENCE.search(text)

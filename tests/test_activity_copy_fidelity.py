@@ -213,16 +213,16 @@ async def test_failed_relevance_collection_is_not_misreported_as_no_evidence(set
 
 async def test_card_repair_gets_actual_rejection_feedback_and_keeps_accepted_fields(setup, monkeypatch):
     good = {"candidate_id": setup["candidate_id"], "summary": "爱探店的话，可以先了解这家具体花艺小店。", "vibe": "花艺小店", "suitable": "了解花艺内容"}
-    first = {**good, "summary": "现在有9.9元体验"}
+    first = {**good, "summary": "每周都有花艺公开课"}
     writer = AsyncMock(side_effect=[json.dumps({"candidates": [first]}), json.dumps({"candidates": [{**good, "vibe": "改掉已通过字段"}]})])
     monkeypatch.setattr(generation, "invoke_text", writer)
     monkeypatch.setattr(generation, "_fact_check", AsyncMock(side_effect=[
-        (False, ["“现在有9.9元体验”：旧探店特价不能证明现在售价"]), (True, [])]))
+        (False, ["“每周都有花艺公开课”：没有课程安排依据"]), (True, [])]))
     status, issues = await generation._verified_card_copy(setup, {"summary": "被排除的用户关联"}, {}, [], NOW,
         missing_status="deterministic", references_filtered=True)
     assert status == "verified" and issues == []
     assert setup["summary"] == good["summary"] and setup["vibe"] == first["vibe"]
-    assert "旧探店特价" in writer.await_args.args[1]
+    assert "没有课程安排依据" in writer.await_args.args[1]
     assert "card_copy_repair_writer" in setup["discovery_metadata"]
 
 
