@@ -87,6 +87,7 @@ async def importing(origins, monkeypatch):
 async def test_admin_upload_binds_exact_private_document_to_each_memory_and_replay(importing):
     o, append, client, embedding = importing
     db, uid, wid, mid, msg, bind, detail, users, agents, spaces, convs = o
+    await db.user.update(where={'id':uid},data={'role':'admin'})
     path = f"/admin-api/agent-templates/{agents[-1]}/knowledge/from-document"
     response = await client.post(path, files={"file": ("private-upload.txt", DOCUMENT)}, headers=auth(uid, "admin"))
     assert response.status_code == 200, response.text
@@ -131,6 +132,7 @@ async def test_upload_real_auth_size_and_foreign_template_fail_before_embedding(
     path = f"/admin-api/agent-templates/{agents[-1]}/knowledge/from-document"
     assert (await client.post(path, files={"file": ("a.txt", DOCUMENT)})).status_code == 401
     assert (await client.post(path, files={"file": ("a.txt", DOCUMENT)}, headers=auth(uid))).status_code == 403
+    await db.user.update(where={'id':uid},data={'role':'admin'})
     assert (await client.post(path, files={"file": ("a.txt", b"")}, headers=auth(uid, "admin"))).status_code == 400
     too_large = b"x" * (2 * 1024 * 1024 + 1)
     assert (await client.post(path, files={"file": ("a.txt", too_large)}, headers=auth(uid, "admin"))).status_code == 413
@@ -263,6 +265,7 @@ async def test_historical_duplicate_rows_keep_both_import_queries_bounded(import
 async def test_maximum_200_item_document_commits_complete_batch(importing, record_testsuite_property):
     o, append, client, embedding = importing
     db, uid, wid, mid, msg, bind, detail, users, agents, spaces, convs = o
+    await db.user.update(where={'id':uid},data={'role':'admin'})
     raw = ("合成容量资料\n" + "\n".join(f"项目{i:03d}：内容{i:03d}" for i in range(200))).encode()
     expected, _ = parse_knowledge_document_snapshot(raw)
     assert len(expected) == 200
@@ -665,7 +668,7 @@ async def test_public_and_repair_permissions_and_same_id_collision_fail_closed(e
     repair_path = f"/admin-api/memory-repairs/{item['id']}/actions"
     assert (await client.post(repair_path, json={"action": "edit_memory", **payload}, headers=auth(uid))).status_code == 403
     # A stale elevated JWT cannot bypass the live actor-role check.
-    response = await client.patch(f"/memories/{row.id}", json=payload, headers=auth(uid, "admin"))
+    response = await client.post(repair_path, json={"action":"edit_memory", **payload}, headers=auth(uid, "admin"))
     assert response.status_code == 403
     # The legacy fixture deliberately holds user and AI memories with one ID.
     response = await client.patch(f"/memories/{mid}", json=payload, headers=auth(uid))

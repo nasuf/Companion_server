@@ -8,24 +8,10 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
-
-
 @pytest.fixture
-def mock_deps():
-    """Mock all external dependencies."""
-    with (
-        patch("app.db.connect_db", new_callable=AsyncMock),
-        patch("app.db.disconnect_db", new_callable=AsyncMock),
-        patch("app.redis_client.get_redis", new_callable=AsyncMock),
-        patch("app.redis_client.close_redis", new_callable=AsyncMock),
-        patch("jobs.scheduler.setup_scheduler"),
-        patch("jobs.scheduler.shutdown_scheduler"),
-        patch("app.middleware.configure_logging"),
-        patch("app.middleware.configure_langsmith"),
-    ):
-        from app.main import app
-        yield TestClient(app)
+def mock_deps(api_client):
+    """Use the shared isolated router client and signed test identities."""
+    return api_client
 
 
 def test_health_endpoint(mock_deps):

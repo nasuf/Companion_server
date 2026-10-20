@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
+
 from app.services.chat.prompt_builder import (
     _build_reengagement_section,
     build_chat_messages,

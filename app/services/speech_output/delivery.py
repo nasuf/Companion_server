@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.runtime import user_erasure
 from app.services.chat_media import repo as media_repo
 from app.services.chat_media import storage as media_storage
 from app.services.chat_media.prompt import attachment_to_metadata
@@ -82,31 +83,32 @@ async def prepare_voice_output(
         message_id=None,
         source=source,
     )
-    storage_key = media_storage.save_audio_blob(
-        user_id=user_id,
-        conversation_id=conversation_id,
-        blob=speech.audio,
-        mime=speech.mime,
-    )
-    try:
-        attachment = await media_repo.create_generated_audio_attachment(
+    async with user_erasure.owner_write_scope(user_id):
+        storage_key = media_storage.save_audio_blob(
             user_id=user_id,
             conversation_id=conversation_id,
-            storage_key=storage_key,
-            url=media_storage.media_url(storage_key),
+            blob=speech.audio,
             mime=speech.mime,
-            size=len(speech.audio),
-            duration_seconds=max(
-                1,
-                math.ceil(speech.duration_milliseconds / 1000),
-            ),
-            transcript=transcript,
-            request_id=speech.request_id,
-            name="agent_voice.wav",
         )
-    except BaseException:
-        media_storage.delete_media_file(storage_key)
-        raise
+        try:
+            attachment = await media_repo.create_generated_audio_attachment(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                storage_key=storage_key,
+                url=media_storage.media_url(storage_key),
+                mime=speech.mime,
+                size=len(speech.audio),
+                duration_seconds=max(
+                    1,
+                    math.ceil(speech.duration_milliseconds / 1000),
+                ),
+                transcript=transcript,
+                request_id=speech.request_id,
+                name="agent_voice.wav",
+            )
+        except BaseException:
+            media_storage.delete_media_file(storage_key)
+            raise
     metadata = attachment_to_metadata(attachment)
     metadata["generated_by"] = "assistant_tts"
     return PreparedVoiceOutput(

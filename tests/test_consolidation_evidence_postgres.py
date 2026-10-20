@@ -450,6 +450,7 @@ async def test_real_admin_api_pagination_scope_and_privacy(compression):
         assert (
             await client.get(path, params=params, headers=auth(f.uid))
         ).status_code == 403
+        await f.db.user.update(where={'id':f.uid},data={'role':'admin'})
         first = await client.get(path, params=params, headers=auth(f.uid, "admin"))
         assert first.status_code == 200
         second = await client.get(

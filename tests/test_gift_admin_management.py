@@ -198,7 +198,7 @@ async def test_manual_gift_is_created_as_mystery_with_initial_tracking(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_concurrent_duplicate_insert_discards_new_upload(monkeypatch):
+async def test_concurrent_duplicate_insert_discards_new_upload(monkeypatch, unit_media_scope):
     insert, add_events, emit, _, _ = _patch_create(monkeypatch, inserted=(_admin_gift(), False))
     monkeypatch.setattr(svc.gift_repo, "gift_notice_sent", AsyncMock(return_value=True))
     monkeypatch.setattr(svc.activity_media_storage, "save_image_blob", Mock(return_value="user-1_gift_x.png"))

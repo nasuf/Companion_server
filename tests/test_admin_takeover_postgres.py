@@ -305,7 +305,8 @@ async def test_complete_inbox_payload_and_named_durable_alert_survive_ws_failure
 async def test_admin_http_auth_bounds_claim_status_messages_and_read(human):
     h=human;c=h.client;base='/admin-api/takeovers'
     assert (await c.get(base)).status_code==401
-    assert (await c.get(base,headers=auth(h,role='user'))).status_code==403
+    user_auth={'Authorization':'Bearer '+create_jwt(h.flow.ids['owner'],role='user')}
+    assert (await c.get(base,headers=user_auth)).status_code==403
     assert (await c.get(base+'?scope=bad',headers=auth(h))).status_code==400
     assert (await c.get(base+'/missing',headers=auth(h))).status_code==404
     assert (await c.post(base+'/missing/dismiss',headers=auth(h))).status_code==404
@@ -321,7 +322,7 @@ async def test_admin_http_auth_bounds_claim_status_messages_and_read(human):
     assert (await c.post(base+'/'+h.case+'/messages',json={'text':'hello','attachments':[{'id':'bad'}]},headers=auth(h))).status_code==422
     assert (await c.post(base+'/'+h.case+'/messages',json={'text':'hello'},headers=auth(h,1))).status_code==403
     incoming=await user_message(h)
-    assert (await c.get(base+'/unread-summary',headers=auth(h,role='user'))).status_code==403
+    assert (await c.get(base+'/unread-summary',headers=user_auth)).status_code==403
     summary=(await c.get(base+'/unread-summary',headers=auth(h))).json()
     assert summary['unread_count']==1 and summary['unread_chats']==1 and summary['sampled_at']
     read={'message_id':incoming['message_id']}

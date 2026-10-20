@@ -44,6 +44,7 @@ async def flow(monkeypatch):
     database = Prisma(datasource={'url': url}, http={'trust_env': False})
     redis = Redis.from_url(redis_url, decode_responses=True)
     await database.connect()
+    monkeypatch.setattr('app.db.db', database)
     tag = uuid4().hex
     monkeypatch.setattr(store, '_redis_key', lambda key: f'e2e:{tag}:text:{key}')
     monkeypatch.setattr(store, '_enabled_redis_key', lambda key: f'e2e:{tag}:enabled:{key}')

@@ -49,7 +49,8 @@ def secured_ws(monkeypatch):
     conv = SimpleNamespace(id='conv', userId='owner', agent=agent, isDeleted=False, workspaceId='workspace')
     db = MagicMock()
     db.conversation.find_unique = AsyncMock(return_value=conv)
-    db.user.find_unique = AsyncMock(return_value=SimpleNamespace(username='Synthetic'))
+    db.user.find_unique = AsyncMock(side_effect=lambda **kw: SimpleNamespace(username='Synthetic',status='active',archivedAt=None,role='admin' if kw['where']['id']=='admin' else 'user'))
+    monkeypatch.setattr('app.db.db', db)
     monkeypatch.setattr(chat, 'db', db)
     monkeypatch.setattr(ws, 'db', db)
     manager = MagicMock()
@@ -76,6 +77,62 @@ def mint(s, user='owner', role='user'):
 
 def protocols(ticket):
     return [auth.CHAT_PROTOCOL, auth.TICKET_PROTOCOL_PREFIX+ticket]
+
+
+@pytest.mark.parametrize('state', [None, 'deleting'])
+def test_account_erased_before_registration_is_denied(secured_ws, state):
+    ticket=mint(secured_ws)
+    secured_ws.db.user.find_unique.side_effect=None
+    secured_ws.db.user.find_unique.return_value=(None if state is None else SimpleNamespace(status=state,archivedAt=None,role='user'))
+    denied(secured_ws,protocols(ticket))
+
+
+@pytest.mark.parametrize('still_active', [False, True])
+def test_revoke_during_registration_stops_connection_effects(secured_ws, still_active):
+    s=secured_ws;ticket=mint(s)
+    async def connect(*args, **kwargs):
+        await args[2].close(code=4003)
+        if not still_active:
+            s.db.user.find_unique.side_effect=None
+            s.db.user.find_unique.return_value=None
+    s.manager.connect.side_effect=connect
+    with s.client.websocket_connect('/ws/conv',subprotocols=protocols(ticket)) as socket:
+        with pytest.raises(WebSocketDisconnect) as caught:socket.receive_json()
+    assert caught.value.code==4003
+    s.manager.disconnect.assert_awaited_once()
+    ws.record_ws_online.assert_not_called()
+    ws.send_first_greeting.assert_not_called()
+    ws._handle_message.assert_not_called()
+
+
+@pytest.mark.parametrize('actor', ['owner', 'admin'])
+@pytest.mark.parametrize('failure', ['deleting', 'missing', 'database'])
+def test_registration_rechecks_owner_and_actor_before_presence(secured_ws, actor, failure):
+    s = secured_ws
+    ticket = mint(s, actor, 'admin' if actor == 'admin' else 'user')
+    original = s.db.user.find_unique.side_effect
+
+    async def register(*args, **kwargs):
+        def current(**query):
+            if query['where']['id'] != actor:
+                return original(**query)
+            if failure == 'database':
+                raise ConnectionError('unavailable')
+            if failure == 'missing':
+                return None
+            return SimpleNamespace(status='deleting', archivedAt=None, role='user')
+        s.db.user.find_unique.side_effect = current
+
+    s.manager.connect.side_effect = register
+    with s.client.websocket_connect('/ws/conv', subprotocols=protocols(ticket)) as socket:
+        with pytest.raises(WebSocketDisconnect) as caught:
+            socket.receive_json()
+    assert caught.value.code == (1011 if failure == 'database' else 4401)
+    assert s.manager.connect.await_args.kwargs['actor_user_id'] == actor
+    s.manager.disconnect.assert_awaited_once()
+    ws.record_ws_online.assert_not_called()
+    ws.send_first_greeting.assert_not_called()
+    ws._handle_message.assert_not_called()
 
 
 def denied(s, offered=None, code=4401, headers=None, path='/ws/conv'):
@@ -286,7 +343,7 @@ def test_jwt_expiry_while_loading_identity_prevents_connection_effects(secured_w
 
     async def identity(**_):
         clock[0] = exp + 1
-        return SimpleNamespace(username="Synthetic")
+        return SimpleNamespace(username="Synthetic", status='active', archivedAt=None, role='user')
 
     secured_ws.db.user.find_unique.side_effect = identity
     denied(secured_ws, protocols(ticket))

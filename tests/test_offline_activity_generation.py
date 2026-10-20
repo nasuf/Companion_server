@@ -2,6 +2,8 @@ import base64
 from unittest.mock import AsyncMock
 import pytest
 
+pytestmark = pytest.mark.usefixtures('unit_media_scope')
+
 from app.api.public import offline
 from app.services.offline import activity_service
 from app.services.offline.activity_generation import (

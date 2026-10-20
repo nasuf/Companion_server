@@ -42,6 +42,10 @@ async def test_browser_versioned_publication_persists_and_hot_reads(monkeypatch)
     database = Prisma(datasource={"url": url}, http={"trust_env": False})
     redis = Redis.from_url(redis_url, decode_responses=True)
     await database.connect()
+    monkeypatch.setattr('app.db.db', database)
+    principals = [await database.user.create(data={
+        'username':'browser-principal-'+uuid4().hex,'role':role,
+    }) for role in ('admin','user')]
     definition = replace(PROMPT_DEFINITION_MAP["memory.relevance"], key="test.browser." + uuid4().hex,
                          default_text="合成默认 {message}")
     monkeypatch.setattr(store, "db", database)
@@ -107,8 +111,8 @@ async def test_browser_versioned_publication_persists_and_hot_reads(monkeypatch)
                 page.on("pageerror", lambda error: page_errors.append(str(error)))
                 try:
                     await page.goto(origin)
-                    admin_token = create_jwt("synthetic-browser-admin", role="admin")
-                    user_token = create_jwt("synthetic-browser-user", role="user")
+                    admin_token = create_jwt(principals[0].id, role="admin")
+                    user_token = create_jwt(principals[1].id, role="user")
                     path = "/admin-api/prompts/" + definition.key
 
                     async def request(path, token, method="GET", data=None):
@@ -165,4 +169,5 @@ async def test_browser_versioned_publication_persists_and_hot_reads(monkeypatch)
         await database.promptpublicationcounter.delete_many(where={"promptKey": definition.key})
         await redis.delete("prompt_snapshot:" + definition.key, store._redis_key(definition.key), store._enabled_redis_key(definition.key))
         await redis.aclose()
+        await database.user.delete_many(where={'id':{'in':[user.id for user in principals]}})
         await database.disconnect()

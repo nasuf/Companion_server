@@ -24,6 +24,16 @@ async def require_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
         )
+    # JWT signatures survive deletion. Current SQL identity is authoritative
+    # for account lifecycle and admin role, including retries while deleting.
+    user_id = payload.get("sub")
+    if not isinstance(user_id, str) or not user_id:
+        raise HTTPException(status_code=401, detail="Invalid account")
+    from app.db import db
+    user = await db.user.find_unique(where={"id": user_id})
+    if not user or user.status != "active" or user.archivedAt is not None:
+        raise HTTPException(status_code=401, detail="Account unavailable")
+    payload["role"] = user.role
     return payload
 
 

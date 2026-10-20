@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures('unit_media_scope')
 from fastapi import FastAPI, WebSocketDisconnect, Response
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketState
@@ -228,6 +230,18 @@ def test_inbox_ping_cleanup_timeout_and_expiration(inbox,monkeypatch):
     with inbox.websocket_connect('/ws/admin-inbox/admin') as peer:
         with pytest.raises(WebSocketDisconnect) as error:peer.receive_json()
         assert error.value.code==4401
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_inbox_rechecks_admin_after_registration(inbox, monkeypatch, failure):
+    import app.db
+    app.db.db.query_raw.side_effect = [[{'exists': 1}], ConnectionError() if failure else []]
+    with inbox.websocket_connect('/ws/admin-inbox/admin') as peer:
+        with pytest.raises(WebSocketDisconnect) as caught:
+            peer.receive_json()
+    assert caught.value.code == (1011 if failure else 4403)
+    admin_inbox.manager.connect_admin.assert_awaited_once()
+    admin_inbox.manager.disconnect_admin.assert_awaited_once()
 
 
 @pytest.mark.parametrize('fails',[False,True])

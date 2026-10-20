@@ -82,7 +82,7 @@ async def test_selected_relevance_web_versions_scoping_and_public_api_consistenc
     assert "user_relevance" not in listing.text
     # New API field never grants access to another user's recommendation.
     foreign = await j.client.get(path, headers={"Authorization": "Bearer " + create_jwt(uuid4().hex, role="user")})
-    assert foreign.status_code == 404
+    assert foreign.status_code == 401  # The random JWT subject is not an account.
     # These are real Web publication numbers, not code-sync audit counts.
     for key in ("offline.activity_card", "offline.activity_recommendation_message", "offline.recommendation_message_check"):
         rows = await j.db.query_raw("""SELECT v.change_type, p.number FROM prompt_template_versions v

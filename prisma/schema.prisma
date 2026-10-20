@@ -15,6 +15,21 @@ generator client {
 }
 
 model User {
+  erasureSpeechUsage SpeechUsage[] @relation("ErasureSpeechUsage") @ignore
+  erasureTtsUsage TtsUsage[] @relation("ErasureTtsUsage") @ignore
+  erasureUserMemory UserMemory[] @relation("ErasureUserMemory") @ignore
+  erasureAiMemory AiMemory[] @relation("ErasureAiMemory") @ignore
+  erasureMemoryRepairItem MemoryRepairItem[] @relation("ErasureMemoryRepairItem") @ignore
+  erasureMemoryQualityState MemoryQualityState[] @relation("ErasureMemoryQualityState") @ignore
+  erasureMemoryConsolidationRun MemoryConsolidationRun[] @relation("ErasureMemoryConsolidationRun") @ignore
+  erasureMemoryVisibleUseEvent MemoryVisibleUseEvent[] @relation("ErasureMemoryVisibleUseEvent") @ignore
+  erasureCrisisEvent CrisisEvent[] @relation("ErasureCrisisEvent") @ignore
+  erasureProactiveChatLog ProactiveChatLog[] @relation("ErasureProactiveChatLog") @ignore
+  erasureProactiveCounter ProactiveCounter[] @relation("ErasureProactiveCounter") @ignore
+  erasureMemoryEntity MemoryEntity[] @relation("ErasureMemoryEntity") @ignore
+  erasureMemoryMention MemoryMention[] @relation("ErasureMemoryMention") @ignore
+  erasureLlmUsage LlmUsage[] @relation("ErasureLlmUsage") @ignore
+
   // Server-only execution identity. Lifecycle/rebinding changes rotate it in DB.
   executionGeneration      String @default(dbgenerated("gen_random_uuid()::text")) @map("execution_generation")
   id                       String                          @id @default(uuid())
@@ -269,6 +284,8 @@ model WorkspaceInteractionDay {
 }
 
 model Conversation {
+  erasureTraces MessageTrace[] @relation("ErasureMessageTrace") @ignore
+
   // Server-only execution identity. Lifecycle/rebinding changes rotate it in DB.
   executionGeneration     String @default(dbgenerated("gen_random_uuid()::text")) @map("execution_generation")
   id                      String                          @id @default(uuid())
@@ -370,10 +387,11 @@ model ChatMessageAttachment {
 
 // Speech-to-text usage meter. One row per successful /chat/transcribe call,
 // covering BOTH display modes so voice-message ("voice") and voice-to-text
-// ("text") durations can be reported separately. Deliberately FK-free: it is a
-// standalone ledger and must survive user/conversation deletion (and accept
-// historical backfill for rows whose owners no longer exist).
+// ("text") durations can be reported separately. Account erasure cascades this
+// private ledger; new backfill must reference an existing, non-deleting owner.
 model SpeechUsage {
+  erasureOwner User @relation("ErasureSpeechUsage", fields: [userId], references: [id], onDelete: Cascade, map: "speech_usage_erasure_owner_fkey") @ignore
+
   id              String   @id @default(uuid())
   userId          String   @map("user_id")
   conversationId  String   @map("conversation_id")
@@ -392,6 +410,8 @@ model SpeechUsage {
 // Assistant text-to-speech billing ledger. Values are stored at generation
 // time so later price edits do not rewrite historical cost.
 model TtsUsage {
+  erasureOwner User @relation("ErasureTtsUsage", fields: [userId], references: [id], onDelete: Cascade, map: "tts_usage_erasure_owner_fkey") @ignore
+
   id                   String   @id @default(uuid())
   userId               String   @map("user_id")
   agentId              String   @map("agent_id")
@@ -1049,6 +1069,8 @@ model UserFeedback {
 // - shareUrl 与 message.metadata.trace_url 重复, 但单独存便于按 trace 维度
 //   查 (e.g. batch 分析).
 model MessageTrace {
+  erasureConversation Conversation @relation("ErasureMessageTrace", fields: [conversationId], references: [id], onDelete: Cascade, map: "message_traces_erasure_conversation_fkey") @ignore
+
   traceId         String   @id @map("trace_id")
   conversationId  String   @map("conversation_id")
   messageId       String?  @map("message_id") // 关联 message 表; 不外键, 避免删 msg 级联
@@ -1081,6 +1103,9 @@ model MessageTrace {
 // - 保留期由 scheduler 每日清理 (trace_retention_days); 被查看过的 trace
 //   已物化进 message_traces 镜像, 不受清理影响.
 model TraceRun {
+  traceRoot TraceRun @relation("TraceErasureTree", fields: [traceId], references: [id], onDelete: Cascade, map: "trace_runs_erasure_root_fkey") @ignore
+  traceChildren TraceRun[] @relation("TraceErasureTree") @ignore
+
   id                 String    @id @map("run_id") // langchain run_id (uuid)
   traceId            String    @map("trace_id")
   parentId           String?   @map("parent_id")
@@ -1160,6 +1185,8 @@ model PromptPublicationCounter {
 }
 
 model UserMemory {
+  erasureOwner User @relation("ErasureUserMemory", fields: [userId], references: [id], onDelete: Cascade, map: "memories_user_erasure_owner_fkey") @ignore
+
   id            String         @id @default(uuid())
   userId        String         @map("user_id")
   workspaceId   String?        @map("workspace_id")
@@ -1201,6 +1228,8 @@ model UserMemory {
 }
 
 model AiMemory {
+  erasureOwner User @relation("ErasureAiMemory", fields: [userId], references: [id], onDelete: Cascade, map: "memories_ai_erasure_owner_fkey") @ignore
+
   id            String         @id @default(uuid())
   userId        String         @map("user_id")
   workspaceId   String?        @map("workspace_id")
@@ -1349,6 +1378,8 @@ model MemoryDailyReview {
 }
 
 model MemoryRepairItem {
+  erasureOwner User? @relation("ErasureMemoryRepairItem", fields: [userId], references: [id], onDelete: Cascade, map: "memory_repair_items_erasure_owner_fkey") @ignore
+
   id              String    @id @default(uuid())
   sourceType      String    @map("source_type")
   sourceId        String?   @map("source_id")
@@ -1453,6 +1484,8 @@ model MemoryInputOrigin {
 }
 
 model MemoryQualityState {
+  erasureOwner User @relation("ErasureMemoryQualityState", fields: [userId], references: [id], onDelete: Cascade, map: "memory_quality_states_erasure_owner_fkey") @ignore
+
   memoryId             String    @map("memory_id")
   memorySource         String    @map("memory_source")
   userId               String    @map("user_id")
@@ -1480,6 +1513,8 @@ model MemoryQualityState {
 }
 
 model MemoryConsolidationRun {
+  erasureOwner User? @relation("ErasureMemoryConsolidationRun", fields: [userId], references: [id], onDelete: Cascade, map: "memory_consolidation_runs_erasure_owner_fkey") @ignore
+
   id          String   @id @default(uuid())
   // 哪个任务写的: "hygiene" (近重复合并) 还是 "l3_compression" (簇压缩)。
   // 两者都叫"整合"但做的事不同, 混在一张表里会让审计读不出发生了什么 ——
@@ -1504,6 +1539,8 @@ model MemoryConsolidationRun {
 }
 
 model MemoryVisibleUseEvent {
+  erasureOwner User? @relation("ErasureMemoryVisibleUseEvent", fields: [userId], references: [id], onDelete: Cascade, map: "memory_visible_use_events_erasure_owner_fkey") @ignore
+
   id                        String   @id @default(uuid())
   messageId                 String?  @map("message_id")
   conversationId            String   @map("conversation_id")
@@ -1531,6 +1568,8 @@ model MemoryVisibleUseEvent {
 }
 
 model CrisisEvent {
+  erasureOwner User? @relation("ErasureCrisisEvent", fields: [userId], references: [id], onDelete: Cascade, map: "crisis_events_erasure_owner_fkey") @ignore
+
   id                 String   @id @default(uuid())
   messageId          String?  @map("message_id")
   conversationId     String   @map("conversation_id")
@@ -1600,6 +1639,8 @@ model ScheduleAdjustLog {
 }
 
 model ProactiveChatLog {
+  erasureOwner User @relation("ErasureProactiveChatLog", fields: [userId], references: [id], onDelete: Cascade, map: "proactive_chat_logs_erasure_owner_fkey") @ignore
+
   id             String         @id @default(uuid())
   agentId        String         @map("agent_id")
   agent          AiAgent        @relation(fields: [agentId], references: [id])
@@ -1682,6 +1723,8 @@ model ProactiveEventLog {
 // Redis 挂时 can_send_proactive / can_send_proactive_2day 可从这里降级读取, 避免计数丢失
 // 导致主动消息超发. date 按 Asia/Shanghai 时区的 YYYYMMDD 字符串, 与 Redis key 对齐.
 model ProactiveCounter {
+  erasureOwner User @relation("ErasureProactiveCounter", fields: [userId], references: [id], onDelete: Cascade, map: "proactive_counters_erasure_owner_fkey") @ignore
+
   id        String   @id @default(uuid())
   agentId   String   @map("agent_id")
   userId    String   @map("user_id")
@@ -1784,6 +1827,8 @@ model TimeTrigger {
 // ── Entity knowledge layer ──
 
 model MemoryEntity {
+  erasureOwner User @relation("ErasureMemoryEntity", fields: [userId], references: [id], onDelete: Cascade, map: "memory_entities_erasure_owner_fkey") @ignore
+
   id              String    @id @default(uuid())
   userId          String    @map("user_id")
   workspaceId     String?   @map("workspace_id")
@@ -1808,6 +1853,8 @@ model MemoryEntity {
 }
 
 model MemoryMention {
+  erasureOwner User @relation("ErasureMemoryMention", fields: [userId], references: [id], onDelete: Cascade, map: "memory_mentions_erasure_owner_fkey") @ignore
+
   memoryId     String       @map("memory_id")
   memorySource String       @map("memory_source") // "user" | "ai"
   entityId     String       @map("entity_id")
@@ -1854,6 +1901,8 @@ model Holiday {
 // 每条 chat 请求结束时写一行的 token 用量明细. 跟 message_traces 解耦 —
 // 后者是 lazy 写 (用户点 Trace 才落库), 这张表是热路径强写, 用于后台统计概览.
 model LlmUsage {
+  erasureOwner User? @relation("ErasureLlmUsage", fields: [userId], references: [id], onDelete: Cascade, map: "llm_usage_erasure_owner_fkey") @ignore
+
   id               String   @id @default(uuid())
   // conversation_id 可空: 非会话场景 (admin 建 agent / 每日作息 cron) 也写一行,
   // 这两类没有 conversation 归属, 用 scope 区分.

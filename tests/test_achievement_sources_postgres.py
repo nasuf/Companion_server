@@ -363,6 +363,7 @@ async def test_source_api_is_bounded_authorized_and_hides_content(achieved):
                 },
             )
         ).status_code == 403
+        await db.user.update(where={'id':event.user_id},data={'role':'admin'})
         assert (
             await client.get(url + "?limit=51", headers=admin_headers)
         ).status_code == 422

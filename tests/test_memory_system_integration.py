@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
+
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.memory.retrieval.relevance import compute_display_score, RelevanceLevel
 from app.services.memory.lifecycle.l2_dynamics import _time_factor, _frequency_factor, _quality_factor

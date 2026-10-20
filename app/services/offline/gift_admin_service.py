@@ -7,6 +7,8 @@ gift_status.MANUAL_PROVIDER）：不会调用任何下单 / 物流接口，轨�
 
 from __future__ import annotations
 
+from app.services.runtime import user_erasure
+
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -384,7 +386,8 @@ async def _resolve_image(user_id: str, data: Any, *, current: str | None) -> tup
     if data.image_base64:
         mime = activity_media_storage.normalize_image_mime(data.image_mime)
         blob = activity_media_storage.decode_image_base64(data.image_base64)
-        return _store_gift_image(user_id, blob, mime)
+        async with user_erasure.owner_write_scope(user_id):
+            return _store_gift_image(user_id, blob, mime)
     if data.image_url is None:
         return (current if "image_url" not in data.model_fields_set else None), None
     url = _validate_image_url(user_id, data.image_url)
@@ -398,7 +401,8 @@ async def _resolve_image(user_id: str, data: Any, *, current: str | None) -> tup
         mime = activity_media_storage.normalize_image_mime(mime)
     except HTTPException as exc:
         raise HTTPException(status_code=422, detail="图片格式不支持（仅 JPG / PNG / WEBP），请换一张或直接上传") from exc
-    return _store_gift_image(user_id, blob, mime)
+    async with user_erasure.owner_write_scope(user_id):
+        return _store_gift_image(user_id, blob, mime)
 
 
 def _store_gift_image(user_id: str, blob: bytes, mime: str) -> tuple[str, str]:

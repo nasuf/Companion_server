@@ -137,12 +137,13 @@ async def test_legacy_admin_api_auth_and_no_source_content(legacy_origins):
     await db.aimemory.delete(where={"id": mid})
     await log(db, uid, wid, mid, [msg.id])
     app = FastAPI(); app.include_router(memory_repairs.router)
-    headers = {"Authorization": "Bearer " + create_jwt("synthetic-admin", role="admin")}
+    headers = {"Authorization": "Bearer " + create_jwt(uid, role="admin")}
     path = f"/admin-api/memory-repairs/evidence/user/{mid}"
     params = {"user_id": uid, "workspace_id": wid}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://isolated.test") as client:
         assert (await client.get(path, params=params)).status_code == 401
         assert (await client.get(path, params=params, headers={"Authorization": "Bearer "+create_jwt(uid, role="user")})).status_code == 403
+        await db.user.update(where={'id':uid},data={'role':'admin'})
         assert (await client.get(path, params={**params,"workspace_id": spaces[1]}, headers=headers)).status_code == 404
         response = await client.get(path, params=params, headers=headers)
         assert response.status_code == 200

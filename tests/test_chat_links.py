@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.usefixtures('unit_media_scope')
+
 from app.services.chat_links.cards import component_card_for_link
 from app.services.chat_links import extraction as extraction_mod
 from app.services.chat_links import covers as cover_mod

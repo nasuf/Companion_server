@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures('unit_media_scope')
 from fastapi import HTTPException
 
 from app.models.admin_gifts import (

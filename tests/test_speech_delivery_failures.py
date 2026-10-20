@@ -108,7 +108,7 @@ async def test_concurrent_voice_assignment_keeps_existing_admin_voice(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_cancelled_attachment_creation_removes_file_after_metering(monkeypatch):
+async def test_cancelled_attachment_creation_removes_file_after_metering(monkeypatch, unit_media_scope):
     speech = SimpleNamespace(audio=b"wav", mime="audio/wav", duration_milliseconds=500, request_id="request")
     metered = AsyncMock()
     deleted = []

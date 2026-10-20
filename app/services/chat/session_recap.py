@@ -26,6 +26,7 @@ from app.services.temporal import local_clock, parse_time
 
 from app.observability.events import EVT_SESSION_RECAP
 from app.redis_client import get_redis
+from app.services.runtime import user_erasure
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.prompting.store import get_prompt_text
 from app.services.prompting.utils import safe_format
@@ -92,7 +93,8 @@ async def get_or_build_session_recap(
     )
     if redis is not None:
         try:
-            await redis.set(key, recap, ex=_RECAP_TTL_S)
+            async with user_erasure.conversation_write_scope(conversation_id):
+                await redis.set(key, recap, ex=_RECAP_TTL_S)
         except Exception:
             pass
     return recap

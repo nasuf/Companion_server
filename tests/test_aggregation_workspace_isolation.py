@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
+
 from app.services.interaction.aggregation import (
     _parse_scope_token,
     _scope_token,

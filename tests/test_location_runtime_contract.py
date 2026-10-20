@@ -124,7 +124,7 @@ async def test_dispatch_failure_does_not_starve_other_runtime_jobs(monkeypatch, 
         assert prune.await_count == (0 if family == failing_family else 1)
 
 
-async def test_admin_requires_admin_token_and_bounded_query(monkeypatch):
+async def test_admin_requires_admin_token_and_bounded_query(monkeypatch, mock_current_accounts):
     from app.config import settings
 
     monkeypatch.setattr(

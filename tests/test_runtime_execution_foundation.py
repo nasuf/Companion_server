@@ -113,7 +113,7 @@ class RuntimeDatabase:
 
 
 @pytest.fixture
-async def flow():
+async def flow(monkeypatch):
     url = os.getenv("PROACTIVE_E2E_DATABASE_URL")
     if not url:
         pytest.skip("isolated PostgreSQL required")
@@ -122,6 +122,7 @@ async def flow():
     assert parsed.path == "/companion_proactive_e2e"
     database = RuntimeDatabase(Prisma(datasource={"url": url}, http={"trust_env": False}))
     await database.connect()
+    monkeypatch.setattr('app.db.db', database)
     ids = {key: str(uuid4()) for key in ("owner", "agent", "workspace", "conversation", "other_conversation")}
     try:
         await database.user.create(data={"id": ids["owner"], "username": "runtime-" + ids["owner"]})

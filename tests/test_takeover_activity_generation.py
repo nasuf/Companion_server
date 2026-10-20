@@ -129,11 +129,13 @@ async def test_failure_never_sends_to_the_wrong_chat(pipeline, failure, status):
     pipeline["create"].assert_not_awaited()
 
 
-async def test_recommendation_requires_current_active_admin(pipeline, monkeypatch):
+async def test_recommendation_requires_current_active_admin(pipeline, monkeypatch, mock_current_accounts):
     from tests.conftest import make_auth_header
     value = FastAPI()
     value.include_router(takeovers.router)
-    monkeypatch.setattr(activities.db, "query_raw", AsyncMock(return_value=[]))
+    query=AsyncMock(return_value=[])
+    monkeypatch.setattr(activities.db, "query_raw", query)
+    monkeypatch.setattr('app.db.db.query_raw',query,raising=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=value), base_url="http://test") as client:
         url = "/admin-api/takeovers/case/activities/recommend"
         assert (await client.post(url)).status_code == 401

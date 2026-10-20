@@ -19,6 +19,9 @@ def secured_chat(monkeypatch):
     conv = SimpleNamespace(id="conv-1", userId="owner", isDeleted=False,
                            agent=agent, workspaceId="workspace-1")
     db = MagicMock()
+    db.user.find_unique = AsyncMock(side_effect=lambda **kw: SimpleNamespace(
+        status='active', archivedAt=None, role='admin' if kw['where']['id']=='admin' else 'user'))
+    monkeypatch.setattr('app.db.db', db)
     db.conversation.find_unique = AsyncMock(return_value=conv)
     db.aiagent.find_unique = AsyncMock(return_value=agent)
     db.message.create = AsyncMock(return_value=SimpleNamespace(id="message-1"))

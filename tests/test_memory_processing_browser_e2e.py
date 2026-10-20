@@ -26,6 +26,7 @@ from tests.test_memory_processing_diagnostics import observations, redis
 
 async def test_browser_reads_real_dual_side_failure_and_success(origins, observations, monkeypatch):
     db,uid,wid,_,msg,*_=origins
+    monkeypatch.setattr('app.db.db',db)
     monkeypatch.setattr(p,'db',db)
     from app.services.memory.recording import chat_sources
     monkeypatch.setattr(chat_sources,'db',db)
@@ -76,9 +77,10 @@ async def test_browser_reads_real_dual_side_failure_and_success(origins, observa
                         }''',[token,path,method])
                     path = '/admin-api/runtime-jobs/memory-processing'
                     assert (await request('',path))['status'] == 401
-                    ordinary = create_jwt('synthetic-user',role='user')
+                    ordinary = create_jwt(uid,role='user')
                     assert (await request(ordinary,path))['status'] == 403
-                    admin = create_jwt('synthetic-admin',role='admin')
+                    await db.user.update(where={'id':uid},data={'role':'admin'})
+                    admin = create_jwt(uid,role='admin')
                     assert (await request(admin,path+'?limit=51'))['status'] == 422
                     result = await request(admin,path)
                     assert result['status'] == 200

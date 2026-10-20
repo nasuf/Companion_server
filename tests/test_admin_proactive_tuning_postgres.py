@@ -27,6 +27,7 @@ async def env(monkeypatch):
     assert urlsplit(url).path == "/companion_proactive_e2e"
     db = Prisma(datasource={"url": url}, http={"trust_env": False})
     await db.connect()
+    monkeypatch.setattr('app.db.db', db)
     from app.config import settings
 
     monkeypatch.setattr(settings, "jwt_secret", "synthetic-proactive-tuning-test-secret")
@@ -140,5 +141,6 @@ async def test_unchanged_values_write_nothing(env):
 
 async def test_non_admin_is_forbidden(env):
     _db, client, admin = env
+    await _db.user.update(where={'id':admin.id},data={'role':'user'})
     resp = await client.get("/admin-api/proactive-tuning", headers=_auth(admin.id, role="user"))
     assert resp.status_code == 403

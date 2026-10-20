@@ -39,6 +39,7 @@ _ADMIN_CHANNEL_PREFIX = "ws:admin:{"
 _PSUB_PATTERN_CONV = "ws:conv:*"
 _PSUB_PATTERN_WS = "ws:workspace:*"
 _PSUB_PATTERN_ADMIN = "ws:admin:*"
+_PSUB_PATTERN_REVOKE = "ws:revoke:*"
 
 
 def _conv_channel(conv_id: str) -> str:
@@ -59,6 +60,7 @@ def _parse_channel(channel: str) -> tuple[str, str] | None:
         (_CONV_CHANNEL_PREFIX, "conv"),
         (_WS_CHANNEL_PREFIX, "workspace"),
         (_ADMIN_CHANNEL_PREFIX, "admin"),
+        ("ws:revoke:{", "revoke"),
     ):
         if channel.startswith(prefix) and channel.endswith(_CHANNEL_SUFFIX):
             return kind, channel[len(prefix):-len(_CHANNEL_SUFFIX)]
@@ -73,6 +75,8 @@ class ConnectionManager:
         self._user_convs: dict[str, set[str]] = {}
         self._workspace_convs: dict[str, set[str]] = {}
         self._conv_users: dict[str, str] = {}
+        self._conv_actors: dict[str, str] = {}
+        self._actor_convs: dict[str, set[str]] = {}
         self._conv_workspace: dict[str, str | None] = {}
         # Admin inbox sockets are a separate map. They must not occupy
         # _connections, which is one socket per end-user conversation.
@@ -93,6 +97,7 @@ class ConnectionManager:
         ws: WebSocket,
         *,
         workspace_id: str | None = None,
+        actor_user_id: str | None = None,
     ) -> None:
         """注册一条 WS 连接. workspace_id 为 None 时仅 user 维度可达 (兼容历史 conv)."""
         async with self._lock:
@@ -103,10 +108,19 @@ class ConnectionManager:
                 except Exception:
                     pass
 
+            previous_actor = self._conv_actors.pop(conv_id, None)
+            if previous_actor:
+                self._actor_convs[previous_actor].discard(conv_id)
+                if not self._actor_convs[previous_actor]:
+                    del self._actor_convs[previous_actor]
+
             self._connections[conv_id] = ws
             self._conv_users[conv_id] = user_id
             self._conv_workspace[conv_id] = workspace_id
             self._user_convs.setdefault(user_id, set()).add(conv_id)
+            if actor_user_id and actor_user_id != user_id:
+                self._conv_actors[conv_id] = actor_user_id
+                self._actor_convs.setdefault(actor_user_id, set()).add(conv_id)
             if workspace_id:
                 self._workspace_convs.setdefault(workspace_id, set()).add(conv_id)
         logger.debug(
@@ -122,6 +136,11 @@ class ConnectionManager:
                 return
             self._connections.pop(conv_id, None)
             user_id = self._conv_users.pop(conv_id, None)
+            actor_id = self._conv_actors.pop(conv_id, None)
+            if actor_id:
+                self._actor_convs[actor_id].discard(conv_id)
+                if not self._actor_convs[actor_id]:
+                    del self._actor_convs[actor_id]
             workspace_id = self._conv_workspace.pop(conv_id, None)
             if user_id and user_id in self._user_convs:
                 self._user_convs[user_id].discard(conv_id)
@@ -241,6 +260,28 @@ class ConnectionManager:
                 local_count += 1
         return local_count
 
+    async def _close_local_user(self, user_id: str) -> None:
+        conversations = self._user_convs.get(user_id, set()) | self._actor_convs.get(user_id, set())
+        for cid in conversations:
+            ws = self._connections.get(cid)
+            if ws is not None and (self._conv_users.get(cid) == user_id
+                                   or self._conv_actors.get(cid) == user_id):
+                try:
+                    await ws.close(code=4003, reason="account unavailable")
+                finally:
+                    await self.disconnect(cid, expected=ws)
+        admin = self._admin_connections.get(user_id)
+        if admin is not None:
+            try:
+                await admin.close(code=4003, reason="account unavailable")
+            finally:
+                await self.disconnect_admin(user_id, expected=admin)
+
+    async def revoke_user(self, user_id: str, *, redis=None) -> None:
+        await self._close_local_user(user_id)
+        redis = redis if redis is not None else await get_redis()
+        await redis.publish(f"ws:revoke:{{{user_id}}}", json.dumps({"sender": self._instance_id}))
+
     # ────────────────────────── 内部 ──────────────────────────
 
     async def _send_local_conv(
@@ -314,7 +355,7 @@ class ConnectionManager:
                 pubsub_client = self._make_pubsub_client()
                 pubsub = pubsub_client.pubsub()
                 await pubsub.psubscribe(
-                    _PSUB_PATTERN_CONV, _PSUB_PATTERN_WS, _PSUB_PATTERN_ADMIN,
+                    _PSUB_PATTERN_CONV, _PSUB_PATTERN_WS, _PSUB_PATTERN_ADMIN, _PSUB_PATTERN_REVOKE,
                 )
                 logger.info(
                     f"WS subscriber started: psubscribe "
@@ -389,6 +430,9 @@ class ConnectionManager:
         # 关键: 跳过自己 publish 的消息. send_to_workspace 同时本地 push +
         # publish, 自己的 subscriber 收到自己的 publish 会重复 push 一次.
         if payload.get("sender") == self._instance_id:
+            return
+        if kind == "revoke":
+            await self._close_local_user(scope_id)
             return
         event_type = payload.get("type", "")
         data = payload.get("data")

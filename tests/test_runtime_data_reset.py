@@ -6,6 +6,26 @@ import pytest
 from app.services.runtime import data_reset
 
 
+@pytest.mark.parametrize('kind,mode', [('chat','directory'),('chat','noop'),
+    ('offline','directory'),('offline','noop'),('offline','missing')])
+def test_media_cleanup_cannot_succeed_with_an_unavailable_or_unremoved_file(tmp_path, monkeypatch, kind, mode):
+    storage=data_reset.chat_media_storage if kind=='chat' else data_reset.activity_media_storage
+    root=tmp_path/'media'
+    monkeypatch.setattr(storage,'_MEDIA_DIR',root)
+    peer=None
+    key='user-1_retry.jpg'
+    if mode!='missing':
+        root.mkdir();peer=root/'peer_keep.jpg';peer.write_bytes(b'peer bytes')
+        if mode=='directory':(root/key).mkdir()
+        else:
+            (root/key).write_bytes(b'must remain')
+            monkeypatch.setattr(storage,'delete_media_file',lambda _:None)
+    cleanup=data_reset._delete_chat_media_files if kind=='chat' else data_reset._delete_offline_media_files
+    with pytest.raises(RuntimeError):cleanup([key])
+    if peer:assert peer.read_bytes()==b'peer bytes'
+    if mode=='noop':assert (root/key).read_bytes()==b'must remain'
+
+
 class _Delegate:
     def __init__(self, *, find_many_result=None, delete_result=0):
         self.find_many = AsyncMock(return_value=find_many_result or [])
@@ -283,7 +303,7 @@ async def test_hard_delete_user_keeps_user_row_when_chat_media_cleanup_fails(mon
     )
 
     with pytest.raises(RuntimeError, match="chat media disk unavailable"):
-        await data_reset.hard_delete_user_data("user-1")
+        await data_reset._hard_delete_user_data("user-1")
 
     fake_db.user.delete.assert_not_awaited()
 
@@ -315,7 +335,7 @@ async def test_hard_delete_user_data_reuses_agent_delete_and_removes_user(monkey
     )
     monkeypatch.setattr(data_reset, "_clear_user_redis", AsyncMock(return_value=3))
 
-    stats = await data_reset.hard_delete_user_data("user-1")
+    stats = await data_reset._hard_delete_user_data("user-1")
 
     agent_delete.assert_awaited_once_with("agent-1", "user-1")
     fake_db.aiagent.delete_many.assert_awaited_once_with(where={"userId": "user-1"})
@@ -330,6 +350,7 @@ async def test_hard_delete_user_data_reuses_agent_delete_and_removes_user(monkey
 
 @pytest.mark.asyncio
 async def test_delete_remaining_user_side_tables_clears_user_owned_capsules_and_wills(monkeypatch, tmp_path):
+    monkeypatch.setattr(data_reset.activity_media_storage, '_MEDIA_DIR', tmp_path)
     # Production deletion deliberately fails closed if the media disk is absent.
     # Give this SQL-cleanup test its own available, empty synthetic media root.
     monkeypatch.setenv("CAPSULE_MEDIA_DIR", str(tmp_path))
@@ -364,6 +385,7 @@ async def test_delete_remaining_user_side_tables_clears_user_owned_capsules_and_
 
 @pytest.mark.asyncio
 async def test_delete_remaining_user_side_tables_removes_capsule_media_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(data_reset.activity_media_storage, '_MEDIA_DIR', tmp_path)
     media_keys = ["user-1_capsule.jpg", "user-1_capsule.m4a", "user-1_orphan.webp"]
     for key in media_keys:
         (tmp_path / key).write_bytes(b"media")
@@ -379,7 +401,7 @@ async def test_delete_remaining_user_side_tables_removes_capsule_media_files(mon
                     }
                 }
             ]
-        if "DELETE FROM offline_activity_media" in sql:
+        if "FROM offline_activity_media" in sql:
             return []
         return []
 
@@ -440,7 +462,7 @@ async def test_hard_delete_agent_data_removes_offline_image_url_files(monkeypatc
         if "FROM offline_activity_recommendations" in sql and "SELECT image_urls" in sql:
             assert args == ("user-1", "agent-1")
             return [{"image_urls": [f"/offline/media/{media_key}"]}]
-        if "DELETE FROM offline_activity_media" in sql:
+        if "FROM offline_activity_media" in sql:
             return []
         return []
 

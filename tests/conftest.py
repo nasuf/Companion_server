@@ -2,6 +2,7 @@
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+from contextlib import asynccontextmanager
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,7 +44,37 @@ def auth_header():
 
 
 @pytest.fixture
-def api_client():
+def mock_current_accounts(monkeypatch):
+    """Explicit SQL identities for router tests with synthetic admin/user tokens."""
+    from types import SimpleNamespace
+    accounts = {
+        key: SimpleNamespace(id=key, username=key, status='active', archivedAt=None, role=role)
+        for key, role in {'admin':'admin', 'user':'user', 'subject':'user'}.items()
+    }
+    async def find_unique(*, where):
+        return accounts.get(where['id'])
+    monkeypatch.setattr('app.db.db', SimpleNamespace(user=SimpleNamespace(find_unique=find_unique)))
+    return accounts
+
+
+@pytest.fixture
+def unit_media_scope(monkeypatch):
+    """Router/storage unit tests use synthetic DB delegates, not a transaction.
+
+    Lifecycle/fence behavior is exercised against real SQL in
+    test_user_erasure_postgres.py; this fixture must not be used there.
+    """
+    from app.services.runtime import user_erasure
+    @asynccontextmanager
+    async def scope(_uid, *, database=None, update_owner=False):
+        yield database
+    monkeypatch.setattr(user_erasure, "owner_write_scope", scope)
+    monkeypatch.setattr(user_erasure, "conversation_write_scope", scope)
+    monkeypatch.setattr(user_erasure, "runtime_job_write_scope", scope)
+
+
+@pytest.fixture
+def api_client(unit_media_scope):
     """TestClient(app) with all external deps mocked. Replaces the inline
     `mock_deps` fixture in test_api_integration.py / test_public_endpoints_ownership.py.
     """
@@ -58,7 +89,27 @@ def api_client():
         patch("app.middleware.configure_langsmith"),
     ):
         from app.main import app
-        yield TestClient(app)
+        from app.api.jwt_auth import require_user, bearer_scheme
+        from app.services.auth import decode_jwt
+        from fastapi import Depends, HTTPException
+        # These isolated router tests historically mock out SQL connection.
+        # Validate JWTs here; current-account checks have dedicated auth tests.
+        async def unit_identity(credentials=Depends(bearer_scheme)):
+            if not credentials:
+                raise HTTPException(status_code=401, detail="Token required")
+            try:
+                return decode_jwt(credentials.credentials)
+            except Exception:
+                raise HTTPException(status_code=401, detail="Invalid or expired token")
+        previous = app.dependency_overrides.get(require_user)
+        app.dependency_overrides[require_user] = unit_identity
+        try:
+            yield TestClient(app)
+        finally:
+            if previous is None:
+                app.dependency_overrides.pop(require_user, None)
+            else:
+                app.dependency_overrides[require_user] = previous
 
 
 @pytest.fixture(scope="session")

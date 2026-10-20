@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 from app.redis_client import get_redis
+from app.services.runtime import user_erasure
 from app.services.interaction.reply_context import merge_reply_contexts
 from app.services.interaction.turn_coalescing import coalesce_turn_messages
 
@@ -82,7 +83,8 @@ async def enqueue_delayed_message(
     if current_score is None or due_at < float(current_score):
         pipe.zadd(_DELAYED_ZSET_KEY, {conversation_id: due_at})
     try:
-        await pipe.execute()
+        async with user_erasure.conversation_write_scope(conversation_id):
+            await pipe.execute()
     except Exception as e:
         # 入队失败 = 延迟消息丢失; caller 目前无法感知, 用户看到"排队中"但无 flush.
         # (caller 侧降级 - Redis 挂时同步走 LLM - 在 Phase C 处理)

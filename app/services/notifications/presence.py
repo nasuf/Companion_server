@@ -39,7 +39,9 @@ async def record_ws_online(user_id: str | None, conn_id: str) -> None:
         return
     try:
         redis = await get_redis()
-        await redis.zadd(_ONLINE_WS_ZKEY, {_ws_member(user_id, conn_id): time.time()})
+        from app.services.runtime.user_erasure import owner_write_scope
+        async with owner_write_scope(user_id):
+            await redis.zadd(_ONLINE_WS_ZKEY, {_ws_member(user_id, conn_id): time.time()})
     except Exception as e:
         logger.debug(f"[PRESENCE] record_ws_online skipped user={user_id[:8]}: {e}")
 
@@ -61,7 +63,9 @@ async def record_online(user_id: str | None) -> None:
         return
     try:
         redis = await get_redis()
-        await redis.zadd(_ONLINE_HB_ZKEY, {user_id: time.time()})
+        from app.services.runtime.user_erasure import owner_write_scope
+        async with owner_write_scope(user_id):
+            await redis.zadd(_ONLINE_HB_ZKEY, {user_id: time.time()})
     except Exception as e:
         logger.debug(f"[PRESENCE] record_online skipped user={user_id[:8]}: {e}")
 
@@ -111,9 +115,11 @@ async def update_presence(
             "conversation_id": conversation_id,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        await redis.set(_key(user_id, device_id), json.dumps(payload), ex=_TTL_SECONDS)
-        # 同时喂统一在线计数 (App 前台但未进聊天也算在线).
-        await record_online(user_id)
+        from app.services.runtime.user_erasure import owner_write_scope
+        async with owner_write_scope(user_id):
+            await redis.set(_key(user_id, device_id), json.dumps(payload), ex=_TTL_SECONDS)
+            # Keep both private writes inside the same short erasure fence.
+            await redis.zadd(_ONLINE_HB_ZKEY, {user_id: time.time()})
         logger.info(
             f"[PUSH] presence user={user_id[:8]} device={device_id[:16]} "
             f"foreground=true workspace={workspace_id} conversation={conversation_id}"

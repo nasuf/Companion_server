@@ -22,6 +22,7 @@ from datetime import datetime
 from app.db import db
 from app.observability.events import EVT_MEMORY_DELETED, EVT_MEMORY_DELETION_PENDING
 from app.redis_client import get_redis
+from app.services.runtime import user_erasure
 from app.services.memory.storage import repo as memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.config import DELETION_SIMILARITY_THRESHOLD, LLM_INTENT_MIN_CONFIDENCE
@@ -392,11 +393,12 @@ def get_deletion_response() -> str:
 async def save_pending_deletion(conversation_id: str, candidates: list[dict]) -> None:
     """Store deletion candidates in Redis so user can confirm."""
     redis = await get_redis()
-    await redis.set(
-        f"{_PENDING_DELETION_PREFIX}{conversation_id}",
-        json.dumps(candidates, ensure_ascii=False),
-        ex=_PENDING_DELETION_TTL,
-    )
+    async with user_erasure.conversation_write_scope(conversation_id):
+        await redis.set(
+            f"{_PENDING_DELETION_PREFIX}{conversation_id}",
+            json.dumps(candidates, ensure_ascii=False),
+            ex=_PENDING_DELETION_TTL,
+        )
 
 
 async def load_pending_deletion(conversation_id: str) -> list[dict] | None:
@@ -431,11 +433,12 @@ async def save_pending_action(
     if summary is not None:
         payload["summary"] = summary
     redis = await get_redis()
-    await redis.set(
-        f"{_PENDING_DELETION_PREFIX}{conversation_id}",
-        json.dumps(payload, ensure_ascii=False),
-        ex=_PENDING_DELETION_TTL,
-    )
+    async with user_erasure.conversation_write_scope(conversation_id):
+        await redis.set(
+            f"{_PENDING_DELETION_PREFIX}{conversation_id}",
+            json.dumps(payload, ensure_ascii=False),
+            ex=_PENDING_DELETION_TTL,
+        )
     logger.info(
         f"[PENDING] {action} saved n_candidates={len(candidates or [])}",
         extra={

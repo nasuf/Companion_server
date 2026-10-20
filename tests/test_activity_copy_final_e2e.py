@@ -88,7 +88,7 @@ async def test_partial_detail_matches_persistence_public_api_and_final_trace(nat
     fetched = await j.client.get("/offline/activities/" + public["id"])
     assert fetched.status_code == 200 and fetched.json()["description"] == public["description"]
     denied = await j.client.get("/offline/activities/" + public["id"], headers={"Authorization": "Bearer " + create_jwt("foreign-user", role="user")})
-    assert denied.status_code == 404
+    assert denied.status_code == 401  # This random JWT subject has no account.
     assert "discovery_metadata" not in public and "copy_kept_sections" not in public
     output = os.environ.get("ACTIVITY_COPY_E2E_PAYLOAD")
     if output:

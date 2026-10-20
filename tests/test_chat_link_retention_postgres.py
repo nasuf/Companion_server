@@ -223,6 +223,7 @@ async def test_admin_api_auth_policy_and_real_operations(governed,monkeypatch):
         for method,suffix in [('GET',''),('POST','/preview'),('POST','/execute?confirmed=true&policy_version='+r.POLICY_VERSION)]:
             assert (await client.request(method,path+suffix)).status_code==401
             assert (await client.request(method,path+suffix,headers={'Authorization':'Bearer '+create_jwt(uid,'user')})).status_code==403
+        await db.user.update(where={'id':uid},data={'role':'admin'})
         assert (await client.post(path+'/execute?confirmed=true&policy_version=old',headers=headers)).status_code==409
         assert (await client.post(path+'/execute?policy_version='+r.POLICY_VERSION,headers=headers)).status_code==409
         assert (await client.get(path,headers=headers)).json()['last_run'] is None

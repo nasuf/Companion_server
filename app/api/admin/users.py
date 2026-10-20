@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -8,6 +9,8 @@ from pydantic import BaseModel, field_validator
 from app.db import db
 from app.api.jwt_auth import require_admin_jwt
 from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED_ROLES = {"user", "admin"}
 _WECHAT_PROVIDER = "wechat"
@@ -609,5 +612,12 @@ async def delete_user(
 
     from app.services.runtime.data_reset import hard_delete_user_data
 
-    stats = await hard_delete_user_data(user_id)
+    try:
+        stats = await hard_delete_user_data(user_id)
+    except Exception as exc:
+        logger.exception("Account erasure incomplete user=%s error=%s", user_id, type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="用户删除未完成，未确认全部在线数据清理成功。请刷新查看账号状态，排查后重试。",
+        ) from exc
     return {"ok": True, "stats": stats}

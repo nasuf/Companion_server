@@ -190,6 +190,18 @@ async def enqueue_runtime_job(
 ) -> str:
     if not isinstance(payload, dict):
         raise ValueError("Runtime job payload must be an object")
+    from app.services.runtime.user_erasure import runtime_job_write_scope
+    async with runtime_job_write_scope(payload):
+        return await _enqueue_runtime_job(
+            job_type, payload, idempotency_key=idempotency_key,
+            delay_s=delay_s, max_attempts=max_attempts,
+        )
+
+
+async def _enqueue_runtime_job(
+    job_type: str, payload: dict[str, Any], *, idempotency_key: str | None,
+    delay_s: int, max_attempts: int,
+) -> str:
     redis = await get_redis()
     candidate_id = uuid.uuid4().hex
     content = json.dumps(payload, ensure_ascii=False, allow_nan=False)

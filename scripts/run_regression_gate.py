@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def evidence_hashes(root: Path = ROOT) -> dict[str, str]:
     paths = [p for folder in ("app", "jobs", "tests", "scripts", "prisma", "evals")
              for p in (root / folder).rglob("*")
-             if p.is_file() and p.suffix in {".py", ".json", ".jsonl", ".sql", ".prisma"}]
+             if p.is_file() and p.suffix in {".py", ".json", ".jsonl", ".sql", ".prisma", ".sh"}]
     paths += list((root / ".github/workflows").glob("*.yml"))
     paths += [root / name for name in ("pyproject.toml", "runtime-constraints.txt")]
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -62,12 +62,15 @@ def main() -> int:
         raise ValueError("Run in a clean test checkout without .env; child processes must not reload local credentials")
     database = resource_url("PROACTIVE_E2E_DATABASE_URL", "postgresql", {"/companion_proactive_e2e"})
     memory = resource_url("MEMORY_EVAL_TEST_DATABASE_URL", "postgresql", {"/companion_memory_eval_ci", "/companion_memory_eval_gate"})
+    resource_url("ERASURE_E2E_DATABASE_URL", "postgresql", {"/companion_erasure_e2e"})
+    resource_url("ERASURE_E2E_REDIS_URL", "redis", {"/12"})
     for name in ("G03_TEST_DATABASE_URL", "TTS_TEST_DATABASE_URL"):
         resource_url(name, "postgresql", {"/postgres"})
     for name in ("RUNTIME_JOB_TEST_REDIS_URL", "PROACTIVE_E2E_REDIS_URL", "MEMORY_EVAL_TEST_REDIS_URL"):
         resource_url(name, "redis", {"/13", "/14", "/15"})
     names = ("PROACTIVE_E2E_DATABASE_URL", "MEMORY_EVAL_TEST_DATABASE_URL", "G03_TEST_DATABASE_URL",
-             "TTS_TEST_DATABASE_URL", "RUNTIME_JOB_TEST_REDIS_URL", "PROACTIVE_E2E_REDIS_URL", "MEMORY_EVAL_TEST_REDIS_URL")
+             "TTS_TEST_DATABASE_URL", "RUNTIME_JOB_TEST_REDIS_URL", "PROACTIVE_E2E_REDIS_URL", "MEMORY_EVAL_TEST_REDIS_URL",
+             "ERASURE_E2E_DATABASE_URL", "ERASURE_E2E_REDIS_URL")
     resources = {key: os.environ[key] for key in names}
     started = datetime.now(UTC).isoformat()
     before = evidence_hashes()

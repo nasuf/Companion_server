@@ -38,6 +38,7 @@ async def scenario(monkeypatch, tmp_path):
     )
     database = Prisma(datasource={"url": url}, http={"trust_env": False})
     await database.connect()
+    monkeypatch.setattr('app.db.db', database)
     for module in (svc, mobile, gift_admin_repository, game_points):
         monkeypatch.setattr(module, "db", database)
     monkeypatch.setattr(activity_media_storage, "_MEDIA_DIR", tmp_path)
@@ -198,6 +199,7 @@ async def scenario(monkeypatch, tmp_path):
     app = FastAPI()
     app.include_router(router)
     app.include_router(public_router)
+    await database.user.update(where={'id':u}, data={'role':'admin'})
     token = create_jwt(u, "admin")
     headers = {"Authorization": "Bearer " + token}
     async with httpx.AsyncClient(
@@ -418,7 +420,7 @@ async def test_all_users_list_is_admin_only_and_workspace_requires_owner(scenari
     assert (await s.client.get(url, headers={"Authorization": ""})).status_code == 401
     assert (
         await s.client.get(
-            url, headers={"Authorization": "Bearer " + create_jwt(s.user, "user")}
+            url, headers={"Authorization": "Bearer " + create_jwt(s.bob, "user")}
         )
     ).status_code == 403
     assert (
@@ -524,7 +526,7 @@ async def test_admin_only_and_requested_owner_required(scenario, suffix):
         await s.client.get(
             url,
             params=params,
-            headers={"Authorization": "Bearer " + create_jwt(s.user, "user")},
+            headers={"Authorization": "Bearer " + create_jwt(s.bob, "user")},
         )
     ).status_code == 403
     assert (await s.client.get(url, params={"user_id": s.bob})).status_code == 404

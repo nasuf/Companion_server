@@ -4,6 +4,8 @@ import inspect
 import io
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
 from PIL import Image
 
 from app.api.public import chat_media

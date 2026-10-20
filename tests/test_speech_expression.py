@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures('unit_media_scope')
+
 from app.services.speech_output import delivery, style, voices
 
 

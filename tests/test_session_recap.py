@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
+
 from app.services.chat.session_recap import (
     RECAP_GAP_SECONDS,
     get_or_build_session_recap,

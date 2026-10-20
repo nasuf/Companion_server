@@ -235,7 +235,7 @@ async def traced_usage_session(
         reset_prompt_render_trace,
         start_prompt_render_trace,
     )
-    tracer = create_tracer(name, conversation_id or "", usage_scope=scope).enter()
+    tracer = create_tracer(name, conversation_id or "", usage_scope=scope, owner_user_id=user_id).enter()
     prompt_trace_token = start_prompt_render_trace()
     try:
         async with usage_session(

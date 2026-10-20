@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw
 from app.api.public import offline
 from app.services.offline import activity_generation as gen, activity_images as media
 from app.services.offline import activity_service as service, repository as repo
+from app.services.offline import activity_recommendation_message as note
 from app.services.offline.activity_discovery import ACTIVITY_PLACE_CATEGORIES, ordered_categories, event_facts, source_address
 from app.services.offline.chat_emit import build_activity_component_card
 from app.services.offline.providers import search
@@ -61,6 +62,13 @@ async def discovery(journey, monkeypatch, tmp_path):
     monkeypatch.setattr(service, 'geocode_address', AsyncMock(return_value=None))
     monkeypatch.setattr(service, 'generate_activity_invite_message', AsyncMock(return_value='找到个地方，想看看吗'))
     monkeypatch.setattr(gen, '_recommendation_copy', AsyncMock(return_value=''))
+    # Other suites can publish note-review prompts in this shared test DB.
+    # Discovery tests still stub ALL model transports, including that reviewer.
+    monkeypatch.setattr(note, 'invoke_text', AsyncMock(return_value='合成活动寄语'))
+    monkeypatch.setattr(note, 'invoke_json', AsyncMock(return_value={
+        'supported': True, 'unsupported_claims': [], 'relevant_indices': []}))
+    monkeypatch.setattr(note, 'get_chat_model', lambda: object())
+    monkeypatch.setattr(note, 'get_utility_model', lambda: object())
     class SearchCache:
         async def get(self, key):
             return await j.redis.get(store._redis_key('search:' + key))

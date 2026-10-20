@@ -34,7 +34,9 @@ def test_deploy_reuses_only_same_image_with_initialized_workers(tmp_path,same_im
     root=Path(__file__).resolve().parents[1]
     workflow=yaml.safe_load((root/'.github/workflows/deploy.yml').read_text())
     deploy=next(s for s in workflow['jobs']['deploy']['steps'] if s['name']=='Deploy server stack on VPS')
-    section=deploy['with']['script'].split('RUNNING_IMAGE=',1)[1].split('echo "==> Running database migrations"',1)[0]
+    # Exercise the image/worker gate; screenshot preservation has its own
+    # actual-shell failure/stop-order tests in test_feedback_media_preservation.
+    section=deploy['with']['script'].split('RUNNING_IMAGE=',1)[1].split('source scripts/deploy_feedback_media.sh',1)[0]
     image='candidate' if same_image else 'older'
     stub=f'''set -euo pipefail
 DOCKER=docker

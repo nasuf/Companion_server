@@ -79,3 +79,19 @@ def test_admin_list_user_feedback(api_client, auth_header, monkeypatch):
     payload = response.json()
     assert payload["total"] == 1
     assert payload["items"][0]["content"] == "建议增加夜间模式"
+
+
+def test_feedback_database_failure_removes_new_files(api_client, auth_header, monkeypatch):
+    import pytest
+    from unittest.mock import Mock
+    from app.api.public import feedback
+    database = MagicMock()
+    database.userfeedback.create = AsyncMock(side_effect=RuntimeError("synthetic DB failure"))
+    monkeypatch.setattr(feedback, "db", database)
+    monkeypatch.setattr(feedback.storage, "save_feedback_image", lambda **_: "user-1_new.jpg")
+    remove = Mock()
+    monkeypatch.setattr(feedback.storage, "delete_feedback_image", remove)
+    with pytest.raises(RuntimeError, match="synthetic DB failure"):
+        api_client.post("/users/me/feedback", data={"content":"合成反馈内容", "contact":"synthetic"},
+            files=[("images", ("image.jpg", _jpeg_bytes(), "image/jpeg"))], headers=auth_header("user-1"))
+    remove.assert_called_once_with("user-1_new.jpg")

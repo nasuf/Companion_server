@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
+
 from app.services.interaction.aggregation import is_short_message, push_pending, push_turn_pending
 from app.services import runtime_config
 from app.services.interaction.user_turn_aggregation import plan_user_message_aggregation

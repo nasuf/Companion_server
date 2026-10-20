@@ -3,6 +3,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi import FastAPI
@@ -17,7 +18,10 @@ from tests.test_runtime_job_queue import redis
 
 
 @pytest.fixture
-async def observations(redis,monkeypatch):
+async def observations(redis,monkeypatch,unit_media_scope):
+    monkeypatch.setattr(d,"db",SimpleNamespace(query_raw=AsyncMock(return_value=[{"user_id":"synthetic-user"}])))
+    monkeypatch.setattr('app.db.db',SimpleNamespace(user=SimpleNamespace(find_unique=AsyncMock(
+        side_effect=lambda **kw: SimpleNamespace(status='active',archivedAt=None,role='admin' if kw['where']['id']=='admin' else 'user')))))
     prefix='test:memory-processing:'+uuid4().hex
     monkeypatch.setattr(d,'_INDEX',prefix+':index');monkeypatch.setattr(d,'_DATA',prefix+':data')
     monkeypatch.setattr(d,'get_redis',AsyncMock(return_value=redis))

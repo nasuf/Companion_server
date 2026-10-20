@@ -21,6 +21,7 @@ from typing import Any
 
 from app.observability.events import EVT_AGG_FLUSHED, EVT_AGG_PUSHED, EVT_AGG_SCAN
 from app.redis_client import get_redis
+from app.services.runtime import user_erasure
 from app.services.emoji import is_emoji_only_message
 from app.services.interaction.reply_context import merge_reply_contexts
 from app.services.interaction.turn_coalescing import coalesce_turn_messages
@@ -131,7 +132,8 @@ async def push_pending(
         pipe.set(ctx_key, json.dumps(reply_context, ensure_ascii=False), ex=_PENDING_TTL)
     pipe.zadd(_PENDING_DELAYED_KEY, {token: time.time() + _AGGREGATION_WINDOW})
     try:
-        await pipe.execute()
+        async with user_erasure.conversation_write_scope(conversation_id):
+            await pipe.execute()
     except Exception as e:
         logger.warning(
             f"[AGG-PUSH] Redis push failed agent_id={agent_id} user_id={user_id}: {e}"
@@ -304,7 +306,8 @@ async def push_turn_pending(
         pipe.set(first_key, str(first_at), ex=_TURN_TTL)
     pipe.zadd(_TURN_DELAYED_KEY, {token: due_at})
     try:
-        await pipe.execute()
+        async with user_erasure.conversation_write_scope(conversation_id):
+            await pipe.execute()
     except Exception as e:
         logger.warning(
             f"[TURN-PUSH] Redis push failed agent_id={agent_id} user_id={user_id}: {e}"

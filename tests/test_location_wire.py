@@ -113,6 +113,7 @@ async def test_location_ws_retry_recovers_dual_memory_and_hydrates_history(
                     url + "/admin-api/runtime-jobs/location-events", headers=user
                 )
             ).status_code == 403
+            await flow.db.user.update(where={'id':owner},data={'role':'admin'})
             records = (
                 await client.get(
                     url + "/admin-api/runtime-jobs/location-events", headers=admin

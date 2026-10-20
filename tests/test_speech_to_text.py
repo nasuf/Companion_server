@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
 from fastapi import HTTPException
 
 from app.api.public import speech
@@ -20,6 +22,14 @@ from app.services.speech_to_text.audio import (
     validate_audio,
     validate_chat_m4a_duration,
 )
+
+
+@pytest.fixture(autouse=True)
+def ordinary_chat_without_takeover(monkeypatch):
+    # ASR tests exercise ordinary chat. Isolate the lazy takeover import from
+    # router tests that intentionally replace the Redis dependency.
+    from app.services.admin_takeover import service
+    monkeypatch.setattr(service, "is_conversation_taken_over", AsyncMock(return_value=False))
 
 
 def _active_audio() -> AudioActivity:

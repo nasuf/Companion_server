@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from app.services.runtime import user_erasure
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.jwt_auth import require_admin_jwt, require_user
@@ -226,43 +228,44 @@ async def upload_offline_activity_image(
     user_id = str(user["sub"])
     if not await activity_media_repo.activity_belongs_to_user(activity_id, user_id):
         raise HTTPException(status_code=404, detail="Activity not found")
-    if data.kind == "audio":
-        mime = activity_media_storage.normalize_audio_mime(data.mime)
-        blob = activity_media_storage.decode_audio_base64(data.base64)
-        storage_key = activity_media_storage.save_audio_blob(
-            user_id=user_id,
-            blob=blob,
-            mime=mime,
-        )
-        width = None
-        height = None
-    else:
-        mime = activity_media_storage.normalize_image_mime(data.mime)
-        blob = activity_media_storage.decode_image_base64(data.base64)
-        storage_key = activity_media_storage.save_image_blob(
-            user_id=user_id,
-            blob=blob,
-            mime=mime,
-        )
-        width = data.width
-        height = data.height
-    try:
-        media = await activity_media_repo.create_media(
-            recommendation_id=activity_id,
-            user_id=user_id,
-            kind=data.kind,
-            storage_key=storage_key,
-            url=activity_media_storage.media_url(storage_key),
-            mime=mime,
-            size=len(blob),
-            name=data.name,
-            width=width,
-            height=height,
-            duration_seconds=data.duration_seconds if data.kind == "audio" else None,
-        )
-    except Exception:
-        activity_media_storage.delete_media_file(storage_key)
-        raise
+    async with user_erasure.owner_write_scope(user_id):
+        if data.kind == "audio":
+            mime = activity_media_storage.normalize_audio_mime(data.mime)
+            blob = activity_media_storage.decode_audio_base64(data.base64)
+            storage_key = activity_media_storage.save_audio_blob(
+                user_id=user_id,
+                blob=blob,
+                mime=mime,
+            )
+            width = None
+            height = None
+        else:
+            mime = activity_media_storage.normalize_image_mime(data.mime)
+            blob = activity_media_storage.decode_image_base64(data.base64)
+            storage_key = activity_media_storage.save_image_blob(
+                user_id=user_id,
+                blob=blob,
+                mime=mime,
+            )
+            width = data.width
+            height = data.height
+        try:
+            media = await activity_media_repo.create_media(
+                recommendation_id=activity_id,
+                user_id=user_id,
+                kind=data.kind,
+                storage_key=storage_key,
+                url=activity_media_storage.media_url(storage_key),
+                mime=mime,
+                size=len(blob),
+                name=data.name,
+                width=width,
+                height=height,
+                duration_seconds=data.duration_seconds if data.kind == "audio" else None,
+            )
+        except Exception:
+            activity_media_storage.delete_media_file(storage_key)
+            raise
     return _media_response(media)
 
 

@@ -26,6 +26,7 @@ async def origins(monkeypatch):
     assert urlsplit(url).path=="/companion_proactive_e2e"
     db=Prisma(datasource={"url":url},http={"trust_env":False})
     await db.connect()
+    monkeypatch.setattr('app.db.db', db)
     from app.config import settings
     monkeypatch.setattr(settings,"jwt_secret","synthetic-memory-evidence-test-secret")
     for mod in (e,read,repo):monkeypatch.setattr(mod,"db",db)
@@ -188,13 +189,14 @@ async def test_write_transaction_rolls_back_and_side_collision_updates_correct_t
 async def test_admin_scope_permissions_validation_and_readonly_preview(origins):
     db,uid,wid,mid,msg,bind,detail,users,agents,spaces,convs=origins
     app=FastAPI();app.include_router(memory_repairs.router)
-    token=create_jwt("synthetic-admin",role="admin")
+    token=create_jwt(uid,role="admin")
     headers={"Authorization":"Bearer "+token}
     path=f"/admin-api/memory-repairs/evidence/user/{mid}"
     params={"user_id":uid,"workspace_id":wid}
     async with AsyncClient(transport=ASGITransport(app=app),base_url="http://isolated.test") as client:
         assert (await client.get(path,params=params)).status_code==401
         assert (await client.get(path,params=params,headers={"Authorization":"Bearer "+create_jwt(uid,role="user")})).status_code==403
+        await db.user.update(where={'id':uid},data={'role':'admin'})
         assert (await client.get(path,params=params,headers=headers)).json()["state"]=="historical_unknown"
         for key,value in [("workspace_id",spaces[1]),("user_id",users[-1])]:
             assert (await client.get(path,params={**params,key:value},headers=headers)).status_code==404

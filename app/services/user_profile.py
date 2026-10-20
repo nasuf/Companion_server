@@ -30,6 +30,7 @@ import unicodedata
 from fastapi import HTTPException
 
 from app.db import db
+from app.services.runtime import user_erasure
 from app.models.user import MAX_DISPLAY_NAME_LENGTH
 from app.services.user_avatars import build_avatar_url, delete_avatar, save_avatar
 
@@ -100,31 +101,36 @@ async def apply_profile_update(
 
     没有任何字段要改时原样返回传入的 ``user`` —— 空更新不该产生一次写库。
     """
-    update: dict[str, str] = {}
     cleaned_name = visible_text_or_none(display_name)
-    if cleaned_name:
-        update["displayName"] = cleaned_name[:MAX_DISPLAY_NAME_LENGTH]
-    if avatar is not None:
-        blob, mime, crop = avatar
-        update["avatarKey"] = save_avatar(
-            user_id=user.id, blob=blob, mime=mime, crop=crop
-        )
-    if not update:
+    if not cleaned_name and avatar is None:
         return user
+    # This transaction updates users itself. Lock exclusively from the start;
+    # two SHARE holders trying to upgrade to UPDATE would deadlock.
+    async with user_erasure.owner_write_scope(user.id, database=db, update_owner=True) as tx:
+        update: dict[str, str] = {}
+        if cleaned_name:
+            update["displayName"] = cleaned_name[:MAX_DISPLAY_NAME_LENGTH]
+        if avatar is not None:
+            blob, mime, crop = avatar
+            update["avatarKey"] = save_avatar(
+                user_id=user.id, blob=blob, mime=mime, crop=crop
+            )
+        if not update:
+            return user
 
-    try:
-        updated = await db.user.update(where={"id": user.id}, data=update)
-    except Exception:
-        delete_avatar(update.get("avatarKey"))
-        raise
-    if updated is None:
-        delete_avatar(update.get("avatarKey"))
-        raise HTTPException(status_code=404, detail="User not found")
+        try:
+            updated = await tx.user.update(where={"id": user.id}, data=update)
+        except Exception:
+            delete_avatar(update.get("avatarKey"))
+            raise
+        if updated is None:
+            delete_avatar(update.get("avatarKey"))
+            raise HTTPException(status_code=404, detail="User not found")
 
-    previous_key = getattr(user, "avatarKey", None)
-    if "avatarKey" in update and previous_key != update["avatarKey"]:
-        delete_avatar(previous_key)
-    return updated
+        previous_key = getattr(user, "avatarKey", None)
+        if "avatarKey" in update and previous_key != update["avatarKey"]:
+            delete_avatar(previous_key)
+        return updated
 
 
 def _wechat_identity_profile(identities) -> tuple[str | None, str | None]:

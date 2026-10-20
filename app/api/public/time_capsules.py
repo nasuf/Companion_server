@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from app.api.idempotency import claim_submission
 from app.api.jwt_auth import require_user
 from app.db import db
+from app.services.runtime import user_erasure
 from app.models.time_capsule import (
     TimeCapsuleCreate,
     TimeCapsuleMediaUpload,
@@ -688,10 +689,11 @@ async def upload_capsule_media(
     else:
         duration = None
 
-    _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    ext = _mime_ext(mime, ".jpg" if kind == "image" else ".m4a")
-    storage_key = f"{user['sub']}_{uuid.uuid4().hex}{ext}"
-    _storage_path(storage_key).write_bytes(blob)
+    async with user_erasure.owner_write_scope(str(user["sub"]), database=db):
+        _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+        ext = _mime_ext(mime, ".jpg" if kind == "image" else ".m4a")
+        storage_key = f"{user['sub']}_{uuid.uuid4().hex}{ext}"
+        _storage_path(storage_key).write_bytes(blob)
     fire_background(_cleanup_unreferenced_media(user["sub"]))
     logger.info(
         "[capsule:media] uploaded kind=%s size=%s elapsed_ms=%s",

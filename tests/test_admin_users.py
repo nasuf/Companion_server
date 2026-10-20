@@ -225,7 +225,8 @@ def test_list_users_empty_search_page_preserves_total(api_client):
 def test_list_users_search_requires_admin(api_client, auth_header):
     fake_db = MagicMock()
     fake_db.query_raw = AsyncMock()
-    with patch("app.api.admin.users.db", fake_db):
+    fake_db.user.find_unique = AsyncMock(return_value=SimpleNamespace(role="user", status="active", archivedAt=None))
+    with patch("app.api.admin.users.db", fake_db), patch("app.db.db", fake_db):
         response = api_client.get("/admin-api/users", params={"search": "1381234"}, headers=auth_header("user-1"))
     assert response.status_code == 403
     fake_db.query_raw.assert_not_awaited()
@@ -255,3 +256,17 @@ def test_delete_user_refuses_template_system_user(api_client):
         hard_delete.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_delete_user_cleanup_failure_is_not_reported_as_success(api_client):
+    app, admin = _admin_override()
+    fake = MagicMock()
+    fake.user.find_unique = AsyncMock(return_value=_fake_user_row())
+    try:
+        with patch("app.api.admin.users.db",fake), patch(
+            "app.services.runtime.data_reset.hard_delete_user_data",AsyncMock(side_effect=RuntimeError("PRIVATE_DISK_PATH"))):
+            response=api_client.delete("/admin-api/users/user-1")
+        assert response.status_code==503
+        assert "删除未完成" in response.json()["detail"]
+        assert "PRIVATE_DISK_PATH" not in response.text
+    finally:app.dependency_overrides.pop(admin,None)

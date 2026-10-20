@@ -7,6 +7,7 @@ from contextlib import suppress
 import os
 from pathlib import Path
 import socket
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -29,6 +30,7 @@ from app.services.memory.profile_evidence import prepare_profile_origin
 @pytest.mark.parametrize("source_kind", ["message", "profile", "clone", "knowledge", "compression"])
 async def test_browser_readonly_evidence_permissions_and_source_deletion(origins,persona,cloning,publishing,compression,source_kind):
     db,uid,wid,mid,msg,bind,detail,users,agents,spaces,convs=origins
+    principal=await db.user.create(data={'username':'evidence-browser-admin-'+uuid4().hex,'role':'admin'})
     app=FastAPI()
     app.include_router(memory_repairs.router)
 
@@ -70,7 +72,7 @@ async def test_browser_readonly_evidence_permissions_and_source_deletion(origins
                     await page.goto(origin)
                     side="ai" if source_kind in {"profile","clone","knowledge","compression"} else "user"
                     path=f"/admin-api/memory-repairs/evidence/{side}/{mid}?user_id={uid}&workspace_id={wid}&limit=20"
-                    admin=create_jwt("synthetic-evidence-browser-admin",role="admin")
+                    admin=create_jwt(principal.id,role="admin")
                     async def request(token,selected_path=None):
                         return await page.evaluate("args=>window.read(...args)",[token,selected_path or path])
                     assert (await request(""))["status"]==401
@@ -159,3 +161,4 @@ async def test_browser_readonly_evidence_permissions_and_source_deletion(origins
             task.cancel()
             with suppress(asyncio.CancelledError):await task
         sock.close()
+        await db.user.delete(where={'id':principal.id})

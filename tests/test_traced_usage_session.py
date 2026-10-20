@@ -48,7 +48,7 @@ async def test_scoped_operation_records_identity_before_usage_flush(storage, sco
         assert usage_tracker.current_scope() == scope
         usage_tracker.record("synthetic", 10, 2)
     await settle(fake)
-    assert metadata(fake) == {"usage_scope": scope, "usage_expected": True}
+    assert metadata(fake) == {"usage_scope": scope, "usage_expected": True, "owner_user_id":"u-1"}
     write_usage.assert_awaited_once()
     assert write_usage.await_args.kwargs["trace_id"] == tracer.trace_id
     assert write_usage.await_args.kwargs["scope"] == scope
@@ -65,7 +65,7 @@ async def test_zero_model_operation_is_explicit(storage):
     ):
         pass
     await settle(fake)
-    assert metadata(fake) == {"usage_scope": "proactive", "usage_expected": False}
+    assert metadata(fake) == {"usage_scope": "proactive", "usage_expected": False, "owner_user_id":"u-1"}
     write_usage.assert_not_awaited()
 
 
@@ -85,7 +85,7 @@ async def test_real_langchain_callback_stays_under_the_scoped_root(storage):
     roots = [row for row in rows if row["name"] == "chat_request"]
     models = [row for row in rows if row["runType"] == "llm"]
     assert len(roots) == len(models) == 1
-    assert roots[0]["extraJson"].data["metadata"] == {"usage_scope": "proactive"}
+    assert roots[0]["extraJson"].data["metadata"] == {"usage_scope": "proactive", "owner_user_id":"u-1"}
     assert models[0]["traceId"] == models[0]["parentId"] == tracer.trace_id
 
 

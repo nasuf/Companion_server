@@ -55,6 +55,8 @@ jobs:
       DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       PROACTIVE_E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/companion_proactive_e2e
       PROACTIVE_E2E_REDIS_URL: redis://127.0.0.1:6379/14
+      ERASURE_E2E_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/companion_erasure_e2e
+      ERASURE_E2E_REDIS_URL: redis://127.0.0.1:6379/12
       JWT_SECRET: ci-test-jwt-secret-for-backend-quality-tests
 
     steps:
@@ -107,6 +109,16 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -p 5433 -U postgres -d companion_proactive_e2e -c 'CREATE SCHEMA IF NOT EXISTS extensions; CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;'
+          prisma migrate deploy
+
+      - name: Prepare isolated account erasure database
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/companion_erasure_e2e
+          DIRECT_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/companion_erasure_e2e
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE companion_erasure_e2e;'
+          psql -h 127.0.0.1 -p 5433 -U postgres -d companion_erasure_e2e -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS extensions; CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;'
           prisma migrate deploy
 
       - name: Install pinned browser for real API regression

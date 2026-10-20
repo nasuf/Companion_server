@@ -19,8 +19,10 @@ from app.services.runtime import turn_followups as t, job_queue as q
 from tests.test_turn_followups_postgres import turn, followups, origins, redis, receipt
 
 
-async def test_browser_turn_recovery_uses_real_permissions_and_reconciles_sql(turn, redis):
+async def test_browser_turn_recovery_uses_real_permissions_and_reconciles_sql(turn, redis, monkeypatch):
     db, user, _, args = turn
+    monkeypatch.setattr('app.db.db',db)
+    owner=(await db.conversation.find_unique(where={'id':user.conversationId})).userId
     tid = args['turn_id']
     await t.register_completed_turn(**args)
     await t.dispatch_turn_followups(turn_id=tid)
@@ -66,9 +68,10 @@ async def test_browser_turn_recovery_uses_real_permissions_and_reconciles_sql(tu
                     path = '/admin-api/runtime-jobs/turn-followups'
                     action = path+'/'+tid+'/retry'
                     assert (await request('',path))['status'] == 401
-                    ordinary = create_jwt('synthetic-user',role='user')
+                    ordinary = create_jwt(owner,role='user')
                     assert (await request(ordinary,action,'POST'))['status'] == 403
-                    admin = create_jwt('synthetic-admin',role='admin')
+                    await db.user.update(where={'id':owner},data={'role':'admin'})
+                    admin = create_jwt(owner,role='admin')
                     result = await request(admin,path+'?status=failed')
                     assert result['status'] == 200 and result['data']['items'][0]['turn_id'] == tid
                     assert user.content not in str(result)

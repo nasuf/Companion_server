@@ -95,12 +95,13 @@ async def test_api_is_read_only_scoped_and_uncached(reads, suffix):
 
 
 @pytest.mark.parametrize("suffix", ["", "/review"])
-async def test_api_requires_current_active_admin(monkeypatch, suffix):
+async def test_api_requires_current_active_admin(monkeypatch, suffix, mock_current_accounts):
     from tests.conftest import make_auth_header
     app = FastAPI()
     app.include_router(takeovers.router)
     query = AsyncMock(return_value=[])
     monkeypatch.setattr(activities.db, "query_raw", query)
+    monkeypatch.setattr('app.db.db.query_raw',query,raising=False)
     url = "/admin-api/takeovers/case/activities/activity" + suffix
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         assert (await client.get(url)).status_code == 401

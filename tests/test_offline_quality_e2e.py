@@ -152,7 +152,7 @@ async def test_delete_owned_unstarted_only_and_no_resurrection(journey):
     j=journey;a=await j.create()
     path='/offline/activities/'+a['id']
     denied=await j.client.delete(path,headers={'Authorization':'Bearer '+create_jwt('other-user', role='user')})
-    assert denied.status_code==404
+    assert denied.status_code==401  # No SQL account exists for the random subject.
     r=await j.client.delete(path);assert r.status_code==200,r.text
     assert (await j.client.delete(path)).status_code==200
     assert (await post(j,a,'accept')).status_code==409
@@ -261,7 +261,7 @@ async def test_confirmation_keeps_ownership_and_single_active_journey(journey):
     forbidden = await j.client.post('/offline/activities/' + a['id'] + '/arrive',
         json={'manual_confirmation': True},
         headers={'Authorization': 'Bearer ' + create_jwt('other-user', role='user')})
-    assert forbidden.status_code == 404
+    assert forbidden.status_code == 401
     results = await asyncio.gather(*(post(j, row, 'arrive', {'manual_confirmation': True}) for row in (a, b)))
     assert sorted(r.status_code for r in results) == [200, 409]
     rows = [await repo.get_activity(row['id'], j.user) for row in (a, b)]

@@ -476,3 +476,72 @@ async def test_durable_local_send_and_failure_preserve_event_identity():
         assert await manager.send_envelope('conv',envelope)
         assert manager.get('conv') is None
         assert json.loads(redis.publish.call_args.args[1])['event_id']=='event'
+
+
+@pytest.mark.asyncio
+async def test_account_revocation_closes_only_target_on_local_and_peer_workers():
+    local, peer = ConnectionManager(), ConnectionManager()
+    own, other, remote = _make_ws(), _make_ws(), _make_ws()
+    await local.connect('own-conv','erased-user',own)
+    await local.connect('other-conv','surviving-user',other)
+    await peer.connect('peer-conv','erased-user',remote)
+    redis = AsyncMock()
+    await local.revoke_user('erased-user',redis=redis)
+    own.close.assert_awaited_once()
+    other.close.assert_not_awaited()
+    assert local.get('own-conv') is None and local.get('other-conv') is other
+    channel,payload=redis.publish.await_args.args
+    await peer._handle_message({'channel':channel,'data':payload})
+    remote.close.assert_awaited_once()
+    assert peer.get('peer-conv') is None
+
+
+@pytest.mark.asyncio
+async def test_actor_revocation_closes_cross_owner_socket_and_preserves_peer():
+    manager = ConnectionManager()
+    inspected, peer = _make_ws(), _make_ws()
+    await manager.connect('inspected', 'owner', inspected, actor_user_id='admin')
+    await manager.connect('peer', 'peer-owner', peer)
+    await manager.revoke_user('admin', redis=AsyncMock())
+    inspected.close.assert_awaited_once()
+    peer.close.assert_not_awaited()
+    assert manager.get('peer') is peer and manager.get('inspected') is None
+    assert not manager._actor_convs and not manager._conv_actors
+
+
+@pytest.mark.asyncio
+async def test_replaced_actor_socket_is_not_revoked_with_previous_admin():
+    manager=ConnectionManager()
+    original,replacement=_make_ws(),_make_ws()
+    await manager.connect('conversation','owner',original,actor_user_id='admin')
+    await manager.connect('conversation','owner',replacement,actor_user_id='owner')
+    await manager.revoke_user('admin',redis=AsyncMock())
+    assert manager.get('conversation') is replacement
+    replacement.close.assert_not_awaited()
+    assert not manager._actor_convs and not manager._conv_actors
+
+
+@pytest.mark.asyncio
+async def test_actor_revocation_does_not_close_replacement_during_snapshot_iteration():
+    manager = ConnectionManager()
+    originals = {cid: _make_ws() for cid in ('first', 'second')}
+    replacement = _make_ws()
+    replaced = []
+
+    async def replace_other(cid):
+        if replaced:
+            return
+        other = 'second' if cid == 'first' else 'first'
+        replaced.append(other)
+        await manager.connect(other, 'owner', replacement, actor_user_id='owner')
+
+    for cid, socket in originals.items():
+        async def on_close(*args, cid=cid, **kwargs):
+            await replace_other(cid)
+        socket.close.side_effect = on_close
+        await manager.connect(cid, 'owner', socket, actor_user_id='admin')
+
+    await manager.revoke_user('admin', redis=AsyncMock())
+    assert len(replaced) == 1 and manager.get(replaced[0]) is replacement
+    replacement.close.assert_not_awaited()
+    assert not manager._actor_convs and not manager._conv_actors

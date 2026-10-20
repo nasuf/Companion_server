@@ -13,6 +13,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
 import redis.asyncio as redis_async
 
 

@@ -340,7 +340,7 @@ async def test_http_and_socket_share_real_link_receipt_and_error_contracts(links
         path = "/chat/" + flow.ids["conversation"]
         assert (await client.post(path, json=payload)).status_code == 401
         foreign = {"Authorization": "Bearer " + create_jwt("foreign", "user")}
-        assert (await client.post(path, json=payload, headers=foreign)).status_code == 403
+        assert (await client.post(path, json=payload, headers=foreign)).status_code == 401
         response = await client.post(path, json=payload, headers=auth)
         assert response.status_code == 200 and response.text.count("event: ack") == 1
         assert '"acceptance_only": true' in response.text

@@ -8,6 +8,7 @@ from app.api.jwt_auth import require_user
 from app.models.chat_media import ChatAttachmentResponse, ChatImageUpload
 from app.services.chat_media import repo, storage
 from app.services.runtime.tasks import fire_background
+from app.services.runtime import user_erasure
 
 router = APIRouter(prefix="/chat/media", tags=["chat-media"])
 logger = logging.getLogger(__name__)
@@ -37,29 +38,30 @@ async def _store_chat_image(
             raise HTTPException(status_code=404, detail="Conversation not found")
     normalized_mime = storage.normalize_image_mime(mime)
     storage.validate_image_size(blob)
-    storage_key, processed = storage.save_image_with_thumbnail(
-        user_id=owner_id,
-        conversation_id=conversation_id,
-        blob=blob,
-        mime=normalized_mime,
-    )
-    try:
-        attachment = await repo.create_attachment(
+    async with user_erasure.owner_write_scope(owner_id):
+        storage_key, processed = storage.save_image_with_thumbnail(
             user_id=owner_id,
             conversation_id=conversation_id,
-            storage_key=storage_key,
-            url=storage.media_url(storage_key),
-            mime=processed.mime,
-            size=len(processed.blob),
-            name=name,
-            # Server-measured dimensions win: H5 historically sent 0x0, which
-            # broke bubble aspect ratios on every client.
-            width=processed.width or fallback_width,
-            height=processed.height or fallback_height,
+            blob=blob,
+            mime=normalized_mime,
         )
-    except Exception:
-        storage.delete_media_file(storage_key)
-        raise
+        try:
+            attachment = await repo.create_attachment(
+                user_id=owner_id,
+                conversation_id=conversation_id,
+                storage_key=storage_key,
+                url=storage.media_url(storage_key),
+                mime=processed.mime,
+                size=len(processed.blob),
+                name=name,
+                # Server-measured dimensions win: H5 historically sent 0x0, which
+                # broke bubble aspect ratios on every client.
+                width=processed.width or fallback_width,
+                height=processed.height or fallback_height,
+            )
+        except Exception:
+            storage.delete_media_file(storage_key)
+            raise
     fire_background(_cleanup_orphan_files(owner_id))
     return _response(attachment)
 

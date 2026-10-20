@@ -2,6 +2,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures('unit_media_scope')
+
 
 class _FakeZSetRedis:
     """Minimal in-memory Redis supporting the ZSET ops presence.py uses."""

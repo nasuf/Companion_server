@@ -15,6 +15,7 @@ from app.models.chat_media import ChatAttachmentResponse
 from app.services.chat_media import repo as chat_media_repo
 from app.services.chat_media import storage as chat_media_storage
 from app.services.runtime.tasks import fire_background
+from app.services.runtime import user_erasure
 from app.services.speech_to_text import (
     SpeechTranscriptionEmpty,
     SpeechTranscriptionNotConfigured,
@@ -144,29 +145,30 @@ async def transcribe_chat_audio(
             request_id=result.request_id,
         )
 
-    storage_key = chat_media_storage.save_audio_blob(
-        user_id=user_id,
-        conversation_id=data.conversation_id,
-        blob=audio,
-        mime=mime,
-    )
-    try:
-        attachment = await chat_media_repo.create_audio_attachment(
+    async with user_erasure.owner_write_scope(user_id):
+        storage_key = chat_media_storage.save_audio_blob(
             user_id=user_id,
             conversation_id=data.conversation_id,
-            storage_key=storage_key,
-            url=chat_media_storage.media_url(storage_key),
+            blob=audio,
             mime=mime,
-            size=len(audio),
-            duration_seconds=duration_seconds,
-            transcription_text=result.text,
-            transcription_model=result.model,
-            transcription_request_id=result.request_id,
-            name=data.name,
         )
-    except Exception:
-        chat_media_storage.delete_media_file(storage_key)
-        raise
+        try:
+            attachment = await chat_media_repo.create_audio_attachment(
+                user_id=user_id,
+                conversation_id=data.conversation_id,
+                storage_key=storage_key,
+                url=chat_media_storage.media_url(storage_key),
+                mime=mime,
+                size=len(audio),
+                duration_seconds=duration_seconds,
+                transcription_text=result.text,
+                transcription_model=result.model,
+                transcription_request_id=result.request_id,
+                name=data.name,
+            )
+        except Exception:
+            chat_media_storage.delete_media_file(storage_key)
+            raise
     fire_background(_cleanup_orphan_files(user_id))
 
     logger.info(
@@ -231,29 +233,30 @@ async def _store_takeover_audio(
         mime=mime,
         declared_duration_seconds=data.duration_seconds,
     )
-    storage_key = chat_media_storage.save_audio_blob(
-        user_id=user_id,
-        conversation_id=data.conversation_id,
-        blob=audio,
-        mime=mime,
-    )
-    try:
-        attachment = await chat_media_repo.create_audio_attachment(
+    async with user_erasure.owner_write_scope(user_id):
+        storage_key = chat_media_storage.save_audio_blob(
             user_id=user_id,
             conversation_id=data.conversation_id,
-            storage_key=storage_key,
-            url=chat_media_storage.media_url(storage_key),
+            blob=audio,
             mime=mime,
-            size=len(audio),
-            duration_seconds=duration_seconds,
-            transcription_text="",
-            transcription_model="human_takeover",
-            transcription_request_id=None,
-            name=data.name,
         )
-    except Exception:
-        chat_media_storage.delete_media_file(storage_key)
-        raise
+        try:
+            attachment = await chat_media_repo.create_audio_attachment(
+                user_id=user_id,
+                conversation_id=data.conversation_id,
+                storage_key=storage_key,
+                url=chat_media_storage.media_url(storage_key),
+                mime=mime,
+                size=len(audio),
+                duration_seconds=duration_seconds,
+                transcription_text="",
+                transcription_model="human_takeover",
+                transcription_request_id=None,
+                name=data.name,
+            )
+        except Exception:
+            chat_media_storage.delete_media_file(storage_key)
+            raise
     return ChatAudioTranscriptionResponse(
         text="［语音］",
         duration_seconds=duration_seconds,

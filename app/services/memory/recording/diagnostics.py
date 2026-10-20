@@ -13,6 +13,8 @@ import logging
 from uuid import uuid4
 
 from app.redis_client import get_redis
+from app.db import db
+from app.services.runtime import user_erasure
 from app.services.memory.recording.outcomes import MemorySideOutcome
 
 logger = logging.getLogger(__name__)
@@ -92,10 +94,21 @@ def _project_record(value: str, now: datetime) -> dict:
 
 async def _write(record: dict) -> None:
     try:
-        redis = await get_redis()
-        await redis.eval(_WRITE, 2, _INDEX, _DATA, record['id'],
-            datetime.fromisoformat(record['updated_at']).timestamp(),
-            json.dumps(record, ensure_ascii=False), _RETENTION, _MAX_RECORDS)
+        conversation_id = record.get('conversation_id')
+        if conversation_id:
+            owners = await db.query_raw('SELECT user_id FROM conversations WHERE id=$1', conversation_id)
+            if not owners:
+                return
+            async with user_erasure.owner_write_scope(owners[0]['user_id'], database=db):
+                redis = await get_redis()
+                await redis.eval(_WRITE, 2, _INDEX, _DATA, record['id'],
+                    datetime.fromisoformat(record['updated_at']).timestamp(),
+                    json.dumps(record, ensure_ascii=False), _RETENTION, _MAX_RECORDS)
+        else:
+            redis = await get_redis()
+            await redis.eval(_WRITE, 2, _INDEX, _DATA, record['id'],
+                datetime.fromisoformat(record['updated_at']).timestamp(),
+                json.dumps(record, ensure_ascii=False), _RETENTION, _MAX_RECORDS)
     except Exception as exc:
         # Telemetry is best effort; it must never prevent or retry a memory write.
         logger.warning("Memory processing observation unavailable (%s)", type(exc).__name__)

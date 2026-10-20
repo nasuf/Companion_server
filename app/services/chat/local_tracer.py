@@ -296,6 +296,7 @@ class LocalTraceHandler(AsyncBaseTracer):
         super().__init__(_schema_format="original+chat")
         self.local_trace_id = trace_id
         self.local_root_run_id = root_run_id
+        self.root_start_task: asyncio.Task | None = None
 
     async def _persist_run(self, run: Any) -> None:
         # Rows are written incrementally in _on_run_create/_on_run_update; the
@@ -325,6 +326,9 @@ def _run_row_base(handler: LocalTraceHandler, run: Any) -> dict[str, Any]:
 
 async def _write_run_start(handler: LocalTraceHandler, run: Any) -> None:
     try:
+        root_task = getattr(handler, "root_start_task", None)
+        if root_task is not None:
+            await asyncio.shield(root_task)
         from app.db import db
 
         base = _run_row_base(handler, run)
@@ -347,6 +351,9 @@ async def _write_run_start(handler: LocalTraceHandler, run: Any) -> None:
 
 async def _write_run_end(handler: LocalTraceHandler, run: Any) -> None:
     try:
+        root_task = getattr(handler, "root_start_task", None)
+        if root_task is not None:
+            await asyncio.shield(root_task)
         from app.db import db
 
         base = _run_row_base(handler, run)
@@ -511,6 +518,10 @@ async def _write_manual_step(
     outputs: dict[str, Any], display: dict[str, Any], at: datetime,
 ) -> None:
     try:
+        handler = _local_trace_handler.get()
+        root_task = getattr(handler, "root_start_task", None)
+        if root_task is not None:
+            await asyncio.shield(root_task)
         from app.db import db
 
         await db.tracerun.create(data={
@@ -549,6 +560,10 @@ async def _write_manual_run(
     extra_outputs: dict[str, Any] | None,
 ) -> None:
     try:
+        handler = _local_trace_handler.get()
+        root_task = getattr(handler, "root_start_task", None)
+        if root_task is not None:
+            await asyncio.shield(root_task)
         from app.db import db
 
         extra: dict[str, Any] = {
@@ -675,6 +690,7 @@ class LocalTracer:
             self.trace_id, self._user_message, self._conversation_id, _utcnow(),
             dict(self._execution_metadata),
         ))
+        handler.root_start_task = self._root_start_task
         return self
 
     def attach_to_parent(self, parent_trace_id: str | None) -> "LocalTracer":

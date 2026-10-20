@@ -12,6 +12,7 @@ import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from prisma import Json
+from starlette.websockets import WebSocketState
 
 from app.db import db
 from app.services.runtime.ws_auth import (
@@ -68,6 +69,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websocket"])
 
 _IDLE_TIMEOUT = 90.0
+
+
+async def _connection_accounts_current(principal, owner_id: str, owner=None) -> bool:
+    owner = owner if owner is not None else await db.user.find_unique(where={"id": owner_id})
+    if not owner or owner.status != 'active' or owner.archivedAt is not None:
+        return False
+    actor = owner if principal.user_id == owner_id else await db.user.find_unique(
+        where={"id": principal.user_id}
+    )
+    return bool(actor and actor.status == "active" and actor.archivedAt is None
+                and actor.role == principal.role)
 
 
 def _message_metadata(
@@ -866,6 +878,9 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     )
     # username 一次性查询缓存 — 整个 WS 生命周期复用, 避免每条 message 查 DB
     user_record = await db.user.find_unique(where={"id": user_id})
+    if not await _connection_accounts_current(principal, user_id, user_record):
+        await websocket.close(code=4401, reason='authentication_required')
+        return
     cached_username = user_record.username if user_record else None
     if principal.expires_at <= time.time():
         await websocket.close(code=4401, reason="session_expired")
@@ -886,7 +901,26 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     extra={"event": "ws.auth_mode", "ws_auth_mode": "ticket"})
         await manager.connect(
             conversation_id, user_id, websocket, workspace_id=workspace_id,
+            actor_user_id=principal.user_id,
         )
+        # Register before rechecking. A deletion either sees this registration
+        # in its revoke broadcast, or this check sees the disabled account.
+        unavailable_code, unavailable_reason = 4401, 'authentication_required'
+        try:
+            current = await _connection_accounts_current(principal, user_id)
+        except Exception:
+            current = False
+            unavailable_code, unavailable_reason = 1011, 'authentication_unavailable'
+        if not current:
+            await manager.disconnect(conversation_id, expected=websocket)
+            try:
+                await websocket.close(code=unavailable_code, reason=unavailable_reason)
+            except RuntimeError:
+                pass
+            return
+        if getattr(websocket, 'application_state', None) == WebSocketState.DISCONNECTED:
+            await manager.disconnect(conversation_id, expected=websocket)
+            return
         # 实时在线 (连接数语义): 每条 WS 用唯一 conn_id 入 WS 池, 断开时摘除 →
         # 离开聊天页瞬时下线. App / H5 同一路径, 一视同仁.
         ws_conn_id = uuid.uuid4().hex

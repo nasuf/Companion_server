@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from app.db import db
 from app.services.chat_media import storage
+from app.services.runtime import user_erasure
 
 POLICY_VERSION = "link_retention_v1"
 RETENTION_DAYS = 7
@@ -59,6 +60,13 @@ async def reserve_cover(key: str, size: int, *, database=None) -> bool:
 
 async def write_cover(*, user_id: str, conversation_id: str | None, blob: bytes,
                       mime: str, database=None) -> str | None:
+    async with user_erasure.owner_write_scope(user_id, database=db if database is None else database):
+        return await _write_cover(user_id=user_id, conversation_id=conversation_id,
+                                 blob=blob, mime=mime, database=database)
+
+
+async def _write_cover(*, user_id: str, conversation_id: str | None, blob: bytes,
+                       mime: str, database=None) -> str | None:
     storage.validate_image_size(blob)
     storage._MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     if shutil.disk_usage(storage._MEDIA_DIR).free < DISK_RESERVE_BYTES + len(blob):
@@ -71,7 +79,14 @@ async def write_cover(*, user_id: str, conversation_id: str | None, blob: bytes,
     def write():
         with storage.storage_path(key).open("xb") as stream:
             stream.write(blob)
-    await asyncio.to_thread(write)
+    # Keep the user fence until the disk write has actually finished, including
+    # cancellation. An abandoned thread must not recreate a deleted cover later.
+    task = asyncio.create_task(asyncio.to_thread(write))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
     return key
 
 

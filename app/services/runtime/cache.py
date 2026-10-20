@@ -23,6 +23,9 @@ VERSION_PREFIX = "cache_ver:"
 def _make_key(namespace: str, identifier: str) -> str:
     """Create a namespaced cache key."""
     h = hashlib.md5(identifier.encode()).hexdigest()[:16]
+    if namespace in {"ret", "graph"} and identifier.startswith("owner:"):
+        owner = identifier.split(":", 2)[1]
+        return f"{CACHE_PREFIX}{namespace}:{owner}:{h}"
     return f"{CACHE_PREFIX}{namespace}:{h}"
 
 
@@ -56,11 +59,13 @@ async def bump_cache_version(user_id: str, workspace_id: str | None) -> None:
     state where only one namespace has been bumped.
     """
     try:
-        redis = await get_redis()
-        pipe = redis.pipeline()
-        pipe.incr(_version_key("ret", user_id, workspace_id))
-        pipe.incr(_version_key("graph", user_id, workspace_id))
-        await pipe.execute()
+        from app.services.runtime import user_erasure
+        async with user_erasure.owner_write_scope(user_id):
+            redis = await get_redis()
+            pipe = redis.pipeline()
+            pipe.incr(_version_key("ret", user_id, workspace_id))
+            pipe.incr(_version_key("graph", user_id, workspace_id))
+            await pipe.execute()
     except Exception as e:
         logger.debug(f"Cache version bump failed for {user_id}: {e}")
 
@@ -109,7 +114,7 @@ async def cache_set_embedding(text: str, embedding: list[float]) -> None:
 async def cache_retrieval(query: str, user_id: str, workspace_id: str | None = None) -> dict | None:
     """Get cached retrieval results (scoped to current cache version)."""
     ver = await get_cache_version("ret", user_id, workspace_id)
-    result = await cache_get("ret", f"v{ver}:{user_id}:{workspace_id or 'none'}:{query}")
+    result = await cache_get("ret", f"owner:{user_id}:v{ver}:{workspace_id or 'none'}:{query}")
     if isinstance(result, dict):
         return result
     return None
@@ -120,18 +125,23 @@ async def cache_set_retrieval(
 ) -> None:
     """Cache retrieval results (TTL 5 min, keyed by current cache version)."""
     ver = await get_cache_version("ret", user_id, workspace_id)
-    await cache_set(
-        "ret",
-        f"v{ver}:{user_id}:{workspace_id or 'none'}:{query}",
-        results,
-        ttl=DEFAULT_TTL,
-    )
+    from app.services.runtime import user_erasure
+    try:
+        async with user_erasure.owner_write_scope(user_id):
+            await cache_set(
+                "ret",
+                f"owner:{user_id}:v{ver}:{workspace_id or 'none'}:{query}",
+                results,
+                ttl=DEFAULT_TTL,
+            )
+    except Exception:
+        logger.debug("Retrieval cache write skipped: account unavailable")
 
 
 async def cache_graph_context(user_id: str, workspace_id: str | None = None) -> dict | None:
     """Get cached graph context (scoped to current cache version)."""
     ver = await get_cache_version("graph", user_id, workspace_id)
-    result = await cache_get("graph", f"v{ver}:{user_id}:{workspace_id or 'none'}")
+    result = await cache_get("graph", f"owner:{user_id}:v{ver}:{workspace_id or 'none'}")
     if isinstance(result, dict):
         return result
     return None
@@ -140,11 +150,15 @@ async def cache_graph_context(user_id: str, workspace_id: str | None = None) -> 
 async def cache_set_graph_context(user_id: str, context: dict, workspace_id: str | None = None) -> None:
     """Cache graph context (TTL 5 min, keyed by current cache version)."""
     ver = await get_cache_version("graph", user_id, workspace_id)
-    await cache_set(
-        "graph",
-        f"v{ver}:{user_id}:{workspace_id or 'none'}",
-        context,
-        ttl=DEFAULT_TTL,
-    )
+    from app.services.runtime import user_erasure
+    try:
+        async with user_erasure.owner_write_scope(user_id):
+            await cache_set(
+                "graph",
+                f"owner:{user_id}:v{ver}:{workspace_id or 'none'}",
+                context,
+                ttl=DEFAULT_TTL,
+            )
 
-
+    except Exception:
+        logger.debug("Graph cache write skipped: account unavailable")

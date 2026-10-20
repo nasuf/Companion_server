@@ -20,7 +20,7 @@ _USER_ID = "11111111-2222-3333-4444-555555555555"
 
 
 @pytest.fixture
-def avatar_dir(tmp_path, monkeypatch):
+def avatar_dir(tmp_path, monkeypatch, unit_media_scope):
     monkeypatch.setattr(ua, "_AVATAR_DIR", tmp_path)
     return tmp_path
 

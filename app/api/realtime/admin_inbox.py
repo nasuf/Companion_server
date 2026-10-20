@@ -59,6 +59,17 @@ async def admin_inbox(websocket: WebSocket, admin_id: str):
     await websocket.accept(subprotocol=CHAT_PROTOCOL)
     await manager.connect_admin(admin_id, websocket)
     try:
+        # A revoke may have happened after the first SQL check and before the
+        # socket was registered. Recheck before receiving any privileged data.
+        try:
+            rows = await db.query_raw("SELECT 1 FROM users WHERE id=$1 AND role='admin' "
+                "AND status='active' AND archived_at IS NULL", admin_id)
+        except Exception:
+            await websocket.close(code=1011, reason='authentication_unavailable')
+            return
+        if not rows:
+            await websocket.close(code=4403, reason='admin_inbox_denied')
+            return
         while True:
             remaining = principal.expires_at - time.time()
             if remaining <= 0:

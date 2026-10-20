@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
@@ -23,6 +24,19 @@ if (
     or urlsplit(os.environ.get("REDIS_URL", "")).hostname != "test-redis"
 ):
     raise RuntimeError("Synthetic wire fixture requires test mode and isolated test-redis")
+
+# This Redis-only wire fixture has an explicit synthetic identity store.
+# Actual SQL account lifecycle/revocation is covered by the erasure gate.
+import app.db as identity_database
+
+
+async def synthetic_identity(*, where):
+    roles = {'synthetic-admin':'admin', 'synthetic-user':'user', 'user':'user'}
+    role = roles.get(where['id'])
+    return None if role is None else SimpleNamespace(status='active', archivedAt=None, role=role)
+
+
+identity_database.db = SimpleNamespace(user=SimpleNamespace(find_unique=synthetic_identity))
 
 for field in (
     "_READY_KEY", "_DELAYED_KEY", "_RUNNING_KEY", "_DLQ_KEY",

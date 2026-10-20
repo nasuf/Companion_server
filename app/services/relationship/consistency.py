@@ -1,7 +1,7 @@
 """长对话一致性服务。
 
 维护50轮上下文窗口 + 话题栈，检测人格漂移。
-纯计算+Redis，无LLM调用。
+纯计算与 Redis 状态；写入用短数据库锁校验会话生命周期，无 LLM 调用。
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import json
 import logging
 
 from app.redis_client import get_redis
+from app.services.runtime import user_erasure
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,13 @@ async def get_context_window(conversation_id: str) -> list[dict]:
 
 async def push_to_context_window(conversation_id: str, role: str, content: str) -> None:
     """将消息推入上下文窗口。"""
-    redis = await get_redis()
-    key = f"context_window:{conversation_id}"
-    entry = json.dumps({"role": role, "content": content[:500]}, ensure_ascii=False)
-    await redis.lpush(key, entry)
-    await redis.ltrim(key, 0, CONTEXT_WINDOW_SIZE - 1)
-    await redis.expire(key, 86400 * 7)  # 7天过期
+    async with user_erasure.conversation_write_scope(conversation_id):
+        redis = await get_redis()
+        key = f"context_window:{conversation_id}"
+        entry = json.dumps({"role": role, "content": content[:500]}, ensure_ascii=False)
+        await redis.lpush(key, entry)
+        await redis.ltrim(key, 0, CONTEXT_WINDOW_SIZE - 1)
+        await redis.expire(key, 86400 * 7)  # 7天过期
 
 
 def detect_personality_drift(

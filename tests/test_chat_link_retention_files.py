@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 
+pytestmark = pytest.mark.usefixtures("unit_media_scope")
+
 from app.services.chat_links import retention as r, covers
 from app.services.chat_links.extraction import LinkMetadata
 from app.services.chat_media import storage

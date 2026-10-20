@@ -5,6 +5,7 @@ import asyncio
 import os
 import time
 import uuid
+from types import SimpleNamespace
 from collections import deque
 from urllib.parse import urlsplit
 
@@ -19,13 +20,17 @@ from app.services.runtime import distributed_lock, job_queue as q
 
 
 @pytest.fixture
-async def redis(monkeypatch):
+async def redis(monkeypatch, unit_media_scope):
     if os.environ.get("APP_ENV") == "production":
         pytest.fail("Runtime queue tests refuse production mode")
     url = os.environ.get("RUNTIME_JOB_TEST_REDIS_URL", "redis://127.0.0.1:6379/15")
     if urlsplit(url).hostname not in {"127.0.0.1", "localhost", "test-redis"}:
         pytest.fail("Runtime queue tests require explicitly isolated local Redis")
     client = Redis.from_url(url, decode_responses=True, max_connections=256)
+    async def identity(*, where):
+        return SimpleNamespace(status='active', archivedAt=None,
+                               role='admin' if where['id']=='admin' else 'user')
+    monkeypatch.setattr('app.db.db', SimpleNamespace(user=SimpleNamespace(find_unique=identity)))
     await client.ping()
     prefix = f"test:runtime-terminal:{uuid.uuid4().hex}:"
     for field in ("_READY_KEY", "_DELAYED_KEY", "_RUNNING_KEY", "_DLQ_KEY",

@@ -21,6 +21,7 @@ from app.observability.events import (
     EVT_MEMORY_CONTRADICTION_STEP,
 )
 from app.redis_client import get_redis
+from app.services.runtime import user_erasure
 from app.services.llm.models import (
     get_chat_model,
     get_utility_model,
@@ -311,8 +312,9 @@ async def save_pending_contradiction(conversation_id: str, conflict: dict, **con
     from .contradiction_state import prepare_pending, exclude_messages, db
     pending = await prepare_pending(conflict, conversation_id=conversation_id, **context)
     redis = await get_redis()
-    await redis.set(f"{_PENDING_KEY_PREFIX}{conversation_id}",
-                    json.dumps(pending, ensure_ascii=False), ex=_PENDING_TTL)
+    async with user_erasure.conversation_write_scope(conversation_id, database=db):
+        await redis.set(f"{_PENDING_KEY_PREFIX}{conversation_id}",
+                        json.dumps(pending, ensure_ascii=False), ex=_PENDING_TTL)
     try:
         await exclude_messages(db, conversation_id, context['message_ids'])
     except Exception:

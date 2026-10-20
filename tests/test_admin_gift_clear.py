@@ -45,6 +45,7 @@ async def gift_db(monkeypatch):
     assert urlsplit(url).path == '/companion_proactive_e2e'
     db = Prisma(datasource={'url': url}, http={'trust_env': False})
     await db.connect()
+    monkeypatch.setattr('app.db.db', db)
     monkeypatch.setattr(gift_repository, 'db', db)
     users, agents, spaces, convs = [], [], [], []
     try:
@@ -147,6 +148,7 @@ async def test_authenticated_api_to_database_clears_and_returns_empty_home(gift_
     from app.api.public import offline
     db, users, agents, spaces, convs = gift_db
     await seed_gift(gift_db, 'shipping')
+    await db.user.update(where={'id':users[0]},data={'role':'admin'})
     await seed_gift(gift_db, 'delivered', 1)
     app = FastAPI()
     app.include_router(offline.router)

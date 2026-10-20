@@ -51,6 +51,7 @@ async def test_browser_admin_cleanup_preserves_real_message_history(governed):
                     }''',[path,method,create_jwt(uid,role)])
                 endpoint='/admin-api/stats/link-storage'
                 assert (await request(endpoint,'GET','user'))['status']==403
+                await db.user.update(where={'id':uid},data={'role':'admin'})
                 assert (await request(endpoint+'/preview','POST','admin'))['body']['status']=='completed'
                 assert await db.query_raw('SELECT id FROM chat_link_snapshots WHERE id=$1',unused.snapshot_id)
                 response=await request(endpoint+'/execute?confirmed=true&policy_version='+r.POLICY_VERSION,'POST','admin')
