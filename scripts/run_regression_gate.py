@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def evidence_hashes(root: Path = ROOT) -> dict[str, str]:
-    paths = [p for folder in ("app", "jobs", "tests", "scripts", "prisma")
+    paths = [p for folder in ("app", "jobs", "tests", "scripts", "prisma", "evals")
              for p in (root / folder).rglob("*")
-             if p.is_file() and p.suffix in {".py", ".json", ".sql", ".prisma"}]
+             if p.is_file() and p.suffix in {".py", ".json", ".jsonl", ".sql", ".prisma"}]
     paths += list((root / ".github/workflows").glob("*.yml"))
     paths += [root / name for name in ("pyproject.toml", "runtime-constraints.txt")]
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
