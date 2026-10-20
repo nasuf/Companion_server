@@ -63,3 +63,17 @@ registration/recovery and delivery guarantees belong to roadmap R01.03.8.3.6;
 SQL chat/checkpoint rollout remains independently gated. Daily and memory rules
 keep their existing source contracts. Existing unlocks are not revoked when a
 message is removed; new-contract counters stop using a removed source.
+
+## Chat timeline persistence
+
+Workspace-driven unlocks (including memory milestones) bind to that workspace's
+active conversation in the same INSERT that creates the unlock. Live WS and
+system notifications use the returned conversation ID; unique unlock constraints
+and point calculation remain unchanged.
+
+Historical unlocks with a workspace but no conversation are projected read-only
+onto the conversation that existed at `unlocked_at`, scoped by user, agent and
+workspace. Deleted conversations remain candidates for this historical lookup:
+their notices must not move into a later, recreated chat. Unlocks lacking workspace
+evidence are not guessed into a conversation. Existing mode/definition filters and
+message-page time bounds still apply, and reading history does not re-notify.

@@ -445,16 +445,30 @@ async def _achievement_timeline_items(
         lower = datetime.fromtimestamp(0, UTC)
         upper = datetime.now(UTC)
 
+    # Legacy memory unlocks only stored workspace_id. Project each onto the chat
+    # that existed at unlock time. Include deleted chats in that lookup so their
+    # notices cannot migrate into a later, recreated conversation.
     rows = await db.query_raw(
         """
-        SELECT id, achievement_id, unlocked_at
-        FROM achievement_unlocks
-        WHERE user_id = $1
-          AND agent_id = $2
-          AND conversation_id = $3
-          AND unlocked_at >= $4::timestamp
-          AND unlocked_at <= $5::timestamp
-        ORDER BY unlocked_at DESC
+        SELECT u.id, u.achievement_id, u.unlocked_at
+        FROM achievement_unlocks u
+        WHERE u.user_id = $1
+          AND u.agent_id = $2
+          AND (
+              u.conversation_id = $3
+              OR (u.conversation_id IS NULL AND u.workspace_id IS NOT NULL
+                  AND $3 = (
+                      SELECT c.id FROM conversations c
+                      WHERE c.user_id = u.user_id AND c.agent_id = u.agent_id
+                        AND c.workspace_id = u.workspace_id
+                        AND c.created_at <= u.unlocked_at
+                      ORDER BY c.created_at DESC, c.id DESC
+                      LIMIT 1
+                  ))
+          )
+          AND u.unlocked_at >= $4::timestamp
+          AND u.unlocked_at <= $5::timestamp
+        ORDER BY u.unlocked_at DESC, u.id DESC
         """,
         user_id,
         agent_id,

@@ -145,9 +145,16 @@ async def unlock_achievement(
             INSERT INTO achievement_unlocks (
                 user_id, agent_id, workspace_id, conversation_id, achievement_id, metadata
             )
-            SELECT $1, $2, $3, $4, $5, $6::jsonb WHERE {guard}
+            SELECT $1, $2, $3,
+                COALESCE($4::text, (
+                    SELECT c.id FROM conversations c
+                    WHERE c.user_id = $1 AND c.agent_id = $2
+                      AND c.workspace_id = $3 AND c.is_deleted = FALSE
+                    ORDER BY c.created_at DESC, c.id DESC
+                    LIMIT 1
+                )), $5, $6::jsonb WHERE {guard}
             ON CONFLICT (user_id, agent_id, achievement_id) DO NOTHING
-            RETURNING id, unlocked_at
+            RETURNING id, unlocked_at, conversation_id
             """,
             user_id,
             agent_id,
@@ -165,6 +172,9 @@ async def unlock_achievement(
             await _cache_unlocked_achievements(user_id, agent_id, {achievement_id})
         return False
     await _cache_unlocked_achievements(user_id, agent_id, {achievement_id})
+    # Memory-driven unlocks have a workspace but no message/conversation source.
+    # Bind their live notification to the same conversation saved by the INSERT.
+    conversation_id = _field(rows[0], "conversation_id") or conversation_id
     unlocked_at = _field(rows[0], "unlocked_at") or _now()
     payload = {
         **definition.to_dict(),
