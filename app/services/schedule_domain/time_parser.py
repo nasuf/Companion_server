@@ -109,6 +109,10 @@ _MONTH_MAP = [("这个月", 0), ("上个月", -1), ("下个月", 1)]
 _PM_PERIODS = {"下午", "晚上"}
 
 
+class TimeExpressionLimitExceeded(ValueError):
+    """The complete result cannot fit the caller's parsing budget."""
+
+
 @dataclass
 class ParsedTime:
     original_text: str
@@ -156,8 +160,9 @@ def parse_time_expressions(
     message: str,
     now: datetime | None = None,
     *, calendar_timezone=None, all_occurrences: bool = False,
+    max_results: int | None = None,
 ) -> list[ParsedTime]:
-    """解析消息中的显式时间表述。返回所有匹配结果。"""
+    """解析消息中的显式时间表述；超过可选预算时中止，不返回截断结果。"""
     now = now or _now_corrected()
     zone = calendar_timezone or _TZ
     if calendar_timezone is not None:
@@ -173,6 +178,11 @@ def parse_time_expressions(
             for us, ue in used_spans:
                 if span[0] < ue and span[1] > us:
                     return
+        # Stop at the first excess non-overlapping match: collecting all matches
+        # before enforcing a bound makes repeated input quadratic in _add.
+        if max_results is not None and len(results) >= max_results:
+            raise TimeExpressionLimitExceeded
+        if span:
             used_spans.append(span)
         results.append(ParsedTime(
             original_text=text,

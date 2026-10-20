@@ -122,7 +122,9 @@ class TemporalQuery:
 
 def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
                            timezone_name: str | None = None) -> TemporalQuery:
-    from app.services.schedule_domain.time_parser import parse_time_expressions
+    from app.services.schedule_domain.time_parser import (
+        TimeExpressionLimitExceeded, parse_time_expressions,
+    )
 
     stamp = parse_time(anchor)
     zone_name = timezone_name or settings.schedule_timezone
@@ -168,7 +170,12 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
     try:
         for match in _DATED.finditer(text):
             date(*(int(v) for v in match.groups()))
-        parsed = parse_time_expressions(text, now=stamp, calendar_timezone=zone, all_occurrences=True)
+        parsed = parse_time_expressions(text, now=stamp, calendar_timezone=zone,
+                                        all_occurrences=True, max_results=MAX_EXPRESSIONS)
+    except TimeExpressionLimitExceeded:
+        base["date_basis"] = "unbound_expression"
+        base["binding"] = binding_diagnostics(source, [], "expression_limit")
+        return TemporalQuery(**base, status="unresolved", reason="expression_limit")
     except (ValueError, OverflowError):
         return TemporalQuery(**base, status="unresolved", reason="invalid_expression")
     if len(parsed) > MAX_EXPRESSIONS:

@@ -94,6 +94,42 @@ def test_scheduling_callers_keep_legacy_occurrence_policy():
     assert [p.original_text for p in read].count("早上") == 2
 
 
+def test_parser_stops_constructing_results_at_the_budget(monkeypatch):
+    from app.services.schedule_domain import time_parser
+    constructor = time_parser.ParsedTime
+    created = []
+
+    def counted(*args, **kwargs):
+        result = constructor(*args, **kwargs)
+        created.append(result)
+        return result
+
+    monkeypatch.setattr(time_parser, "ParsedTime", counted)
+    with pytest.raises(time_parser.TimeExpressionLimitExceeded):
+        time_parser.parse_time_expressions("昨天" * 2000, now=NOW,
+                                           all_occurrences=True, max_results=8)
+    assert len(created) == 8
+    # The unbounded default remains available to existing recording/scheduling.
+    assert len(time_parser.parse_time_expressions("昨天" * 9, now=NOW,
+                                                  all_occurrences=True)) == 9
+
+
+def test_parser_budget_ignores_overlapping_substrings():
+    from app.services.schedule_domain.time_parser import parse_time_expressions
+    results = parse_time_expressions("大前天", now=NOW, all_occurrences=True, max_results=1)
+    assert [p.original_text for p in results] == ["大前天"]
+    results = parse_time_expressions("2026年10月1日", now=NOW, max_results=1)
+    assert [p.original_text for p in results] == ["2026年10月1日"]
+
+
+@pytest.mark.parametrize("text", ["昨晚" * 2000, "下午" * 2000, "2026年10月1日，" * 300])
+def test_large_repeated_dates_fail_closed_without_truncated_ranges(text):
+    q = query(text)
+    assert q.reason == "expression_limit" and q.binding["decision"] == "expression_limit"
+    assert q.expressions == () and q.binding["spans"] == []
+    assert not q.allows_event_range()
+
+
 def test_unlocatable_parser_output_fails_closed(monkeypatch):
     from app.services.schedule_domain import time_parser
     monkeypatch.setattr(time_parser, "parse_time_expressions",
