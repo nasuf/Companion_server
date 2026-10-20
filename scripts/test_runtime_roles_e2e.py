@@ -125,12 +125,28 @@ def main():
         result['checks'].append('scheduler and background expose independent dependency readiness')
 
         # A real, centrally registered handler reads a nonexistent synthetic agent.
-        # No model call, user record, or production identifier is needed.
+        # The producer is a separate process: connect its SQL client and seed an
+        # owned synthetic user so the account-erasure fence is exercised too.
         job_id=worker_probe(background,"""import asyncio,json
+from app.db import connect_db,disconnect_db,db
+from fastapi import HTTPException
 from app.services.runtime.job_queue import enqueue_runtime_job
 async def main():
- print(json.dumps(await enqueue_runtime_job('agent_initialization', {'agent_id':'00000000-0000-0000-0000-000000000001','user_id':'00000000-0000-0000-0000-000000000002'},idempotency_key='isolated-role-initialization')))
+ await connect_db()
+ try:
+  payload={'agent_id':'00000000-0000-0000-0000-000000000001','user_id':'00000000-0000-0000-0000-000000000002'}
+  try:
+   await enqueue_runtime_job('agent_initialization',payload,idempotency_key='isolated-missing-owner')
+  except HTTPException as error:
+   assert error.status_code==401
+  else:
+   raise AssertionError('Missing account was allowed to enqueue a private job')
+  await db.user.create(data={'id':payload['user_id'],'username':'isolated-role-owner'})
+  print(json.dumps(await enqueue_runtime_job('agent_initialization',payload,idempotency_key='isolated-role-initialization')))
+ finally:
+  await disconnect_db()
 asyncio.run(main())""")
+        result['checks'].append('separate producer rejects missing owner and admits owned synthetic user')
         def status():
             return run('exec',redis,'redis-cli','-n','13','HGET','runtime:job:'+job_id,'status').stdout.strip()
         deadline=time.monotonic()+35

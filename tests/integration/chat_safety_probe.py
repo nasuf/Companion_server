@@ -42,13 +42,14 @@ async def main():
                  ("GET", "/chat/proactive/agent-1/history?user_id=owner")]
         for method, path in paths:
             for headers, expected in [({}, 401), ({"Authorization": "Bearer broken"}, 401),
+                                      ({"Authorization": f"Bearer {create_jwt('missing-account', 'user')}"}, 401),
                                       ({"Authorization": f"Bearer {create_jwt('intruder', 'user')}"}, 403)]:
                 response = await client.request(method, base + path, headers=headers,
                                                 json={"message": "hello"} if method == "POST" else None)
                 assert response.status_code == expected, response.text
         state = (await client.get(base + "/test/state")).json()
         assert state["effects"] == {"messages": 0, "history": 0, "trigger": 0}
-        completed.append("HTTP JWT/ownership rejects have no business side effects (9 requests)")
+        completed.append("HTTP JWT/current-account/ownership rejects have no business side effects (12 requests)")
         headers = {"Authorization": f"Bearer {create_jwt('owner', 'user')}"}
         for method, path in paths:
             response = await client.request(method, base + path, headers=headers,

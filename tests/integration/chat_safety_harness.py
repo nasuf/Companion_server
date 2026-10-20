@@ -16,6 +16,7 @@ print("chat safety harness imports started", flush=True)
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
+import app.db as database_module
 from app.api import deps, ownership
 from app.api.public import chat
 from app.api.realtime import ws
@@ -50,13 +51,25 @@ async def trigger(**_):
     return {"ok": True, "message": "synthetic proactive"}
 
 
+async def find_user(*, where, **_):
+    user_id = where.get("id")
+    if user_id not in {"owner", "intruder"}:
+        return None
+    return SimpleNamespace(
+        id=user_id, username=f"Synthetic {user_id}", status="active",
+        archivedAt=None, role="user",
+    )
+
+
 db = SimpleNamespace(
     conversation=SimpleNamespace(find_unique=AsyncMock(return_value=conv)),
     aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=agent)),
-    user=SimpleNamespace(find_unique=AsyncMock(return_value=SimpleNamespace(username="Synthetic"))),
+    user=SimpleNamespace(find_unique=find_user),
     message=SimpleNamespace(create=save_message),
 )
-chat.db = ws.db = ownership.db = db
+# require_user resolves the shared DB lazily; keep authentication and ownership
+# checks real while supplying the same explicit synthetic accounts to HTTP/WS.
+database_module.db = chat.db = ws.db = ownership.db = db
 deps.is_redis_healthy = ws.is_redis_healthy = lambda: True
 chat.get_proactive_history = history
 chat.send_manual_or_triggered_proactive = trigger

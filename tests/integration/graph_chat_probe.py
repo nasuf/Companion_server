@@ -33,12 +33,13 @@ async def main():
             before = (await client.get("http://worker-a:8000/test/state")).json()["effects"]
             for unauthorized, expected_status in (
                 ({}, 401),
-                ({"Authorization": "Bearer " + create_jwt("other-user", "user")}, 403),
+                ({"Authorization": "Bearer " + create_jwt("missing-account", "user")}, 401),
+                ({"Authorization": "Bearer " + create_jwt("intruder", "user")}, 403),
             ):
                 denied = await client.post(
                     "http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=unauthorized,
                 )
-                assert denied.status_code == expected_status
+                assert denied.status_code == expected_status, denied.text
             after = (await client.get("http://worker-a:8000/test/state")).json()["effects"]
             assert after == before
             completed.append("Full rollout still rejects anonymous/cross-account access without business effects")
@@ -100,11 +101,27 @@ async def main():
             completed.append(
                 "Persistence failure emits no done and does not replay the legacy executor"
             )
-        base = "http://worker-a:8000"
-        controls = (await client.post(base + "/test/graph-control", json={"reset": True})).json()
+        worker_bases = ("http://worker-a:8000", "http://worker-b:8000")
+
+        async def control_workers(data):
+            responses = await asyncio.gather(*(
+                client.post(base + "/test/graph-control", json=data)
+                for base in worker_bases
+            ))
+            for response in responses:
+                response.raise_for_status()
+            return [response.json() for response in responses]
+
+        def total_effects(states):
+            return {key: sum(state[key] for state in states) for key in (
+                "saves", "finish", "background", "turn_achievement", "user_messages")}
+
+        # Nginx may assign a WebSocket to either worker. Reset/control both and
+        # assert global side-effect counts instead of assuming round-robin parity.
+        controls = await control_workers({"reset": True})
         expect_all = os.environ.get("CHAT_GRAPH_ALL_CONVERSATIONS") == "true"
-        assert controls["all_conversations"] is expect_all
-        assert controls["allowlist"] == ("" if expect_all else "conv-1")
+        assert all(state["all_conversations"] is expect_all for state in controls)
+        assert all(state["allowlist"] == ("" if expect_all else "conv-1") for state in controls)
         if expect_all:
             completed.append("Explicit full rollout reaches real graph with an empty allowlist")
         async def mint():
@@ -126,19 +143,21 @@ async def main():
             frames = await until_done(socket)
             assert sum(f["type"] == "ack" for f in frames) == 1, frames
             assert [f["data"]["text"] for f in frames if f["type"] == "reply"] == ["ordinary reply"], frames
-            state = (await client.post(base + "/test/graph-control", json={})).json()
-            assert {k: state[k] for k in ("saves", "finish", "background", "turn_achievement", "user_messages")} == {
-                "saves": 1, "finish": 1, "background": 1, "turn_achievement": 1, "user_messages": 1}, state
+            states = await control_workers({})
+            assert total_effects(states) == {
+                "saves": 1, "finish": 1, "background": 1, "turn_achievement": 1, "user_messages": 1}, states
             completed.append("Actual authenticated WS message ingress persists user once and runs the graph to done")
 
-        await client.post(base + "/test/hold-cleanup")
-        await client.post(base + "/test/graph-control", json={"reset": True, "hold": True})
+        for base in worker_bases:
+            (await client.post(base + "/test/hold-cleanup")).raise_for_status()
+        await control_workers({"reset": True, "hold": True})
         async with connect("ws://test-entry:8000/api/ws/conv-1", subprotocols=await mint()) as old:
             await old.send(json.dumps({"type": "message", "data": {"message": "reconnect during generation", "client_id": "ingress-2"}}))
             deadline = time.monotonic() + 10
             while True:
-                state = (await client.post(base + "/test/graph-control", json={})).json()
-                if state["generating"]:
+                states = await control_workers({})
+                if any(state["generating"] for state in states):
+                    assert sum(state["generating"] for state in states) == 1, states
                     break
                 if time.monotonic() >= deadline:
                     raise AssertionError("Graph generation did not reach hold point")
@@ -146,16 +165,17 @@ async def main():
             async with connect("ws://test-entry:8000/api/ws/conv-1", subprotocols=await mint()) as new:
                 await new.send(json.dumps({"type": "ping"}))
                 assert json.loads(await asyncio.wait_for(new.recv(), 3)) == {"type": "pong"}
-                await client.post(base + "/test/graph-control", json={"release": True})
+                await control_workers({"release": True})
                 frames = await until_done(new)
                 assert [f["data"]["text"] for f in frames if f["type"] == "reply"] == ["ordinary reply"]
-                await client.post(base + "/test/release-cleanup")
+                for base in worker_bases:
+                    (await client.post(base + "/test/release-cleanup")).raise_for_status()
                 await asyncio.sleep(0.1)
                 await new.send(json.dumps({"type": "ping"}))
                 assert json.loads(await asyncio.wait_for(new.recv(), 3)) == {"type": "pong"}
-                state = (await client.post(base + "/test/graph-control", json={})).json()
-                assert state["saves"] == state["finish"] == state["background"] == state["turn_achievement"] == 1
-                assert state["user_messages"] == 2
+                states = await control_workers({})
+                assert total_effects(states) == {
+                    "saves": 1, "finish": 1, "background": 1, "turn_achievement": 1, "user_messages": 2}, states
                 completed.append("In-flight graph reconnect delivers reply/done to the new socket and stale cleanup preserves it")
     print(
         json.dumps(
