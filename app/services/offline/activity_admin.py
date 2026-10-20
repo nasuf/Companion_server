@@ -81,21 +81,33 @@ def _counts(row: dict) -> dict:
 
 
 async def list_activities(
-    user_id: str, workspace_id: str | None, status: str, q: str, limit: int, offset: int
+    user_id: str | None,
+    workspace_id: str | None,
+    status: str,
+    q: str,
+    limit: int,
+    offset: int,
 ) -> dict:
-    await _workspace(user_id, workspace_id)
+    if user_id is not None:
+        await _workspace(user_id, workspace_id)
+    elif workspace_id is not None:
+        raise HTTPException(422, "workspace_id requires user_id")
     # Literal query, not SQL LIKE wildcard syntax. All values remain parameters.
     pattern = (
         "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         if q.strip()
         else None
     )
-    where = f"""WHERE a.user_id=$1 AND ($2::text IS NULL OR a.workspace_id=$2)
+    where = f"""WHERE ($1::text IS NULL OR a.user_id=$1) AND ($2::text IS NULL OR a.workspace_id=$2)
         AND ($3='all' OR {_STAGE}=$3 OR ($3='closed' AND a.status IN ('ignored','cancelled','expired')))
         AND ($4::text IS NULL OR a.title ILIKE $4 OR a.location_name ILIKE $4 OR a.id=$5)"""
     args = (user_id, workspace_id, status, pattern, q)
     rows = await db.query_raw(
-        f"""SELECT a.id,a.user_id,a.agent_id,ag.name AS agent_name,a.workspace_id,
+        f"""SELECT a.id,a.user_id,u.username,
+        COALESCE((SELECT ai.raw_profile->>'nickname' FROM auth_identities ai
+            WHERE ai.user_id=a.user_id AND ai.provider='wechat'
+            ORDER BY ai.updated_at DESC,ai.id DESC LIMIT 1),NULLIF(u.display_name,'')) AS nickname,
+        a.agent_id,ag.name AS agent_name,a.workspace_id,
         a.title,a.summary,a.status,a.reached,a.location_name,a.created_at,a.updated_at,
         {_STAGE} AS stage,{_COUNTS} {_SCOPE} {where}
         ORDER BY a.created_at DESC,a.id DESC LIMIT $6 OFFSET $7""",

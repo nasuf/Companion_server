@@ -332,6 +332,101 @@ async def test_user_search_workspaces_filters_paging_and_scope(scenario):
     ).status_code == 404
 
 
+@pytest.mark.parametrize(
+    "status,reached,stage",
+    [
+        ("pending", False, "pending"),
+        ("accepted", False, "planned"),
+        ("accepted", True, "in_progress"),
+        ("completed", True, "completed"),
+        ("ignored", False, "closed"),
+        ("cancelled", False, "closed"),
+        ("expired", False, "closed"),
+    ],
+)
+async def test_all_users_list_preserves_status_filters_owners_and_paging(
+    scenario, status, reached, stage
+):
+    s = scenario
+    marker = "global-scope-" + s.activity
+    await s.db.execute_raw(
+        "UPDATE offline_activity_recommendations SET title=$1,status=$2,reached=$3 WHERE id=ANY($4::text[])",
+        marker,
+        status,
+        reached,
+        [s.activity, s.foreign],
+    )
+    params = {"q": marker, "status": stage, "limit": 1}
+    first = await s.client.get("/admin-api/activities", params=params)
+    assert first.status_code == 200, first.text
+    data = first.json()
+    assert data["total"] == 2 and len(data["items"]) == 1 and data["sampled_at"]
+    second = (
+        await s.client.get("/admin-api/activities", params={**params, "offset": 1})
+    ).json()
+    rows = data["items"] + second["items"]
+    assert {r["user_id"] for r in rows} == {s.user, s.bob}
+    for row in rows:
+        assert row["username"] == "admin-activity-" + row["user_id"]
+        assert row["nickname"] == "用户" + row["user_id"][:4]
+        detail = await s.client.get(
+            "/admin-api/activities/" + row["id"], params={"user_id": row["user_id"]}
+        )
+        assert detail.status_code == 200 and detail.json()["user_id"] == row["user_id"]
+    own = (
+        await s.client.get(
+            "/admin-api/activities", params={**params, "user_id": s.user}
+        )
+    ).json()
+    assert own["total"] == 1 and own["items"][0]["id"] == s.activity
+    other_stage = "pending" if stage != "pending" else "planned"
+    assert (
+        await s.client.get(
+            "/admin-api/activities", params={**params, "status": other_stage}
+        )
+    ).json()["total"] == 0
+    assert (
+        await s.client.get("/admin-api/activities", params={**params, "status": "all"})
+    ).json()["total"] == 2
+    assert (
+        await s.client.get(
+            "/admin-api/activities", params={**params, "q": marker + "%"}
+        )
+    ).json()["total"] == 0
+
+
+async def test_global_list_owner_nickname_uses_latest_wechat_profile_only(scenario):
+    s = scenario
+    for offset, nickname in [(-1, "旧昵称"), (0, "当前微信昵称")]:
+        await s.db.execute_raw(
+            "INSERT INTO auth_identities(id,user_id,provider,provider_account_id,raw_profile,updated_at) VALUES($1,$2,'wechat',$3,$4::jsonb,$5::timestamp)",
+            uuid4().hex,
+            s.user,
+            uuid4().hex,
+            json.dumps({"nickname": nickname, "private_token": "DO_NOT_LEAK"}),
+            s.now + timedelta(hours=offset),
+        )
+    response = await s.client.get("/admin-api/activities", params={"q": s.activity})
+    assert response.status_code == 200
+    assert response.json()["items"][0]["nickname"] == "当前微信昵称"
+    assert "DO_NOT_LEAK" not in response.text and "raw_profile" not in response.text
+
+
+async def test_all_users_list_is_admin_only_and_workspace_requires_owner(scenario):
+    s = scenario
+    url = "/admin-api/activities"
+    assert (await s.client.get(url, headers={"Authorization": ""})).status_code == 401
+    assert (
+        await s.client.get(
+            url, headers={"Authorization": "Bearer " + create_jwt(s.user, "user")}
+        )
+    ).status_code == 403
+    assert (
+        await s.client.get(url, params={"workspace_id": s.workspace})
+    ).status_code == 422
+    assert (await s.client.get(url + "/" + s.activity)).status_code == 422
+
+
 async def test_tasks_fragments_media_and_snapshot_preserve_real_states_and_text(
     scenario,
 ):

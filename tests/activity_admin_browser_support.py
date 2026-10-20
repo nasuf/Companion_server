@@ -31,6 +31,8 @@ async def check_browser(s, mobile_payload, web_project):
                 "user_id": s.user,
                 "username": "admin-activity-" + s.user,
                 "activity": mobile_payload,
+                "other_user_id": s.bob,
+                "other_activity_id": s.foreign,
             },
             ensure_ascii=False,
         )

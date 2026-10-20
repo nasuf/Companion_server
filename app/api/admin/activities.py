@@ -44,7 +44,7 @@ async def user_context(user_id: str, response: Response):
 @router.get("", response_model=ActivityPage[AdminActivityItem])
 async def list_activities(
     response: Response,
-    user_id: str = Query(min_length=1, max_length=64),
+    user_id: str | None = Query(default=None, min_length=1, max_length=64),
     workspace_id: str | None = Query(default=None, max_length=64),
     status: ActivityFilter = "all",
     q: str = Query(default="", max_length=80),

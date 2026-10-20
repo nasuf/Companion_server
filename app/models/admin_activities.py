@@ -24,6 +24,8 @@ class ActivityPage(BaseModel, Generic[T]):
 class AdminActivityItem(BaseModel):
     id: str
     user_id: str
+    username: str
+    nickname: str | None
     agent_id: str | None
     agent_name: str | None
     workspace_id: str | None
