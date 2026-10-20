@@ -178,12 +178,11 @@ def parse_time_expressions(
             for us, ue in used_spans:
                 if span[0] < ue and span[1] > us:
                     return
+            used_spans.append(span)
         # Stop at the first excess non-overlapping match: collecting all matches
         # before enforcing a bound makes repeated input quadratic in _add.
         if max_results is not None and len(results) >= max_results:
             raise TimeExpressionLimitExceeded
-        if span:
-            used_spans.append(span)
         results.append(ParsedTime(
             original_text=text,
             type=typ,
