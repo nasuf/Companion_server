@@ -12,11 +12,12 @@ Includes Redis caching for retrieval results.
 import asyncio
 import logging
 import re
-from datetime import datetime
+
+from app.services.temporal_query import TemporalQuery, resolve_temporal_query
+from datetime import datetime, timezone
 
 from app.services.memory.retrieval.timeline import (
-    build_timeline,
-    format_timeline,
+    timeline_evidence,
     is_aggregate_time_question,
 )
 from app.services.memory.retrieval.vector_search import (
@@ -218,6 +219,7 @@ async def hybrid_retrieve(
     workspace_id: str | None = None,
     token_budget: int = 800,
     enhanced_query: str | None = None,
+    temporal_query: TemporalQuery | None = None,
 ) -> dict:
     """Perform hybrid retrieval and return context for prompt.
 
@@ -234,7 +236,9 @@ async def hybrid_retrieve(
 
     # Phase 2.4: cache key 用 effective_query (含 enhanced) 避免不同指代复用同 cache
     effective_query = enhanced_query or message
-    cache_key = effective_query if enhanced_query else message
+    query = temporal_query or resolve_temporal_query(message, anchor=datetime.now(timezone.utc),
+                                                     anchor_source="execution_fallback")
+    cache_key = effective_query + "\n" + query.cache_token()
     # "我们之间"类提问用原话判定 (共同经历线索通常在原话, 不在指代改写里).
     wants_shared_history = asks_shared_history(message)
     cached = await cache_retrieval(cache_key, user_id, workspace_id=workspace_id)
@@ -256,13 +260,7 @@ async def hybrid_retrieve(
 
     # Spec §3.2 step 1: 向量搜索 L1+L2 + 时间搜索（若有显式时间）
     # 时间范围由时间系统（纯规则）解析，无 LLM 调用. 时间词通常在原话, 用 message.
-    time_range: tuple[datetime, datetime] | None = None
-    if has_explicit_time(message):
-        parsed = parse_time_expressions(message)
-        if parsed:
-            best = max(parsed, key=lambda p: p.confidence)
-            if not best.is_future:
-                time_range = (best.start, best.end)
+    time_range = query.retrieval_range()
 
     levels = [1, 2]
 
@@ -453,19 +451,18 @@ async def hybrid_retrieve(
     # 候选集 ID 供惰性衰减用作弱使用信号 (lifecycle/value.py 的 α): 进了候选说明
     # 这条记忆至少跟本轮话题沾边, 值得比"完全没人问津"多留一会儿。注入集 (强信号)
     # 调用方从 memories 自取。只带 ID 不带正文, 避免把整个候选集塞进缓存。
-    # 聚合类时间问题 ("上次…是几个月前" / "参加过几次…") 需要**穷举**某主题下的所有
-    # 事件才能作答, 而注入集只有 10 条。LongMemEval 实测这类题要 k=26~42 才拿得全,
-    # 但它们不需要记忆全文 —— 压成"日期 + 短标签"后 400 token 就装得下。
-    # 只在命中聚合特征时才建, 其余消息完全不受影响。
-    timeline_text = None
+    # Bounded candidate dates help temporal questions, but do not enumerate
+    # the complete history. The evidence labels and diagnostics preserve that limit.
+    timeline_text, timeline_diagnostics = None, None
     if is_aggregate_time_question(message):
-        timeline_text = format_timeline(build_timeline(all_candidates)) or None
+        timeline_text, timeline_diagnostics = timeline_evidence(all_candidates)
 
     result = {
         "memories": classified_memories if classified_memories else None,
         "memory_strings": memory_strings,
         "graph_context": None,
         "timeline": timeline_text,
+        "timeline_diagnostics": timeline_diagnostics,
         "candidate_ids": [
             mid for mid in (m.get("id") for m in all_candidates) if mid
         ],

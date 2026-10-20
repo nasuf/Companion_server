@@ -1,36 +1,8 @@
-"""聚合类时间问题的事件时间线.
+"""Bounded memory date evidence, never an exhaustive event ledger.
 
-## 解决什么
-
-LongMemEval 时间推理子集实测 (2026-07-30, 10 题):
-
-    普通时间题 ("X 和 Y 哪个先" / "距今几天")   k=5 就全中     8/10
-    聚合题     ("上次…是几个月前" / "几次…")     需要 k=26~42   2/10
-
-八成的时间题现在就是好的。失败的两道都要**先穷举某个主题下的所有事件**才能作答:
-
-    "上次和朋友去博物馆是几个月前" —— 要拿到全部博物馆相关事件, 才能判断哪些算
-    "和朋友参观"、哪次是最近的
-    "参加两次连续两天的慈善活动至今几个月" —— 要拿到全部慈善活动, 才能识别出哪
-    两次是连着的
-
-普通检索取"最相似的一条", 这类题要的是"这个主题下的全部"。
-
-## 为什么不是简单加大 k
-
-40 条记忆 × 中位 52 token ≈ 2080, 而注入预算是 900。但这类题**不需要记忆全文**,
-只需要"事件 + 日期"。压成 `[2023-02-14] 参加24小时骑行慈善活动` 约 15 token, 40 条
-只要 600 —— 比现在还省。
-
-## 日期从哪来
-
-`occur_time` 只有 12%(用户侧)/30%(AI侧) 填了, 光靠它时间线是空的。降级到
-`statement_time`: 实测两者都有的记忆里中位只差 2 天 —— 用户讲刚发生的事时不带时间
-词, 说话时刻就约等于事件时刻。
-
-已知偏差: "我小时候在苏州长大" 这种明确指向久远过去的, statement_time 会把它标成
-今天。这类内容有明显词面特征, 直接排除掉而不是标错日期 —— 时间线里一条错误日期
-会让 LLM 算出完全错误的间隔, 比少一条严重得多。
+occur_time is a stored event assertion, not independent verification. A
+statement_time labels only when something was mentioned. Neither record/access
+clocks nor a short candidate list prove an event date, exact count, or first/last.
 """
 
 from __future__ import annotations
@@ -39,7 +11,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.services.schedule_domain.time_parser import VAGUE_PAST_RE as _VAGUE_PAST_RE
+from app.services.temporal import parse_time, local_clock
+
 
 # 聚合类提问的词面特征。刻意用规则而不是 LLM: 这是热路径上的一个开关, 判错的代价
 # 只是多注入/少注入一段时间线, 不值得为它加一次模型调用。
@@ -56,9 +29,6 @@ _AGGREGATE_PATTERNS = (
     r"多久一次|经常|每隔",
 )
 _AGGREGATE_RE = re.compile("|".join(_AGGREGATE_PATTERNS))
-
-# 远过去词 _VAGUE_PAST_RE 从 time_parser import (见顶部) —— occur_time 写入侧兜底
-# 与这里的时间线过滤用同一份判定, 单一真理来源, 两处各存一份迟早漂。
 
 
 def is_aggregate_time_question(text: str) -> bool:
@@ -81,26 +51,23 @@ class TimelineEntry:
 
 def _event_time(row: dict) -> tuple[datetime, str] | None:
     for field in ("occur_time", "statement_time"):
-        v = row.get(field)
-        if isinstance(v, str):
-            try:
-                v = datetime.fromisoformat(v.replace("Z", "+00:00"))
-            except ValueError:
-                v = None
-        if isinstance(v, datetime):
-            return v, field
+        value = parse_time(row.get(field))
+        if value is not None:
+            return value, field
     return None
 
 
 def build_timeline(rows: list[dict], *, limit: int = 40) -> list[TimelineEntry]:
     """把候选记忆压成按时间排序的事件条目.
 
-    只保留能定出日期的; 明确讲久远过去的排除 (见模块 docstring)。
+    保留可标注的事件或提及日期；提及时间不会变成事件日期。
     """
+    if limit <= 0:
+        return []
     entries: list[TimelineEntry] = []
     for row in rows:
-        content = (row.get("content") or "").strip()
-        if not content or _VAGUE_PAST_RE.search(content):
+        content = " ".join((row.get("content") or "").split())
+        if not content:
             continue
         stamped = _event_time(row)
         if stamped is None:
@@ -109,7 +76,7 @@ def build_timeline(rows: list[dict], *, limit: int = 40) -> list[TimelineEntry]:
         entries.append(
             TimelineEntry(
                 at=at, text=content, dated_by=source,
-                owner="ai" if row.get("source") == "ai" else "user",
+                owner=row.get("source") if row.get("source") in {"ai", "user"} else "unknown",
             )
         )
 
@@ -145,20 +112,39 @@ def format_timeline(
 
     if not entries:
         return ""
+    if max_chars < 2 or token_budget <= 0:
+        return ""
+    header = "【候选日期摘录，非完整历史；不能据此确定总次数或首次/末次】"
     lines: list[str] = []
-    used = 0
+    used = estimate_tokens(header) + 1
     for e in reversed(entries):  # 从最近往前
         text = e.text if len(e.text) <= max_chars else e.text[: max_chars - 1] + "…"
-        # statement_time 定的日期加个"约", 让 LLM 知道这个日期是推断的不是确证的
-        mark = "" if e.dated_by == "occur_time" else "约"
+        label = "事件记录" if e.dated_by == "occur_time" else "提及（事件时间未知）"
         # 归属前缀是必须的, 不是装饰: 时间线同时含用户经历和 AI 自己的经历, 不标
         # 归属的话"我上次去博物馆是几个月前"可能被 AI 自己的经历答掉。
-        who = "我" if e.owner == "ai" else "用户"
-        line = f"[{who}] {mark}{e.at:%Y-%m-%d} {text}"
+        who = "我" if e.owner == "ai" else "用户" if e.owner == "user" else "归属未知"
+        line = f"[{who}] {label} {local_clock(e.at)[:10]} {text}"
         cost = estimate_tokens(line) + 1  # +1 为换行
         if used + cost > token_budget:
             break
         lines.append(line)
         used += cost
     lines.reverse()
-    return "\n".join(lines)
+    return "\n".join([header, *lines]) if lines else ""
+
+
+def timeline_evidence(rows: list[dict]) -> tuple[str | None, dict]:
+    """Count only this bounded retrieval candidate set, never the memory bank."""
+    entries = build_timeline(rows, limit=max(1, len(rows)))
+    selected = entries[-40:]
+    text = format_timeline(selected)
+    shown = max(0, len(text.splitlines()) - 1)
+    return text or None, {
+        "version": 1, "candidate_count": len(rows),
+        "dated_count": len(entries), "shown_count": shown,
+        "event_date_count": sum(e.dated_by == "occur_time" for e in entries),
+        "mention_only_count": sum(e.dated_by == "statement_time" for e in entries),
+        "undated_count": len(rows) - len(entries),
+        "truncated": shown < len(entries), "complete_history": False,
+        "token_budget": TIMELINE_TOKEN_BUDGET,
+    }

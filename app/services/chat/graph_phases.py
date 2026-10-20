@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.services.chat.memory_usage import submit_memory_usage
 from app.services.chat.repetition_guard import find_repeated_ai_phrases
+from app.services.temporal_query import resolve_temporal_query
 from app.services.chat.temporal_context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
 from app.services.chat.followup_policy import guard_optional_questions
 
@@ -55,7 +56,7 @@ async def load_turn(ctx):
         ctx.current_turn_ids
     )
     ctx.covered_until_user_ts = services._max_user_created_at(ctx.messages_dicts)
-    ctx.turn_clock = build_turn_clock(ctx.messages_dicts, exclude_ids=ctx.current_turn_ids)
+    ctx.turn_clock = build_turn_clock(ctx.messages_dicts, exclude_ids=ctx.current_turn_ids, received_at=(ctx.reply_context or {}).get("received_at"))
     ctx.reengagement_gap_seconds = services.compute_reengagement_gap_seconds(
         ctx.messages_dicts, exclude_ids=ctx.current_turn_ids, now=ctx.turn_clock.now
     )
@@ -232,10 +233,11 @@ async def prepare_reads(ctx):
         if ctx.crisis_decision.crisis_care_turn
         else None,
     }
+    ctx.temporal_query = resolve_temporal_query(ctx.user_message, anchor=ctx.turn_clock.statement_at, anchor_source=ctx.turn_clock.anchor_source)
     ctx.turn_clock, ctx.followup_policy, ctx.temporal_instructions = await prepare_reply_time(
         ctx.messages_dicts, exclude_ids=ctx.current_turn_ids,
         current_message=ctx.user_message, diagnostics=ctx.response_diagnostics,
-        now=ctx.turn_clock.now,
+        now=ctx.turn_clock.now, clock=ctx.turn_clock, temporal_query=ctx.temporal_query,
     )
     ctx.fetch_task: services.asyncio.Task | None = None
     ctx.crisis_memory_task: services.asyncio.Task | None = None
@@ -273,7 +275,7 @@ async def prepare_reads(ctx):
             )
     elif ctx.forced_intent is None and (not ctx.current_state_fast_path):
         early_parsed_times = (
-            services.parse_time_expressions(ctx.user_message)
+            ctx.temporal_query.parsed_times()
             if not ctx.skip_time_memory_lookup
             and services.has_explicit_time(ctx.user_message)
             else []
@@ -287,6 +289,7 @@ async def prepare_reads(ctx):
                 messages_dicts=ctx.messages_dicts,
                 parsed_times=early_parsed_times,
                 exclude_message_ids=ctx.current_turn_ids,
+                temporal_query=ctx.temporal_query,
             )
         )
         ctx.session_recap_task = ctx.spawn(
@@ -625,7 +628,7 @@ async def prepare_context(ctx):
         )
     else:
         parsed_times = (
-            services.parse_time_expressions(ctx.user_message)
+            ctx.temporal_query.parsed_times()
             if not ctx.skip_time_memory_lookup
             and services.has_explicit_time(ctx.user_message)
             else []
@@ -640,11 +643,14 @@ async def prepare_context(ctx):
             detected_intent=ctx.detected_intent,
             l3_trigger_classify_fn=services._l3_trigger_analyze,
             exclude_message_ids=ctx.current_turn_ids,
+            temporal_query=ctx.temporal_query,
         )
+    ctx.response_diagnostics["temporal_context"]["timeline"] = ctx.fetched.timeline_diagnostics
     ctx.memory_relevance = ctx.fetched.memory_relevance
     ctx.classified_memories = ctx.fetched.classified_memories if ctx.crisis_care_turn else scope_event_memories(
         ctx.fetched.classified_memories, ctx.user_message,
         now=ctx.turn_clock.now, diagnostics=ctx.response_diagnostics,
+        temporal_query=ctx.temporal_query,
     )
     ctx.temporal_evidence = await render_event_scope(ctx.response_diagnostics)
     ctx.prompt_user_emotion = ctx.fetched.user_emotion
@@ -1054,6 +1060,7 @@ async def generate_reply(ctx):
         reengagement_gap_seconds=ctx.reengagement_gap_seconds,
         temporal_instructions=ctx.temporal_instructions,
         temporal_evidence=ctx.temporal_evidence,
+        timeline=ctx.fetched.timeline,
         force_main_prompt=bool(ctx.offering_context) or bool(ctx.continuation_lines),
         diagnostics=ctx.response_diagnostics,
     )

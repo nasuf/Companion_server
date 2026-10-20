@@ -580,12 +580,7 @@ async def _build_time_context_section(time_context: str | None) -> _PromptBody |
 
 
 async def _build_timeline_section(timeline: str | None) -> _PromptBody | None:
-    """事件时间线 —— 只在聚合类时间问题上出现.
-
-    普通检索给的是"最相关的几条", 而"上次…是几个月前""参加过几次…"这类要先把某个
-    主题下的事件**穷举**出来才能作答 (LongMemEval 实测这类题需要 k=26~42, 而注入集
-    只有 10 条)。时间线用"日期 + 短标签"的紧凑形式补上这个缺口, 400 token 封顶。
-    """
+    """Managed bounded date excerpt; not proof of a complete event history."""
     if not timeline:
         return None
     tpl = await _get_optional_prompt("chat.timeline_section")

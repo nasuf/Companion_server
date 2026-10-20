@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from app.config import settings
 from app.services.temporal import parse_time, local_clock
+from app.services.temporal_query import TemporalQuery, resolve_temporal_query
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ class TurnClock:
     last_outbound_at: datetime | None
     inspected_messages: int
     unknown_timestamps: int
+    statement_at: datetime | None = None
+    anchor_source: str = "unknown"
 
     def gap(self, value: datetime | None) -> float | None:
         return round((self.now - value).total_seconds(), 3) if value else None
@@ -52,7 +55,7 @@ class TurnClock:
 
 
 def build_turn_clock(messages: list[dict], *, exclude_ids: set[str] | None = None,
-                     now: datetime | None = None) -> TurnClock:
+                     now: datetime | None = None, received_at: object = None) -> TurnClock:
     reference = parse_time(now) or datetime.now(timezone.utc)
     excluded = exclude_ids or set()
     users, dialogue, outbound = [], [], []
@@ -72,8 +75,20 @@ def build_turn_clock(messages: list[dict], *, exclude_ids: set[str] | None = Non
             outbound.append(ts)
             if not is_proactive(msg):
                 dialogue.append(ts)
+    current = [parse_time(m.get("createdAt")) for m in history
+               if m.get("id") in excluded and m.get("role") == "user"
+               and not m.get("synthetic_current")]
+    current = [t for t in current if t is not None and t <= reference]
+    received = parse_time(received_at)
+    anchor = min(current) if current else received if received and received <= reference else None
+    source = "persisted_message" if current else "server_received" if anchor else "unknown"
+    # Aggregated fragments can straddle local midnight; one shared date would
+    # misinterpret one of them. Keep recall broad until per-fragment binding.
+    from zoneinfo import ZoneInfo
+    if len({t.astimezone(ZoneInfo(settings.schedule_timezone)).date() for t in current}) > 1:
+        anchor, source = None, "multiple_message_dates"
     return TurnClock(reference, max(users, default=None), max(dialogue, default=None),
-                     max(outbound, default=None), len(history), unknown)
+                     max(outbound, default=None), len(history), unknown, anchor, source)
 
 
 def dated_dialogue(messages: list[dict], *, exclude_ids: set[str] | None = None,
@@ -99,7 +114,9 @@ def dated_dialogue(messages: list[dict], *, exclude_ids: set[str] | None = None,
     return "\n".join(reversed(lines)) or "(无可用历史)"
 
 
-async def render_temporal_context(clock: TurnClock, policy: str) -> str:
+async def render_temporal_context(clock: TurnClock, policy: str,
+                                  temporal_query: TemporalQuery | None = None) -> str:
+    import json
     from app.services.prompting.store import get_prompt_text, PromptDisabledError
     from app.services.prompting.utils import render_template
 
@@ -109,6 +126,8 @@ async def render_temporal_context(clock: TurnClock, policy: str) -> str:
         return ""
     return render_template(template, {
         "now": local_clock(clock.now),
+        "statement_at": local_clock(clock.statement_at),
+        "query_context": json.dumps(temporal_query.diagnostics(), ensure_ascii=False) if temporal_query else "未请求日期解析",
         "last_user": local_clock(clock.last_user_at),
         "last_dialogue": local_clock(clock.last_dialogue_at),
         "last_outbound": local_clock(clock.last_outbound_at),
@@ -120,14 +139,17 @@ async def render_temporal_context(clock: TurnClock, policy: str) -> str:
 
 async def prepare_reply_time(messages: list[dict], *, exclude_ids: set[str],
                              current_message: str, diagnostics: dict,
-                             now: datetime | None = None):
+                             now: datetime | None = None, clock: TurnClock | None = None,
+                             temporal_query: TemporalQuery | None = None):
     """One clock/policy snapshot shared by graph and legacy execution paths."""
     from app.services.chat.followup_policy import derive_followup_policy
 
-    clock = build_turn_clock(messages, exclude_ids=exclude_ids, now=now)
+    clock = clock or build_turn_clock(messages, exclude_ids=exclude_ids, now=now)
+    query = temporal_query or resolve_temporal_query(current_message, anchor=clock.statement_at,
+                                   anchor_source=clock.anchor_source)
     policy = derive_followup_policy(messages, now=clock.now, current_message=current_message)
     try:
-        instructions = await render_temporal_context(clock, policy.prompt_value())
+        instructions = await render_temporal_context(clock, policy.prompt_value(), query)
         prompt_status = "enabled" if instructions else "disabled"
     except Exception as exc:
         # An optional prompt read must not prevent a crisis or ordinary reply.
@@ -135,11 +157,13 @@ async def prepare_reply_time(messages: list[dict], *, exclude_ids: set[str],
         instructions, prompt_status = "", "unavailable"
     diagnostics["temporal_context"] = {**clock.diagnostics(), **policy.diagnostics(),
                                        "prompt_status": prompt_status,
+                                       "query": query.diagnostics(),
                                        "suppressed_question_count": 0, "out_of_window_event_count": 0, "event_check_status": "not_requested"}
     return clock, policy, instructions
 
 
-def scope_event_memories(memories, query: str, *, now: datetime, diagnostics: dict):
+def scope_event_memories(memories, query: str, *, now: datetime, diagnostics: dict,
+                         temporal_query: TemporalQuery | None = None):
     """Project point-event evidence into an explicit query date, without writes.
 
     Stable facts, unknown dates, multi-period comparisons and duration statements
@@ -147,7 +171,6 @@ def scope_event_memories(memories, query: str, *, now: datetime, diagnostics: di
     """
     import re
     from zoneinfo import ZoneInfo
-    from app.services.schedule_domain.time_parser import parse_time_expressions
 
     diagnostic = diagnostics.setdefault("temporal_context", {})
     diagnostic["out_of_window_event_count"] = 0
@@ -155,8 +178,11 @@ def scope_event_memories(memories, query: str, *, now: datetime, diagnostics: di
         return memories
     if re.search(r"相比|比较|以前|过去|上次|一直|长期|每天|持续|以来", query):
         return memories
-    zone = ZoneInfo(settings.schedule_timezone)
-    periods = parse_time_expressions(query, now=now.astimezone(zone))
+    resolved = temporal_query or resolve_temporal_query(query, anchor=now, anchor_source="server_received")
+    periods = resolved.parsed_times()
+    if not periods:
+        return memories
+    zone = ZoneInfo(resolved.timezone)
     # A single explicit calendar day is unambiguous. Broader/overlapping intent
     # stays in the normal dated-evidence path rather than guessing its scope.
     dates = {p.start.astimezone(zone).date() for p in periods

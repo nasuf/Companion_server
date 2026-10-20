@@ -36,6 +36,7 @@ async def run(args):
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
     from app.services.chat.prompt_builder import compute_reengagement_gap_seconds
     from app.services.memory.retrieval.context_selector import select_context
+    from app.services.memory.retrieval import timeline as timeline_module
     from app.services.prompting import store
     from tests.g02_harness_support import configure_pair
 
@@ -103,14 +104,19 @@ async def run(args):
                     history = [SimpleNamespace(id=f"history-{i}", role=role, content=text, metadata={},
                         createdAt=io.now-timedelta(seconds=case["gap"] + (len(case["history"])-i-1)*30))
                         for i, (role, text) in enumerate(case["history"])]
+                    if case.get("received_at"):
+                        history.append(SimpleNamespace(id="u-new", role="user", content=case["message"], metadata={},
+                            createdAt=datetime.fromisoformat(case["received_at"].replace("Z", "+00:00"))))
                     io.db.message.find_many.side_effect = lambda **_: list(reversed(history))
                     memories = select_context([dict(id="synthetic-meal", source="ai", content="9月8日午饭吃了三明治",
                         main_category="生活", sub_category="日常", importance=.7, similarity=.9, rank_score=.8,
                         occur_time="2026-09-08T04:00:00Z", statement_time="2026-09-08T04:05:00Z",
                         created_at="2026-09-08T04:05:00Z", last_accessed_at=io.now.isoformat())]) if case["memory"] else []
+                    timeline_rows = case.get("timeline_rows", [])
+                    timeline_text = timeline_module.format_timeline(timeline_module.build_timeline(timeline_rows)) or None
                     chat.fetch_parallel_context.return_value = FetchedContext(
                         memory_relevance="strong" if memories else "weak", classified_memories=memories,
-                        user_emotion={"emotion": "平静", "intensity": 20})
+                        user_emotion={"emotion": "平静", "intensity": 20}, timeline=timeline_text)
                     intent = IntentType.CURRENT_STATE if case["route"] == "current_state" else IntentType.NONE
                     chat.detect_intent_unified.return_value = IntentResult(intent=intent, confidence=1)
                     intent_handlers.resolve_implicit_time.return_value = (io.now, "在家整理工作台")
@@ -118,7 +124,7 @@ async def run(args):
                     try:
                         events = [e async for e in chat.stream_chat_response(
                             "c-1", case["message"], io.agent, "u-1", forced_intent=intent,
-                            reply_context={"received_at": io.now.isoformat()} )]
+                            reply_context={"received_at": case.get("received_at", io.now.isoformat())} )]
                     finally:
                         store.reset_prompt_snapshot(token)
                     texts = []
@@ -130,14 +136,20 @@ async def run(args):
                     if not captured or not answer or not any(e["event"] == "done" for e in events):
                         raise RuntimeError(f"Incomplete actual reply flow for {case['id']}")
                     verdict = await judge.chat.completions.create(model=args.judge_model, temperature=0,
-                        max_tokens=600, extra_body={"enable_thinking": False},
+                        max_tokens=1200, extra_body={"enable_thinking": False},
                         response_format={"type": "json_object"}, messages=[{"role": "user", "content":
-                            "审核合成对话测试，不续写。只评判以下明确条件，其他措辞不影响通过。自己正在整理工作台就是回答当前活动；不用报时；陈述自己歇会儿不是追问。不要添加条件。输出JSON "
+                            "审核合成对话测试，不续写。只评判case.criterion里的明确条件，其他措辞不影响通过。不得添加额外条件：禁止追问某件旧事不等于禁止所有提问；“可以”不是“必须”。输出JSON "
                             "{\"pass\":true或false,\"reason\":\"简短理由\"}。\n"
                             +json.dumps({"case": case, "reply": answer}, ensure_ascii=False)}])
-                    assessment = json.loads(verdict.choices[0].message.content)
-                    if type(assessment.get("pass")) is not bool:
-                        raise ValueError("Judge produced an invalid assessment")
+                    judge_raw = verdict.choices[0].message.content
+                    try:
+                        assessment = json.loads(judge_raw)
+                        if not isinstance(assessment, dict) or type(assessment.get("pass")) is not bool:
+                            raise ValueError("Invalid assessment")
+                    except (ValueError, TypeError):
+                        # Retain the actual reply for review; missing judge evidence
+                        # is never a pass and must not erase the completed sample.
+                        assessment = {"pass": None, "reason": "invalid_model_judgement", "raw": judge_raw}
                     report["runs"].append({"case": case["id"], "sample": sample, "reply": answer,
                                            "judge": assessment, "calls": captured})
                     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
@@ -146,7 +158,7 @@ async def run(args):
     finally:
         await client.close()
         await judge.close()
-    report["passed"] = sum(r["judge"]["pass"] for r in report["runs"])
+    report["passed"] = sum(r["judge"]["pass"] is True for r in report["runs"])
     report["total"] = len(report["runs"])
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(json.dumps({"passed": report["passed"], "total": report["total"]}), flush=True)

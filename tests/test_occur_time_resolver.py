@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 import pytest
 
 from app.services.schedule_domain.time_parser import (
-    VAGUE_PAST_RE,
     has_explicit_time,
     parse_time_expressions,
     resolve_occur_time,
@@ -125,7 +124,13 @@ class TestResolveOccurTime:
         assert r is not None and r.date() == ST.date()
 
 
-def test_vague_past_re_is_single_source_of_truth():
-    """timeline 与写入侧兜底必须用同一份远过去判定, 不能各存一份。"""
-    from app.services.memory.retrieval import timeline
-    assert timeline._VAGUE_PAST_RE is VAGUE_PAST_RE
+@pytest.mark.parametrize("text", ["用户小时候在苏州长大", "以前经常去爬山", "读书时喜欢打篮球"])
+def test_vague_past_stays_undated_but_preserves_mention_evidence(text):
+    """写入不猜事件日；读取保留提及日，不能把未知事件日变成提及日。"""
+    from app.services.memory.retrieval.timeline import build_timeline, format_timeline
+    occur_time = resolve_occur_time(text, statement_time=ST, main_category="生活")
+    entries = build_timeline([{"content": text, "occur_time": occur_time, "statement_time": ST, "source": "user"}])
+    assert occur_time is None
+    assert len(entries) == 1 and entries[0].dated_by == "statement_time"
+    assert entries[0].at == ST
+    assert "事件时间未知" in format_timeline(entries)

@@ -1,14 +1,9 @@
-"""聚合类时间问题的事件时间线.
-
-LongMemEval 实测: 普通时间题 k=5 就全中 (8/10), 只有需要"穷举某主题下所有事件"的
-聚合题要 k=26~42。这个模块就是为那两成题准备的 —— 所以最要紧的测试是**它不能在
-另外八成上乱开**, 那会白白挤占注入预算。
-"""
+"""Bounded date evidence, ownership, mention-only dates and rendering budget."""
 
 from __future__ import annotations
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.services.memory.retrieval.timeline import (
     build_timeline,
@@ -16,7 +11,7 @@ from app.services.memory.retrieval.timeline import (
     is_aggregate_time_question,
 )
 
-_NOW = datetime(2026, 7, 30, 12, 0)
+_NOW = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 
 
 def _row(content: str, *, occur=None, statement=None, source="user") -> dict:
@@ -54,17 +49,14 @@ class TestDetection:
 
 class TestBuild:
     def test_prefers_occur_time_over_statement_time(self):
-        """occur_time 是事件真正发生的时刻, 有就该用它."""
+        """Prefer the stored event assertion, without claiming independent verification."""
         rows = [_row("去了博物馆", occur=_NOW - timedelta(days=100), statement=_NOW)]
         e = build_timeline(rows)[0]
         assert e.dated_by == "occur_time"
         assert (_NOW - e.at).days == 100
 
     def test_falls_back_to_statement_time(self):
-        """occur_time 覆盖率只有 12%, 光靠它时间线是空的.
-
-        实测两者都有的记忆中位只差 2 天 —— 用户讲刚发生的事时不带时间词。
-        """
+        """Mention timestamps label mentions only, never inferred event dates."""
         rows = [_row("去了博物馆", statement=_NOW - timedelta(days=3))]
         e = build_timeline(rows)[0]
         assert e.dated_by == "statement_time"
@@ -72,19 +64,17 @@ class TestBuild:
     def test_undated_rows_are_dropped(self):
         assert build_timeline([_row("没有任何时间信息")]) == []
 
-    def test_vague_past_memories_are_excluded(self):
-        """「我小时候在苏州长大」用 statement_time 会被标成今天.
-
-        时间线里一条错误日期会让 LLM 算出完全错误的间隔 —— 比少一条严重得多。
-        """
+    def test_vague_past_memories_are_kept_as_mentions(self):
+        """Old stories remain recallable without treating their mention day as the event."""
         rows = [
             _row("我小时候在苏州长大", statement=_NOW),
             _row("以前我常去那家面馆", statement=_NOW),
             _row("昨天去了博物馆", statement=_NOW),
         ]
         out = build_timeline(rows)
-        assert len(out) == 1
-        assert "博物馆" in out[0].text
+        assert len(out) == 3
+        assert "事件时间未知" in format_timeline(out)
+        assert all(e.dated_by == "statement_time" for e in out)
 
     def test_entries_are_sorted_by_time(self):
         rows = [
@@ -141,18 +131,19 @@ class TestFormat:
         rows = [
             _row(f"事件{i}", statement=_NOW - timedelta(days=10 - i)) for i in range(10)
         ]
-        lines = format_timeline(build_timeline(rows)).splitlines()
-        dates = [ln.lstrip("约")[:10] for ln in lines]
+        lines = format_timeline(build_timeline(rows)).splitlines()[1:]
+        import re
+        dates = [re.search(r"\d{4}-\d{2}-\d{2}", ln).group() for ln in lines]
         assert dates == sorted(dates)
 
-    def test_inferred_dates_are_marked(self):
-        """statement_time 推出来的日期要标"约" —— 让 LLM 知道它不是确证的."""
-        # 归属前缀在最前, 「约」跟在日期前
+    def test_mention_dates_are_explicitly_distinguished(self):
+        """The label must not suggest an approximate event date."""
         inferred = format_timeline(build_timeline([_row("去了博物馆", statement=_NOW)]))
-        assert "] 约2026-" in inferred
+        assert "] 提及（事件时间未知） 2026-" in inferred
+        assert "约2026-" not in inferred
 
         exact = format_timeline(build_timeline([_row("去了博物馆", occur=_NOW)]))
-        assert "] 2026-" in exact and "约" not in exact
+        assert "] 事件记录 2026-" in exact and "约" not in exact
 
     def test_empty_timeline_renders_empty(self):
         """空串让调用方能直接判空跳过整段注入."""
@@ -172,9 +163,9 @@ class TestOwnership:
         assert u.owner == "user"
         assert a.owner == "ai"
 
-    def test_unknown_source_defaults_to_user(self):
-        """来源缺失时按用户算 —— 把用户的事错标成 AI 的, 比反过来更容易被察觉纠正."""
-        assert build_timeline([_row("去了博物馆", statement=_NOW, source=None)])[0].owner == "user"
+    def test_unknown_source_stays_unknown(self):
+        """Do not assign ambiguous ownership to either participant."""
+        assert build_timeline([_row("去了博物馆", statement=_NOW, source=None)])[0].owner == "unknown"
 
     def test_rendered_lines_carry_the_owner(self):
         rows = [
@@ -189,7 +180,7 @@ class TestOwnership:
         """漏标一行就够模型串味一次."""
         rows = [_row(f"事件{i}", statement=_NOW - timedelta(days=i),
                      source="ai" if i % 2 else "user") for i in range(8)]
-        for line in format_timeline(build_timeline(rows)).splitlines():
+        for line in format_timeline(build_timeline(rows)).splitlines()[1:]:
             assert line.startswith("[用户] ") or line.startswith("[我] "), line
 
     def test_prompt_template_explains_the_markers(self):

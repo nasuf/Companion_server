@@ -35,3 +35,24 @@ CASES = [
          message="你现在可以问我了，想了解什么", route="ordinary", memory=False,
          criterion="用户重新允许提问，应该能提出一个自然的新问题，而不是仍说不能问或强行只回应好。"),
 ]
+
+# TIME02A read-path probes, paired against the same production snapshot.
+CASES += [
+    dict(id="original_midnight_anchor", now="2026-10-20T01:00:00Z", gap=3*86400,
+         received_at="2026-10-18T15:50:00Z", history=[], memory=False, route="ordinary",
+         message="我这条消息里说的昨天，具体是几月几号？",
+         criterion="消息原始时间是北京时间10月18日23:50，昨天指10月17日；不能按10月20日的处理时间回答10月19日。"),
+    dict(id="mention_is_not_event_date", now="2026-10-20T01:00:00Z", gap=86400,
+         history=[], memory=False, route="ordinary", message="我那次去博物馆是什么日期？",
+         timeline_rows=[dict(content="去过博物馆", statement_time="2026-10-19T00:00:00Z", source="user")],
+         criterion="只知道用户10月19日提过博物馆，不知道事件日期；不能把10月19日或昨天当成游览日，必须表达不知道具体日期。"),
+    dict(id="event_assertion_survives_old_mention", now="2026-10-20T01:00:00Z", gap=86400,
+         history=[], memory=False, route="ordinary", message="我记录的那次博物馆是什么日期？",
+         timeline_rows=[dict(content="去了博物馆", occur_time="2024-02-29T00:00:00Z", statement_time="2026-10-19T00:00:00Z", source="user")],
+         criterion="根据记录回答2024年2月29日，不能把提及时间10月19日当成事件日期。"),
+    dict(id="partial_candidates_do_not_prove_total", now="2026-10-20T01:00:00Z", gap=86400,
+         history=[], memory=False, route="ordinary", message="我从小到大总共去过几次博物馆？",
+         timeline_rows=[dict(content="去了博物馆", occur_time="2024-02-29T00:00:00Z", source="user"),
+                        dict(content="去了博物馆", occur_time="2025-03-01T00:00:00Z", source="user")],
+         criterion="可以说目前记录里有两次，但必须说明不知道完整总次数；不能断言一生总共只有两次。"),
+]

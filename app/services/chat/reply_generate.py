@@ -251,6 +251,7 @@ async def generate_reply(
     force_main_prompt: bool = False,
     temporal_instructions: str = "",
     temporal_evidence: str = "",
+    timeline: str | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
     needs_web_search: bool = False,
@@ -288,6 +289,10 @@ async def generate_reply(
     tier_eligible = (
         not force_main_prompt
         and not needs_web_search
+        # Date evidence requires the full evidence-aware prompt. A weak tier
+        # explicitly describes empty recall and can contradict this excerpt.
+        # This selects one model path; it does not call both models.
+        and not timeline
         and can_use_tier_reply(
             intent=detected_intent.intent,
             memory_relevance=memory_relevance,
@@ -299,6 +304,8 @@ async def generate_reply(
     )
     if diagnostics is not None and force_main_prompt:
         diagnostics["tier_blocked_by_special_context"] = True
+    if diagnostics is not None and timeline:
+        diagnostics["tier_blocked_by_date_evidence"] = True
     if diagnostics is not None and (
         reengagement_gap_seconds is not None
         and reengagement_gap_seconds >= RECAP_GAP_SECONDS

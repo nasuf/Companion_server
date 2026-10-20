@@ -153,7 +153,7 @@ def test_dated_evidence_scoping_preserves_history_identity_and_unknown_times():
     diagnostic = {}
     assert scope_event_memories(rows, "你今天中午吃了什么", now=NOW, diagnostics=diagnostic) == rows[1:]
     assert diagnostic["temporal_context"]["out_of_window_event_count"] == 1
-    assert scope_event_memories(rows, "9月8日吃了什么", now=NOW, diagnostics={}) == [old, unknown, identity, ongoing]
+    assert scope_event_memories(rows, "2026年9月8日吃了什么", now=NOW, diagnostics={}) == [old, unknown, identity, ongoing]
     for query in ("今天跟以前有什么不同", "今天想聊9月8日，你记得吗", "吃了什么", "今天好热"):
         assert scope_event_memories(rows, query, now=NOW, diagnostics={}) == rows
     assert scope_event_memories([], "今天吃什么", now=NOW, diagnostics={}) == []

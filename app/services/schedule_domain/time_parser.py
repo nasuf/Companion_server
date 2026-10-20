@@ -155,9 +155,15 @@ def parse_with_statement_time(
 def parse_time_expressions(
     message: str,
     now: datetime | None = None,
+    *, calendar_timezone=None,
 ) -> list[ParsedTime]:
     """解析消息中的显式时间表述。返回所有匹配结果。"""
     now = now or _now_corrected()
+    zone = calendar_timezone or _TZ
+    if calendar_timezone is not None:
+        # The read contract treats naive stored timestamps as UTC. Legacy
+        # scheduling callers retain their existing local-clock convention.
+        now = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(zone)
     today = now.date()
     results: list[ParsedTime] = []
     used_spans: list[tuple[int, int]] = []
@@ -179,8 +185,8 @@ def parse_time_expressions(
 
     def _day_range(d: date) -> tuple[datetime, datetime]:
         return (
-            datetime.combine(d, time.min, tzinfo=_TZ),
-            datetime.combine(d, time.max, tzinfo=_TZ),
+            datetime.combine(d, time.min, tzinfo=zone),
+            datetime.combine(d, time.max, tzinfo=zone),
         )
 
     # --- 1. 相对日期（长词优先，避免"大前天"被"前天"抢先匹配）---
@@ -216,10 +222,10 @@ def parse_time_expressions(
             amount = -amount
         target = now
         if unit == "分钟":
-            target = now + timedelta(minutes=amount)
+            target = (now.astimezone(timezone.utc) if calendar_timezone is not None else now) + timedelta(minutes=amount)
             s, e = target, target + timedelta(minutes=1)
         elif unit == "小时":
-            target = now + timedelta(hours=amount)
+            target = (now.astimezone(timezone.utc) if calendar_timezone is not None else now) + timedelta(hours=amount)
             s, e = target, target + timedelta(hours=1)
         elif unit == "天":
             d = today + timedelta(days=amount)
@@ -283,16 +289,16 @@ def parse_time_expressions(
         prefix = m.group(1)
         start_day = monday + timedelta(weeks=_week_offset(prefix))
         end_day = start_day + timedelta(days=6)
-        s = datetime.combine(start_day, time.min, tzinfo=_TZ)
-        e = datetime.combine(end_day, time.max, tzinfo=_TZ)
+        s = datetime.combine(start_day, time.min, tzinfo=zone)
+        e = datetime.combine(end_day, time.max, tzinfo=zone)
         _add(m.group(), s, e, "relative", 0.82, m.span())
 
     for m in _WEEKEND_PAT.finditer(message):
         prefix = m.group(1)
         start_day = monday + timedelta(weeks=_week_offset(prefix), days=5)
         end_day = start_day + timedelta(days=1)
-        s = datetime.combine(start_day, time.min, tzinfo=_TZ)
-        e = datetime.combine(end_day, time.max, tzinfo=_TZ)
+        s = datetime.combine(start_day, time.min, tzinfo=zone)
+        e = datetime.combine(end_day, time.max, tzinfo=zone)
         _add(m.group(), s, e, "relative", 0.82, m.span())
 
     # --- 3. 相对月 ---
@@ -309,8 +315,8 @@ def parse_time_expressions(
                 month -= 12
                 year += 1
             _, last_day = monthrange(year, month)
-            s = datetime(year, month, 1, tzinfo=_TZ)
-            e = datetime(year, month, last_day, 23, 59, 59, tzinfo=_TZ)
+            s = datetime(year, month, 1, tzinfo=zone)
+            e = datetime(year, month, last_day, 23, 59, 59, tzinfo=zone)
             _add(word, s, e, "relative", 0.85, span)
 
     # --- 4a. 带年份的显性日期 (2026-08-23 / 2026年8月9日). 必须在 4. 之前, 让
@@ -349,11 +355,11 @@ def parse_time_expressions(
         if month_str:
             month = int(month_str)
             _, last_day = monthrange(year, month)
-            s = datetime(year, month, 1, tzinfo=_TZ)
-            e = datetime(year, month, last_day, 23, 59, 59, tzinfo=_TZ)
+            s = datetime(year, month, 1, tzinfo=zone)
+            e = datetime(year, month, last_day, 23, 59, 59, tzinfo=zone)
         else:
-            s = datetime(year, 1, 1, tzinfo=_TZ)
-            e = datetime(year, 12, 31, 23, 59, 59, tzinfo=_TZ)
+            s = datetime(year, 1, 1, tzinfo=zone)
+            e = datetime(year, 12, 31, 23, 59, 59, tzinfo=zone)
         _add(m.group(), s, e, "absolute", 0.85, m.span())
 
     # --- 6. 时间点 X点/时 ---
@@ -364,13 +370,13 @@ def parse_time_expressions(
         # spec §3.1 "晚上 12 点" 语义对齐"深夜次日 00:00", 而不是中午
         if period == "晚上" and hour == 12:
             anchor_day = today + timedelta(days=1)
-            dt = datetime.combine(anchor_day, time(0, minute), tzinfo=_TZ)
+            dt = datetime.combine(anchor_day, time(0, minute), tzinfo=zone)
             _add(m.group(), dt, dt + timedelta(hours=1), "absolute", 0.85, m.span())
             continue
         if period and hour <= 12 and period in _PM_PERIODS and hour < 12:
             hour += 12
         if 0 <= hour <= 23 and 0 <= minute <= 59:
-            dt = datetime.combine(today, time(hour, minute), tzinfo=_TZ)
+            dt = datetime.combine(today, time(hour, minute), tzinfo=zone)
             _add(m.group(), dt, dt + timedelta(hours=1), "absolute", 0.8, m.span())
 
     # --- 7. 时间段词 ---
@@ -383,11 +389,11 @@ def parse_time_expressions(
         anchor_day = today + timedelta(days=1) if period_name in _NEXT_DAY_PERIODS else today
         # 处理 18-24 这种 end=24 不是合法 hour, 改用次日 00:00 作为闭区间
         if h_end >= 24:
-            s = datetime.combine(anchor_day, time(h_start, 0), tzinfo=_TZ)
-            e = datetime.combine(anchor_day + timedelta(days=1), time(0, 0), tzinfo=_TZ) - timedelta(seconds=1)
+            s = datetime.combine(anchor_day, time(h_start, 0), tzinfo=zone)
+            e = datetime.combine(anchor_day + timedelta(days=1), time(0, 0), tzinfo=zone) - timedelta(seconds=1)
         else:
-            s = datetime.combine(anchor_day, time(h_start, 0), tzinfo=_TZ)
-            e = datetime.combine(anchor_day, time(h_end - 1, 59, 59), tzinfo=_TZ)
+            s = datetime.combine(anchor_day, time(h_start, 0), tzinfo=zone)
+            e = datetime.combine(anchor_day, time(h_end - 1, 59, 59), tzinfo=zone)
         _add(period_name, s, e, "relative", 0.6, span)
 
     # --- 8. 节日名称 ---

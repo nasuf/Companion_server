@@ -110,7 +110,10 @@ async def test_hybrid_cache_key_uses_enhanced_query():
         )
 
     # 两次 cache 查询用了不同的 key (enhanced_query 各异)
-    assert captured_keys == ["妈妈情况", "妹妹情况"]
+    assert len(captured_keys) == 2
+    assert [k.split("\n", 1)[0] for k in captured_keys] == ["妈妈情况", "妹妹情况"]
+    assert captured_keys[0] != captured_keys[1]
+    assert all(k.split("\n", 1)[1].startswith("time02:") for k in captured_keys)
 
 
 @pytest.mark.asyncio
@@ -477,60 +480,29 @@ async def test_relevance_parser_extracts_json_from_noise():
 
 
 @pytest.mark.asyncio
-async def test_cache_write_uses_same_key_as_read_with_enhanced_query():
-    """Phase 2.4 CR bug fix: cache_set_retrieval 必须用跟 cache_retrieval 相同
-    的 cache_key (effective_query), 否则 enhanced_query 路径永远 cache miss.
-    """
+@pytest.mark.parametrize("enhanced,expected", [("妈妈情况", "妈妈情况"), (None, "我喜欢咖啡")])
+async def test_cache_write_uses_same_dated_key_as_read(enhanced, expected):
+    """改写语义和原消息的时间范围都必须参与缓存；写入与读取一致。"""
     from app.services.memory.retrieval import hybrid
 
-    set_calls = []
-    async def _capture_set(key, user_id, result, workspace_id=None):
-        set_calls.append(key)
-
     with (
-        patch.object(hybrid, "search_similar_tiers",
-                     new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "search_by_time_range",
-                     new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "cache_retrieval",
-                     new_callable=AsyncMock, return_value=None),
-        patch.object(hybrid, "cache_set_retrieval", side_effect=_capture_set),
-    ):
-        # 场景 1: enhanced_query 非空 → set/get 都用 enhanced_query
-        await hybrid.hybrid_retrieve(
-            message="那他呢?", user_id="u1", workspace_id="w1",
-            enhanced_query="妈妈情况",
-        )
-
-    assert set_calls == ["妈妈情况"], (
-        f"cache_set_retrieval 必须用 enhanced_query (跟 read 一致); got {set_calls}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_cache_write_uses_message_when_no_enhanced_query():
-    """无 enhanced_query 时, cache write 仍用 message (跟 read 一致)."""
-    from app.services.memory.retrieval import hybrid
-
-    set_calls = []
-    async def _capture_set(key, user_id, result, workspace_id=None):
-        set_calls.append(key)
-
-    with (
-        patch.object(hybrid, "search_similar_tiers",
-                     new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "search_by_time_range",
-                     new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "cache_retrieval",
-                     new_callable=AsyncMock, return_value=None),
-        patch.object(hybrid, "cache_set_retrieval", side_effect=_capture_set),
+        patch.object(hybrid, "search_similar_tiers", new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "search_by_time_range", new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "search_related_memories_for_query", new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "cache_retrieval", new_callable=AsyncMock, return_value=None) as get,
+        patch.object(hybrid, "cache_set_retrieval", new_callable=AsyncMock) as put,
     ):
         await hybrid.hybrid_retrieve(
-            message="我喜欢咖啡", user_id="u1", workspace_id="w1",
-            # enhanced_query 不传
+            message="我喜欢咖啡", user_id="u1", workspace_id="w1", enhanced_query=enhanced,
         )
 
-    assert set_calls == ["我喜欢咖啡"]
+    assert get.await_count == put.await_count == 1
+    key = get.await_args.args[0]
+    assert key.split("\n", 1)[0] == expected
+    assert key.split("\n", 1)[1].startswith("time02:")
+    assert put.await_args.args[0] == key
+    assert get.await_args.args[1] == put.await_args.args[1] == "u1"
+    assert get.await_args.kwargs["workspace_id"] == put.await_args.kwargs["workspace_id"] == "w1"
 
 
 @pytest.mark.asyncio

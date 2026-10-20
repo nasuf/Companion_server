@@ -20,6 +20,7 @@ from app.observability.events import (
     EVT_MEMORY_RELEVANCE,
     EVT_MEMORY_RETRIEVED,
 )
+from app.services.temporal_query import TemporalQuery
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.chat.message_utils import last_user_turns
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
@@ -79,6 +80,7 @@ class FetchedContext:
     time_memories: list[str] = field(default_factory=list)
     # 聚合类时间问题的事件时间线; 非聚合问题为 None, 该段不注入
     timeline: str | None = None
+    timeline_diagnostics: dict | None = None
     l3_memories: list[str] = field(default_factory=list)
     l3_trigger_label: str = "无"            # "无" | "不满纠正" | "请求更久" | "稀疏补召"
     enhanced_query: str = ""
@@ -127,6 +129,7 @@ async def _decide_web_search(user_message: str, context: str) -> bool:
 async def _do_retrieval(
     user_message: str, user_id: str, workspace_id: str | None,
     enhanced_query: str = "",
+    temporal_query: TemporalQuery | None = None,
 ) -> dict:
     """Phase 2.4: 优先用 enhanced_query 做向量检索 (省略式追问还原后的完整短语).
     enhanced_query 空时 fallback 到原 user_message.
@@ -135,6 +138,7 @@ async def _do_retrieval(
         user_message, user_id,
         workspace_id=workspace_id,
         enhanced_query=enhanced_query or None,
+        temporal_query=temporal_query,
     )
 
 
@@ -589,6 +593,7 @@ async def fetch_parallel_context(
     detected_intent: IntentResult | None = None,
     l3_trigger_classify_fn: Callable[..., Awaitable[Any]] | None = None,
     exclude_message_ids: set[str] | None = None,
+    temporal_query: TemporalQuery | None = None,
 ) -> FetchedContext:
     """spec §3.1+§3.2 step 2-3：拉取记忆/用户情绪/画像/作息 + L3 awakening。
 
@@ -682,6 +687,7 @@ async def fetch_parallel_context(
             retrieval_result = await _do_retrieval(
                 user_message, user_id, workspace_id,
                 enhanced_query=enhanced_query,
+                temporal_query=temporal_query,
             )
         except Exception as e:
             logger.warning(f"Enhanced-first retrieval failed: {e}")
@@ -691,6 +697,7 @@ async def fetch_parallel_context(
             retrieval_result = await _do_retrieval(
                 user_message, user_id, workspace_id,
                 enhanced_query=profile_enhanced_query,
+                temporal_query=temporal_query,
             )
         except Exception as e:
             logger.warning(f"Hybrid retrieval failed: {e}")
@@ -711,6 +718,7 @@ async def fetch_parallel_context(
             retrieval_result = await _do_retrieval(
                 user_message, user_id, workspace_id,
                 enhanced_query=enhanced_query,
+                temporal_query=temporal_query,
             )
         except Exception as e:
             logger.warning(f"Enhanced retrieval failed, keep original: {e}")
@@ -803,6 +811,8 @@ async def fetch_parallel_context(
             retrieval_result.get("timeline")
             if isinstance(retrieval_result, dict) else None
         ),
+        timeline_diagnostics=(retrieval_result.get("timeline_diagnostics")
+                              if isinstance(retrieval_result, dict) else None),
         l3_memories=l3_memories,
         l3_trigger_label=l3_trigger_label,
         enhanced_query=enhanced_query,

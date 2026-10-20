@@ -7,6 +7,7 @@ Background (fire-and-forget, after response):
   user emotion metadata + memory pipeline + trait/patience updates
 """
 
+from app.services.temporal_query import resolve_temporal_query
 from app.services.chat.temporal_context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
 from app.services.chat.followup_policy import guard_optional_questions
 import asyncio
@@ -568,7 +569,7 @@ async def _stream_legacy_response(
         covered_until_user_ts = _max_user_created_at(messages_dicts)
         # 重逢感知 (拟人度): 当前轮距上一轮最后一条消息的间隔. ≥30min 时
         # build_system_prompt 注入分档「重逢感知」段, B3 同时用它重置话题上下文.
-        turn_clock = build_turn_clock(messages_dicts, exclude_ids=current_turn_ids)
+        turn_clock = build_turn_clock(messages_dicts, exclude_ids=current_turn_ids, received_at=(reply_context or {}).get("received_at"))
         reengagement_gap_seconds = compute_reengagement_gap_seconds(
             messages_dicts, exclude_ids=current_turn_ids, now=turn_clock.now,
         )
@@ -753,9 +754,10 @@ async def _stream_legacy_response(
             ),
         }
 
+        temporal_query = resolve_temporal_query(user_message, anchor=turn_clock.statement_at, anchor_source=turn_clock.anchor_source)
         turn_clock, followup_policy, temporal_instructions = await prepare_reply_time(
             messages_dicts, exclude_ids=current_turn_ids, current_message=user_message,
-            diagnostics=response_diagnostics, now=turn_clock.now,
+            diagnostics=response_diagnostics, now=turn_clock.now, clock=turn_clock, temporal_query=temporal_query,
         )
 
         # P0-2: auto-intent 路径下提前 kick off fetch 与 intent 并行 (节省 600-1500ms).
@@ -805,7 +807,7 @@ async def _stream_legacy_response(
                 )
         elif forced_intent is None and not current_state_fast_path:
             early_parsed_times = (
-                parse_time_expressions(user_message)
+                temporal_query.parsed_times()
                 if not skip_time_memory_lookup and has_explicit_time(user_message) else []
             )
             fetch_task = asyncio.create_task(fetch_parallel_context(
@@ -815,6 +817,7 @@ async def _stream_legacy_response(
                 exclude_message_ids=current_turn_ids,
                 # detected_intent / l3_trigger_classify_fn 都不传 → fetch 跳过 L3,
                 # 由 orchestrator 在 intent 出来后单独跑.
+                temporal_query=temporal_query,
             ))
             # W2 中期记忆: 重逢 (gap≥3h) 时并行生成「上次聊到」摘要.
             # 模块内部有 gap 阈值判断 + Redis 缓存 (同一次重逢只调一次 LLM);
@@ -1159,7 +1162,7 @@ async def _stream_legacy_response(
             response_diagnostics["memory_retrieval_skipped_reason"] = "current_state_fast_path"
         else:
             parsed_times = (
-                parse_time_expressions(user_message)
+                temporal_query.parsed_times()
                 if not skip_time_memory_lookup and has_explicit_time(user_message) else []
             )
             fetched = await fetch_parallel_context(
@@ -1169,11 +1172,14 @@ async def _stream_legacy_response(
                 detected_intent=detected_intent,
                 l3_trigger_classify_fn=_l3_trigger_analyze,
                 exclude_message_ids=current_turn_ids,
+                temporal_query=temporal_query,
             )
+        response_diagnostics["temporal_context"]["timeline"] = fetched.timeline_diagnostics
         memory_relevance = fetched.memory_relevance
         classified_memories = fetched.classified_memories if crisis_care_turn else scope_event_memories(
             fetched.classified_memories, user_message,
             now=turn_clock.now, diagnostics=response_diagnostics,
+            temporal_query=temporal_query,
         )
         temporal_evidence = await render_event_scope(response_diagnostics)
         prompt_user_emotion = fetched.user_emotion
@@ -1594,6 +1600,7 @@ async def _stream_legacy_response(
             reengagement_gap_seconds=reengagement_gap_seconds,
             temporal_instructions=temporal_instructions,
             temporal_evidence=temporal_evidence,
+            timeline=fetched.timeline,
             # 「话题接续」段 (告诉模型承接句已发, 别重复) 只在主 prompt 里有
             force_main_prompt=bool(offering_context) or bool(continuation_lines),
             diagnostics=response_diagnostics,

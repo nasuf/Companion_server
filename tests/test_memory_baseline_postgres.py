@@ -24,6 +24,8 @@ from app.redis_client import get_redis,close_redis
 from app.services.memory.retrieval import vector_search,hybrid
 from app.services.runtime import cache
 from uuid import uuid4
+from datetime import datetime,timezone
+from app.services.temporal_query import resolve_temporal_query
 async def run():
     case=next(c for c in load_cases() if c['group']=='multi_agent')
     vectors={m['text']:[1.]+[0.]*1023 for m in case['memories']}
@@ -39,13 +41,15 @@ async def run():
             for scope in ('target','other_agent','other_user'):
                 uid,wid=spaces[scope]
                 expected={m['key'] for m in case['memories'] if m['scope']==scope and not m.get('archived')}
-                a=await hybrid.hybrid_retrieve(case['query'],uid,workspace_id=wid)
-                b=await hybrid.hybrid_retrieve(case['query'],uid,workspace_id=wid)
+                temporal=resolve_temporal_query(case['query'],anchor=datetime.now(timezone.utc),anchor_source='server_received')
+                cache_key=case['query']+'\n'+temporal.cache_token()
+                a=await hybrid.hybrid_retrieve(case['query'],uid,workspace_id=wid,temporal_query=temporal)
+                b=await hybrid.hybrid_retrieve(case['query'],uid,workspace_id=wid,temporal_query=temporal)
                 assert {keys[m.id] for m in a['memories']}<=expected
                 assert [m.id for m in a['memories']]==[m.id for m in b['memories']]
-                assert await cache.cache_retrieval(case['query'],uid,workspace_id=wid)
+                assert await cache.cache_retrieval(cache_key,uid,workspace_id=wid)
                 await cache.bump_cache_version(uid,wid)
-                assert await cache.cache_retrieval(case['query'],uid,workspace_id=wid) is None
+                assert await cache.cache_retrieval(cache_key,uid,workspace_id=wid) is None
         await cleanup(db,*own);own=None
         assert await db.user.count(where={'id':{'in':owners}})==0
         assert await db.chatworkspace.count(where={'id':{'in':[v[1] for v in spaces.values()]}})==0
