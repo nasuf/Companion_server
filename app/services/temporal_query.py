@@ -15,6 +15,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.config import settings
 from app.services.temporal import parse_time
 from app.services.temporal_operation import TemporalOperation, classify_temporal_operation
+from app.services.temporal_binding import (
+    SourceText, binding_diagnostics, binding_uncertainty, locate_parts,
+)
 
 MAX_EXPRESSIONS = 8
 MAX_QUERY_CHARS = 4000
@@ -27,7 +30,6 @@ _ALIASES = {"昨晚": "昨天晚上", "昨夜": "昨天晚上", "今早": "今�
 _ALIAS_PATTERN = re.compile("|".join(_ALIASES))
 _IMPRECISE = re.compile(r"刚刚|刚才|不久前|前不久|一会儿|待会|稍后")
 _JOIN = re.compile(r"\s*(?:到|至|—|~|～)\s*")
-_DISTINCT = re.compile(r"和|以及|、|或|相比|还是|分别")
 _HOLIDAY = re.compile(r"春节|端午|中秋|国庆|除夕|元旦|圣诞|清明|重阳|元宵")
 # These references may date a statement, quotation, or stored record instead of
 # its subject. Without semantic binding, retaining recall is safer than using
@@ -71,6 +73,7 @@ class TemporalQuery:
     kind: str = "unspecified"
     operation: TemporalOperation = TemporalOperation()
     date_basis: str = "event_candidate"
+    binding: dict | None = None
 
     def allows_event_range(self) -> bool:
         return (self.date_basis == "event_candidate" and self.status == "resolved"
@@ -92,7 +95,9 @@ class TemporalQuery:
     def diagnostics(self) -> dict:
         return {**self.prompt_context(),
                 "date_basis": {"version": 1, "kind": self.date_basis,
-                               "event_range_eligible": self.allows_event_range()}}
+                               "event_range_eligible": self.allows_event_range()},
+                "binding": self.binding or {"version": 1, "decision": "not_analyzed",
+                                           "offset_unit": "unicode_codepoint", "spans": []}}
 
     def cache_token(self) -> str:
         # Do not key ordinary messages by a changing clock. Resolved ranges
@@ -140,7 +145,9 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
     # simply because a parser happens to recognize another substring.
     if _VAGUE.search(text) or _IMPRECISE.search(text):
         return TemporalQuery(**base, status="ambiguous", reason="vague_expression")
-    text = _ALIAS_PATTERN.sub(lambda m: _ALIASES[m.group()], text)
+    original_text = text
+    source = SourceText.original(text).substitute(_ALIAS_PATTERN, lambda m: _ALIASES[m.group()])
+    text = source.text
     # Holiday cache may choose the nearest year or even shift a lunar holiday
     # by a Gregorian year. A read query needs explicit, qualified calendar
     # evidence before such a date can restrict recall.
@@ -150,8 +157,10 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
     # Relative years are explicit when bound to a calendar date. Resolve them
     # before the legacy parser's overlapping year/month patterns can discard it.
     year = stamp.astimezone(zone).year
-    text = re.sub(r"(今年|去年|前年)\s*(?=\d{1,2}\s*月\s*\d{1,2}\s*[日号])",
-                  lambda m: str(year - {"今年": 0, "去年": 1, "前年": 2}[m.group(1)]) + "年", text)
+    source = source.substitute(
+        re.compile(r"(今年|去年|前年)\s*(?=\d{1,2}\s*月\s*\d{1,2}\s*[日号])"),
+        lambda m: str(year - {"今年": 0, "去年": 1, "前年": 2}[m.group(1)]) + "年")
+    text = source.text
     if _YEARLESS.search(_DATED.sub("", text)):
         return TemporalQuery(**base, status="ambiguous", reason="year_unspecified")
     if _APPROXIMATE.search(text):
@@ -159,43 +168,59 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
     try:
         for match in _DATED.finditer(text):
             date(*(int(v) for v in match.groups()))
-        parsed = parse_time_expressions(text, now=stamp, calendar_timezone=zone)
+        parsed = parse_time_expressions(text, now=stamp, calendar_timezone=zone, all_occurrences=True)
     except (ValueError, OverflowError):
         return TemporalQuery(**base, status="unresolved", reason="invalid_expression")
     if len(parsed) > MAX_EXPRESSIONS:
+        base["date_basis"] = "unbound_expression"
+        base["binding"] = binding_diagnostics(source, [], "expression_limit")
         return TemporalQuery(**base, status="unresolved", reason="expression_limit")
     if not parsed:
         return TemporalQuery(**base, status="not_requested", reason="no_expression")
-    # "去年和上个月" are two requested periods, even if they overlap. Only
-    # directly adjacent day/time fragments or explicit "A到B" may be combined.
-    ordered = sorted(parsed, key=lambda p: text.find(p.original_text))
-    if any(_DISTINCT.search(text[text.find(a.original_text) + len(a.original_text):
-                                      text.find(b.original_text)])
-           for a, b in zip(ordered, ordered[1:])):
-        return TemporalQuery(**base, status="ambiguous", reason="multiple_periods")
+    parts, error = locate_parts(source, parsed, MAX_EXPRESSIONS)
+    if error:
+        base["date_basis"] = "unbound_expression"
+        base["binding"] = binding_diagnostics(source, [], error)
+        return TemporalQuery(**base, status="unresolved", reason=error)
+    uncertainty = binding_uncertainty(original_text)
+    base["binding"] = binding_diagnostics(source, parts, uncertainty or "single_expression")
+    if uncertainty:
+        base["date_basis"] = "unbound_expression"
+        return TemporalQuery(**base, status="ambiguous", reason="unbound_expression")
+    # Never intersect dates separated by prose, even when their periods overlap.
+    # Separate occurrences of the same spelling are separate evidence positions.
+    ordered = [p.parsed for p in parts]
     # Bind only adjacent calendar-day + time-of-day expressions. "昨天中午"
     # is one period; "昨天去了，今天中午又去" is not. Never combine across prose.
     bound_range = None
-    if len(parsed) == 2:
+    decision = "single_expression"
+    if len(parts) == 2:
         left, right = ordered
-        left_end = text.find(left.original_text) + len(left.original_text)
-        right_start = text.find(right.original_text)
+        left_end, right_start = parts[0].end, parts[1].start
         if _JOIN.fullmatch(text[left_end:right_start]):
-            if left.start > right.end:
+            if left.start > right.start:
+                base["binding"] = binding_diagnostics(source, parts, "reversed_range")
                 return TemporalQuery(**base, status="unresolved", reason="reversed_range")
             bound_range = left.start, right.end
-        days = [p for p in parsed if p.start.hour == 0 and p.start.minute == 0
+            decision = "explicit_range"
+        days = [p for p in ordered if p.start.hour == 0 and p.start.minute == 0
                 and p.end.hour == 23 and p.end.minute == 59 and p.start.date() == p.end.date()]
         if len(days) == 1:
             day = days[0]
-            part = next(p for p in parsed if p is not day)
-            adjacent = re.search(re.escape(day.original_text) + r"\s*(?:的)?\s*" + re.escape(part.original_text), text)
+            part = next(p for p in ordered if p is not day)
+            adjacent = day is left and re.fullmatch(r"\s*(?:的)?\s*", text[left_end:right_start])
             if not bound_range and adjacent and re.search(r"点|时|早|上午|中午|下午|晚上|凌晨|深夜", part.original_text):
                 delta = day.start.date() - stamp.astimezone(zone).date()
                 bound_range = part.start + delta, part.end + delta
-    # Use the intersection only when all fragments describe a compatible
-    # period (e.g. 今天中午). Distinct periods require semantic binding later.
-    start, end = bound_range or (max(p.start for p in parsed), min(p.end for p in parsed))
+                decision = "adjacent_day_time"
+    if len(parts) > 1 and bound_range is None:
+        if base["date_basis"] == "event_candidate":
+            base["date_basis"] = "unbound_expression"
+        base["binding"] = binding_diagnostics(source, parts, "separate_expressions")
+        return TemporalQuery(**base, status="ambiguous", reason="multiple_periods")
+    base["binding"] = binding_diagnostics(
+        source, parts, "reference_unbound" if base["date_basis"] == "unbound_reference" else decision)
+    start, end = bound_range or (ordered[0].start, ordered[0].end)
     if start > end:
         return TemporalQuery(**base, status="ambiguous", reason="multiple_periods")
     # Elapsed offsets have an unambiguous UTC anchor even during a repeated

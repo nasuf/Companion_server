@@ -155,7 +155,7 @@ def parse_with_statement_time(
 def parse_time_expressions(
     message: str,
     now: datetime | None = None,
-    *, calendar_timezone=None,
+    *, calendar_timezone=None, all_occurrences: bool = False,
 ) -> list[ParsedTime]:
     """解析消息中的显式时间表述。返回所有匹配结果。"""
     now = now or _now_corrected()
@@ -189,11 +189,17 @@ def parse_time_expressions(
             datetime.combine(d, time.max, tzinfo=zone),
         )
 
+    def _occurrences(word: str):
+        matches = re.finditer(re.escape(word), message)
+        # Read queries require every occurrence. Existing scheduling/recording
+        # callers retain their first-occurrence behaviour.
+        first = next(matches, None) if not all_occurrences else None
+        return matches if all_occurrences else (() if first is None else (first,))
+
     # --- 1. 相对日期（长词优先，避免"大前天"被"前天"抢先匹配）---
     for word, delta in _RELATIVE_DAYS:
-        idx = message.find(word)
-        if idx != -1:
-            span = (idx, idx + len(word))
+        for match in _occurrences(word):
+            span = match.span()
             d = today + timedelta(days=delta)
             s, e = _day_range(d)
             _add(word, s, e, "relative", 0.95, span)
@@ -303,9 +309,8 @@ def parse_time_expressions(
 
     # --- 3. 相对月 ---
     for word, delta in _MONTH_MAP:
-        idx = message.find(word)
-        if idx != -1:
-            span = (idx, idx + len(word))
+        for match in _occurrences(word):
+            span = match.span()
             year = today.year
             month = today.month + delta
             if month < 1:
@@ -381,10 +386,9 @@ def parse_time_expressions(
 
     # --- 7. 时间段词 ---
     for period_name, (h_start, h_end) in _PERIOD_HOURS.items():
-        idx = message.find(period_name)
-        if idx == -1:
+        matches = tuple(_occurrences(period_name))
+        if not matches:
             continue
-        span = (idx, idx + len(period_name))
         # spec §3.1: "深夜" 语义 = 次日 00:00-06:00
         anchor_day = today + timedelta(days=1) if period_name in _NEXT_DAY_PERIODS else today
         # 处理 18-24 这种 end=24 不是合法 hour, 改用次日 00:00 作为闭区间
@@ -394,7 +398,8 @@ def parse_time_expressions(
         else:
             s = datetime.combine(anchor_day, time(h_start, 0), tzinfo=zone)
             e = datetime.combine(anchor_day, time(h_end - 1, 59, 59), tzinfo=zone)
-        _add(period_name, s, e, "relative", 0.6, span)
+        for match in matches:
+            _add(period_name, s, e, "relative", 0.6, match.span())
 
     # --- 8. 节日名称 ---
     for holiday_name in holiday_cache.all_known_names():
