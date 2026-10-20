@@ -29,6 +29,15 @@ _IMPRECISE = re.compile(r"刚刚|刚才|不久前|前不久|一会儿|待会|稍
 _JOIN = re.compile(r"\s*(?:到|至|—|~|～)\s*")
 _DISTINCT = re.compile(r"和|以及|、|或|相比|还是|分别")
 _HOLIDAY = re.compile(r"春节|端午|中秋|国庆|除夕|元旦|圣诞|清明|重阳|元宵")
+# These references may date a statement, quotation, or stored record instead of
+# its subject. Without semantic binding, retaining recall is safer than using
+# that date to exclude events. This is NOT a statement-date search.
+_REFERENCE_CLOCK = re.compile(
+    r"提过|提起|提到|提及|说过|说的|说起|聊过|聊的|聊起|聊天|告诉|"
+    r"讲过|讲的|讲起|分享过|发过|发的|问过|问的|记下|记录过|记录的|"
+    r"转述|转发|原帖|日记|录音|日志|入库|导入|保存|读取|打开|重试|补传|"
+    r"提及时|陈述时|接收时间"
+)
 
 
 def _unique_local_clock(value: datetime) -> bool:
@@ -61,8 +70,15 @@ class TemporalQuery:
     expressions: tuple[TemporalExpression, ...] = ()
     kind: str = "unspecified"
     operation: TemporalOperation = TemporalOperation()
+    date_basis: str = "event_candidate"
 
-    def diagnostics(self) -> dict:
+    def allows_event_range(self) -> bool:
+        return (self.date_basis == "event_candidate" and self.status == "resolved"
+                and len(self.expressions) == 1
+                and self.operation.type not in {"as_of", "current", "duration", "comparison", "multiple"})
+
+    def prompt_context(self) -> dict:
+        """Existing prompt contract; operational filter policy stays in Trace."""
         return {
             "version": 1, "anchor_at": self.anchor.isoformat() if self.anchor else None,
             "anchor_source": self.anchor_source, "timezone": self.timezone,
@@ -73,6 +89,11 @@ class TemporalQuery:
                         "precision": p.precision, "kind": p.kind} for p in self.expressions],
         }
 
+    def diagnostics(self) -> dict:
+        return {**self.prompt_context(),
+                "date_basis": {"version": 1, "kind": self.date_basis,
+                               "event_range_eligible": self.allows_event_range()}}
+
     def cache_token(self) -> str:
         # Do not key ordinary messages by a changing clock. Resolved ranges
         # include their date/zone; unknown anchors cannot reuse a dated result.
@@ -81,16 +102,14 @@ class TemporalQuery:
         return "time02:" + hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
 
     def retrieval_range(self) -> tuple[datetime, datetime] | None:
-        if (self.status != "resolved" or len(self.expressions) != 1
-                or self.operation.type in {"as_of", "current", "duration", "comparison", "multiple"}):
+        if not self.allows_event_range():
             return None
         p = self.expressions[0]
         return (p.start, p.end) if self.anchor and p.start <= self.anchor else None
 
     def parsed_times(self) -> list:
         from app.services.schedule_domain.time_parser import ParsedTime
-        if (self.status != "resolved"
-                or self.operation.type in {"as_of", "current", "duration", "comparison", "multiple"}):
+        if not self.allows_event_range():
             return []
         return [ParsedTime("", p.kind, p.start, p.end, 1.0,
                            bool(self.anchor and p.start > self.anchor)) for p in self.expressions]
@@ -106,7 +125,8 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
     base = dict(anchor=stamp, anchor_source=anchor_source, timezone=zone_name,
                 timezone_source=zone_source)
     if len(text) > MAX_QUERY_CHARS:
-        return TemporalQuery(**base, status="unresolved", reason="input_limit")
+        return TemporalQuery(**base, status="unresolved", reason="input_limit", date_basis="unavailable")
+    base["date_basis"] = "unbound_reference" if _REFERENCE_CLOCK.search(text) else "event_candidate"
     base["operation"] = classify_temporal_operation(text)
     try:
         zone = ZoneInfo(zone_name)

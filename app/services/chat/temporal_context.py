@@ -127,7 +127,7 @@ async def render_temporal_context(clock: TurnClock, policy: str,
     return render_template(template, {
         "now": local_clock(clock.now),
         "statement_at": local_clock(clock.statement_at),
-        "query_context": json.dumps(temporal_query.diagnostics(), ensure_ascii=False) if temporal_query else "未请求日期解析",
+        "query_context": json.dumps(temporal_query.prompt_context(), ensure_ascii=False) if temporal_query else "未请求日期解析",
         "last_user": local_clock(clock.last_user_at),
         "last_dialogue": local_clock(clock.last_dialogue_at),
         "last_outbound": local_clock(clock.last_outbound_at),

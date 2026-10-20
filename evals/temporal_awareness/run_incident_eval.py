@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 from incident_cases import CASES
 
 
-async def run(args):
+async def run(args, cases=None):
     if (args.source_root / ".env").exists():
         raise ValueError("Use an isolated source checkout without .env")
     sys.path.insert(0, str(args.source_root))
@@ -52,14 +52,15 @@ async def run(args):
               "samples": args.samples, "runs": [],
               "limitations": "Synthetic IO and forced routing; actual prompt rendering, model and reply normalization. No production delivery."}
     try:
-        for case in CASES:
+        for case in (CASES if cases is None else cases):
             for sample in range(args.samples):
                 captured = []
                 async def generate(messages):
+                    started = time.monotonic()
                     result = await client.chat.completions.create(model=args.model, messages=messages,
                         temperature=.7, max_tokens=700)
                     text = result.choices[0].message.content or ""
-                    captured.append({"messages": messages, "raw": text,
+                    captured.append({"messages": messages, "raw": text, "duration_seconds": time.monotonic()-started,
                                      "usage": result.usage.model_dump() if result.usage else None})
                     return text
 
@@ -86,12 +87,12 @@ async def run(args):
                         async def live_check(_model, prompt):
                             started = time.monotonic()
                             result = await judge.chat.completions.create(
-                                model=args.judge_model, temperature=0, max_tokens=250,
+                                model=getattr(args, "guard_model", "qwen3.5-flash"), temperature=0, max_tokens=250,
                                 extra_body={"enable_thinking": False},
                                 response_format={"type": "json_object"},
                                 messages=[{"role": "user", "content": str(prompt)}])
                             verdict = json.loads(result.choices[0].message.content)
-                            captured.append({"kind": "temporal_check", "verdict": verdict, "duration_seconds": time.monotonic()-started})
+                            captured.append({"kind": "temporal_check", "verdict": verdict, "duration_seconds": time.monotonic()-started, "usage": result.usage.model_dump() if result.usage else None})
                             return verdict
                         patch.setattr(temporal_guard, "get_utility_model", lambda: None)
                         patch.setattr(temporal_guard, "invoke_json", live_check)
@@ -104,6 +105,10 @@ async def run(args):
                     history = [SimpleNamespace(id=f"history-{i}", role=role, content=text, metadata={},
                         createdAt=io.now-timedelta(seconds=case["gap"] + (len(case["history"])-i-1)*30))
                         for i, (role, text) in enumerate(case["history"])]
+                    if "history_rows" in case:
+                        history = [SimpleNamespace(id=f"history-{i}", role=row["role"], content=row["content"],
+                            metadata=row.get("metadata", {}), createdAt=datetime.fromisoformat(row["createdAt"]))
+                            for i, row in enumerate(case["history_rows"])]
                     if case.get("received_at"):
                         history.append(SimpleNamespace(id="u-new", role="user", content=case["message"], metadata={},
                             createdAt=datetime.fromisoformat(case["received_at"].replace("Z", "+00:00"))))
@@ -112,6 +117,8 @@ async def run(args):
                         main_category="生活", sub_category="日常", importance=.7, similarity=.9, rank_score=.8,
                         occur_time="2026-09-08T04:00:00Z", statement_time="2026-09-08T04:05:00Z",
                         created_at="2026-09-08T04:05:00Z", last_accessed_at=io.now.isoformat())]) if case["memory"] else []
+                    if "memories" in case:
+                        memories = select_context(case["memories"])
                     timeline_rows = case.get("timeline_rows", [])
                     timeline_text = timeline_module.format_timeline(timeline_module.build_timeline(timeline_rows)) or None
                     chat.fetch_parallel_context.return_value = FetchedContext(
@@ -135,21 +142,24 @@ async def run(args):
                     answer = " ".join(texts)
                     if not captured or not answer or not any(e["event"] == "done" for e in events):
                         raise RuntimeError(f"Incomplete actual reply flow for {case['id']}")
-                    verdict = await judge.chat.completions.create(model=args.judge_model, temperature=0,
-                        max_tokens=1200, extra_body={"enable_thinking": False},
-                        response_format={"type": "json_object"}, messages=[{"role": "user", "content":
-                            "审核合成对话测试，不续写。只评判case.criterion里的明确条件，其他措辞不影响通过。不得添加额外条件：禁止追问某件旧事不等于禁止所有提问；“可以”不是“必须”。输出JSON "
-                            "{\"pass\":true或false,\"reason\":\"简短理由\"}。\n"
-                            +json.dumps({"case": case, "reply": answer}, ensure_ascii=False)}])
-                    judge_raw = verdict.choices[0].message.content
                     try:
-                        assessment = json.loads(judge_raw)
-                        if not isinstance(assessment, dict) or type(assessment.get("pass")) is not bool:
-                            raise ValueError("Invalid assessment")
-                    except (ValueError, TypeError):
-                        # Retain the actual reply for review; missing judge evidence
-                        # is never a pass and must not erase the completed sample.
-                        assessment = {"pass": None, "reason": "invalid_model_judgement", "raw": judge_raw}
+                        verdict = await judge.chat.completions.create(model=args.judge_model, temperature=0,
+                            max_tokens=1200, extra_body={"enable_thinking": False},
+                            response_format={"type": "json_object"}, messages=[{"role": "user", "content":
+                                getattr(args, "judging_instruction", "审核合成对话测试，不续写。只评判case.criterion里的明确条件，其他措辞不影响通过。不得添加额外条件：禁止追问某件旧事不等于禁止所有提问；“可以”不是“必须”。输出JSON "
+                                "{\"pass\":true或false,\"reason\":\"简短理由\"}。\n")
+                            +json.dumps({"case": case, "reply": answer}, ensure_ascii=False)}])
+                        judge_raw = verdict.choices[0].message.content
+                        try:
+                            assessment = json.loads(judge_raw)
+                            if not isinstance(assessment, dict) or type(assessment.get("pass")) is not bool:
+                                raise ValueError("Invalid assessment")
+                        except (ValueError, TypeError):
+                            # Retain the actual reply for review; missing judge evidence
+                            # is never a pass and must not erase the completed sample.
+                            assessment = {"pass": None, "reason": "invalid_model_judgement", "raw": judge_raw}
+                    except Exception as exc:
+                        assessment = {"pass": None, "reason": "judge_unavailable", "error_type": type(exc).__name__}
                     report["runs"].append({"case": case["id"], "sample": sample, "reply": answer,
                                            "judge": assessment, "calls": captured})
                     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
