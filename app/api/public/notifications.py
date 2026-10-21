@@ -15,7 +15,7 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 
 class PushDeviceRegister(BaseModel):
-    platform: str = Field(pattern="^ios$")
+    platform: str = Field(pattern="^(ios|android)$")
     token: str = Field(min_length=8)
     environment: str = "sandbox"
     bundle_id: str | None = None

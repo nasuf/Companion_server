@@ -1,8 +1,17 @@
 from typing import Literal
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Android JPush: JSON keyed by package name, values app_key/master_secret.
+    # None enables sending when matching credentials exist; False is a kill switch.
+    jpush_enabled: bool | None = None
+    jpush_apps: str = "{}"
+    jiguang_push_app_key: str = ""
+    jiguang_push_master_secret: SecretStr = SecretStr("")
+    jiguang_push_package_name: str = "com.bansheng.prod"
+
     # Runtime environment
     app_env: str = "development"
     # integrated preserves the existing deployment until role handover is accepted.

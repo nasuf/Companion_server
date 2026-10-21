@@ -11,6 +11,8 @@ from app.db import db
 from app.observability.events import EVT_PUSH_DEVICE_DISABLED, EVT_PUSH_PARTIAL_FAILURE
 from app.services.notifications.apns import ApnsConfigurationError, apns_client
 from app.services.notifications.devices import disable_device_token, list_enabled_apns_devices
+from app.services.notifications.devices import list_enabled_jpush_devices
+from app.services.notifications.jpush import jpush_client
 from app.services.notifications.presence import is_user_foreground
 
 logger = logging.getLogger(__name__)
@@ -112,12 +114,8 @@ async def _dispatch_one(row: Any) -> None:
         await _mark_status(event_id, "suppressed", "app_foreground")
         return
 
-    if not apns_client.configured:
-        logger.warning(f"[PUSH] event={event_id} suppressed reason=apns_not_configured")
-        await _mark_status(event_id, "suppressed", "apns_not_configured")
-        return
-
     devices = await list_enabled_apns_devices(user_id=user_id)
+    devices += await list_enabled_jpush_devices(user_id=user_id)
     if not devices:
         logger.info(
             f"[PUSH] event={event_id} suppressed reason=no_enabled_devices "
@@ -132,24 +130,36 @@ async def _dispatch_one(row: Any) -> None:
     successes = 0
     errors: list[str] = []
     last_apns_id = None
+    accepted_providers: set[str] = set()
     for device in devices:
         try:
-            result = await apns_client.send_alert(
-                token=device.token,
-                title=str(_field(row, "title")),
-                body=str(_field(row, "body")),
-                payload=payload,
-                topic=device.bundle_id or None,
-                environment=device.environment,
-                collapse_id=collapse_id,
-                thread_id=thread_id,
-            )
+            if device.provider == "jpush":
+                result = await jpush_client.send_alert(
+                    token=device.token, package=device.bundle_id,
+                    title=str(_field(row, "title")), body=str(_field(row, "body")),
+                    payload=payload,
+                )
+            elif not apns_client.configured:
+                errors.append("apns_not_configured")
+                continue
+            else:
+                result = await apns_client.send_alert(
+                    token=device.token,
+                    title=str(_field(row, "title")),
+                    body=str(_field(row, "body")),
+                    payload=payload,
+                    topic=device.bundle_id or None,
+                    environment=device.environment,
+                    collapse_id=collapse_id,
+                    thread_id=thread_id,
+                )
         except ApnsConfigurationError as e:
             logger.warning(f"[PUSH] event={event_id} suppressed reason={e}")
-            await _mark_status(event_id, "suppressed", str(e))
-            return
+            errors.append("apns_not_configured")
+            continue
         if result.ok:
             successes += 1
+            accepted_providers.add(device.provider)
             last_apns_id = result.apns_id
         else:
             # bundle_id belongs in the error string: with one app record per
@@ -201,14 +211,17 @@ async def _dispatch_one(row: Any) -> None:
             """
             UPDATE notification_events
             SET status = 'sent',
+                provider = $3,
                 provider_message_id = $1,
                 attempts = attempts + 1,
                 sent_at = CURRENT_TIMESTAMP,
-                error = NULL,
+                error = $2,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = $2
+            WHERE id = $4
             """,
             last_apns_id,
+            "; ".join(errors)[:240] if errors else None,
+            next(iter(accepted_providers)) if len(accepted_providers) == 1 else "mixed",
             event_id,
         )
         return

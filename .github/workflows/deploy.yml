@@ -128,6 +128,11 @@ jobs:
 
       - name: Deploy server stack on VPS
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          JIGUANG_PUSH_APP_KEY: ${{ vars.JIGUANG_PUSH_APP_KEY }}
+          JIGUANG_PUSH_MASTER_SECRET: ${{ secrets.JIGUANG_PUSH_MASTER_SECRET }}
+          JIGUANG_PUSH_PACKAGE_NAME: ${{ vars.JIGUANG_PUSH_PACKAGE_NAME || 'com.bansheng.prod' }}
+          JPUSH_ENABLED: ${{ vars.JPUSH_ENABLED || 'true' }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ vars.VPS_USERNAME }}
@@ -138,6 +143,7 @@ jobs:
           # 45m: apt 镜像降级重装 217MB 系统依赖需要额外余量 (2026-07-18 复现
           # 30m 把降级安装杀在半路).
           command_timeout: 45m
+          envs: JIGUANG_PUSH_APP_KEY,JIGUANG_PUSH_MASTER_SECRET,JIGUANG_PUSH_PACKAGE_NAME,JPUSH_ENABLED
           script: |
             set -euo pipefail
 
@@ -159,6 +165,9 @@ jobs:
             sudo mkdir -p /app/companion-server /app/companion-secrets/apns /app/companion-secrets/iap /mnt/datadisk0/companion/{postgres,redis,ollama,logs,docker,chat_media,offline_media,capsule_media,feedback_media}
             sudo chown -R "$USER:$USER" /app/companion-server /mnt/datadisk0/companion/{logs,chat_media,offline_media,capsule_media,feedback_media}
             cd /app/companion-server
+
+            # Validate JPush before replacing .env.
+            python3 scripts/deploy_jpush_preflight.py
 
             POSTGRES_USER="${{ vars.POSTGRES_USER || 'companion' }}"
             POSTGRES_DB="${{ vars.POSTGRES_DB || 'companion' }}"
@@ -283,18 +292,20 @@ jobs:
             OFFLINE_MODEL_PROVIDER=${{ vars.OFFLINE_MODEL_PROVIDER || 'runtime' }}
             OFFLINE_CHAT_MODEL=${{ vars.OFFLINE_CHAT_MODEL || 'qwen3.5-plus' }}
             OFFLINE_SMALL_MODEL=${{ vars.OFFLINE_SMALL_MODEL || 'qwen3.5-flash' }}
-            # DailyHot source and freshness controls; independent of offline search.
             PROACTIVE_HOT_API_URL=${{ vars.PROACTIVE_HOT_API_URL || 'https://api-hot.imsyy.top' }}
             PROACTIVE_HOT_API_KEY=${{ secrets.PROACTIVE_HOT_API_KEY }}
             PROACTIVE_HOT_MAX_AGE_DAYS=${{ vars.PROACTIVE_HOT_MAX_AGE_DAYS || '2' }}
             APNS_ENABLED=$APNS_ENABLED
+            JPUSH_ENABLED=$JPUSH_ENABLED
+            JIGUANG_PUSH_APP_KEY=$JIGUANG_PUSH_APP_KEY
+            JIGUANG_PUSH_MASTER_SECRET=$JIGUANG_PUSH_MASTER_SECRET
+            JIGUANG_PUSH_PACKAGE_NAME=$JIGUANG_PUSH_PACKAGE_NAME
             APNS_TEAM_ID=${{ vars.APNS_TEAM_ID }}
             APNS_KEY_ID=${{ secrets.APNS_KEY_ID }}
             APNS_AUTH_KEY_PATH=${{ secrets.APNS_AUTH_KEY }}
             APNS_AUTH_KEY=
             APNS_TOPIC=${{ vars.APNS_TOPIC || 'com.bansheng.dev' }}
             APNS_USE_SANDBOX=${{ vars.APNS_USE_SANDBOX || 'false' }}
-            # IAP private keys stay on VPS; env stores the read-only mount path.
             APPLE_IAP_ENABLED=${{ vars.APPLE_IAP_ENABLED || 'false' }}
             APPLE_IAP_BUNDLE_ID=${{ vars.APPLE_IAP_BUNDLE_ID || 'com.bansheng.prod' }}
             APPLE_IAP_ISSUER_ID=${{ secrets.APPLE_IAP_ISSUER_ID }}

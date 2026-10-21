@@ -15,6 +15,7 @@ class PushDevice:
     token: str
     environment: str
     bundle_id: str | None
+    provider: str = "apns"
 
 
 def normalize_apns_token(token: str) -> str:
@@ -37,10 +38,16 @@ async def register_device(
     device_id: str | None = None,
     app_version: str | None = None,
 ) -> str:
-    normalized_token = normalize_apns_token(token)
+    if platform not in {"ios", "android"}:
+        raise ValueError("unsupported push platform")
+    normalized_token = normalize_apns_token(token) if platform == "ios" else token.strip()
+    if platform == "android" and not re.fullmatch(r"[A-Za-z0-9_-]{8,200}", normalized_token):
+        raise ValueError("invalid registration id")
+    if platform == "android" and not bundle_id:
+        raise ValueError("Android package name is required")
     if not normalized_token:
         raise ValueError("empty push token")
-    provider = "apns" if platform == "ios" else "unknown"
+    provider = "apns" if platform == "ios" else "jpush"
     env = environment if environment in {"sandbox", "production"} else "sandbox"
     rows = await db.query_raw(
         """
@@ -75,22 +82,23 @@ async def register_device(
 
 
 async def disable_device_for_user(*, user_id: str, token: str) -> None:
-    normalized_token = normalize_apns_token(token)
+    normalized_token = token.strip()
     if not normalized_token:
         return
     await db.execute_raw(
         """
         UPDATE push_devices
         SET enabled = FALSE, disabled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1 AND token = $2
+        WHERE user_id = $1 AND (token = $2 OR (provider = 'apns' AND token = $3))
         """,
         user_id,
         normalized_token,
+        normalize_apns_token(token),
     )
 
 
 async def disable_device_token(token: str) -> None:
-    normalized_token = normalize_apns_token(token)
+    normalized_token = token.strip()
     if not normalized_token:
         return
     await db.execute_raw(
@@ -145,3 +153,15 @@ async def list_enabled_apns_devices(
         )
         for row in rows
     ]
+
+
+async def list_enabled_jpush_devices(*, user_id: str) -> list[PushDevice]:
+    rows = await db.query_raw(
+        """SELECT id, token, environment, bundle_id AS "bundleId"
+        FROM push_devices WHERE user_id = $1 AND platform = 'android'
+        AND provider = 'jpush' AND enabled = TRUE ORDER BY last_seen_at DESC LIMIT 100""",
+        user_id,
+    )
+    return [PushDevice(str(_field(row, "id")), str(_field(row, "token")),
+                       str(_field(row, "environment")), _field(row, "bundleId"), "jpush")
+            for row in rows]

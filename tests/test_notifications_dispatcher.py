@@ -182,3 +182,58 @@ async def test_dispatch_logs_partial_failure_and_names_the_disabled_bundle(
     # delivery.
     assert "com.bansheng.dev" in messages
     assert "Unregistered" in messages
+
+
+@pytest.fixture(autouse=True)
+def _no_android_devices_by_default(monkeypatch):
+    monkeypatch.setattr(dispatcher, "list_enabled_jpush_devices", AsyncMock(return_value=[]))
+
+
+async def test_android_sends_without_apns_configuration(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(dispatcher, "apns_client", SimpleNamespace(configured=False))
+    monkeypatch.setattr(dispatcher, "is_user_foreground", AsyncMock(return_value=False))
+    monkeypatch.setattr(dispatcher, "list_enabled_apns_devices", AsyncMock(return_value=[]))
+    monkeypatch.setattr(dispatcher, "list_enabled_jpush_devices", AsyncMock(return_value=[
+        PushDevice("android", "registration_123", "production", "com.bansheng.prod", "jpush")]))
+    send = AsyncMock(return_value=ApnsResult(ok=True, apns_id="jpush-1"))
+    monkeypatch.setattr(dispatcher, "jpush_client", SimpleNamespace(send_alert=send))
+    update = AsyncMock()
+    monkeypatch.setattr(dispatcher.db, "execute_raw", update)
+    await dispatcher._dispatch_one({"id":"event", "userId":"user", "type":"agent_message", "title":"hi", "body":"hello"})
+    send.assert_awaited_once()
+    assert send.await_args.kwargs["package"] == "com.bansheng.prod"
+    assert update.await_args.args[1] == "jpush-1"
+    assert update.await_args.args[3] == "jpush"
+
+
+async def test_unconfigured_ios_does_not_block_android_and_remains_observable(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(dispatcher, 'apns_client', SimpleNamespace(configured=False))
+    monkeypatch.setattr(dispatcher, 'is_user_foreground', AsyncMock(return_value=False))
+    monkeypatch.setattr(dispatcher, 'list_enabled_apns_devices', AsyncMock(return_value=[
+        PushDevice('ios', 'ios-token', 'production', None)]))
+    monkeypatch.setattr(dispatcher, 'list_enabled_jpush_devices', AsyncMock(return_value=[
+        PushDevice('android', 'rid-12345', 'production', 'com.bansheng.prod', 'jpush')]))
+    monkeypatch.setattr(dispatcher, 'jpush_client', SimpleNamespace(
+        send_alert=AsyncMock(return_value=ApnsResult(ok=True, apns_id='jpush-1'))))
+    update = AsyncMock()
+    monkeypatch.setattr(dispatcher.db, 'execute_raw', update)
+    await dispatcher._dispatch_one({'id': 'event', 'userId': 'user', 'type': 'agent_message'})
+    assert update.await_args.args[2] == 'apns_not_configured'
+    assert update.await_args.args[3] == 'jpush'
+
+
+async def test_failed_android_dispatch_is_retried_instead_of_reported_sent(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(dispatcher, 'is_user_foreground', AsyncMock(return_value=False))
+    monkeypatch.setattr(dispatcher, 'list_enabled_apns_devices', AsyncMock(return_value=[]))
+    monkeypatch.setattr(dispatcher, 'list_enabled_jpush_devices', AsyncMock(return_value=[
+        PushDevice('android', 'rid-12345', 'production', 'com.bansheng.prod', 'jpush')]))
+    monkeypatch.setattr(dispatcher, 'jpush_client', SimpleNamespace(
+        send_alert=AsyncMock(return_value=ApnsResult(ok=False, reason='jpush_transport_error'))))
+    update = AsyncMock()
+    monkeypatch.setattr(dispatcher.db, 'execute_raw', update)
+    await dispatcher._dispatch_one({'id': 'event', 'userId': 'user', 'type': 'agent_message', 'attempts': 0})
+    assert update.await_args.args[1] == 'pending'
+    assert 'jpush_transport_error' in update.await_args.args[3]
