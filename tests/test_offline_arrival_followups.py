@@ -276,3 +276,94 @@ async def test_voice_is_atomically_bound_replayed_or_falls_back_to_text(arrival,
     payloads=[call.args[2] for call in emit.manager.send_to_workspace.await_args_list if call.args[1]=='proactive']
     assert {p['assistant_message_id'] for p in payloads}=={stored['id']}
     if not missing_asset:assert all(p['attachments'][0]['id']==asset.id for p in payloads)
+
+
+@pytest.mark.parametrize('payload', [
+    {}, {'activity_id': '', 'generation': 0},
+    {'activity_id': 'x' * 201, 'generation': 0},
+    {'activity_id': 'x', 'generation': True},
+    {'activity_id': 'x', 'generation': -1},
+])
+async def test_invalid_dispatch_payload_never_touches_storage(monkeypatch, payload):
+    from types import SimpleNamespace
+    query = AsyncMock(side_effect=AssertionError('invalid dispatch must not query storage'))
+    monkeypatch.setattr(f, 'db', SimpleNamespace(query_raw=query))
+    with pytest.raises(ValueError, match='invalid_arrival_followup_payload'):
+        await f.run_arrival_followup(payload)
+    query.assert_not_awaited()
+
+
+async def test_uncommitted_dispatch_generation_does_not_deliver(arrival):
+    db, aid, uid, *_ = arrival
+    await arrive(aid, uid)
+    with pytest.raises(f.ArrivalFollowupFailed, match='RuntimeError'):
+        await f.run_arrival_followup({'activity_id': aid, 'generation': 1})
+    assert (await receipt(db, aid))['generation'] == 0
+    assert await f.load_delivery(aid, 'user') is None
+    await f.run_arrival_followup({'activity_id': aid, 'generation': 0})
+    assert (await receipt(db, aid))['status'] == 'completed'
+
+
+async def test_already_archived_activity_cancels_before_model_or_delivery(arrival):
+    db, aid, uid, *_ = arrival
+    await arrive(aid, uid)
+    await db.execute_raw("UPDATE offline_activity_recommendations SET status='completed' WHERE id=$1", aid)
+    await f.run_arrival_followup({'activity_id': aid, 'generation': 0})
+    assert (await receipt(db, aid))['status'] == 'cancelled'
+    activity_service._arrival_guide_text.assert_not_awaited()
+    assert await f.load_delivery(aid, 'user') is None
+
+
+async def test_unavailable_context_records_retryable_redacted_failure(arrival, monkeypatch):
+    db, aid, uid, *_ = arrival
+    await arrive(aid, uid)
+    original = repo.resolve_user_context
+    monkeypatch.setattr(repo, 'resolve_user_context', AsyncMock(return_value=None))
+    with pytest.raises(f.ArrivalFollowupFailed, match='RuntimeError'):
+        await f.run_arrival_followup({'activity_id': aid, 'generation': 0})
+    assert (await receipt(db, aid))['last_error'] == 'RuntimeError'
+    assert await f.load_delivery(aid, 'user') is None
+    monkeypatch.setattr(repo, 'resolve_user_context', original)
+    await f.run_arrival_followup({'activity_id': aid, 'generation': 0})
+    assert (await receipt(db, aid))['status'] == 'completed'
+
+
+@pytest.mark.parametrize('fault', ['conversation', 'collision', 'empty_voice', 'duplicate_voice'])
+async def test_delivery_rejects_mismatched_scope_and_invalid_assets_atomically(arrival, fault):
+    db, aid, uid, wid, agents, spaces, convs = arrival
+    await arrive(aid, uid)
+    conversation_id, metadata = convs[0], {}
+    if fault == 'conversation':
+        conversation_id = convs[1]
+    elif fault == 'collision':
+        await db.execute_raw("""INSERT INTO messages(id,conversation_id,role,content)
+            VALUES($1,$2,'user','existing row must survive')""", f.delivery_id(aid, 'assistant'), convs[1])
+    else:
+        metadata = {'display_mode': 'voice', 'attachments': [] if fault == 'empty_voice'
+                    else [{'id': 'same'}, {'id': 'same'}]}
+    error = f.ArrivalVoiceBindingFailed if fault.endswith('voice') else RuntimeError
+    with pytest.raises(error):
+        await f.persist_delivery(activity_id=aid, generation=0, role='assistant',
+            conversation_id=conversation_id, content='must not commit', metadata=metadata)
+    rows = await db.query_raw('SELECT content FROM messages WHERE id=$1', f.delivery_id(aid, 'assistant'))
+    assert rows == ([{'content': 'existing row must survive'}] if fault == 'collision' else [])
+    assert (await receipt(db, aid))['status'] == 'pending_dispatch'
+
+
+async def test_admin_arrival_unavailable_is_not_shown_as_empty_or_success(arrival, monkeypatch):
+    from app.api.admin.runtime_jobs import router
+    from app.services.auth import create_jwt
+    app = FastAPI(); app.include_router(router)
+    headers = {'Authorization': 'Bearer ' + create_jwt('admin', role='admin')}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        path = '/admin-api/runtime-jobs/arrival-followups'
+        monkeypatch.setattr(f, 'inspect_arrival_followups', AsyncMock(side_effect=RuntimeError('PRIVATE_SQL')))
+        unavailable = await client.get(path, headers=headers)
+        assert unavailable.status_code == 503 and 'PRIVATE' not in unavailable.text
+        retry = AsyncMock(side_effect=RuntimeError('PRIVATE_SQL'))
+        monkeypatch.setattr(f, 'retry_arrival_followup', retry)
+        unavailable = await client.post(path + '/missing/retry', headers=headers)
+        assert unavailable.status_code == 503 and 'PRIVATE' not in unavailable.text
+        retry.side_effect = None; retry.return_value = False
+        missing = await client.post(path + '/missing/retry', headers=headers)
+        assert missing.status_code == 404 and missing.json()['detail'] == 'arrival_followup_not_found'

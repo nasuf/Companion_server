@@ -14,7 +14,10 @@ import pytest
 from app.api.public import offline
 from app.services.auth import create_jwt
 from app.services.offline import activity_service as service, repository as repo
-from app.services.offline import place_catalog, memory_note, recognition
+from app.services.offline import place_catalog, memory_note, recognition, arrival_followups, chat_emit
+from app.services.offline import activity_companion
+from app.services.notifications import service as notifications
+from app.services.proactive import emit
 from app.services.offline.chat_emit import build_activity_component_card
 from app.services.offline.geocode import wgs84_to_gcj02
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP
@@ -29,10 +32,14 @@ async def journey(flow, monkeypatch):
     monkeypatch.setattr(settings, 'offline_search_provider', 'tavily')
     flow.app.include_router(offline.router)
     flow.client.headers['Authorization'] = 'Bearer '+create_jwt(flow.user, role="user")
-    for module in (place_catalog,):
+    for module in (place_catalog, arrival_followups, chat_emit):
         monkeypatch.setattr(module, 'db', flow.db)
     for name in ('emit_assistant', 'emit_activity_card', 'insert_user_activity_card'):
         monkeypatch.setattr(service, name, AsyncMock(return_value='sent'))
+    monkeypatch.setattr(chat_emit, 'manager', emit.manager)
+    monkeypatch.setattr(chat_emit, '_notify_takeover_transcript', AsyncMock())
+    monkeypatch.setattr(notifications, 'notify_agent_message_created', AsyncMock())
+    monkeypatch.setattr(activity_companion, 'start_opening_segment', AsyncMock())
     monkeypatch.setattr(service, 'fire_background', lambda c: c.close())
     monkeypatch.setattr(service, 'remember_user_event', lambda **k: None)
     monkeypatch.setattr(service, '_arrival_guide_text', AsyncMock(return_value='到了呀，慢慢逛'))
@@ -54,6 +61,24 @@ async def journey(flow, monkeypatch):
             title='莲湖公园走走',location_name='莲湖公园',city='东莞',address='桥头镇莲湖路',
             summary='慢慢走走',description='推荐介绍：建议看看湖面',place_lat=lat,place_lng=lng,
             **over))
+    async def deliver_arrival(activity):
+        aid = activity['id']
+        receipts = await flow.db.query_raw(
+            'SELECT generation FROM offline_arrival_followups WHERE activity_id=$1', aid)
+        assert len(receipts) == 1  # Arrival and its durable receipt share a commit.
+        await arrival_followups.run_arrival_followup(
+            {'activity_id': aid, 'generation': receipts[0]['generation']})
+        rows = await flow.db.query_raw(
+            'SELECT status FROM offline_arrival_followups WHERE activity_id=$1', aid)
+        assert rows[0]['status'] == 'completed'
+        messages = await flow.db.query_raw(
+            "SELECT id,role,content,metadata FROM messages WHERE metadata->>'source_id'=$1", aid)
+        assert len(messages) == 2 and {m['role'] for m in messages} == {'user', 'assistant'}
+        by_role = {m['role']: m for m in messages}
+        assert by_role['user']['metadata']['component_card']['payload']['status_label'] == '我到了'
+        assert by_role['assistant']['content'] == '到了呀，慢慢逛'
+        return by_role
+    flow.deliver_arrival = deliver_arrival
     flow.create=create
     return flow
 
@@ -194,8 +219,9 @@ async def test_explicit_manual_arrival_is_not_gps_verified(journey):
     }
     r=await post(j,a,'arrive',{'manual_confirmation':True})
     assert r.status_code==200 and r.json()['reached'] and not r.json()['arrival_verified']
-    assert service.insert_user_activity_card.await_args.kwargs['status_label'] == '我到了'
-    assert service.emit_assistant.await_args.kwargs['message'] == '到了呀，慢慢逛'
+    service._arrival_guide_text.assert_not_awaited()
+    await j.deliver_arrival(a)
+    service._arrival_guide_text.assert_awaited_once()
 
 
 @pytest.mark.parametrize('reason', [
@@ -235,8 +261,10 @@ async def test_location_rejection_can_be_explicitly_confirmed(journey, monkeypat
     assert row[0] == {'arrival_lat': None, 'arrival_lng': None}
     repeated = await post(j, a, 'arrive', {'manual_confirmation': True})
     assert repeated.status_code == 200 and repeated.json() == confirmed.json()
-    service.insert_user_activity_card.assert_awaited_once()
-    service.emit_assistant.assert_awaited_once()
+    service._arrival_guide_text.assert_not_awaited()
+    first = await j.deliver_arrival(a)
+    assert await j.deliver_arrival(a) == first
+    service._arrival_guide_text.assert_awaited_once()
     archived = await post(j, a, 'archive')
     assert archived.status_code == 200
     review = (await j.client.get('/offline/activities/' + a['id'] + '/review')).json()
@@ -267,7 +295,11 @@ async def test_confirmation_keeps_ownership_and_single_active_journey(journey):
     rows = [await repo.get_activity(row['id'], j.user) for row in (a, b)]
     assert sum(bool(row['reached']) for row in rows) == 1
     assert all(not row['arrival_verified'] for row in rows)
-    service.insert_user_activity_card.assert_awaited_once()
+    winner = next(row for row in rows if row['reached'])
+    await j.deliver_arrival(winner)
+    loser = next(row for row in rows if not row['reached'])
+    assert not await j.db.query_raw('SELECT 1 FROM offline_arrival_followups WHERE activity_id=$1', loser['id'])
+    service._arrival_guide_text.assert_awaited_once()
 
 
 async def test_concurrent_confirmation_is_idempotent(journey):
@@ -275,8 +307,10 @@ async def test_concurrent_confirmation_is_idempotent(journey):
     a = await j.create()
     results = await asyncio.gather(*(post(j, a, 'arrive', {'manual_confirmation': True}) for _ in range(3)))
     assert all(r.status_code == 200 and r.json()['reached'] for r in results)
-    service.insert_user_activity_card.assert_awaited_once()
-    service.emit_assistant.assert_awaited_once()
+    service._arrival_guide_text.assert_not_awaited()
+    first = await j.deliver_arrival(a)
+    assert await j.deliver_arrival(a) == first
+    service._arrival_guide_text.assert_awaited_once()
 
 
 @pytest.mark.parametrize('payload', [{'lat': 91}, {'lng': 181}, {'accuracy_m': -1}])
