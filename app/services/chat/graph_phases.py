@@ -233,7 +233,8 @@ async def prepare_reads(ctx):
         if ctx.crisis_decision.crisis_care_turn
         else None,
     }
-    ctx.temporal_query = resolve_temporal_query(ctx.user_message, anchor=ctx.turn_clock.statement_at, anchor_source=ctx.turn_clock.anchor_source)
+    ctx.temporal_query = resolve_temporal_query(ctx.user_message, anchor=ctx.turn_clock.statement_at,
+        anchor_source=ctx.turn_clock.anchor_source, anchor_end=ctx.turn_clock.statement_end_at)
     ctx.turn_clock, ctx.followup_policy, ctx.temporal_instructions = await prepare_reply_time(
         ctx.messages_dicts, exclude_ids=ctx.current_turn_ids,
         current_message=ctx.user_message, diagnostics=ctx.response_diagnostics,

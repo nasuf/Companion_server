@@ -754,7 +754,8 @@ async def _stream_legacy_response(
             ),
         }
 
-        temporal_query = resolve_temporal_query(user_message, anchor=turn_clock.statement_at, anchor_source=turn_clock.anchor_source)
+        temporal_query = resolve_temporal_query(user_message, anchor=turn_clock.statement_at,
+            anchor_source=turn_clock.anchor_source, anchor_end=turn_clock.statement_end_at)
         turn_clock, followup_policy, temporal_instructions = await prepare_reply_time(
             messages_dicts, exclude_ids=current_turn_ids, current_message=user_message,
             diagnostics=response_diagnostics, now=turn_clock.now, clock=turn_clock, temporal_query=temporal_query,

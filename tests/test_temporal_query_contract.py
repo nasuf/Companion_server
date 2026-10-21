@@ -237,7 +237,7 @@ def test_synthetic_prompt_row_never_forges_persisted_message_provenance():
     clock = build_turn_clock([row], exclude_ids={"current"}, now=now, received_at="2026-10-20T01:00:00Z")
     assert clock.anchor_source == "server_received" and clock.statement_at.day == 20
     unknown = build_turn_clock([row], exclude_ids={"current"}, now=now)
-    assert unknown.statement_at is None and unknown.anchor_source == "unknown"
+    assert unknown.statement_at is None and unknown.anchor_source == "incomplete_message_times"
 
 
 @pytest.mark.asyncio

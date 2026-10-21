@@ -32,6 +32,7 @@ _IMPRECISE = re.compile(r"刚刚|刚才|不久前|前不久|一会儿|待会|稍
 _JOIN = re.compile(r"\s*(?:到|至|—|~|～)\s*")
 _CLOCK_MINUTE = re.compile(r"[点时]\d{1,2}分?$")
 _CLOCK_HOUR = re.compile(r"\d{1,2}[点时]$")
+_ELAPSED = re.compile(r"(?:[一二三四五六七八九十百两半\d]{1,4}\s*个?\s*(?:分钟|小时)|半天)(?:之)?[前后]")
 _HOLIDAY = re.compile(r"春节|端午|中秋|国庆|除夕|元旦|圣诞|清明|重阳|元宵")
 # These references may date a statement, quotation, or stored record instead of
 # its subject. Without semantic binding, retaining recall is safer than using
@@ -130,7 +131,7 @@ class TemporalQuery:
 
 
 def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
-                           timezone_name: str | None = None) -> TemporalQuery:
+                           timezone_name: str | None = None, anchor_end: object = None) -> TemporalQuery:
     from app.services.schedule_domain.time_parser import (
         TimeExpressionLimitExceeded, parse_time_expressions,
     )
@@ -152,6 +153,16 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
         return TemporalQuery(**base, status="not_requested", reason="no_expression")
     if stamp is None:
         return TemporalQuery(**base, status="unresolved", reason="missing_anchor")
+    if anchor_end is not None:
+        end = parse_time(anchor_end)
+        if end is None or end < stamp:
+            return TemporalQuery(**base, status="unresolved", reason="invalid_anchor_window")
+        if end.astimezone(zone).date() != stamp.astimezone(zone).date():
+            return TemporalQuery(**base, status="ambiguous", reason="multiple_statement_dates")
+        # One combined input cannot bind an elapsed-time expression to its
+        # originating fragment. Calendar words remain usable on the same day.
+        if end > stamp and _ELAPSED.search(text):
+            return TemporalQuery(**base, status="ambiguous", reason="multiple_statement_instants")
     # A vague expression or an omitted year must not acquire a precise date
     # simply because a parser happens to recognize another substring.
     if _VAGUE.search(text) or _IMPRECISE.search(text):

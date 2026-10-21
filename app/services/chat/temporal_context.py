@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.config import settings
 from app.services.temporal import parse_time, local_clock
@@ -18,6 +19,73 @@ logger = logging.getLogger(__name__)
 
 HISTORY_LIMIT = 120
 SESSION_SECONDS = 3 * 3600
+
+
+@dataclass(frozen=True)
+class StatementEvidence:
+    """Counts refer to unique server-owned turn IDs, never client timestamps."""
+    expected: int
+    verified: int = 0
+    missing: int = 0
+    invalid: int = 0
+    conflicting: int = 0
+    reason: str = "unknown"
+    earliest: datetime | None = None
+    latest: datetime | None = None
+
+    def diagnostics(self, now: datetime) -> dict:
+        return {
+            "version": 1, "reason": self.reason, "expected_messages": self.expected,
+            "verified_messages": self.verified, "missing_messages": self.missing,
+            "invalid_messages": self.invalid, "conflicting_messages": self.conflicting,
+            "earliest_at": self.earliest.isoformat() if self.earliest else None,
+            "latest_at": self.latest.isoformat() if self.latest else None,
+            "processing_delay_seconds": round((now - self.earliest).total_seconds(), 3)
+                if self.earliest else None,
+        }
+
+
+def _statement_evidence(history: list[dict], excluded: set[str], reference: datetime,
+                        received_at: object) -> StatementEvidence:
+    expected = len(excluded)
+    if expected > HISTORY_LIMIT:
+        return StatementEvidence(expected, missing=expected, reason="message_count_limit")
+    groups = {ident: [] for ident in excluded}
+    for message in history:
+        if message.get("id") in groups and not message.get("synthetic_current"):
+            stamp = parse_time(message.get("createdAt"))
+            valid = message.get("role") == "user" and stamp is not None and stamp <= reference
+            groups[message["id"]].append(stamp if valid else None)
+    verified, missing, invalid, conflicting = [], 0, 0, 0
+    for stamps in groups.values():
+        if not stamps:
+            missing += 1
+        elif len(set(stamps)) > 1:
+            conflicting += 1
+        elif stamps[0] is None:
+            invalid += 1
+        else:
+            verified.append(stamps[0])
+    counts = dict(expected=expected, verified=len(verified), missing=missing,
+                  invalid=invalid, conflicting=conflicting)
+    # A receipt can anchor one unsaved/synthetic message, never stand in for
+    # missing fragments or override an invalid/conflicting persisted timestamp.
+    received = parse_time(received_at)
+    if expected <= 1 and not verified and not invalid and not conflicting:
+        if received and received <= reference:
+            return StatementEvidence(**counts, reason="server_received", earliest=received, latest=received)
+    if conflicting or invalid or missing or not verified:
+        reason = ("conflicting_message_times" if conflicting else "invalid_message_times" if invalid
+                  else "incomplete_message_times" if expected else "unknown")
+        return StatementEvidence(**counts, reason=reason)
+    earliest, latest = min(verified), max(verified)
+    try:
+        zone = ZoneInfo(settings.schedule_timezone)
+    except (ValueError, ZoneInfoNotFoundError):
+        return StatementEvidence(**counts, reason="invalid_timezone")
+    reason = ("multiple_message_dates" if earliest.astimezone(zone).date() != latest.astimezone(zone).date()
+              else "persisted_message")
+    return StatementEvidence(**counts, reason=reason, earliest=earliest, latest=latest)
 
 
 def is_proactive(message: dict) -> bool:
@@ -35,6 +103,8 @@ class TurnClock:
     unknown_timestamps: int
     statement_at: datetime | None = None
     anchor_source: str = "unknown"
+    statement_end_at: datetime | None = None
+    statement_evidence: StatementEvidence | None = None
 
     def gap(self, value: datetime | None) -> float | None:
         return round((self.now - value).total_seconds(), 3) if value else None
@@ -51,6 +121,7 @@ class TurnClock:
             "dialogue_gap_seconds": self.gap(self.last_dialogue_at),
             "inspected_messages": self.inspected_messages,
             "unknown_timestamps": self.unknown_timestamps,
+            "statement_evidence": self.statement_evidence.diagnostics(self.now) if self.statement_evidence else None,
         }
 
 
@@ -75,20 +146,11 @@ def build_turn_clock(messages: list[dict], *, exclude_ids: set[str] | None = Non
             outbound.append(ts)
             if not is_proactive(msg):
                 dialogue.append(ts)
-    current = [parse_time(m.get("createdAt")) for m in history
-               if m.get("id") in excluded and m.get("role") == "user"
-               and not m.get("synthetic_current")]
-    current = [t for t in current if t is not None and t <= reference]
-    received = parse_time(received_at)
-    anchor = min(current) if current else received if received and received <= reference else None
-    source = "persisted_message" if current else "server_received" if anchor else "unknown"
-    # Aggregated fragments can straddle local midnight; one shared date would
-    # misinterpret one of them. Keep recall broad until per-fragment binding.
-    from zoneinfo import ZoneInfo
-    if len({t.astimezone(ZoneInfo(settings.schedule_timezone)).date() for t in current}) > 1:
-        anchor, source = None, "multiple_message_dates"
+    evidence = _statement_evidence(history, excluded, reference, received_at)
+    anchor = evidence.earliest if evidence.reason in {"persisted_message", "server_received"} else None
     return TurnClock(reference, max(users, default=None), max(dialogue, default=None),
-                     max(outbound, default=None), len(history), unknown, anchor, source)
+                     max(outbound, default=None), len(history), unknown, anchor, evidence.reason,
+                     evidence.latest if anchor else None, evidence)
 
 
 def dated_dialogue(messages: list[dict], *, exclude_ids: set[str] | None = None,
@@ -146,7 +208,7 @@ async def prepare_reply_time(messages: list[dict], *, exclude_ids: set[str],
 
     clock = clock or build_turn_clock(messages, exclude_ids=exclude_ids, now=now)
     query = temporal_query or resolve_temporal_query(current_message, anchor=clock.statement_at,
-                                   anchor_source=clock.anchor_source)
+                                   anchor_source=clock.anchor_source, anchor_end=clock.statement_end_at)
     policy = derive_followup_policy(messages, now=clock.now, current_message=current_message)
     try:
         instructions = await render_temporal_context(clock, policy.prompt_value(), query)

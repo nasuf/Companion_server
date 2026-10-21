@@ -79,3 +79,26 @@ async def test_pg_half_open_boundaries_include_final_millisecond_and_keep_scope(
     # Retrieval has no write side effects; all synthetic boundary rows remain.
     assert await db.usermemory.count(where={'id':{'in':all_ids}}) == 4
     assert await db.aimemory.count(where={'id':{'in':all_ids}}) == 4
+
+
+@pytest.mark.asyncio
+async def test_pg_aggregation_keeps_original_window_and_rejects_partial_clock(origins):
+    from app.services.chat.temporal_context import build_turn_clock
+    db, _, _, _, message, *_ = origins
+    first = datetime(2026, 10, 20, 1, tzinfo=timezone.utc)
+    last = datetime(2026, 10, 20, 2, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 22, 1, tzinfo=timezone.utc)
+    await db.message.update(where={"id": message.id}, data={"createdAt": first})
+    second = await db.message.create(data={"conversationId": message.conversationId,
+        "role": "user", "content": "一小时前的事情", "createdAt": last})
+    records = await db.message.find_many(where={"id": {"in": [message.id, second.id]}}, order={"createdAt": "desc"})
+    rows = [{"id": r.id, "role": r.role, "createdAt": r.createdAt} for r in records]
+    clock = build_turn_clock(rows, exclude_ids={message.id, second.id}, now=now, received_at=now)
+    assert clock.statement_at == first and clock.statement_end_at == last
+    q = resolve_temporal_query(second.content, anchor=clock.statement_at,
+        anchor_source=clock.anchor_source, anchor_end=clock.statement_end_at)
+    assert q.reason == "multiple_statement_instants" and q.retrieval_range() is None
+    partial = build_turn_clock(rows[:1], exclude_ids={message.id, second.id}, now=now, received_at=now)
+    assert partial.statement_at is None and partial.statement_evidence.missing == 1
+    unchanged = await db.message.find_many(where={"id": {"in": [message.id, second.id]}}, order={"createdAt": "desc"})
+    assert [(r.id, r.createdAt, r.content) for r in unchanged] == [(r.id, r.createdAt, r.content) for r in records]
