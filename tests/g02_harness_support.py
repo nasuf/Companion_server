@@ -24,6 +24,8 @@ def synthetic_agent():
 
 def configure_pair(patches):
     io = configure_chat(patches)
+    from app.services.chat import temporal_recall
+    patches.setattr(temporal_recall, "answer_temporal_recall", AsyncMock(return_value=None))
 
     class FixedClock(datetime):
         @classmethod

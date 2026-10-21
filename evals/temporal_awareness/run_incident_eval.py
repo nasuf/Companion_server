@@ -42,6 +42,14 @@ async def run(args, cases=None):
 
     rows = json.loads(args.prompt_snapshot.read_text())
     snapshot = {r["key"]: (r["content"], r["is_enabled"]) for r in rows}
+    try:
+        import app.services.chat.temporal_recall as temporal_recall
+    except ModuleNotFoundError as exc:
+        if exc.name != "app.services.chat.temporal_recall":
+            raise
+        temporal_recall = None  # baseline predates the optional read path
+    original_recall = temporal_recall.answer_temporal_recall if temporal_recall else None
+    original_generate_reply = reply_generate.generate_reply
     original_tiers = {kind: getattr(chat, f"_memory_{kind}_reply") for kind in ("weak", "medium", "strong", "l3")}
     client = AsyncOpenAI(api_key=os.environ["ARK_API_KEY"], base_url=os.environ["ARK_BASE_URL"],
                          timeout=60, max_retries=1)
@@ -55,6 +63,7 @@ async def run(args, cases=None):
         for case in (CASES if cases is None else cases):
             for sample in range(args.samples):
                 captured = []
+                captured_diagnostics = {}
                 async def generate(messages):
                     started = time.monotonic()
                     result = await client.chat.completions.create(model=args.model, messages=messages,
@@ -72,6 +81,11 @@ async def run(args, cases=None):
 
                 with MonkeyPatch.context() as patch:
                     io = configure_pair(patch)
+                    async def capture_reply(**kwargs):
+                        result = await original_generate_reply(**kwargs)
+                        captured_diagnostics.update(kwargs.get("diagnostics") or {})
+                        return result
+                    patch.setattr(chat, "_generate_reply", capture_reply)
                     io.now = datetime.fromisoformat(case["now"].replace("Z", "+00:00"))
                     patch.setattr(settings, "chat_executor", "langgraph")
                     patch.setattr(chat, "compute_reengagement_gap_seconds", compute_reengagement_gap_seconds)
@@ -96,6 +110,23 @@ async def run(args, cases=None):
                             return verdict
                         patch.setattr(temporal_guard, "get_utility_model", lambda: None)
                         patch.setattr(temporal_guard, "invoke_json", live_check)
+
+                    if temporal_recall is not None:
+                        patch.setattr(temporal_recall, "answer_temporal_recall", original_recall)
+                        patch.setattr(temporal_recall, "get_grounding_model", lambda: "grounding")
+                        async def live_recall(model, prompt, **kwargs):
+                            started = time.monotonic()
+                            result = await judge.chat.completions.create(
+                                model="qwen3.5-plus",
+                                temperature=0, max_tokens=kwargs.get("max_tokens", 1800),
+                                extra_body={"enable_thinking": False}, response_format={"type": "json_object"},
+                                messages=[{"role": "system" if m.type == "system" else "user", "content": m.content} for m in prompt])
+                            value = json.loads(result.choices[0].message.content)
+                            captured.append({"kind": "temporal_recall_" + ("check" if kwargs.get("max_tokens") == 300 else "grounding"), "prompt": str(prompt), "output": value,
+                                             "duration_seconds": time.monotonic() - started,
+                                             "usage": result.usage.model_dump() if result.usage else None})
+                            return value
+                        patch.setattr(temporal_recall, "invoke_json", live_recall)
 
                     patch.setattr(intent_replies, "get_chat_model", lambda: None)
                     for kind, fn in original_tiers.items():
@@ -161,7 +192,7 @@ async def run(args, cases=None):
                     except Exception as exc:
                         assessment = {"pass": None, "reason": "judge_unavailable", "error_type": type(exc).__name__}
                     report["runs"].append({"case": case["id"], "sample": sample, "reply": answer,
-                                           "judge": assessment, "calls": captured})
+                                           "judge": assessment, "calls": captured, "response_diagnostics": captured_diagnostics})
                     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
                     args.output.chmod(0o600)
                     print(json.dumps({"case": case["id"], "sample": sample, "pass": assessment["pass"]}), flush=True)

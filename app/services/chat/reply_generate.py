@@ -315,6 +315,7 @@ async def generate_reply(
         diagnostics["tier_eligible"] = tier_eligible
         diagnostics["memory_relevance"] = memory_relevance
         diagnostics["needs_web_search"] = needs_web_search
+    temporal_recall_selected = False
     if tier_eligible:
         # Reuse the same managed identity/personality section as the main reply.
         # A name alone makes known age/job/city inaccessible on the tier path.
@@ -367,7 +368,18 @@ async def generate_reply(
             base_params["personality_brief"] = (
                 personality_section.body if personality_section else (getattr(agent, "name", "") or "")
             )
-            tier_reply_text = await tier_fn(**base_params, **extra)
+            if not l3_memories and diagnostics is not None:
+                from app.services.chat.temporal_recall import answer_temporal_recall
+
+                tier_reply_text = await answer_temporal_recall(
+                    user_message, classified_memories, diagnostics, max_chars=max_total,
+                    recent_context=base_params["context"],
+                    personality=base_params["personality_brief"],
+                    recent_user_context="\n".join(m["content"] for m in messages_dicts[-6:] if m["role"] == "user"),
+                )
+                temporal_recall_selected = tier_reply_text is not None
+            if not temporal_recall_selected:
+                tier_reply_text = await tier_fn(**base_params, **extra)
         except Exception as e:
             logger.warning(f"Memory tier reply failed, falling back to main prompt: {e}")
             tier_reply_text = None
@@ -376,7 +388,7 @@ async def generate_reply(
 
     if tier_reply_text:
         if diagnostics is not None:
-            diagnostics["reply_path"] = "tier"
+            diagnostics["reply_path"] = "temporal_recall" if temporal_recall_selected else "tier"
         # Phase: tier reply 输出可能含 || 多条 (n≥2 时), 走 split_and_validate_replies
         # 拆分. n=1 单条时也走 (含 || 时仍能正确切, 不含时返单条).
         tier_replies = pipe_fallback_fn(

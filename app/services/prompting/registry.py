@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.prompting.defaults import (
+    CHAT_TEMPORAL_RECALL_PROMPT, CHAT_TEMPORAL_RECALL_CHECK_PROMPT,
     CHAT_TEMPORAL_CONTEXT_PROMPT,
     CHAT_TEMPORAL_EVIDENCE_PROMPT,
     CHAT_TEMPORAL_CHECK_PROMPT,
@@ -225,6 +226,16 @@ class PromptDefinition:
 # 工程项以 【工程补丁】/【工程附加】/【工程扩展】/【工程主导】 前缀标识, 不带 spec 引用.
 
 PROMPT_DEFINITIONS = [
+    PromptDefinition(
+        "chat.temporal_recall", "回忆问答与来源匹配", "聊天热路径", "聊天",
+        "【工程】有界只读回忆问答，关联已有候选与人物/日期；不执行记忆或业务写入。材料以独立用户消息传入，无占位符。",
+        CHAT_TEMPORAL_RECALL_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.temporal_recall_check", "回忆回答事实核对", "聊天热路径", "聊天",
+        "【工程】核对回忆回答的事实、人物、日期及操作声明；失败使用保守回复。材料以独立用户消息传入，无占位符。",
+        CHAT_TEMPORAL_RECALL_CHECK_PROMPT,
+    ),
     PromptDefinition(
         "chat.temporal_check", "回复事件时间核验", "聊天热路径", "聊天",
         "【工程】仅在日期查询存在证据缺口时核验具体事件断言。占位符 {date}/{question}/{evidence}/{reply}。",

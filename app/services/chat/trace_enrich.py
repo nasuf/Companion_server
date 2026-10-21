@@ -527,6 +527,8 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
 ] = [
     # Decision 类
     ("chat.temporal_check", "事件日期依据校验", "decision", None),
+    ("chat.temporal_recall", "回忆问答与来源匹配", "reply", None),
+    ("chat.temporal_recall_check", "回忆回答事实核对", "decision", None),
     ("persona.grounding_check", "角色地点事实校验", "decision", _label_persona_grounding),
     ("memory.relevance", "记忆相关度判定", "decision", _label_passthrough),
     ("intent.unified", "统一意图识别", "decision", _label_intent_unified),
