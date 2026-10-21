@@ -806,12 +806,13 @@ async def test_stop_event_cancels_active_handler_without_early_requeue(flow):
     assert stopped.is_set() and (await state(flow, a.run_id))["status"] == "running"
 
 
-async def test_real_heartbeat_keeps_long_handler_owned_beyond_original_ttl(flow):
+@pytest.mark.parametrize('handler_seconds', [.95, 1.0, 1.05, 1.15])
+async def test_real_heartbeat_keeps_long_handler_owned_beyond_original_ttl(flow, handler_seconds):
     a = await accept(flow)
     q = queue(flow, policy=LeasePolicy(lease_seconds=0.6, heartbeat_seconds=0.15))
 
     async def handler(claim):
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(handler_seconds)
         return PreparedJobResult({"long": True})
 
     assert await SqlJobConsumer(q, {"chat.execute.v1": handler}, "w").poll_once()

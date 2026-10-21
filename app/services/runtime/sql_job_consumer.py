@@ -51,10 +51,32 @@ class SqlJobConsumer:
         self._polling = False
         self._must_stop = False
 
-    async def _heartbeat(self, claim: ClaimedJob) -> None:
-        while True:
-            await asyncio.sleep(self.queue.policy.heartbeat_seconds)
+    async def _heartbeat(self, claim: ClaimedJob, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), self.queue.policy.heartbeat_seconds)
+                return
+            except TimeoutError:
+                pass
+            if stop.is_set():
+                return
             await self.queue.heartbeat(claim)
+
+    async def _settle_heartbeat(self, task: asyncio.Task, stop: asyncio.Event) -> None:
+        # Do not cancel an in-flight Prisma transaction during normal cleanup.
+        # Revoke the local claim first, then let its DB fence settle/roll back.
+        # If the DB cannot settle in time, stop this worker instead of allowing
+        # another poll to share an unresolved database operation.
+        stop.set()
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self.queue.policy.cancellation_seconds)
+        except asyncio.CancelledError:
+            done = set()
+        if not done:
+            self._must_stop = True
+            task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+            raise WorkerStopRequired("Heartbeat did not settle; stop the owning worker")
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _stop_handler(self, task: asyncio.Task, claim: ClaimedJob) -> None:
         claim.revoke()  # Late SQL commits cannot use this local authority.
@@ -96,7 +118,8 @@ class SqlJobConsumer:
             # SQL clock is authoritative at all fences. Local time only bounds
             # preparation; clock skew cannot grant extra lease/commit authority.
             execution = asyncio.create_task(self.handlers[claim.handler](claim))
-            heartbeat = asyncio.create_task(self._heartbeat(claim))
+            heartbeat_stop = asyncio.Event()
+            heartbeat = asyncio.create_task(self._heartbeat(claim, heartbeat_stop))
             try:
                 done, _ = await asyncio.wait(
                     {execution, heartbeat},
@@ -129,9 +152,8 @@ class SqlJobConsumer:
                 await self._stop_handler(execution, claim)
                 raise
             finally:
-                heartbeat.cancel()
-                await asyncio.gather(heartbeat, return_exceptions=True)
                 claim.revoke()
+                await self._settle_heartbeat(heartbeat, heartbeat_stop)
         finally:
             self._polling = False
 
