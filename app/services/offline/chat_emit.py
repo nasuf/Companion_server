@@ -50,6 +50,7 @@ async def emit_assistant(
     extra_metadata: dict[str, Any] | None = None,
     trace_id: str | None = None,
     guard_delivery_key: str | None = None,
+    arrival_delivery: tuple[str, int] | None = None,
 ) -> str | None:
     if not conversation_id or not message.strip():
         return None
@@ -71,6 +72,7 @@ async def emit_assistant(
         voice_eligible=guard_delivery_key is None,
         guard_activity_id=source_id if guard_delivery_key else None,
         guard_delivery_key=guard_delivery_key,
+        **({"arrival_delivery": arrival_delivery} if arrival_delivery else {}),
     )
     await _notify_takeover_transcript(conversation_id, message_id)
     return message_id
@@ -302,6 +304,7 @@ async def insert_user_activity_card(
     activity: dict[str, Any],
     trigger_type: str,
     status_label: str,
+    arrival_delivery: tuple[str, int] | None = None,
 ) -> str | None:
     if not conversation_id:
         return None
@@ -309,6 +312,7 @@ async def insert_user_activity_card(
     return await insert_user_component_message(
         conversation_id=conversation_id,
         workspace_id=workspace_id,
+        **({"arrival_delivery": arrival_delivery} if arrival_delivery else {}),
         content=f"活动卡片：{activity.get('title') or '线下活动'}",
         metadata={
             "real_world_type": "activity",
@@ -326,35 +330,44 @@ async def insert_user_component_message(
     content: str,
     metadata: dict[str, Any],
     client_id: str | None = None,
+    arrival_delivery: tuple[str, int] | None = None,
 ) -> str | None:
     if not conversation_id or not content.strip():
         return None
     if client_id:
         metadata = {**metadata, "client_id": client_id}
-    created = await db.message.create(
-        data={
-            "conversation": {"connect": {"id": conversation_id}},
-            "role": "user",
-            "content": content.strip(),
-            "metadata": Json(metadata),
-        }
-    )
+    if arrival_delivery:
+        from app.services.offline.arrival_followups import persist_delivery
+        row = await persist_delivery(activity_id=arrival_delivery[0], generation=arrival_delivery[1],
+            role='user', conversation_id=conversation_id, content=content.strip(), metadata=metadata)
+        if row is None:
+            return None
+        created_id, created_at = row['id'], row['created_at']
+        content, metadata = row['content'], row['metadata']
+    else:
+        created = await db.message.create(
+            data={
+                "conversation": {"connect": {"id": conversation_id}},
+                "role": "user",
+                "content": content.strip(),
+                "metadata": Json(metadata),
+            }
+        )
+        created_id, created_at = created.id, created.createdAt
     await manager.send_to_workspace(
         workspace_id,
         "message",
         {
-            "message_id": created.id,
+            "message_id": created_id,
             "conversation_id": conversation_id,
             "role": "user",
             "text": content.strip(),
-            "created_at": created.createdAt.isoformat()
-            if getattr(created, "createdAt", None)
-            else None,
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
             **metadata,
         },
     )
-    await _notify_takeover_transcript(conversation_id, created.id)
-    return created.id
+    await _notify_takeover_transcript(conversation_id, created_id)
+    return created_id
 
 
 async def _notify_takeover_transcript(conversation_id: str | None, message_id: str | None) -> None:

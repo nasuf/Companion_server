@@ -988,6 +988,12 @@ async def _run_runtime_job_queue():
         except Exception as e:
             _job_failed("Location memory dispatch", e)
         try:
+            from app.services.offline.arrival_followups import dispatch_arrival_followups, prune_arrival_followups
+            await dispatch_arrival_followups(limit=10)
+            await prune_arrival_followups()
+        except Exception as e:
+            _job_failed("Offline arrival dispatch", e)
+        try:
             from app.services.runtime.message_followups import dispatch_message_followups, prune_message_followups
             await dispatch_message_followups(limit=10)
             await prune_message_followups()

@@ -592,40 +592,8 @@ async def arrive_activity(
         raise HTTPException(status_code=409, detail="确认到达失败，请重试")
     # 到达后后台生成 3-5 拍摄物品 + 分档回忆预生成（PM #3/#4/#5-7，不阻塞、不披露）。
     fire_background(shooting_conditions.generate_items_for_activity(updated))
-    ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
-    if ctx:
-        await insert_user_activity_card(
-            conversation_id=ctx.get("conversation_id"),
-            workspace_id=ctx["workspace_id"],
-            activity=updated,
-            trigger_type="offline_activity_arrived_card",
-            status_label="我到了",  # spec §5.4-14 到达卡「我到了」
-        )
-        # 到达后首条主动消息。失败回退固定陪伴语。
-        guide = await _arrival_guide_text(updated, ctx)
-        guide_id = await emit_assistant(
-            conversation_id=ctx.get("conversation_id"),
-            user_id=user_id,
-            agent_id=ctx["agent_id"],
-            workspace_id=ctx["workspace_id"],
-            message=guide,
-            real_world_type="activity",
-            source_id=activity_id,
-            trigger_type="offline_activity_arrival_guide",
-        )
-        if guide_id and settings.offline_activity_companion_enabled:
-            try:
-                from app.services.offline.activity_companion import (
-                    start_opening_segment,
-                )
-
-                await start_opening_segment(activity_id, user_id)
-            except Exception as companion_err:  # noqa: BLE001 - arrival still succeeds
-                logger.warning(
-                    "[offline-companion] opening clock skipped activity=%s err=%s",
-                    activity_id,
-                    companion_err,
-                )
+    # The database transition registers a durable arrival receipt. A bounded
+    # scheduler dispatches it; LLM/TTS and message delivery never block this API.
     remember_user_event(
         user_id=user_id,
         workspace_id=activity.get("workspace_id"),

@@ -41,6 +41,7 @@ async def emit_proactive_message(
     guard_activity_id: str | None = None,
     guard_delivery_key: str | None = None,
     abort_if_user_replied_since: datetime | None = None,
+    arrival_delivery: tuple[str, int] | None = None,
 ) -> str:
     """持久化主动消息 + 推 WS, 返回 assistant message id.
 
@@ -82,6 +83,14 @@ async def emit_proactive_message(
     if extra_metadata:
         metadata.update(extra_metadata)
 
+    existing_arrival = None
+    if arrival_delivery:
+        from app.services.offline.arrival_followups import load_delivery
+        existing_arrival = await load_delivery(arrival_delivery[0], 'assistant')
+        if existing_arrival:
+            message, metadata = existing_arrival['content'], existing_arrival['metadata']
+            voice_eligible = False
+    inserted = True
     prepared_voice = None
     if guard_activity_id and guard_delivery_key:
         voice_eligible = False
@@ -118,7 +127,33 @@ async def emit_proactive_message(
                 )
 
     try:
-        if guard_activity_id and guard_delivery_key:
+        if arrival_delivery:
+            from app.services.offline.arrival_followups import persist_delivery, ArrivalVoiceBindingFailed
+            try:
+                row = await persist_delivery(activity_id=arrival_delivery[0], generation=arrival_delivery[1],
+                    role='assistant', conversation_id=conversation_id, content=message, metadata=metadata)
+            except ArrivalVoiceBindingFailed:
+                # Preserve the existing text fallback when an audio asset cannot
+                # be bound. The first transaction rolled back both message/asset.
+                if prepared_voice is not None:
+                    from app.services.speech_output.delivery import discard_prepared_voice_output
+                    await discard_prepared_voice_output(prepared_voice)
+                    prepared_voice = None
+                metadata.pop('display_mode', None)
+                metadata.pop('attachments', None)
+                row = await persist_delivery(activity_id=arrival_delivery[0], generation=arrival_delivery[1],
+                    role='assistant', conversation_id=conversation_id, content=message, metadata=metadata)
+            if row is None or not row['inserted']:
+                if prepared_voice is not None:
+                    from app.services.speech_output.delivery import discard_prepared_voice_output
+                    await discard_prepared_voice_output(prepared_voice)
+                    prepared_voice = None
+                if row is None:
+                    return ''
+            inserted = row['inserted']
+            created_id, created_at = row['id'], row['created_at']
+            message, metadata = row['content'], row['metadata']
+        elif guard_activity_id and guard_delivery_key:
             rows = await db.query_raw(
                 """
                 INSERT INTO messages (
@@ -205,7 +240,10 @@ async def emit_proactive_message(
             except Exception:
                 logger.warning("[TTS] proactive cleanup failed", exc_info=True)
         raise
-    if prepared_voice is not None:
+    if prepared_voice is not None and arrival_delivery:
+        from app.services.speech_output.usage import link_tts_usage_to_message
+        await link_tts_usage_to_message(request_id=prepared_voice.speech.request_id, message_id=created_id)
+    elif prepared_voice is not None:
         try:
             from app.services.speech_output.delivery import (
                 bind_prepared_voice_output,
@@ -232,21 +270,26 @@ async def emit_proactive_message(
                 where={"id": created_id},
                 data={"metadata": Json(metadata)},
             )
-    try:
+    if arrival_delivery:
         from app.services.notifications.service import notify_agent_message_created
-        from app.services.runtime.tasks import fire_background
+        await notify_agent_message_created(conversation_id=conversation_id, message_id=created_id,
+            text=message, metadata=metadata, user_id=user_id, agent_id=agent_id, workspace_id=workspace_id)
+    else:
+        try:
+            from app.services.notifications.service import notify_agent_message_created
+            from app.services.runtime.tasks import fire_background
 
-        fire_background(notify_agent_message_created(
-            conversation_id=conversation_id,
-            message_id=created_id,
-            text=message,
-            metadata=metadata,
-            user_id=user_id,
-            agent_id=agent_id,
-            workspace_id=workspace_id,
-        ))
-    except Exception as achievement_err:
-        logger.debug(f"[ACH/PUSH] proactive message hook skipped: {achievement_err}")
+            fire_background(notify_agent_message_created(
+                conversation_id=conversation_id,
+                message_id=created_id,
+                text=message,
+                metadata=metadata,
+                user_id=user_id,
+                agent_id=agent_id,
+                workspace_id=workspace_id,
+            ))
+        except Exception as achievement_err:
+            logger.debug(f"[ACH/PUSH] proactive message hook skipped: {achievement_err}")
 
     # 审计日志写失败不影响主流程.
     # 注: 跟 timetrigger 一样, 这个 prisma client 版本对混合 scalar+relation
@@ -264,7 +307,8 @@ async def emit_proactive_message(
         }
         if workspace_id:
             log_data["workspaceId"] = workspace_id
-        await db.proactivechatlog.create(data=log_data)
+        if inserted:
+            await db.proactivechatlog.create(data=log_data)
     except Exception as e:
         logger.warning(f"proactive_chat_log write failed: {e}")
 
@@ -275,6 +319,9 @@ async def emit_proactive_message(
         "assistant_message_id": created_id,
         "trigger_type": trigger_type,
     }
+    if arrival_delivery and metadata.get('display_mode') == 'voice':
+        ws_payload['display_mode'] = 'voice'
+        ws_payload['attachments'] = metadata.get('attachments', [])
     if prepared_voice is not None:
         ws_payload["display_mode"] = "voice"
         ws_payload["attachments"] = [prepared_voice.metadata]

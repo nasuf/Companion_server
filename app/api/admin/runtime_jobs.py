@@ -135,6 +135,36 @@ async def retry_turn_followup(
     return {"status": "pending_dispatch", "turn_id": turn_id}
 
 
+@router.get("/arrival-followups")
+async def get_arrival_followups(
+    limit: int = Query(20, ge=1, le=50),
+    status: str = Query("all", pattern="^(all|failed|pending_dispatch|queued|completed|cancelled)$"),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    from app.services.offline.arrival_followups import inspect_arrival_followups
+    try:
+        return await inspect_arrival_followups(limit=limit, status=status)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="到达陪伴处理记录暂时不可用，请重试。") from error
+
+
+@router.post("/arrival-followups/{activity_id}/retry")
+async def retry_arrival_followup(
+    activity_id: str = Path(min_length=1, max_length=200),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    from app.services.offline.arrival_followups import FollowupRetryConflict, retry_arrival_followup as retry
+    try:
+        found = await retry(activity_id)
+    except FollowupRetryConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="到达陪伴恢复暂时不可用，请刷新后重试。") from error
+    if not found:
+        raise HTTPException(status_code=404, detail="arrival_followup_not_found")
+    return {"status": "pending_dispatch", "activity_id": activity_id}
+
+
 @router.get("/memory-processing")
 async def get_memory_processing(
     limit: int = Query(20, ge=1, le=50),

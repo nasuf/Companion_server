@@ -104,12 +104,13 @@ def test_registration_uses_service_without_router_imports(monkeypatch):
     monkeypatch.setattr(job_queue, '_HANDLERS', {})
     monkeypatch.setattr(job_queue, '_RECOVERY_DELAYS', {})
     monkeypatch.setattr(job_queue, '_LEGACY_NO_DELAY_HANDLERS', set())
-    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics', 'turn_statistics')
-    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics', 'turn_statistics')
+    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics', 'turn_statistics', 'offline_arrival')
+    assert register_runtime_handlers() == ('agent_initialization', 'location_share_memory', 'message_statistics', 'turn_statistics', 'offline_arrival')
     from app.services.location_memory import write_location_share_memories
     from app.services.runtime.message_followups import run_message_followup
     from app.services.runtime.turn_followups import run_turn_followup
-    assert job_queue._HANDLERS == {'agent_initialization': _run_agent_initialization_job, 'location_share_memory': write_location_share_memories, 'message_statistics': run_message_followup, 'turn_statistics': run_turn_followup}
+    from app.services.offline.arrival_followups import run_arrival_followup
+    assert job_queue._HANDLERS == {'agent_initialization': _run_agent_initialization_job, 'location_share_memory': write_location_share_memories, 'message_statistics': run_message_followup, 'turn_statistics': run_turn_followup, 'offline_arrival': run_arrival_followup}
     assert job_queue._RECOVERY_DELAYS['agent_initialization'] == MEMORY_GENERATION_LOCK_TTL_S
     assert job_queue._LEGACY_NO_DELAY_HANDLERS == {'agent_initialization'}
 
@@ -194,9 +195,15 @@ async def test_stop_required_is_never_retried_in_same_worker(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_background_role_dispatches_statistics_and_retention(monkeypatch):
+@pytest.mark.parametrize('arrival_fails', [False, True])
+async def test_background_role_dispatches_statistics_and_retention(monkeypatch, arrival_fails):
     from jobs import runtime
     from app.services.runtime import job_queue, message_followups
+    from app.services.offline import arrival_followups
+    arrival_dispatch = AsyncMock(side_effect=RuntimeError('synthetic') if arrival_fails else None)
+    arrival_prune = AsyncMock()
+    monkeypatch.setattr(arrival_followups, 'dispatch_arrival_followups', arrival_dispatch)
+    monkeypatch.setattr(arrival_followups, 'prune_arrival_followups', arrival_prune)
     processed = AsyncMock()
     dispatched = AsyncMock()
     # Cancellation ends exactly one scan without changing global asyncio.sleep.
@@ -208,6 +215,8 @@ async def test_background_role_dispatches_statistics_and_retention(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await runtime.consume_background_jobs(health)
     processed.assert_awaited_once_with(max_jobs=20)
+    arrival_dispatch.assert_awaited_once_with(limit=10)
+    assert arrival_prune.await_count == (0 if arrival_fails else 1)
     dispatched.assert_awaited_once_with(limit=10)
     pruned.assert_awaited_once()
 

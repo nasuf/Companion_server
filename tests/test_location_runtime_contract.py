@@ -85,10 +85,11 @@ async def test_location_retry_errors_are_scoped_and_do_not_close_socket(
     quota.assert_not_awaited()
 
 
-@pytest.mark.parametrize("failing_family", ["location", "message", "turn"])
+@pytest.mark.parametrize("failing_family", ["location", "arrival", "message", "turn"])
 async def test_dispatch_failure_does_not_starve_other_runtime_jobs(monkeypatch, failing_family):
     from jobs import scheduler
     from app.services.runtime import message_followups, turn_followups
+    from app.services.offline import arrival_followups
 
     async def local(name, body):
         await body()
@@ -100,6 +101,7 @@ async def test_dispatch_failure_does_not_starve_other_runtime_jobs(monkeypatch, 
     pruners = {}
     for family, module, dispatch, prune in (
         ("location", loc, "dispatch_location_events", None),
+        ("arrival", arrival_followups, "dispatch_arrival_followups", "prune_arrival_followups"),
         ("message", message_followups, "dispatch_message_followups", "prune_message_followups"),
         ("turn", turn_followups, "dispatch_turn_followups", "prune_turn_followups"),
     ):
@@ -115,6 +117,7 @@ async def test_dispatch_failure_does_not_starve_other_runtime_jobs(monkeypatch, 
     assert failed.call_count == 1
     assert failed.call_args.args[0] == {
         "location": "Location memory dispatch",
+        "arrival": "Offline arrival dispatch",
         "message": "Message statistics dispatch",
         "turn": "Turn statistics dispatch",
     }[failing_family]

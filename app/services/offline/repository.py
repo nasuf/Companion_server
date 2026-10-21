@@ -904,6 +904,29 @@ async def mark_arrived(
             lng,
             verified,
         )
+        if rows:
+            # This explicit write (not a DB trigger) distinguishes the new async
+            # path from old synchronous servers during deployment/rollback.
+            # Missing migration or registration failure rolls back reached too.
+            await tx.execute_raw(
+                """INSERT INTO offline_arrival_followups(activity_id,source_workspace_id,arrived_at,scope)
+                SELECT activity.id,activity.workspace_id,
+                  activity.arrival_confirmed_at AT TIME ZONE 'UTC',
+                  jsonb_build_object('user_id',activity.user_id,'workspace_id',bound.workspace_id,
+                    'agent_id',bound.agent_id,'conversation_id',bound.conversation_id)
+                FROM offline_activity_recommendations activity LEFT JOIN LATERAL (
+                  SELECT w.id AS workspace_id,w.agent_id,c.id AS conversation_id
+                  FROM chat_workspaces w JOIN ai_agents agent ON agent.id=w.agent_id AND agent.user_id=w.user_id
+                  JOIN conversations c ON c.workspace_id=w.id AND c.user_id=w.user_id
+                    AND c.agent_id=w.agent_id AND NOT c.is_deleted
+                  WHERE w.user_id=activity.user_id AND w.agent_id=activity.agent_id AND w.status='active'
+                    AND (activity.workspace_id IS NULL OR w.id=activity.workspace_id)
+                    AND (activity.conversation_id IS NULL OR c.id=activity.conversation_id)
+                  ORDER BY w.created_at DESC,c.updated_at DESC,c.id LIMIT 1
+                ) bound ON TRUE WHERE activity.id=$1
+                ON CONFLICT DO NOTHING""",
+                activity_id,
+            )
     return activity_from_row(rows[0], reveal_task=True) if rows else None
 
 

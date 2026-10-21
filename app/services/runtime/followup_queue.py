@@ -1,4 +1,4 @@
-"""Bounded SQL receipt / Redis transport operations for durable statistics.
+"""Bounded SQL receipt / Redis transport operations for durable follow-ups.
 
 Business qualification and effects belong to each family. Identifiers below
 are fixed application constants, never request or job payload values.
@@ -25,10 +25,11 @@ class FollowupFamily:
 
 MESSAGE = FollowupFamily("message_followup_events", "message_id", "message_statistics", "message-statistics")
 TURN = FollowupFamily("turn_followup_events", "turn_id", "turn_statistics", "turn-statistics")
+ARRIVAL = FollowupFamily("offline_arrival_followups", "activity_id", "offline_arrival", "offline-arrival")
 
 
 def _family(value: FollowupFamily) -> FollowupFamily:
-    if value not in (MESSAGE, TURN):
+    if value not in (MESSAGE, TURN, ARRIVAL):
         raise ValueError("invalid_followup_family")
     return value
 
@@ -87,7 +88,7 @@ async def dispatch_followups(db, family, *, enqueue, inspect, limit=10, identity
                     dispatch_attempts=dispatch_attempts+1,last_error=$2,
                     next_dispatch_at=NOW()+INTERVAL '30 seconds',updated_at=NOW()
                     WHERE {column}=$1""", key, type(exc).__name__[:80])
-                logger.warning("Statistics followup dispatch deferred (%s)", type(exc).__name__)
+                logger.warning("%s followup dispatch deferred (%s)", family.job_type, type(exc).__name__)
                 break
             else:
                 await tx.execute_raw(f"""UPDATE {table} SET status='queued',
@@ -100,10 +101,12 @@ async def dispatch_followups(db, family, *, enqueue, inspect, limit=10, identity
 
 async def prune_followups(db, family):
     family = _family(family)
-    return await db.execute_raw(f"""DELETE FROM {family.table} WHERE {family.identity_column} IN (
+    return await db.execute_raw(f"""WITH expired AS MATERIALIZED (
         SELECT {family.identity_column} FROM {family.table} WHERE status IN ('completed','cancelled')
         AND updated_at<NOW()-INTERVAL '30 days' ORDER BY updated_at,{family.identity_column} LIMIT 100
-        FOR UPDATE SKIP LOCKED)""")
+        FOR UPDATE SKIP LOCKED)
+        DELETE FROM {family.table} target USING expired
+        WHERE target.{family.identity_column}=expired.{family.identity_column}""")
 
 
 async def inspect_followups(db, family, *, limit=20, status="all"):

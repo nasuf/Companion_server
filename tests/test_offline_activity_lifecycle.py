@@ -58,8 +58,9 @@ async def test_arrive_success_within_radius(monkeypatch):
 
     assert result.reached is True
     mark.assert_awaited_once()
-    activity_service.insert_user_activity_card.assert_awaited_once()
-    activity_service.emit_assistant.assert_awaited_once()  # 拍照引导
+    # The SQL transition owns durable registration; delivery is off-request.
+    activity_service.insert_user_activity_card.assert_not_awaited()
+    activity_service.emit_assistant.assert_not_awaited()
 
 
 async def test_arrive_rejects_when_another_activity_is_already_reached(monkeypatch):

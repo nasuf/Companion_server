@@ -46,10 +46,18 @@ async def consume_background_jobs(health):
     from app.services.runtime.job_queue import process_runtime_jobs
     from app.services.runtime.message_followups import dispatch_message_followups, prune_message_followups
     from app.services.runtime.turn_followups import dispatch_turn_followups, prune_turn_followups
+    from app.services.offline.arrival_followups import dispatch_arrival_followups, prune_arrival_followups
     from jobs.scheduler import _run_local_job
 
     async def scan():
         await process_runtime_jobs(max_jobs=20)
+        # Keep arrival acknowledgements recoverable in split-process deployments
+        # too; one failing family must not starve the other follow-ups.
+        try:
+            await dispatch_arrival_followups(limit=10)
+            await prune_arrival_followups()
+        except Exception as error:
+            logger.warning("Offline arrival dispatch failed (%s)", type(error).__name__)
         await dispatch_message_followups(limit=10)
         await prune_message_followups()
         await dispatch_turn_followups(limit=10)

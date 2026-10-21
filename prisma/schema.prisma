@@ -2000,6 +2000,7 @@ model OfflineActivityRecommendation {
   companionState  Json                     @default("{}") @map("companion_state")
   feedback       OfflineActivityFeedback[]
   media          OfflineActivityMedia[]
+  arrivalFollowup OfflineArrivalFollowup? @ignore
   conditions     OfflineShootingCondition[]
   fragments      OfflineThoughtFragment[]
   prewritten     OfflinePrewrittenFragment[]
@@ -2708,4 +2709,26 @@ model TurnFollowupEvent {
   @@index([status, createdAt(sort: Desc), turnId(sort: Desc)], map: "turn_followup_status_recent_idx")
   @@index([messageId], map: "turn_followup_message_idx")
   @@map("turn_followup_events")
+}
+
+// Arrivals return after this receipt commits; model/TTS and delivery run off-request.
+model OfflineArrivalFollowup {
+  activityId String @id @map("activity_id")
+  activity OfflineActivityRecommendation @relation(fields: [activityId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  sourceWorkspaceId String? @map("source_workspace_id")
+  arrivedAt DateTime @map("arrived_at") @db.Timestamptz(6)
+  scope Json
+  status String @default("pending_dispatch")
+  generation Int @default(0)
+  jobId String? @map("job_id")
+  dispatchAttempts Int @default(0) @map("dispatch_attempts")
+  lastError String? @map("last_error")
+  outcome String?
+  nextDispatchAt DateTime @default(now()) @map("next_dispatch_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@ignore
+  @@index([createdAt(sort: Desc), activityId(sort: Desc)], map: "offline_arrival_recent_idx")
+  @@index([status, createdAt(sort: Desc), activityId(sort: Desc)], map: "offline_arrival_status_recent_idx")
+  @@map("offline_arrival_followups")
 }
