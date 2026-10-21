@@ -792,11 +792,17 @@ async def prepare_reply(ctx):
     if ctx.memory_relevance in ("strong", "medium"):
         try:
             conflict = await services.detect_l1_contradiction(
-                ctx.user_message, ctx.user_id, workspace_id=ctx.workspace_id
+                ctx.user_message, ctx.user_id, workspace_id=ctx.workspace_id,
+                recent_context=ctx.recent_context_text,
             )
             if conflict:
                 inquiry = await services.generate_contradiction_inquiry(
-                    conflict, agent_name=ctx.agent.name if ctx.agent else "AI"
+                    conflict, agent_name=ctx.agent.name if ctx.agent else "AI",
+                    recent_context=ctx.recent_context_text,
+                    personality_brief=(
+                        services.build_personality_brief(ctx.agent) if ctx.agent else ""
+                    ),
+                    user_portrait=str(ctx.portrait) if ctx.portrait else "",
                 )
                 await services.save_pending_contradiction(ctx.conversation_id, conflict,
                     user_id=ctx.user_id, workspace_id=ctx.workspace_id, agent_id=ctx.agent_id,
@@ -969,11 +975,16 @@ async def prepare_reply(ctx):
         )
 
     ctx._build_main_chat_messages = _build_main_chat_messages
+    selected_ids = [getattr(m, "id", "") for m in ctx.classified_memories or []]
+    candidate_ids = list(getattr(ctx.fetched, "candidate_ids", None) or [])
+    if ctx.contradiction_inquiry:
+        # 矛盾追问直接作为本轮回复, 主 prompt 不构建: 选中的记忆没有被用上, 只记候选。
+        selected_ids, candidate_ids = [], selected_ids + candidate_ids
     ctx.response_diagnostics["memory_usage_submission"] = submit_memory_usage(
         event_id=ctx.memory_usage_event_id, user_id=ctx.user_id,
         workspace_id=ctx.workspace_id,
-        selected_ids=[getattr(m, "id", "") for m in ctx.classified_memories or []],
-        candidate_ids=getattr(ctx.fetched, "candidate_ids", None) or [],
+        selected_ids=selected_ids,
+        candidate_ids=candidate_ids,
         fire_background=services._fire_background,
     )
     from app.services.interaction.chat_management import (

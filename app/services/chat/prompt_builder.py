@@ -611,16 +611,15 @@ async def _build_offline_activity_section(
         return None
     cancelled = offline_activity.get("cancelled_plans") or []
     facts = ("\n出行计划取消记录（当前业务状态）：" + json.dumps(cancelled, ensure_ascii=False)) if cancelled else ""
-    if not activity:
+    # 只有到了现场才是"正在外出"。accepted 只表示放进了待出行, 没有"出发"这个状态:
+    # 生产上有计划放进去一百多天都没去, 期间每轮主回复都被告知"你正陪 TA 外出、
+    # TA 在路上", 跟 TA 实际在上班的对话互相打架, 还让模型以为你们在一起。
+    if not activity or not offline_activity.get("reached"):
         return _PromptBody(facts.strip(), "chat.offline_activity_section") if facts else None
     location = str(
         offline_activity.get("location_name") or offline_activity.get("category") or ""
     ).strip() or "现场"
-    status_line = (
-        "TA 现在已经到了现场。"
-        if offline_activity.get("reached")
-        else "TA 还在前往/准备出发的路上。"
-    )
+    status_line = "TA 现在已经到了现场。"
     safe_hint = str(offline_activity.get("safe_hint") or "").strip() or "（无）"
     return _PromptBody(
         _render_section(tpl, {
@@ -680,7 +679,7 @@ async def build_system_prompt(
     expression_habits: list[str] | None = None,
     red_packet_context: dict[str, Any] | None = None,
     gift_context: dict[str, Any] | None = None,
-    # 线下活动进行中的外出情境 (title/location/reached)，注入「当前线下活动」段。
+    # 线下活动外出情境 (title/location/reached)，已到达现场时注入「当前线下活动」段。
     offline_activity: dict[str, Any] | None = None,
     last_reply_count: int | None = None,
     # 最近几次回复里已出现 ≥2 次的句子 (chat/repetition_guard), 注入「避免重复」段.

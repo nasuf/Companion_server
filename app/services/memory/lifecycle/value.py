@@ -56,6 +56,8 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from app.services.memory.taxonomy import l1_promotion_requirement
+
 logger = logging.getLogger(__name__)
 
 # ── 衰减与回报 ────────────────────────────────────────────────────────────
@@ -92,6 +94,44 @@ HOT_PROMOTE_AT = 0.85    # L2 → L1
 HOT_DEMOTE_AT = 0.78     # L1 → L2
 WARM_PROMOTE_AT = 0.50   # L3 → L2
 WARM_DEMOTE_AT = 0.42    # L2 → L3
+
+# ── L1 晋升闸门 ──────────────────────────────────────────────────────────
+#
+# 上面的阈值只回答"这条记忆最近用得多不多"。2026-10 上线后的数据说明这不够:
+# 抽取把六成以上的新记忆打在 0.80, 一次被选中注入 +0.12 就到 0.92, 于是入库十几
+# 秒的一次性状态也成了 L1。闸门只拦层级, 不动值 —— 值照常累积, 条件满足的那次
+# 使用自然完成升级。
+#
+# - 用户侧: 类目资格见 taxonomy.l1_promotion_requirement; sustained 类目还要求
+#   贡献分布在至少 L1_PROMOTION_MIN_CONTRIBUTION_DAYS 个不同自然日 (含本次)。
+#   同一天里聊了十轮只算一天: 一次话题里被反复检索到, 不等于长期重要。
+# - AI 侧: 聊天衍生的记忆 (自述 / 每日总结 / 整合摘要) 永不升 L1。L1 AI 是人设
+#   核心, 只由建号种子产生; 聊天期爬升就是人设漂移。人设种子仍按值升降, 推演
+#   (evals/memory_lifecycle) 标定的就是这部分。
+#
+# 推演只演值和层级的纯函数 (apply_usage), 闸门不在其中: 推演里 L1/L2 都可检索,
+# 闸门不改变它度量的东西。
+L1_PROMOTION_MIN_CONTRIBUTION_DAYS = 3
+AI_CHAT_DERIVED_PROVENANCE = frozenset({"ai_authored", "daily_summary", "consolidated"})
+
+
+def l1_promotion_allowed(
+    *,
+    side: str,
+    provenance: str | None,
+    main_category: str | None,
+    sub_category: str | None,
+    contribution_days: int,
+) -> bool:
+    """值已过 HOT_PROMOTE_AT 时, 这条记忆能不能真的进 L1。"""
+    if side == "ai":
+        return provenance not in AI_CHAT_DERIVED_PROVENANCE
+    requirement = l1_promotion_requirement(main_category, sub_category)
+    if requirement == "immediate":
+        return True
+    if requirement == "sustained":
+        return contribution_days >= L1_PROMOTION_MIN_CONTRIBUTION_DAYS
+    return False
 
 
 @dataclass(frozen=True)

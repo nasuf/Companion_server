@@ -178,6 +178,67 @@ class TestLevelTransitions:
         assert result.changed_level
 
 
+class TestL1PromotionGate:
+    """值过线只说明"最近常被检索到"。2026-10 生产上 importance 0.8 的记忆一次被
+    选中注入就到 0.92, 入库十几秒的"用户已经在工位了"成了 L1 —— 闸门把"配不配
+    当核心事实"和"是否持续被用到"单独拿出来问。"""
+
+    def _allowed(self, side="user", provenance="user_stated", main="身份", sub="现居地", days=1):
+        from app.services.memory.lifecycle.value import l1_promotion_allowed
+
+        return l1_promotion_allowed(
+            side=side, provenance=provenance, main_category=main,
+            sub_category=sub, contribution_days=days,
+        )
+
+    def test_identity_facts_promote_on_value_alone(self):
+        assert self._allowed(main="身份", sub="现居地", days=1)
+
+    def test_one_shot_states_and_misc_never_become_core(self):
+        assert not self._allowed(main="生活", sub="其他", days=30)
+        assert not self._allowed(main="生活", sub="工作", days=30)
+        assert not self._allowed(main="情绪", sub="焦虑", days=30)
+        assert not self._allowed(main="思维", sub="其他", days=30)
+        assert not self._allowed(main="身份", sub="其他", days=30)
+        assert not self._allowed(main=None, sub=None, days=30)
+
+    def test_stable_preferences_need_use_across_several_days(self):
+        from app.services.memory.lifecycle.value import L1_PROMOTION_MIN_CONTRIBUTION_DAYS
+
+        need = L1_PROMOTION_MIN_CONTRIBUTION_DAYS
+        assert need >= 2, "同一天里聊十轮只算一天 —— 单日证据不该够"
+        assert not self._allowed(main="偏好", sub="禁忌/雷区", days=need - 1)
+        assert self._allowed(main="偏好", sub="禁忌/雷区", days=need)
+        assert not self._allowed(main="偏好", sub="饮食喜好", days=need * 10), (
+            "不在 PROMOTION_RULES 允许 L1 的偏好子类留在 L2"
+        )
+
+    def test_chat_derived_ai_memories_never_become_persona_core(self):
+        for provenance in ("ai_authored", "daily_summary", "consolidated"):
+            assert not self._allowed(side="ai", provenance=provenance, main="生活", sub="生活")
+
+    def test_ai_persona_seeds_stay_value_driven(self):
+        """人设种子由推演标定, 闸门不改变它们的升降规则。"""
+        for provenance in ("profile_seed", "knowledge_seed", None):
+            assert self._allowed(side="ai", provenance=provenance, main="情绪", sub="其他", days=0)
+
+    def test_requirement_classes_follow_the_promotion_rules_table(self):
+        from app.services.memory.taxonomy import (
+            PROMOTION_RULES,
+            is_contradiction_attribute,
+            l1_promotion_requirement,
+        )
+
+        for (main, sub), rule in PROMOTION_RULES.items():
+            if rule.get("allow_l1") and main != "身份":
+                assert l1_promotion_requirement(main, sub) == "sustained"
+        assert l1_promotion_requirement("身份", "星座") == "immediate"
+        assert l1_promotion_requirement("生活", "提醒") == "never"
+        assert is_contradiction_attribute("身份", "现居地")
+        assert not is_contradiction_attribute("偏好", "禁忌/雷区")
+        assert not is_contradiction_attribute("生活", "其他")
+
+
 class TestDaysSince:
     def test_missing_timestamps_mean_no_decay(self):
         """时间基准缺失时宁可少衰减, 也不要凭空把记忆打入冷宫。"""

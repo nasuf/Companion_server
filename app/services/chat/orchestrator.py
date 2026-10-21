@@ -178,7 +178,7 @@ from app.services.chat.post_process import (
 )
 from app.services.chat.repetition_guard import find_repeated_ai_phrases
 from app.services.chat.tracing import create_tracer
-from app.services.mbti import get_mbti
+from app.services.mbti import build_personality_brief, get_mbti
 from app.services.chat.turn_lifecycle import finish_assistant_turn
 from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.chat.topic_continuation import (
@@ -1323,9 +1323,17 @@ async def _stream_legacy_response(
         contradiction_inquiry: str | None = None
         if memory_relevance in ("strong", "medium"):
             try:
-                conflict = await detect_l1_contradiction(user_message, user_id, workspace_id=workspace_id)
+                conflict = await detect_l1_contradiction(
+                    user_message, user_id, workspace_id=workspace_id,
+                    recent_context=recent_context_text,
+                )
                 if conflict:
-                    inquiry = await generate_contradiction_inquiry(conflict, agent_name=agent.name if agent else "AI")
+                    inquiry = await generate_contradiction_inquiry(
+                        conflict, agent_name=agent.name if agent else "AI",
+                        recent_context=recent_context_text,
+                        personality_brief=build_personality_brief(agent) if agent else "",
+                        user_portrait=str(portrait) if portrait else "",
+                    )
                     await save_pending_contradiction(conversation_id, conflict,
                         user_id=user_id, workspace_id=workspace_id, agent_id=agent_id,
                         message_ids=sorted(current_turn_ids), user_message=aggregated_turn_text)
@@ -1422,7 +1430,7 @@ async def _stream_legacy_response(
                 relation_meta_line = ""
             # W4 AI 情绪连续性: 上一轮回复情绪衰减后作为本轮"当下心情"
             ai_mood_text = format_ai_mood_text(await load_ai_mood(conversation_id))
-            # 线下活动外出情境: 进行中(accepted)活动时给主回复注入「当前线下活动」段,
+            # 线下活动外出情境: 已到达现场的活动给主回复注入「当前线下活动」段 (待出行不注入),
             # 让现场照片/消息贴合这次外出而非割裂的普通聊天; 拍摄任务绝不进 prompt.
             # best-effort + 模块未启用/无活动时不查, 不影响聊天主流程。
             offline_activity = None
@@ -1515,11 +1523,16 @@ async def _stream_legacy_response(
 
         # Preserve the existing retrieval-selected signal policy in one shared
         # submission boundary. This is not a receipt of final prompt consumption.
+        selected_ids = [getattr(m, "id", "") for m in classified_memories or []]
+        candidate_ids = list(getattr(fetched, "candidate_ids", None) or [])
+        if contradiction_inquiry:
+            # 矛盾追问直接作为本轮回复, 主 prompt 不构建: 选中的记忆没有被用上, 只记候选。
+            selected_ids, candidate_ids = [], selected_ids + candidate_ids
         response_diagnostics["memory_usage_submission"] = submit_memory_usage(
             event_id=memory_usage_event_id, user_id=user_id,
             workspace_id=workspace_id,
-            selected_ids=[getattr(m, "id", "") for m in classified_memories or []],
-            candidate_ids=getattr(fetched, "candidate_ids", None) or [],
+            selected_ids=selected_ids,
+            candidate_ids=candidate_ids,
             fire_background=_fire_background,
         )
 

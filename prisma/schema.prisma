@@ -1359,6 +1359,9 @@ model MemoryUsageReceipt {
 
   @@id([eventId, memorySide, memoryId])
   @@index([createdAt], map: "memory_usage_receipts_retention_idx")
+  // 部分索引 memory_usage_receipts_contributed_memory_idx (memory_side, memory_id,
+  // created_at) WHERE contributed 在 migration 20261022090000 手写 (Prisma 不支持
+  // partial index DSL), 改 schema 重生成时勿丢 —— L1 晋升闸门靠它按记忆计天数。
   @@map("memory_usage_receipts")
 }
 

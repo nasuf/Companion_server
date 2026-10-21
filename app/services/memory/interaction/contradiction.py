@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import UTC, datetime, timedelta
 
 from app.observability.events import (
     EVT_LLM_FAIL,
@@ -29,8 +30,10 @@ from app.services.llm.models import (
     invoke_text,
 )
 from app.services.memory.storage import repo as memory_repo
+from app.services.memory.taxonomy import is_contradiction_attribute
 from app.services.prompting.store import get_prompt_text
 from app.services.prompting.utils import SafeDict
+from app.services.schedule_domain.sql_time import LOCAL_UTC_OFFSET_HOURS
 
 _PENDING_KEY_PREFIX = "contradiction:pending:"
 _PENDING_TTL = 1800  # 30 min — generous window for user to reply
@@ -83,12 +86,27 @@ def _conflict_new_info_grounded(result: dict, user_message: str) -> bool:
     return overlap >= 0.6
 
 
+def _record_date(memory) -> str:
+    stamp = getattr(memory, "createdAt", None)
+    if not isinstance(stamp, datetime):
+        return "时间未知"
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return (stamp + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)).date().isoformat()
+
+
 async def detect_l1_contradiction(
     user_message: str,
     user_id: str,
     workspace_id: str | None = None,
+    *,
+    recent_context: str = "",
 ) -> dict | None:
     """Spec §4.1: detect if user's message contradicts any L1 memory.
+
+    只对照身份属性 (taxonomy.is_contradiction_attribute)。`recent_context` 只用来
+    理解省略和指代 ——"我不在啊"单拿出来什么都能对上, 放回上下文才知道在说哪件事;
+    矛盾的新信息仍必须落在用户这句原话里 (见 _conflict_new_info_grounded)。
 
     Returns {"has_conflict": True, "old_memory_id": ..., "old_content": ...,
              "new_info": ..., "conflict_description": ...} or None.
@@ -97,15 +115,16 @@ async def detect_l1_contradiction(
     # 只取 source=user 的 L1 — AI 人设记忆 (e.g. "我在苏州长大" 描述的是 AI 自己)
     # 跟"用户提了什么事实"无关, 混入会导致 LLM 把 AI 第一人称叙述误读为用户说的话
     # (实测: 用户说"我是西安人", LLM 把 AI 的"在苏州长大"当成用户说过的, 误报矛盾).
-    # 全量取 L1 (不按 mainCategory 过滤, 不限 take), 安全网 300 防极端情况.
-    l1_user = await memory_repo.find_many(
+    # 同理只取身份属性: 2026-10 生产上"用户已经在工位了"这类当下状态混进 L1, 用户
+    # 一句"我不在啊"就被判成跟它矛盾。安全网 300 防极端情况.
+    l1_user = [m for m in await memory_repo.find_many(
         source="user",
         where={
             "userId": user_id, "workspaceId": workspace_id,
-            "level": 1, "isArchived": False,
+            "level": 1, "isArchived": False, "mainCategory": "身份",
         },
         order={"importance": "desc"}, take=300,
-    )
+    ) if is_contradiction_attribute(m.mainCategory, m.subCategory)]
     if not l1_user:
         logger.debug(
             "contradiction.detect: no L1 user memory to compare against",
@@ -113,13 +132,16 @@ async def detect_l1_contradiction(
         )
         return None
 
-    l1_text = "\n".join(f"[{m.id}] {m.content}" for m in l1_user)
+    l1_text = "\n".join(
+        f"[{m.id}] {m.content}（{m.subCategory}，记录于 {_record_date(m)}）" for m in l1_user
+    )
 
     try:
         template = await get_prompt_text("memory.contradiction_detection")
         prompt = template.format_map(SafeDict({
             "user_message": user_message,
             "existing_l1_memory": l1_text,
+            "recent_context": recent_context or "(无)",
         }))
         result = await invoke_json(get_utility_model(), prompt)
         if isinstance(result, dict) and result.get("has_conflict"):

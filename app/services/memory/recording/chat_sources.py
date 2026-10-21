@@ -20,6 +20,11 @@ def excluded_from_chat_extraction(message: dict) -> bool:
     if metadata.get("real_world_type") == "gift":
         return True
     if message.get("role") == "assistant":
+        # Offline-activity copy is business text about the user's outing in the
+        # user's city ("头疼好些了，去清凉山走走"). Self-memory extraction turned it
+        # into first-person persona facts, so it never becomes an AI memory.
+        if str(metadata.get("trigger_type") or "").startswith("offline_activity_"):
+            return True
         # The explicit marker is written with each reply. Older replies already
         # carry the same server-owned intent in their response diagnostics.
         kind = metadata.get("memory_extraction_exclusion")

@@ -57,10 +57,45 @@ async def test_same_message_concurrent_replay_rewards_once(memory_flow, side):
 
 
 async def test_distinct_concurrent_events_do_not_lose_rewards(memory_flow):
-    f=memory_flow;m=await memory(f);msgs=[await event(f) for _ in range(3)]
+    f=memory_flow;m=await memory(f,mainCategory="身份",subCategory="职业/与经济");msgs=[await event(f) for _ in range(3)]
     assert sum(await asyncio.gather(*(use(f,msg,contributed=[m.id]) for msg in msgs)))==3
     r=await row(f,m.id)
     assert r["current_score"]==pytest.approx(0.86,abs=1e-5) and r["level"]==1
+
+
+@pytest.mark.parametrize("side,overrides", [
+    ("user", {"mainCategory": "生活", "subCategory": "其他"}),
+    ("user", {"mainCategory": "思维", "subCategory": "其他"}),
+    ("ai", {"mainCategory": "生活", "subCategory": "生活", "provenance": "ai_authored"}),
+])
+async def test_value_over_threshold_does_not_make_non_core_memory_l1(memory_flow, side, overrides):
+    """生产 2026-10: 0.8 的一次性状态被选中注入一次就到 0.92 升了 L1。值照常累积, 层级不动。"""
+    f=memory_flow;m=await memory(f,side,currentScore=0.8,**overrides);msg=await event(f)
+    assert await use(f,msg,contributed=[m.id])==1
+    r=await row(f,m.id,side)
+    assert r["current_score"]==pytest.approx(0.92,abs=1e-5) and r["level"]==2
+    assert await f.db.memorychangelog.count(where={"memoryId":m.id,"operation":"promote"})==0
+
+
+async def _backdated_contribution(f, m, days_ago):
+    msg=await event(f)
+    await f.db.execute_raw(
+        "INSERT INTO memory_usage_receipts(event_id,memory_side,memory_id,contributed,reward,created_at) "
+        "VALUES ($1,'user',$2,TRUE,0.12,NOW() - make_interval(days => $3::int))", msg.id, m.id, days_ago)
+
+
+async def test_stable_preference_promotes_only_after_use_on_several_days(memory_flow):
+    from app.services.memory.lifecycle.value import L1_PROMOTION_MIN_CONTRIBUTION_DAYS as need
+    f=memory_flow
+    m=await memory(f,currentScore=0.8,mainCategory="偏好",subCategory="禁忌/雷区")
+    for days_ago in range(1, need - 1):
+        await _backdated_contribution(f, m, days_ago)
+    await _backdated_contribution(f, m, 1)  # 同一天的第二次不多算一天
+    assert await use(f,await event(f),contributed=[m.id])==1
+    assert (await row(f,m.id))["level"]==2
+    await _backdated_contribution(f, m, need)
+    assert await use(f,await event(f),contributed=[m.id])==1
+    assert (await row(f,m.id))["level"]==1
 
 
 async def test_candidate_upgrades_to_contribution_without_double_credit(memory_flow):

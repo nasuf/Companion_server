@@ -16,6 +16,7 @@ from prisma import Json
 
 from app.db import db
 from app.observability.events import EVT_PREFLIGHT_RESOLVED
+from app.services.mbti import build_personality_brief
 from app.services.memory.interaction.contradiction import (
     generate_contradiction_inquiry,
     save_pending_contradiction,
@@ -125,10 +126,12 @@ async def resolve_retrieval_feedback_correction(
         user_id=ctx.user_id, workspace_id=workspace_id, agent_id=ctx.agent_id,
         message_ids=list(ctx.message_ids), user_message=user_message)
     ctx.memory_confirmation = True
-    personality_brief = ctx.agent.name if ctx.agent else "AI"
+    previous_text = str(getattr(previous_assistant, "content", "") or "").strip()
     reply = await generate_contradiction_inquiry(
         conflict,
-        agent_name=personality_brief,
+        agent_name=ctx.agent.name if ctx.agent else "AI",
+        recent_context=f"AI: {previous_text}" if previous_text else "",
+        personality_brief=build_personality_brief(ctx.agent) if ctx.agent else "",
     )
     ctx.last_short_circuit_reply = reply
     logger.info(

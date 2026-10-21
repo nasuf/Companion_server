@@ -43,11 +43,19 @@ class TestOfflineActivitySection:
         assert "上河书房" in section.body
         assert "已经到了现场" in section.body
 
-    async def test_not_reached_activity_injects_enroute_context(self):
-        section = await _build(
+    async def test_planned_activity_is_not_an_ongoing_outing(self):
+        """accepted 只表示放进了待出行: 没到现场就不注入"正在陪 TA 外出"."""
+        assert await _build(
             {"title": "X 活动", "location_name": "Y 地点", "reached": False}
-        )
-        assert "前往" in section.body
+        ) is None
+
+    async def test_planned_activity_keeps_cancellation_facts_only(self):
+        section = await _build({
+            "title": "X 活动", "location_name": "Y 地点", "reached": False,
+            "cancelled_plans": [dict(activity_id="a", title="旧活动", status="cancelled")],
+        })
+        assert "旧活动" in section.body and "cancelled" in section.body
+        assert "正在陪" not in section.body and "X 活动" not in section.body
 
     async def test_never_leaks_task_or_items(self):
         """硬约束: 段内含"严禁提及任务"的规则, 且模板本身不含任何拍摄物品名。"""

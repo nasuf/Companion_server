@@ -586,8 +586,10 @@ async def get_cancelled_activity_plans(user_id: str, workspace_id: str | None) -
 async def get_active_activity_brief(
     user_id: str, workspace_id: str | None = None
 ) -> dict[str, Any] | None:
-    """当前进行中(accepted)活动的轻量概要，供聊天主回复注入外出情境。
+    """最近一条 accepted 活动的轻量概要，供聊天主回复注入外出情境。
 
+    accepted 含"放进待出行、还没去"的计划; 是否算正在外出看 reached, 由调用方判定
+    (chat.prompt_builder 只在到达后注入外出段)。
     只取最近一条 accepted 活动（走 offline_activity_user_status_idx 索引，热路径友好）。
     只把预先校验过的安全线索放进聊天 prompt；物品名/类别/别名永不返回。
     """

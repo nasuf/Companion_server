@@ -15,9 +15,10 @@ from datetime import UTC, datetime, timedelta
 from app.db import db
 from app.services.memory.lifecycle.value import (
     ACCESS_CEILING, ACCESS_REWARD, CONTRIBUTION_REWARD, VALUE_MAX,
-    decayed_value, next_level,
+    decayed_value, l1_promotion_allowed, next_level,
 )
-from app.services.memory.taxonomy import L1_SINGLETON_SUBS
+from app.services.memory.taxonomy import L1_SINGLETON_SUBS, l1_promotion_requirement
+from app.services.schedule_domain.sql_time import LOCAL_UTC_OFFSET_HOURS, local_date_sql
 
 logger = logging.getLogger(__name__)
 _TABLES = {"user": "memories_user", "ai": "memories_ai"}
@@ -43,6 +44,33 @@ def scope_lock_key(source: str, user_id: str, workspace_id: str | None) -> int:
     return int.from_bytes(hashlib.sha256(json.dumps(
         [_TABLES[source], user_id, workspace_id], ensure_ascii=False,
     ).encode()).digest()[:8], "big", signed=True)
+
+
+async def _past_contribution_days(
+    tx, *, source: str, rows: list[dict], event_id: str | None, now: datetime,
+) -> dict[str, int]:
+    """sustained 类目在今天之前被注入过的本地自然日数, 供 L1 晋升闸门使用。
+
+    只查已在 L2/L3、类目需要持续证据的行; 今天单独由调用方按本次是否贡献补上,
+    所以同一天的重放和多轮对话不会把一天算成几天。
+    """
+    if source != "user":
+        return {}
+    ids = [r["id"] for r in rows if r["level"] != 1 and l1_promotion_requirement(
+        r["main_category"], r["sub_category"]) == "sustained"]
+    if not ids:
+        return {}
+    today = (now + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)).date().isoformat()
+    day = local_date_sql("created_at")
+    counted = await tx.query_raw(
+        f"""SELECT memory_id, COUNT(DISTINCT {day})::int AS days
+            FROM memory_usage_receipts
+            WHERE memory_side=$1 AND memory_id=ANY($2::text[]) AND contributed
+              AND event_id IS DISTINCT FROM $3::text AND {day} < $4::date
+            GROUP BY memory_id""",
+        source, ids, event_id, today,
+    )
+    return {r["memory_id"]: int(r["days"]) for r in counted}
 
 
 async def _apply_batch(
@@ -93,6 +121,9 @@ async def _apply_batch(
             user_id, workspace_id,
         )}
         now = datetime.now(UTC)
+        past_days = await _past_contribution_days(
+            tx, source=source, rows=rows, event_id=event_id, now=now,
+        ) if signals is not None else {}
         updates, receipts, changes = [], [], []
         rows.sort(key=lambda r: (-float(r["current_score"] if r["current_score"] is not None else r["importance"]), r["id"]))
         for row in rows:
@@ -116,8 +147,12 @@ async def _apply_batch(
             category = (row["main_category"], row["sub_category"])
             singleton = category in L1_SINGLETON_SUBS
             level = next_level(value, old_level, protected=singleton and old_level == 1)
-            if row["provenance"] == "daily_summary" and old_level != 1:
-                level = max(2, level)
+            if level == 1 and old_level != 1 and not l1_promotion_allowed(
+                side=source, provenance=row["provenance"],
+                main_category=row["main_category"], sub_category=row["sub_category"],
+                contribution_days=past_days.get(mid, 0) + (1 if contributed else 0),
+            ):
+                level = old_level
             if level == 1 and old_level != 1 and singleton:
                 if category in occupied:
                     level = old_level

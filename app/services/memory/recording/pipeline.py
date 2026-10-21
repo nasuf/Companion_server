@@ -29,11 +29,19 @@ from app.services.memory.recording.pre_filter import (
 from app.services.memory import provenance as provenance_mod
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
 from app.services.memory.lifecycle.quality import log_memory_evidence
-from app.services.memory.config import level_for_importance, RECURRENCE_PERIODIC
+from app.services.memory.config import (
+    L1_MIN_IMPORTANCE,
+    RECURRENCE_PERIODIC,
+    level_for_importance,
+)
 from app.services.memory.recording.identity_repair import (
     repair_identity_classification,
 )
-from app.services.memory.taxonomy import SUBCATEGORY_ALIASES
+from app.services.memory.taxonomy import (
+    LEGACY_TYPE_TO_MAIN_CATEGORY,
+    SUBCATEGORY_ALIASES,
+    l1_promotion_requirement,
+)
 from app.services.schedule_domain.time_parser import (
     has_explicit_time,
     parse_with_statement_time,
@@ -179,6 +187,20 @@ def _is_uncertain_ai_self_memory(
 
 
 _DEFAULT_IMPORTANCE = 0.5
+# 录入即 L1 的最高分以下一档: 不配当核心事实的记忆打再高分也只落 L2。
+_NON_CORE_IMPORTANCE_CAP = round(L1_MIN_IMPORTANCE - 0.01, 2)
+
+
+def _l1_on_insert_allowed(side: str, main: str | None, sub: str | None) -> bool:
+    """录入时能否直接落 L1, 跟生命周期的 L1 晋升闸门同一口径。
+
+    用户侧按 taxonomy.l1_promotion_requirement: 情景 / 当下状态 / "其他" 类不进 L1。
+    AI 侧聊天自述只有关系里程碑 (生活/交互) 能录入即 L1 —— L1 AI 是人设核心,
+    其余由建号种子决定 (见 extraction_ai 规则 10/11)。
+    """
+    if side == "ai":
+        return (main, sub) == ("生活", "交互")
+    return l1_promotion_requirement(main, sub) != "never"
 
 
 def _coerce_importance(raw: object) -> float:
@@ -413,6 +435,13 @@ async def process_memory_pipeline(
         # demotion is harmless to the reminder feature itself.
         if sub_category == "提醒":
             importance = max(0.4, min(0.49, float(importance)))
+
+        if importance >= L1_MIN_IMPORTANCE and not _l1_on_insert_allowed(
+            side,
+            main_category or LEGACY_TYPE_TO_MAIN_CATEGORY.get(memory_type or ""),
+            sub_category,
+        ):
+            importance = _NON_CORE_IMPORTANCE_CAP
 
         # Per spec《产品手册·背景信息》§2.3 — level is derived from importance
         # score (0-100), not whatever level the LLM may have guessed:

@@ -71,6 +71,41 @@ PROMOTION_RULES: dict[tuple[str, str], dict[str, float | int | bool]] = {
     ("思维", "自我认知"): {"allow_l1": True, "min_importance": 0.9, "min_mentions": 2},
 }
 
+L1PromotionRequirement = Literal["immediate", "sustained", "never"]
+
+
+def l1_promotion_requirement(main: str | None, sub: str | None) -> L1PromotionRequirement:
+    """用户侧记忆凭使用频率晋升 L1 的资格 (录入期层级钳制共用同一口径)。
+
+    L1 在下游的语义是"核心事实": prompt 里标「重要」、稳定事实优先于历史对话、
+    矛盾检测拿它当对照。2026-10 生产上「用户已经在工位了」「用户询问是否和对方在
+    一个地方」这类一次性状态和对话行为被升进 L1, 随后被当成真理用 —— 值高只说明
+    最近常被检索到, 不说明它配当核心事实。
+
+    - immediate: 身份事实 (除"其他"), 值过线即可升
+    - sustained: PROMOTION_RULES 里允许 L1 的偏好/思维子类, 还要跨多日被持续用到
+    - never: 生活 / 情绪 / 各类"其他" —— 情景、当下状态与杂项, 稳定版本应归进身份或偏好
+    """
+    if not main or not sub or sub == "其他" or sub == "提醒":
+        return "never"
+    if main == "身份":
+        return "immediate"
+    rule = PROMOTION_RULES.get((main, sub))
+    if rule and rule.get("allow_l1"):
+        return "sustained"
+    return "never"
+
+
+def is_contradiction_attribute(main: str | None, sub: str | None) -> bool:
+    """spec §4 交互矛盾只对照身份属性 (姓名/年龄/现居地/职业/亲属…)。
+
+    矛盾的形态是"同一属性的两个取值", 只有身份事实天然是这种形态。偏好会变、
+    情景和状态本来就随时间变, 拿它们当对照只会把"用户不在工位"这类话误判成矛盾,
+    再追问一句让用户莫名其妙。
+    """
+    return l1_promotion_requirement(main, sub) == "immediate"
+
+
 # ── Initial L1 coverage policy (agent provisioning) ───────────────────
 # spec §1.2: agent 创建时应保证每个 (main, sub) 子类都有 L1 记忆。
 # Singleton: 只能有 1 条(事实型,多了就矛盾)。Multi: 3-5 条。

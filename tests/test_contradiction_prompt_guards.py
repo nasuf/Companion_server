@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -135,14 +136,21 @@ def test_no_specific_production_case_phrases_in_prompts():
             )
 
 
+def _l1(mid, content, sub, main="身份"):
+    return SimpleNamespace(
+        id=mid, content=content, mainCategory=main, subCategory=sub,
+        createdAt=datetime(2026, 10, 10, 13, 0, tzinfo=UTC),
+    )
+
+
 @pytest.mark.asyncio
 async def test_contradiction_detector_discards_l1_to_l1_conflict_not_in_current_message():
     """LLM 把两条旧 L1 互相冲突误报为当前矛盾时, 后验校验必须丢弃。"""
     from app.services.memory.interaction.contradiction import detect_l1_contradiction
 
     memories = [
-        SimpleNamespace(id="m-old", content="用户是独生女，无兄弟姐妹"),
-        SimpleNamespace(id="m-new", content="用户有个妹妹叫辽能"),
+        _l1("m-old", "用户是独生女，无兄弟姐妹", "亲属关系"),
+        _l1("m-new", "用户有个妹妹叫辽能", "亲属关系"),
     ]
     llm_result = {
         "has_conflict": True,
@@ -181,7 +189,7 @@ async def test_contradiction_detector_keeps_conflict_grounded_in_current_message
     from app.services.memory.interaction.contradiction import detect_l1_contradiction
 
     memories = [
-        SimpleNamespace(id="m-city", content="用户现在住北京"),
+        _l1("m-city", "用户现在住北京", "现居地"),
     ]
     llm_result = {
         "has_conflict": True,
@@ -212,3 +220,106 @@ async def test_contradiction_detector_keeps_conflict_grounded_in_current_message
         )
 
     assert result == llm_result
+
+
+def test_contradiction_detection_reads_context_but_not_as_conflict_source():
+    """省略句要放回上下文才知道在说什么; 但上下文只能帮助理解, 不能当矛盾的一端."""
+    from app.services.prompting.defaults import MEMORY_CONTRADICTION_DETECTION_PROMPT
+    p = MEMORY_CONTRADICTION_DETECTION_PROMPT
+
+    assert "{recent_context}" in p
+    assert "矛盾的任何一端都不能取自这里" in p
+    assert "当下状态" in p, "当下状态/临时行程跟长期身份属性不是同一属性"
+
+
+def test_contradiction_inquiry_answers_the_message_and_avoids_rhetorical_questions():
+    """追问是本轮唯一回复: 必须先接住对方这句话, 也不能用反问句质疑对方."""
+    from app.services.prompting.defaults import MEMORY_CONTRADICTION_INQUIRY_PROMPT
+    p = MEMORY_CONTRADICTION_INQUIRY_PROMPT
+
+    assert "{recent_context}" in p
+    assert "先结合最近对话接住对方这句话本身" in p
+    assert "反问" in p
+
+
+def _detect_patches(memories, llm_result, captured=None):
+    async def invoke(_model, prompt):
+        if captured is not None:
+            captured.append(prompt)
+        return llm_result
+
+    return (
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.find_many",
+            new=AsyncMock(return_value=memories),
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.get_prompt_text",
+            new=AsyncMock(return_value="{user_message}\n{recent_context}\n{existing_l1_memory}"),
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.invoke_json",
+            new=AsyncMock(side_effect=invoke),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_contradiction_detector_only_compares_identity_attributes():
+    """当下状态 / 情景 / "其他" 类混进 L1 也不参与对照 —— 一句"我不在啊"
+    不能因为 L1 里有"用户已经在工位了"就被判成矛盾."""
+    from app.services.memory.interaction.contradiction import detect_l1_contradiction
+
+    memories = [
+        _l1("m-desk", "用户已经在工位了", "其他", main="生活"),
+        _l1("m-ask", "用户询问是否和对方在一个地方", "其他", main="思维"),
+        _l1("m-misc", "用户身份其他", "其他"),
+    ]
+    p1, p2, p3 = _detect_patches(memories, {"has_conflict": True, "conflicting_memory_id": "m-desk"})
+    with p1 as find_many, p2, p3 as invoke:
+        result = await detect_l1_contradiction("我不在啊", "u1", workspace_id="w1")
+
+    assert result is None
+    invoke.assert_not_awaited()
+    assert find_many.await_args.kwargs["where"]["mainCategory"] == "身份"
+
+
+@pytest.mark.asyncio
+async def test_contradiction_detector_sends_context_and_record_dates():
+    from app.services.memory.interaction.contradiction import detect_l1_contradiction
+
+    captured: list[str] = []
+    p1, p2, p3 = _detect_patches(
+        [_l1("m-city", "用户现在住北京", "现居地")], {"has_conflict": False}, captured,
+    )
+    with p1, p2, p3:
+        result = await detect_l1_contradiction(
+            "我不在啊", "u1", workspace_id="w1", recent_context="AI: 你也在北京吗？",
+        )
+
+    assert result is None
+    assert "AI: 你也在北京吗？" in captured[0]
+    assert "用户现在住北京（现居地，记录于 2026-10-10）" in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_contradiction_detector_without_context_says_so():
+    from app.services.memory.interaction.contradiction import detect_l1_contradiction
+
+    captured: list[str] = []
+    p1, p2, p3 = _detect_patches(
+        [_l1("m-city", "用户现在住北京", "现居地")], {"has_conflict": False}, captured,
+    )
+    with p1, p2, p3:
+        await detect_l1_contradiction("我搬到上海了", "u1", workspace_id="w1")
+
+    assert "(无)" in captured[0]
+
+
+def test_record_date_uses_local_day_and_tolerates_missing_or_naive_stamps():
+    from app.services.memory.interaction.contradiction import _record_date
+
+    assert _record_date(SimpleNamespace(createdAt=None)) == "时间未知"
+    # 库里是 UTC 的 naive 时间: 23:30 UTC 已经是本地次日
+    assert _record_date(SimpleNamespace(createdAt=datetime(2026, 10, 10, 23, 30))) == "2026-10-11"
+    assert _record_date(SimpleNamespace(createdAt=datetime(2026, 10, 10, 1, 0, tzinfo=UTC))) == "2026-10-10"
