@@ -10,7 +10,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.config import settings
 from app.services.temporal import parse_time, local_clock
 
 
@@ -100,6 +102,7 @@ def format_timeline(
     *,
     max_chars: int = _ENTRY_MAX_CHARS,
     token_budget: int = TIMELINE_TOKEN_BUDGET,
+    timezone_name: str | None = None,
 ) -> str:
     """渲染成紧凑的日期行, 按 token 预算从最近往前收.
 
@@ -123,7 +126,7 @@ def format_timeline(
         # 归属前缀是必须的, 不是装饰: 时间线同时含用户经历和 AI 自己的经历, 不标
         # 归属的话"我上次去博物馆是几个月前"可能被 AI 自己的经历答掉。
         who = "我" if e.owner == "ai" else "用户" if e.owner == "user" else "归属未知"
-        line = f"[{who}] {label} {local_clock(e.at)[:10]} {text}"
+        line = f"[{who}] {label} {local_clock(e.at, timezone_name=timezone_name)[:10]} {text}"
         cost = estimate_tokens(line) + 1  # +1 为换行
         if used + cost > token_budget:
             break
@@ -133,14 +136,23 @@ def format_timeline(
     return "\n".join([header, *lines]) if lines else ""
 
 
-def timeline_evidence(rows: list[dict]) -> tuple[str | None, dict]:
+def timeline_evidence(rows: list[dict], *, timezone_name: str | None = None) -> tuple[str | None, dict]:
     """Count only this bounded retrieval candidate set, never the memory bank."""
     entries = build_timeline(rows, limit=max(1, len(rows)))
     selected = entries[-40:]
-    text = format_timeline(selected)
+    zone = timezone_name or settings.schedule_timezone
+    try:
+        ZoneInfo(zone)
+        valid_zone = True
+    except (ValueError, ZoneInfoNotFoundError):
+        valid_zone = False
+    text = format_timeline(selected, timezone_name=zone) if valid_zone else ""
     shown = max(0, len(text.splitlines()) - 1)
     return text or None, {
-        "version": 1, "candidate_count": len(rows),
+        "version": 2, "status": "rendered" if valid_zone else "unavailable",
+        "timezone": zone if valid_zone else None,
+        "reason": "candidate_dates" if valid_zone else "invalid_timezone",
+        "candidate_count": len(rows),
         "dated_count": len(entries), "shown_count": shown,
         "event_date_count": sum(e.dated_by == "occur_time" for e in entries),
         "mention_only_count": sum(e.dated_by == "statement_time" for e in entries),

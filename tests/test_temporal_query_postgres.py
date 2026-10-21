@@ -32,3 +32,50 @@ async def test_original_message_anchor_filters_real_pg_events_without_rewriting(
     assert mid in ids and wrong.id not in ids and foreign.id not in ids
     assert (await db.message.find_unique(where={"id":message.id})).content == "昨天去博物馆"
     assert (await db.usermemory.find_unique(where={"id":mid})).occurTime.date() == (original-timedelta(days=1)).date()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text,zone,start_text,end_text', [
+    ('上个月', 'Asia/Shanghai', '2026-09-01T00:00:00', '2026-10-01T00:00:00'),
+    ('昨天上午', 'Asia/Shanghai', '2026-10-20T09:00:00', '2026-10-20T12:00:00'),
+    ('昨天9点30分', 'Asia/Shanghai', '2026-10-20T09:30:00', '2026-10-20T09:31:00'),
+    ('2024年2月29日', 'Asia/Shanghai', '2024-02-29T00:00:00', '2024-03-01T00:00:00'),
+    ('2026年3月8日', 'America/New_York', '2026-03-08T00:00:00', '2026-03-09T00:00:00'),
+    ('2026年11月1日', 'America/New_York', '2026-11-01T00:00:00', '2026-11-02T00:00:00'),
+])
+async def test_pg_half_open_boundaries_include_final_millisecond_and_keep_scope(
+        origins, monkeypatch, text, zone, start_text, end_text):
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    from app.services.memory.retrieval import vector_search
+    db, uid, wid, _, _, _, _, users, _, spaces, _ = origins
+    monkeypatch.setattr(vector_search, 'db', db)
+    columns = await db.query_raw("SELECT datetime_precision FROM information_schema.columns WHERE table_name IN ('memories_user','memories_ai') AND column_name='occur_time'")
+    assert len(columns) == 2 and all(c['datetime_precision'] == 3 for c in columns)
+    q = resolve_temporal_query(text, anchor='2026-12-01T12:00:00Z' if '11月' in text else '2026-10-21T01:00:00Z',
+                              anchor_source='persisted_message', timezone_name=zone)
+    expected_start, expected_end = [datetime.fromisoformat(t).replace(tzinfo=ZoneInfo(zone)).astimezone(timezone.utc)
+                                    for t in [start_text, end_text]]
+    assert q.retrieval_range() == (expected_start, expected_end)
+    expected = {'user':set(), 'ai':set()}
+    all_ids=[]
+    for side, table, model in [('user','memories_user',db.usermemory),('ai','memories_ai',db.aimemory)]:
+        for index, stamp in enumerate([expected_start-timedelta(milliseconds=1), expected_start,
+                                       expected_end-timedelta(milliseconds=1), expected_end]):
+            row=await model.create(data={'userId':uid,'workspaceId':wid,'content':f'合成边界{side}{index}', 'level':2})
+            # Use the actual TIMESTAMP(3) storage precision. Sub-millisecond
+            # fixtures round to the next boundary and would test different data.
+            await db.execute_raw(f'UPDATE {table} SET occur_time=$2::text::timestamp WHERE id=$1',
+                                 row.id, stamp.replace(tzinfo=None).isoformat())
+            all_ids.append(row.id)
+            if index in {1,2}: expected[side].add(row.id)
+        for other_uid, other_wid, archived in [(users[1],spaces[2],False),(uid,spaces[1],False),(uid,wid,True)]:
+            await model.create(data={'userId':other_uid,'workspaceId':other_wid,'content':'隔离边界',
+                                     'level':2,'occurTime':expected_start,'isArchived':archived})
+    for side in ['user','ai',None]:
+        rows=await vector_search.search_by_time_range(uid,*q.retrieval_range(),source=side,workspace_id=wid,limit=50)
+        wanted=expected[side] if side else expected['user']|expected['ai']
+        assert {r['id'] for r in rows} == wanted
+    # Retrieval has no write side effects; all synthetic boundary rows remain.
+    assert await db.usermemory.count(where={'id':{'in':all_ids}}) == 4
+    assert await db.aimemory.count(where={'id':{'in':all_ids}}) == 4

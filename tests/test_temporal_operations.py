@@ -47,7 +47,11 @@ def test_adjacent_range_endpoints_define_union_not_intersection(expression, star
     q = query(expression)
     assert q.status == "resolved"
     a, b = q.retrieval_range()
-    assert a.date().isoformat() == start and b.date().isoformat() == end
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    # SQL windows are UTC and exclude the next local midnight.
+    assert a.astimezone(ZoneInfo(q.timezone)).date().isoformat() == start
+    assert (b.astimezone(ZoneInfo(q.timezone)) - timedelta(microseconds=1)).date().isoformat() == end
 
 
 @pytest.mark.parametrize("expression", ["去年和上个月", "本周或今天", "今天以及今年", "上周、昨天"])

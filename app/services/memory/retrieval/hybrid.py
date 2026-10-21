@@ -455,7 +455,7 @@ async def hybrid_retrieve(
     # the complete history. The evidence labels and diagnostics preserve that limit.
     timeline_text, timeline_diagnostics = None, None
     if is_aggregate_time_question(message):
-        timeline_text, timeline_diagnostics = timeline_evidence(all_candidates)
+        timeline_text, timeline_diagnostics = timeline_evidence(all_candidates, timezone_name=query.timezone)
 
     result = {
         "memories": classified_memories if classified_memories else None,

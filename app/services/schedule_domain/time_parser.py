@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, time, timezone
 
 from app.services.schedule_domain import holiday_cache
 from app.services.schedule_domain.time_service import _TZ, _now_corrected, ensure_aware
+from app.services.temporal import EndBoundary, exclusive_end
 
 _WEEKDAY_CN = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
 
@@ -121,6 +122,12 @@ class ParsedTime:
     end: datetime
     confidence: float
     is_future: bool
+    # Metadata only; legacy start/end values and scheduling behaviour stay intact.
+    end_boundary: EndBoundary = "exclusive"
+
+    @property
+    def end_exclusive(self) -> datetime:
+        return exclusive_end(self.end, self.end_boundary)
 
 
 @dataclass
@@ -173,7 +180,8 @@ def parse_time_expressions(
     results: list[ParsedTime] = []
     used_spans: list[tuple[int, int]] = []
 
-    def _add(text: str, start: datetime, end: datetime, typ: str, conf: float, span: tuple[int, int] | None = None) -> None:
+    def _add(text: str, start: datetime, end: datetime, typ: str, conf: float, span: tuple[int, int] | None = None,
+             *, end_boundary: EndBoundary = "inclusive_microsecond") -> None:
         if span:
             for us, ue in used_spans:
                 if span[0] < ue and span[1] > us:
@@ -190,6 +198,7 @@ def parse_time_expressions(
             end=end,
             confidence=conf,
             is_future=start > now,
+            end_boundary=end_boundary,
         ))
 
     def _day_range(d: date) -> tuple[datetime, datetime]:
@@ -263,7 +272,8 @@ def parse_time_expressions(
             d = today + timedelta(days=step * amount)
             s, _ = _day_range(d)
             _, e = _day_range(d + timedelta(days=30))
-        _add(m.group(), s, e, "relative", 0.88, m.span())
+        _add(m.group(), s, e, "relative", 0.88, m.span(),
+             end_boundary="exclusive" if unit in {"分钟", "小时"} else "inclusive_microsecond")
 
     # --- 2. 相对周 ---
     for m in _WEEK_PAT.finditer(message):
@@ -331,7 +341,7 @@ def parse_time_expressions(
             _, last_day = monthrange(year, month)
             s = datetime(year, month, 1, tzinfo=zone)
             e = datetime(year, month, last_day, 23, 59, 59, tzinfo=zone)
-            _add(word, s, e, "relative", 0.85, span)
+            _add(word, s, e, "relative", 0.85, span, end_boundary="inclusive_second")
 
     # --- 4a. 带年份的显性日期 (2026-08-23 / 2026年8月9日). 必须在 4. 之前, 让
     #         _add 的 span 去重挡掉下面 _DATE_PAT 对 "8月9日" 子串的重复(错年份)匹配 ---
@@ -374,7 +384,7 @@ def parse_time_expressions(
         else:
             s = datetime(year, 1, 1, tzinfo=zone)
             e = datetime(year, 12, 31, 23, 59, 59, tzinfo=zone)
-        _add(m.group(), s, e, "absolute", 0.85, m.span())
+        _add(m.group(), s, e, "absolute", 0.85, m.span(), end_boundary="inclusive_second")
 
     # --- 6. 时间点 X点/时 ---
     for m in _HOUR_PAT.finditer(message):
@@ -385,13 +395,13 @@ def parse_time_expressions(
         if period == "晚上" and hour == 12:
             anchor_day = today + timedelta(days=1)
             dt = datetime.combine(anchor_day, time(0, minute), tzinfo=zone)
-            _add(m.group(), dt, dt + timedelta(hours=1), "absolute", 0.85, m.span())
+            _add(m.group(), dt, dt + timedelta(hours=1), "absolute", 0.85, m.span(), end_boundary="exclusive")
             continue
         if period and hour <= 12 and period in _PM_PERIODS and hour < 12:
             hour += 12
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             dt = datetime.combine(today, time(hour, minute), tzinfo=zone)
-            _add(m.group(), dt, dt + timedelta(hours=1), "absolute", 0.8, m.span())
+            _add(m.group(), dt, dt + timedelta(hours=1), "absolute", 0.8, m.span(), end_boundary="exclusive")
 
     # --- 7. 时间段词 ---
     for period_name, (h_start, h_end) in _PERIOD_HOURS.items():
@@ -408,7 +418,7 @@ def parse_time_expressions(
             s = datetime.combine(anchor_day, time(h_start, 0), tzinfo=zone)
             e = datetime.combine(anchor_day, time(h_end - 1, 59, 59), tzinfo=zone)
         for match in matches:
-            _add(period_name, s, e, "relative", 0.6, match.span())
+            _add(period_name, s, e, "relative", 0.6, match.span(), end_boundary="inclusive_second")
 
     # --- 8. 节日名称 ---
     for holiday_name in holiday_cache.all_known_names():

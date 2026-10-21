@@ -6,14 +6,14 @@ new wall clock during retrieval, and ambiguous ranges never narrow recall.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.config import settings
-from app.services.temporal import parse_time
+from app.services.temporal import EndBoundary, exclusive_end, parse_time
 from app.services.temporal_operation import TemporalOperation, classify_temporal_operation
 from app.services.temporal_binding import (
     SourceText, binding_diagnostics, binding_uncertainty, locate_parts,
@@ -30,6 +30,8 @@ _ALIASES = {"昨晚": "昨天晚上", "昨夜": "昨天晚上", "今早": "今�
 _ALIAS_PATTERN = re.compile("|".join(_ALIASES))
 _IMPRECISE = re.compile(r"刚刚|刚才|不久前|前不久|一会儿|待会|稍后")
 _JOIN = re.compile(r"\s*(?:到|至|—|~|～)\s*")
+_CLOCK_MINUTE = re.compile(r"[点时]\d{1,2}分?$")
+_CLOCK_HOUR = re.compile(r"\d{1,2}[点时]$")
 _HOLIDAY = re.compile(r"春节|端午|中秋|国庆|除夕|元旦|圣诞|清明|重阳|元宵")
 # These references may date a statement, quotation, or stored record instead of
 # its subject. Without semantic binding, retaining recall is safer than using
@@ -59,6 +61,7 @@ class TemporalExpression:
     end: datetime
     precision: str
     kind: str
+    end_boundary: EndBoundary = "exclusive"
 
 
 @dataclass(frozen=True)
@@ -93,7 +96,13 @@ class TemporalQuery:
         }
 
     def diagnostics(self) -> dict:
+        window = self.retrieval_range()
         return {**self.prompt_context(),
+                "retrieval_window": {"version": 1,
+                    "status": "eligible" if window else "not_eligible",
+                    "bounds": "[start,end)",
+                    "start": window[0].isoformat() if window else None,
+                    "end_exclusive": window[1].isoformat() if window else None},
                 "date_basis": {"version": 1, "kind": self.date_basis,
                                "event_range_eligible": self.allows_event_range()},
                 "binding": self.binding or {"version": 1, "decision": "not_analyzed",
@@ -104,20 +113,20 @@ class TemporalQuery:
         # include their date/zone; unknown anchors cannot reuse a dated result.
         value = self.diagnostics()
         value.pop("anchor_at")
-        return "time02:" + hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
+        return "time02f:" + hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
 
     def retrieval_range(self) -> tuple[datetime, datetime] | None:
         if not self.allows_event_range():
             return None
         p = self.expressions[0]
-        return (p.start, p.end) if self.anchor and p.start <= self.anchor else None
+        return (parse_time(p.start), exclusive_end(p.end, p.end_boundary)) if self.anchor and p.start <= self.anchor else None
 
     def parsed_times(self) -> list:
         from app.services.schedule_domain.time_parser import ParsedTime
         if not self.allows_event_range():
             return []
         return [ParsedTime("", p.kind, p.start, p.end, 1.0,
-                           bool(self.anchor and p.start > self.anchor)) for p in self.expressions]
+                           bool(self.anchor and p.start > self.anchor), p.end_boundary) for p in self.expressions]
 
 
 def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
@@ -196,10 +205,11 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
         return TemporalQuery(**base, status="ambiguous", reason="unbound_expression")
     # Never intersect dates separated by prose, even when their periods overlap.
     # Separate occurrences of the same spelling are separate evidence positions.
-    ordered = [p.parsed for p in parts]
+    ordered = [part.parsed for part in parts]
     # Bind only adjacent calendar-day + time-of-day expressions. "昨天中午"
     # is one period; "昨天去了，今天中午又去" is not. Never combine across prose.
     bound_range = None
+    end_boundary = ordered[0].end_boundary
     decision = "single_expression"
     if len(parts) == 2:
         left, right = ordered
@@ -209,6 +219,7 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
                 base["binding"] = binding_diagnostics(source, parts, "reversed_range")
                 return TemporalQuery(**base, status="unresolved", reason="reversed_range")
             bound_range = left.start, right.end
+            end_boundary = right.end_boundary
             decision = "explicit_range"
         days = [p for p in ordered if p.start.hour == 0 and p.start.minute == 0
                 and p.end.hour == 23 and p.end.minute == 59 and p.start.date() == p.end.date()]
@@ -219,6 +230,7 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
             if not bound_range and adjacent and re.search(r"点|时|早|上午|中午|下午|晚上|凌晨|深夜", part.original_text):
                 delta = day.start.date() - stamp.astimezone(zone).date()
                 bound_range = part.start + delta, part.end + delta
+                end_boundary = part.end_boundary
                 decision = "adjacent_day_time"
     if len(parts) > 1 and bound_range is None:
         if base["date_basis"] == "event_candidate":
@@ -228,6 +240,15 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
     base["binding"] = binding_diagnostics(
         source, parts, "reference_unbound" if base["date_basis"] == "unbound_reference" else decision)
     start, end = bound_range or (ordered[0].start, ordered[0].end)
+    if _CLOCK_MINUTE.search(ordered[-1].original_text):
+        # Refine read precision only after binding the calendar date. Refining
+        # on the statement's day first can carry its DST transition into a
+        # different event day. The legacy scheduling parser remains unchanged.
+        minute_start = ordered[-1].start if decision == "explicit_range" else start
+        if not _unique_local_clock(minute_start):
+            return TemporalQuery(**base, status="ambiguous", reason="ambiguous_clock")
+        end = (minute_start.astimezone(timezone.utc) + timedelta(minutes=1)).astimezone(zone)
+        end_boundary = "exclusive"
     if start > end:
         return TemporalQuery(**base, status="ambiguous", reason="multiple_periods")
     # Elapsed offsets have an unambiguous UTC anchor even during a repeated
@@ -237,7 +258,18 @@ def resolve_temporal_query(text: str, *, anchor: object, anchor_source: str,
         return TemporalQuery(**base, status="ambiguous", reason="ambiguous_clock")
     local_start, local_end = start.astimezone(zone), end.astimezone(zone)
     precision = "day" if local_start.date() == local_end.date() and local_start.hour == 0 and local_end.hour == 23 else "range"
-    expression = TemporalExpression(start, end, precision, parsed[0].type)
+    if decision in {"single_expression", "adjacent_day_time"}:
+        if _CLOCK_MINUTE.search(ordered[-1].original_text):
+            precision = "minute"
+        elif _CLOCK_HOUR.search(ordered[-1].original_text):
+            precision = "hour"
+    # Overflow or a non-positive real-time window is not a usable SQL range.
+    try:
+        if exclusive_end(end, end_boundary) <= parse_time(start):
+            raise ValueError("invalid_interval")
+    except (ValueError, OverflowError):
+        return TemporalQuery(**base, status="unresolved", reason="invalid_expression")
+    expression = TemporalExpression(start, end, precision, parsed[0].type, end_boundary)
     if base["operation"].type == "unspecified":
         base["operation"] = TemporalOperation("planned" if start > stamp else "range")
     return TemporalQuery(**base, status="resolved", reason="explicit_range",

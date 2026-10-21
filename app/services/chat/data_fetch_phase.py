@@ -21,6 +21,7 @@ from app.observability.events import (
     EVT_MEMORY_RETRIEVED,
 )
 from app.services.temporal_query import TemporalQuery
+from app.services.temporal import parse_time
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.chat.message_utils import last_user_turns
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
@@ -367,7 +368,8 @@ async def _load_time_memories(
     all_rows = await asyncio.gather(
         *[
             search_by_time_range(
-                user_id, pt.start, pt.end, limit=5, workspace_id=workspace_id,
+                user_id, parse_time(pt.start), pt.end_exclusive,
+                limit=5, workspace_id=workspace_id,
             )
             for pt in past_times
         ]

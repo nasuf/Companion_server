@@ -113,7 +113,7 @@ async def test_hybrid_cache_key_uses_enhanced_query():
     assert len(captured_keys) == 2
     assert [k.split("\n", 1)[0] for k in captured_keys] == ["妈妈情况", "妹妹情况"]
     assert captured_keys[0] != captured_keys[1]
-    assert all(k.split("\n", 1)[1].startswith("time02:") for k in captured_keys)
+    assert all(k.split("\n", 1)[1].startswith("time02f:") for k in captured_keys)
 
 
 @pytest.mark.asyncio
@@ -499,7 +499,7 @@ async def test_cache_write_uses_same_dated_key_as_read(enhanced, expected):
     assert get.await_count == put.await_count == 1
     key = get.await_args.args[0]
     assert key.split("\n", 1)[0] == expected
-    assert key.split("\n", 1)[1].startswith("time02:")
+    assert key.split("\n", 1)[1].startswith("time02f:")
     assert put.await_args.args[0] == key
     assert get.await_args.args[1] == put.await_args.args[1] == "u1"
     assert get.await_args.kwargs["workspace_id"] == put.await_args.kwargs["workspace_id"] == "w1"

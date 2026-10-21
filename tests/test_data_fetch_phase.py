@@ -296,9 +296,13 @@ async def test_fetch_parallel_context_fast_weak_preserves_entity_followup():
 async def test_fetch_parallel_context_time_memories_use_workspace_scope():
     """显式时间记忆段必须限制在当前 conversation workspace 内。"""
     from app.services.chat.data_fetch_phase import fetch_parallel_context
+    from app.services.schedule_domain.time_parser import ParsedTime
 
     now = datetime.now(timezone.utc)
-    parsed_time = SimpleNamespace(
+    parsed_time = ParsedTime(
+        original_text="上周",
+        type="relative",
+        confidence=1.0,
         is_future=False,
         start=now - timedelta(days=7),
         end=now,
