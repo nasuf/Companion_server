@@ -156,19 +156,20 @@ async def clear_my_chat_records(
 
 
 def _location_response(row) -> UserLocationResponse:
-    latitude = getattr(row, "location_latitude", None)
-    longitude = getattr(row, "location_longitude", None)
-    permission_status = getattr(row, "location_permission_status", None)
-    updated_at = getattr(row, "location_updated_at", None)
+    # Prisma query_raw returns mappings, not model instances.
+    latitude = row.get("location_latitude")
+    longitude = row.get("location_longitude")
+    permission_status = row.get("location_permission_status")
+    updated_at = row.get("location_updated_at")
     return UserLocationResponse(
         has_location=latitude is not None
         and longitude is not None
         and permission_status in {"whileInUse", "always"},
         latitude=latitude,
         longitude=longitude,
-        city=getattr(row, "location_city", None),
-        region=getattr(row, "location_region", None),
-        country=getattr(row, "location_country", None),
+        city=row.get("location_city"),
+        region=row.get("location_region"),
+        country=row.get("location_country"),
         permission_status=permission_status,
         updated_at=updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at,
     )
