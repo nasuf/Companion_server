@@ -60,6 +60,7 @@ async def extract_memories(
     *,
     context_conversation: str = "",
     side: Side = "user",
+    source_messages: str | None = None,
 ) -> dict:
     """Extract structured memory from a conversation string for one side.
 
@@ -78,6 +79,7 @@ async def extract_memories(
     now = datetime.now(ZoneInfo(settings.schedule_timezone))
     try:
         tpl = await get_prompt_text(_PROMPT_KEY_BY_SIDE[side])
+        source_contract = (await get_prompt_text("memory.extraction_source_contract")) if source_messages is not None else None
     except PromptDisabledError:
         # admin 停用抽取模板 → 本条消息不抽记忆, 但不能让异常打断整条
         # _bg_memory_pipeline (否则时间解析/changelog/提醒 timetrigger 全部连坐).
@@ -91,11 +93,19 @@ async def extract_memories(
             "_extraction_error": True,
             "_extraction_error_kind": "prompt_disabled",
         }
+    if source_contract is not None:
+        from app.services.prompting.trace_components import ManagedPromptText
+
+        tpl = ManagedPromptText.compose([
+            (_PROMPT_KEY_BY_SIDE[side], tpl),
+            ("memory.extraction_source_contract", source_contract),
+        ], _PROMPT_KEY_BY_SIDE[side])
     prompt = tpl.format(
         new_conversation=new_conversation,
         context_conversation=context_conversation or "(无)",
         current_time=now.strftime("%Y-%m-%d %H:%M %A"),
         taxonomy_list=_taxonomy_list_text(side),
+        source_messages=source_messages,
     )
 
     import time as _time

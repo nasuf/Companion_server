@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.prompting.defaults import (
+    MEMORY_EXTRACTION_SOURCE_CONTRACT_PROMPT,
     CHAT_TEMPORAL_RECALL_PROMPT, CHAT_TEMPORAL_RECALL_CHECK_PROMPT,
     CHAT_TEMPORAL_CONTEXT_PROMPT,
     CHAT_TEMPORAL_EVIDENCE_PROMPT,
@@ -850,6 +851,12 @@ PROMPT_DEFINITIONS = [
         "《记忆部分产品手册》§2.2.3: 拆分 + 五类分类 + importance 打分合并一步, "
         "仅抽 AI 自我记忆, 存 memories_ai (A 库).",
         MEMORY_EXTRACTION_AI_PROMPT,
+    ),
+
+    PromptDefinition(
+        "memory.extraction_source_contract", "记忆来源与事件时间归因", "异步记忆", "记忆",
+        "逐事实关联已校验原消息；原文时间由规则解析，未确定的时间保留未知。",
+        MEMORY_EXTRACTION_SOURCE_CONTRACT_PROMPT,
     ),
 
     # ── 记忆: 矛盾处理 (Memory §4) ──

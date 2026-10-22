@@ -264,6 +264,7 @@ async def store_memory(
     evidence_sources: tuple | None = None,
     extractor_version: str = "memory-write-v1",
     skip_reconciliation: bool = False,
+    infer_time: bool = True,
     _singleton_locked: bool = False,
     _split_done: bool = False,
     _consolidation_staged: bool = False,
@@ -323,7 +324,7 @@ async def store_memory(
     # 总结 / 送礼红包 / L3 整合等**所有**写入路径都受益, 而不是各写一遍。分层与
     # 排除 (提醒/profile_seed/远过去词/非事件类) 见 time_parser.resolve_occur_time。
     # 放在拆分前 → 拆出的多行共享同一 occur_time。
-    if occur_time is None:
+    if occur_time is None and infer_time:
         occur_time = resolve_occur_time(
             content,
             statement_time=statement_time,
@@ -343,6 +344,10 @@ async def store_memory(
                 "[STORE-SPLIT] content exceeds the per-item limit; storing as %d rows",
                 len(pieces),
             )
+            if not infer_time:
+                from app.services.memory.recording.temporal_sources import uncertain_composite_sources
+                evidence_sources = uncertain_composite_sources(evidence_sources or (), "split_unresolved")
+                occur_time = statement_time = None
             first_id: str | None = None
             for piece in pieces:
                 mid = await store_memory(
@@ -353,7 +358,7 @@ async def store_memory(
                     workspace_id=workspace_id, recurrence=recurrence,
                     entities=entities, topics=topics, provenance=provenance,
                     evidence_sources=evidence_sources, extractor_version=extractor_version,
-                    skip_reconciliation=skip_reconciliation, _split_done=True,
+                    skip_reconciliation=skip_reconciliation, infer_time=infer_time, _split_done=True,
                     _consolidation_staged=_consolidation_staged,
                 )
                 first_id = first_id or mid
@@ -390,7 +395,7 @@ async def store_memory(
                     recurrence=recurrence, entities=entities, topics=topics,
                     provenance=provenance,
                     evidence_sources=evidence_sources, extractor_version=extractor_version,
-                    skip_reconciliation=skip_reconciliation, _split_done=_split_done,
+                    skip_reconciliation=skip_reconciliation, infer_time=infer_time, _split_done=_split_done,
                     _consolidation_staged=_consolidation_staged,
                     _singleton_locked=True,
                 )
@@ -510,9 +515,14 @@ async def store_memory(
             type=memory_type,
             mainCategory=taxonomy.main_category,
             subCategory=taxonomy.sub_category,
-            statementTime=statement_time or datetime.now(timezone.utc),
+            statementTime=statement_time if not infer_time else statement_time or datetime.now(timezone.utc),
         )
-        if occur_time is not None:
+        if not infer_time and updated_content != content:
+            from app.services.memory.recording.temporal_sources import uncertain_composite_sources
+            evidence_sources = uncertain_composite_sources(evidence_sources or (), "merge_unresolved")
+            update_data["statementTime"] = None
+            occur_time = None
+        if occur_time is not None or not infer_time:
             update_data["occurTime"] = occur_time
         if recurrence and taxonomy.sub_category == "提醒":
             update_data["recurrence"] = recurrence
@@ -571,7 +581,7 @@ async def store_memory(
         create_data["occurTime"] = occur_time
     # Part 5 §3.1: statement_time = 用户说出这句话的时间 (消息接收时刻)
     # 调用方未提供时, 用 now 作为最佳估计 (extraction 时机近似消息时刻)
-    create_data["statementTime"] = statement_time or datetime.now(timezone.utc)
+    create_data["statementTime"] = statement_time if not infer_time else statement_time or datetime.now(timezone.utc)
     # Part 5 §4.2: 提醒重复规则; 仅提醒子类有效, 其他子类强制清空避免脏数据.
     if recurrence and taxonomy.sub_category == "提醒":
         create_data["recurrence"] = recurrence

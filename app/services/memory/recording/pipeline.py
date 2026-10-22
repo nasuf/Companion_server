@@ -76,6 +76,7 @@ async def _create_reminder_timetrigger(
     occur_time: datetime,
     recurrence: str,
     side: Side,
+    require_stored_clock: bool = False,
 ) -> None:
     """统一提醒系统 (Phase 4.1): 提醒入库 → 同步建 timetrigger.
 
@@ -109,6 +110,17 @@ async def _create_reminder_timetrigger(
             f"user={user_id[:8]} memory={memory_id[:8]}"
         )
         return
+
+    if require_stored_clock:
+        # Reconciliation/splitting can invalidate the incoming fact clock.
+        # Never schedule from an extraction value the write did not retain.
+        memory = await db.usermemory.find_first(where={
+            "id": memory_id, "userId": user_id, "workspaceId": workspace.id,
+            "isArchived": False, "subCategory": "提醒", "occurTime": occur_time,
+        })
+        if memory is None:
+            logger.warning("Reminder clock no longer matches stored memory")
+            return
 
     trigger_time = occur_time
     # Heuristic: parser's _day_range emits start=00:00:00 with no time component.
@@ -288,6 +300,9 @@ async def process_memory_pipeline(
         if evidence_message_ids and await snapshot_sources() != origins:
             raise MemoryExtractionError("Memory source changed", kind="source_invalid")
 
+    strict_clock = bool(evidence_conversation_id and evidence_message_ids)
+    from app.services.memory.recording.temporal_sources import source_table, resolve_fact_clock
+
     # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
     # 只对 new_conversation 判定, 历史上下文已经抽过了
     if not should_extract_memory(new_conversation):
@@ -320,6 +335,7 @@ async def process_memory_pipeline(
         new_conversation,
         context_conversation=context_conversation,
         side=side,
+        **({"source_messages": source_table(origins)} if strict_clock else {}),
     )
     # Hard LLM failure → propagate so the caller keeps the watermark put and a
     # later batch retries. An empty-but-successful extraction (no error flag)
@@ -341,7 +357,7 @@ async def process_memory_pipeline(
     # 消息里唯一匹配到 1 个时间表述时才覆盖 LLM 的 occur_time — 否则
     # 无法把单个时间归因到多条记忆中的哪一条，回退到 LLM 抽取字段。
     rule_based_occur_time: datetime | None = None
-    if has_explicit_time(new_conversation):
+    if not strict_clock and len(memories) == 1 and has_explicit_time(new_conversation):
         parsed = parse_with_statement_time(new_conversation, now=statement_time)
         if len(parsed.event_times) == 1:
             rule_based_occur_time = ensure_aware(parsed.event_times[0].start)
@@ -456,8 +472,11 @@ async def process_memory_pipeline(
         # 必须 ensure_aware: LLM 输出 ISO 经常没 tz, fromisoformat 解出来是
         # naive, 跟下面 ref_now (aware) 比较时崩 "can't compare offset-naive
         # and offset-aware datetimes". 在边界统一规范化, 避免每个比较点打补丁.
-        occur_time: datetime | None = rule_based_occur_time
-        if occur_time is None:
+        clock = resolve_fact_clock({**mem, "sub_category": sub_category}, origins) if strict_clock else None
+        fact_statement_time = clock.statement_time if clock else statement_time
+        fact_origins = clock.bind(origins) if clock else origins
+        occur_time: datetime | None = clock.occur_time if clock else rule_based_occur_time
+        if occur_time is None and not strict_clock:
             raw_time = mem.get("occur_time")
             if raw_time and isinstance(raw_time, str):
                 try:
@@ -479,7 +498,7 @@ async def process_memory_pipeline(
         # 跟 parser 的 tz-aware occur_time 比较会 TypeError.
         reminder_demoted_reason: str | None = None
         if sub_category == "提醒" and recurrence == "once":
-            ref_now = statement_time or _now_corrected()
+            ref_now = (_now_corrected() if strict_clock else statement_time or _now_corrected())
             if occur_time is None or occur_time <= ref_now:
                 reminder_demoted_reason = (
                     "missing_occur_time" if occur_time is None
@@ -501,7 +520,8 @@ async def process_memory_pipeline(
             main_category=main_category,
             sub_category=sub_category,
             occur_time=occur_time,
-            statement_time=statement_time,
+            statement_time=fact_statement_time,
+            **({"infer_time": False} if strict_clock else {}),
             workspace_id=workspace_id,
             source=side,
             recurrence=recurrence,
@@ -513,8 +533,8 @@ async def process_memory_pipeline(
                 provenance_mod.USER_STATED if side == "user"
                 else provenance_mod.AI_AUTHORED
             ),
-            evidence_sources=origins,
-            extractor_version="memory-extraction-v1",
+            evidence_sources=fact_origins,
+            extractor_version="memory-extraction-time-v2" if strict_clock else "memory-extraction-v1",
         )
 
         if memory_id:
@@ -523,10 +543,14 @@ async def process_memory_pipeline(
                 await log_memory_evidence(
                     user_id=user_id,
                     memory_id=memory_id,
-                    message_ids=evidence_message_ids or [],
+                    # All batch inputs are guarded, but only attributed inputs
+                    # may increase this fact's evidence count.
+                    message_ids=([origins[i - 1].ref for i in clock.indices]
+                                 if clock is not None else evidence_message_ids or []),
                     workspace_id=workspace_id,
                     source=side,
-                    evidence_sources=origins,
+                    evidence_sources=fact_origins,
+                    **({"sources_already_bound": True} if strict_clock else {}),
                 )
             except Exception as e:
                 logger.debug(f"[MEM-{side}] evidence link failed for {memory_id}: {e}")
@@ -552,6 +576,7 @@ async def process_memory_pipeline(
                     occur_time=occur_time,
                     recurrence=recurrence,
                     side=side,
+                    **({"require_stored_clock": True} if strict_clock else {}),
                 )
 
             # Log user emphasis so L2→L1 promotion can verify the condition

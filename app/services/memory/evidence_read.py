@@ -114,6 +114,7 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
                     WHEN c.user_id IS DISTINCT FROM e.user_id OR c.workspace_id IS DISTINCT FROM e.workspace_id
                          OR c.agent_id IS DISTINCT FROM e.agent_id OR c.is_deleted THEN 'unavailable'
                     WHEN encode(sha256(convert_to(m.content,'UTF8')),'hex')<>e.source_version THEN 'changed'
+                    WHEN e.source_statement_time IS NOT NULL AND e.source_statement_time IS DISTINCT FROM m.created_at THEN 'changed'
                     WHEN e.source_card_version IS NOT NULL AND e.source_card_version IS DISTINCT FROM
                          encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex') THEN 'changed'
                     ELSE 'available' END
@@ -150,6 +151,8 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
            ) p ON true
            WHERE e.memory_id=$1 AND e.memory_source=$2 AND e.user_id=$3 AND e.workspace_id=$4 AND e.id>$5
            ORDER BY e.id LIMIT $6""", memory_id,side,user_id,workspace_id,after,limit+1,targets[0]["agent_id"])
+    from app.services.memory.recording.temporal_sources import public_temporal_basis
+    from app.services.memory.evidence import message_statement_time
     items = []
     for row in rows[:limit]:
         accessible = row["availability"] not in {"deleted", "unavailable", "unverified"}
@@ -161,6 +164,8 @@ async def memory_evidence_detail(*, user_id: str, workspace_id: str, side: str,
             "current_content":row["content_version"]==version,
             "extractor_version":row["extractor_version"],"relation":row["relation"],
             "availability":row["availability"],"created_at":row["created_at"],
+            "source_statement_time": message_statement_time(row["source_statement_time"]).isoformat() if accessible and row.get("source_statement_time") else None,
+            "temporal_basis": public_temporal_basis(row.get("temporal_basis")) if accessible else None,
             "conversation_id":row["conversation_id"] if accessible and row["source_kind"]=="message" else None,
             "source_archived":row["parent_archived"] if accessible and row["source_kind"]=="memory" else None,
             "repair_action":row["repair_action"] if accessible and row["source_kind"]=="input" and row["repair_action"] in {"merge_memories","insert_replacement_memory","archive_memory","downgrade_memory","mark_verified"} else None,

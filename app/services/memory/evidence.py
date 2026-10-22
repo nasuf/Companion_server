@@ -7,6 +7,8 @@ the administration endpoint. Missing historic evidence remains unknown.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from app.services.schedule_domain.time_service import ensure_aware
 from hashlib import sha256
 import json
 from typing import Literal
@@ -26,6 +28,20 @@ class EvidenceSource:
     expected_role: str | None = None
     expected_conversation_id: str | None = None
     expected_card_version: str | None = None
+    expected_statement_time: datetime | None = None
+    input_text: str | None = None
+    temporal_basis: dict | None = None
+
+
+def message_statement_time(value) -> datetime:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("evidence_source_time_invalid") from exc
+    if not isinstance(value, datetime):
+        raise ValueError("evidence_source_time_invalid")
+    return ensure_aware(value)
 
 
 def content_version(content: str) -> str:
@@ -52,7 +68,7 @@ async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Sid
         raise ValueError("invalid_evidence_batch")
     role = "user" if side == "user" else "assistant"
     rows = await db.query_raw(
-        """SELECT m.id,m.content,m.metadata,
+        """SELECT m.id,m.content,m.metadata,m.created_at,
            encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex') AS card_version FROM messages m JOIN conversations c ON c.id=m.conversation_id
            JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
            WHERE m.id=ANY($1::text[]) AND c.user_id=$2 AND c.workspace_id=$3
@@ -80,6 +96,8 @@ async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Sid
     return tuple(EvidenceSource("message", mid, relation="extracted_from", expected_role=role,
                                 expected_version=content_version(by_id[mid]["content"]),
                                 expected_conversation_id=conversation_id,
+                                expected_statement_time=message_statement_time(by_id[mid].get("created_at")) if conversation_id else None,
+                                input_text=texts[ids.index(mid)] if conversation_id else None,
                                 expected_card_version=by_id[mid]["card_version"]
                                     if conversation_id is not None and has_music_card(by_id[mid]) else None) for mid in ids)
 
@@ -93,7 +111,7 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
     params = [ref]
     if kind == "message":
         query = """SELECT c.user_id, c.workspace_id, c.agent_id, c.id AS conversation_id,
-                   m.role, m.content AS version_text, 'recorded' AS status, m.metadata,
+                   m.role, m.content AS version_text, 'recorded' AS status, m.metadata, m.created_at,
                    w.status AS workspace_status,
                    encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex') AS card_version
                    FROM messages m JOIN conversations c ON c.id=m.conversation_id
@@ -140,6 +158,8 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
             raise ValueError('evidence_source_changed_or_unavailable')
     if kind == "message" and source.relation == "extracted_from" and (row.get("metadata") or {}).get("memory_confirmation"):
         raise ValueError("evidence_message_reserved_for_confirmation")
+    if source.expected_statement_time is not None and message_statement_time(row.get("created_at")) != source.expected_statement_time:
+        raise ValueError("evidence_source_time_changed")
     if source.expected_card_version is not None and row.get("card_version") != source.expected_card_version:
         raise ValueError("evidence_source_card_changed")
     if source.expected_role and row.get("role") != source.expected_role:
@@ -162,6 +182,10 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
               "status": row["status"], "user_id": row["user_id"], "workspace_id": row["workspace_id"]}
     if source.expected_card_version is not None:
         origin["card_version"] = source.expected_card_version
+    if source.expected_statement_time is not None:
+        origin["statement_time"] = source.expected_statement_time.isoformat()
+    if source.temporal_basis is not None:
+        origin["temporal_basis"] = source.temporal_basis
     return origin
 
 
@@ -201,8 +225,8 @@ async def bind_memory_evidence(
                (id,memory_id,memory_source,user_memory_id,ai_memory_id,user_id,workspace_id,agent_id,
                 content_version,source_kind,source_ref,source_version,source_user_id,source_workspace_id,
                 source_role,source_status,source_message_id,parent_user_memory_id,parent_ai_memory_id,
-                relation,extractor_version,source_memory_side,source_profile_id,source_input_id,source_card_version)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+                relation,extractor_version,source_memory_side,source_profile_id,source_input_id,source_card_version,source_statement_time,temporal_basis)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::timestamp,$27::jsonb)
                ON CONFLICT (id) DO NOTHING""",
             eid, memory_id, side, memory_id if side == "user" else None,
             memory_id if side == "ai" else None, user_id, workspace_id, target["agent_id"], version,
@@ -214,6 +238,7 @@ async def bind_memory_evidence(
             source.relation, extractor_version, source.side if source.kind == "memory" else None,
             source.ref if source.kind == "profile" else None,
             source.ref if source.kind == "input" else None,
-            origin.get("card_version"),
+            origin.get("card_version"), source.expected_statement_time.astimezone(timezone.utc).replace(tzinfo=None) if source.expected_statement_time else None,
+            json.dumps(source.temporal_basis) if source.temporal_basis is not None else None,
         )
     return inserted
