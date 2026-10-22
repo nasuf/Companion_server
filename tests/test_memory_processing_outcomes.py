@@ -31,7 +31,7 @@ def unit(monkeypatch):
 async def test_failure_and_disabled_are_not_successful_empty(unit, monkeypatch, kind, status):
     p.process_memory_pipeline.side_effect = MemoryExtractionError('PRIVATE_CHAT_AND_TOKEN', kind=kind)
     result = await p._bg_memory_pipeline('user', unit, 'conversation', 'workspace')
-    assert result[0] == MemorySideOutcome('user', status, kind, source_count=1, source_binding='persisted_messages')
+    assert result[0] == MemorySideOutcome('user', status, kind, source_count=1, source_binding='persisted_messages', cursor_kind='initial_window', inspected_count=1)
     assert result[1].status == 'no_new_messages'
     p.set_watermark.assert_not_awaited()
     assert 'PRIVATE' not in str(d._write.await_args_list)
@@ -40,7 +40,7 @@ async def test_failure_and_disabled_are_not_successful_empty(unit, monkeypatch, 
 
 async def test_successful_empty_is_completed_and_advances(unit):
     result = await p._bg_memory_pipeline('user', unit, 'conversation', 'workspace')
-    assert result[0] == MemorySideOutcome('user', 'completed', 'processed', 0, 'advanced', 1, 'persisted_messages')
+    assert result[0] == MemorySideOutcome('user', 'completed', 'processed', 0, 'advanced', 1, 'persisted_messages', 'initial_window', 1)
     p.set_watermark.assert_awaited_once()
     assert d._write.await_args.args[0]['status'] == 'completed'
 
@@ -49,7 +49,7 @@ async def test_write_then_progress_failure_preserves_known_count(unit):
     p.process_memory_pipeline.return_value = ['one', 'two']
     p.set_watermark.side_effect = MemoryProgressError('watermark_write_unavailable')
     result = await p._bg_memory_pipeline('user', unit, 'conversation', 'workspace')
-    assert result[0] == MemorySideOutcome('user','failed','watermark_write_unavailable',2,'unknown',1,'persisted_messages')
+    assert result[0] == MemorySideOutcome('user','failed','watermark_write_unavailable',2,'unknown',1,'persisted_messages','initial_window',1)
     p.process_memory_pipeline.assert_awaited_once()
     p.manager.send_event.assert_awaited_once()
 
@@ -132,20 +132,18 @@ async def test_real_scope_is_resolved_and_validated(origins,monkeypatch):
     assert await p._resolve_workspace_id_for_conversation(msg.conversationId,uid,wid)==wid
 
 
-async def test_bounded_page_never_advances_over_an_incomplete_timestamp_cohort(origins,monkeypatch):
-    db,uid,wid,_,msg,*_=origins;monkeypatch.setattr(p,'db',db)
-    await db.message.delete_many(where={'conversationId':msg.conversationId})
-    base=datetime(2026,10,1,tzinfo=UTC)
-    for i in range(31):
-        await db.message.create(data={'conversationId':msg.conversationId,'role':'user','content':'synthetic',
-            'createdAt':base+timedelta(seconds=0 if i<20 else 1)})
+async def test_backlog_lookahead_keeps_tied_rows_available_for_next_page(origins,monkeypatch):
+    db,uid,wid,_,msg,*_=origins
+    monkeypatch.setattr(p,'db',db)
+    base=msg.createdAt
+    await db.message.update(where={'id':msg.id},data={'createdAt':base})
+    for i in range(30):
+        await db.message.create(data={'conversationId':msg.conversationId,'role':'user','content':'synthetic','createdAt':base})
     rows=await p._fetch_new_side_messages(msg.conversationId,base-timedelta(seconds=1),'user')
-    assert len(rows)==20 and all(p._parse_ts(r)==base for r in rows)
-    rows=await p._fetch_new_side_messages(msg.conversationId,base,'user')
-    assert len(rows)==11
-    await db.message.update_many(where={'conversationId':msg.conversationId},data={'createdAt':base})
-    with pytest.raises(MemoryProgressError,match='timestamp_page_boundary'):
-        await p._fetch_new_side_messages(msg.conversationId,base-timedelta(seconds=1),'user')
+    assert len(rows)==31
+    cursor=wm.MessageProgress(base, rows[29]['id'])
+    following=await p._fetch_new_side_messages(msg.conversationId,cursor,'user')
+    assert [r['id'] for r in following]==[rows[30]['id']]
 
 
 async def test_recent_synthetic_reply_cannot_jump_over_pending_page(unit,monkeypatch):
@@ -174,7 +172,7 @@ async def test_intentionally_skipped_progress_write_failure_is_unknown(unit):
         'metadata':{'memory_extraction_exclusion':'current_state'}})
     p.set_watermark.side_effect=MemoryProgressError('watermark_write_unavailable')
     result=await p._bg_memory_pipeline('user',unit,'conv','workspace',skip_ai_side=True)
-    assert result[1]==MemorySideOutcome('ai','failed','watermark_write_unavailable',0,'unknown',0,'persisted_messages')
+    assert result[1]==MemorySideOutcome('ai','failed','watermark_write_unavailable',0,'unknown',0,'persisted_messages','initial_window',1)
 
 
 async def test_no_conversation_side_runs_and_refresh_failure_does_not_change_success(unit):

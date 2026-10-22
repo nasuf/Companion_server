@@ -602,8 +602,9 @@ async def test_reserved_backlog_does_not_starve_later_regular_messages(
     async def get(*args):
         return wm
 
-    async def set_wm(*args):
+    async def set_wm(*args, message_id, expected):
         nonlocal wm
+        assert expected == wm and message_id is None  # completed timestamp groups
         wm = args[-1]
 
     monkeypatch.setattr(post, "get_watermark", get)

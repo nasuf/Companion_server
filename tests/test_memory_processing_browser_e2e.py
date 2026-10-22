@@ -92,8 +92,8 @@ async def test_browser_reads_real_dual_side_failure_and_success(origins, observa
                     assert ai['status']=='failed' and ai['memory_count'] is None and ai['progress']=='unchanged'
                     assert ai['reason']=='extraction_failed'
                     assert msg.content not in str(result) and 'PRIVATE_PROVIDER' not in str(result)
-                    assert await wm.get_watermark(msg.conversationId,'user') == msg.createdAt
-                    assert await wm.get_watermark(msg.conversationId,'ai') == baseline
+                    assert wm.progress_time(await wm.get_watermark(msg.conversationId,'user')) == msg.createdAt
+                    assert wm.progress_time(await wm.get_watermark(msg.conversationId,'ai')) == baseline
                     assert result['data']['replay_supported'] is False
                     assert (await request(admin,path+'/missing/retry','POST'))['status']==404
                     assert not violations

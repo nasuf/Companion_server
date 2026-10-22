@@ -27,7 +27,7 @@ _REASONS = frozenset({
     "prompt_disabled", "source_invalid", "extraction_failed", "processing_failed",
     "scope_unavailable", "scope_invalid", "lock_unavailable", "backlog_unavailable",
     "watermark_read_unavailable", "watermark_write_unavailable", "watermark_invalid",
-    "timestamp_page_boundary",
+    "timestamp_page_boundary", "watermark_conflict",
     "source_identity_missing", "source_identity_invalid", "source_read_unavailable", "source_batch_limit",
 })
 _WRITE = """
@@ -61,6 +61,12 @@ def _safe_side(result: MemorySideOutcome) -> dict:
         item['source_count'] = None
     if result.source_binding not in {'persisted_messages', 'unlinked_input', 'unknown'}:
         item['source_binding'] = 'unknown'
+    if result.cursor_kind not in {'initial_window', 'timestamp_cohort', 'message_position', 'not_applicable'}:
+        item['cursor_kind'] = 'unknown'
+    if type(result.inspected_count) is not int or not 0 <= result.inspected_count <= 100:
+        item['inspected_count'] = None
+    if type(result.has_more) is not bool:
+        item['has_more'] = None
     item['reason'] = result.reason if result.reason in _REASONS else 'processing_failed'
     return item
 
@@ -85,6 +91,8 @@ def _project_record(value: str, now: datetime) -> dict:
     sides = [_safe_side(MemorySideOutcome(
         **{key: side[key] for key in ('side', 'status', 'reason', 'memory_count', 'progress')},
         source_count=side.get('source_count'), source_binding=side.get('source_binding', 'unknown'),
+        cursor_kind=side.get('cursor_kind', 'unknown'), inspected_count=side.get('inspected_count'),
+        has_more=side.get('has_more'),
     )) for side in item['sides']]
     if len({side['side'] for side in sides}) != len(sides):
         raise ValueError('duplicate_side')

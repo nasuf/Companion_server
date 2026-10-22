@@ -15,6 +15,9 @@ class MemorySideOutcome:
     progress: Literal["advanced", "unchanged", "not_applicable", "unknown"] = "unchanged"
     source_count: int | None = None
     source_binding: Literal["persisted_messages", "unlinked_input", "unknown"] = "unknown"
+    cursor_kind: str = "unknown"
+    inspected_count: int | None = None
+    has_more: bool | None = None
 
 
 class MemoryProgressError(RuntimeError):

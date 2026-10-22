@@ -42,7 +42,7 @@ async def test_parent_source_reads_all_persisted_bubbles_and_ignores_invented_bo
     assert inputs['ai']=='assistant: 实际气泡一\nassistant: 实际气泡二'
     assert all(r.status=='completed' and r.source_binding=='persisted_messages' for r in result)
     assert [r.source_count for r in result]==[1,2]
-    assert await wm.get_watermark(msg.conversationId,'ai')==replies[-1].createdAt
+    assert wm.progress_time(await wm.get_watermark(msg.conversationId,'ai')) ==replies[-1].createdAt
 
 
 @pytest.mark.parametrize('mutation',['missing','foreign','archived','deleted','missing_turn'])
@@ -104,7 +104,7 @@ async def test_skipped_current_reply_does_not_discard_older_pending_reply(chat,m
     ai=next(r for r in result if r.side=='ai')
     inputs=[c.args[0] for c in pl.extract_memories.await_args_list if c.kwargs['side']=='ai']
     assert inputs==['assistant: '+older.content] and ai.source_count==1
-    assert await wm.get_watermark(msg.conversationId,'ai')==latest.createdAt
+    assert wm.progress_time(await wm.get_watermark(msg.conversationId,'ai')) ==latest.createdAt
 
 
 async def test_skipped_reply_does_not_advance_if_older_extraction_fails(chat):
@@ -117,7 +117,7 @@ async def test_skipped_reply_does_not_advance_if_older_extraction_fails(chat):
     pl.extract_memories.return_value={'_extraction_error':True}
     result=await p._bg_memory_pipeline(uid,[],msg.conversationId,wid,skip_ai_side=True,source_message_ids=[latest.id])
     assert result[1].status=='failed'
-    assert await wm.get_watermark(msg.conversationId,'ai')==msg.createdAt
+    assert wm.progress_time(await wm.get_watermark(msg.conversationId,'ai')) ==msg.createdAt
 
 
 @pytest.mark.parametrize('extra',['\nuser: 未保存的新增事实','\nassistant: 角色混入'])
@@ -198,7 +198,7 @@ async def test_unchanged_prefilter_noop_can_acknowledge_persisted_source(chat,mo
     result=await p._bg_memory_pipeline(uid,[],msg.conversationId,wid,source_message_ids=[msg.id])
     assert result[0].status=='completed' and result[0].source_count==1
     pl.extract_memories.assert_not_awaited()
-    assert await wm.get_watermark(msg.conversationId,'user')==msg.createdAt
+    assert wm.progress_time(await wm.get_watermark(msg.conversationId,'user')) ==msg.createdAt
 
 
 async def test_chat_pipeline_cannot_omit_persisted_ids(chat):

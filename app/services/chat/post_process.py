@@ -35,7 +35,9 @@ from app.services.memory.recording.pipeline import (
     MemoryExtractionError,
     process_memory_pipeline,
 )
-from app.services.memory.recording.watermark import get_watermark, set_watermark
+from app.services.memory.recording.watermark import (
+    MessageProgress, get_watermark, includes, progress_time, set_watermark,
+)
 from app.services.memory.recording.outcomes import MemoryProgressError, MemorySideOutcome
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
@@ -368,7 +370,7 @@ def _memory_written_by_lifecycle(m: dict) -> bool:
 
 async def _fetch_new_side_messages(
     conversation_id: str,
-    wm: datetime,
+    wm: MessageProgress | datetime,
     target_role: str,
 ) -> list[dict]:
     """Fetch the side's un-extracted backlog straight from the DB.
@@ -380,27 +382,25 @@ async def _fetch_new_side_messages(
     them, are silently never extracted. Fetching `createdAt > watermark` from
     the DB makes the pipeline self-healing regardless of window size.
 
-    A failed read must hold progress: a shorter fallback window could skip
-    older unprocessed rows forever. The lookahead prevents splitting a group
-    with an identical timestamp, since this legacy cursor has no ID tiebreaker.
+    A failed read holds progress. The extra row only reports whether another
+    page was observed; it is not consumed and is not an exact backlog count.
     """
+    timestamp = progress_time(wm)
+    after = {"createdAt": {"gt": timestamp}}
+    if isinstance(wm, MessageProgress) and wm.message_id is not None:
+        after = {"OR": [after, {"createdAt": timestamp, "id": {"gt": wm.message_id}}]}
     try:
         rows = await db.message.find_many(
             where={
                 "conversationId": conversation_id,
                 "role": target_role,
-                "createdAt": {"gt": wm},
+                **after,
             },
             order=[{"createdAt": "asc"}, {"id": "asc"}],
             take=_WATERMARK_BACKLOG_LIMIT + 1,
         )
     except Exception as e:
         raise MemoryProgressError("backlog_unavailable") from e
-    if len(rows) > _WATERMARK_BACKLOG_LIMIT:
-        boundary = rows[_WATERMARK_BACKLOG_LIMIT].createdAt
-        rows = [row for row in rows[:_WATERMARK_BACKLOG_LIMIT] if row.createdAt < boundary]
-        if not rows:
-            raise MemoryProgressError("timestamp_page_boundary")
     return [
         {
             "id": r.id,
@@ -424,7 +424,7 @@ async def _pipeline_with_watermark(
     """按 (conversation_id, side) 水位线切分, 调用 extraction pipeline.
     返回明确结果；返回的记忆ID数量包含更新，并非新建行数。
 
-    新消息来源优先 DB 增量 (createdAt > watermark, 上限 30 条)。
+    新消息来源优先 DB 增量 (createdAt,id) 稳定分页，上限 30 条。
     DB 失败保持进度；首次无水位线只处理已验证窗口，不回填历史。
     会话抽取只使用已落库消息，不能用合成文本或当前时间推进进度。
     """
@@ -432,26 +432,34 @@ async def _pipeline_with_watermark(
     # backlog/context must never turn later human messages into AI memories.
     recent = [m for m in recent if not (m.get("metadata") or {}).get("human_takeover")
               and not (m.get("metadata") or {}).get("memory_confirmation")]
-    wm = _ensure_aware(
-        await get_watermark(conversation_id, side) if conversation_id else None
-    )
+    wm = await get_watermark(conversation_id, side) if conversation_id else None
 
     # Cross-role rows provide context only; they never change memory ownership.
     target_role = "user" if side == "user" else "assistant"
     fallback_now = datetime.now(UTC)
 
     db_backlog: list[dict] | None = None
+    has_more: bool | None = None
+    partial_cohort = False
     if conversation_id and wm is not None:
         # wm None (first run / expired) keeps the window-only path: fetching the
         # whole history would re-extract an entire old conversation.
         db_backlog = await _fetch_new_side_messages(conversation_id, wm, target_role)
+        if db_backlog is not None:
+            has_more = len(db_backlog) > _WATERMARK_BACKLOG_LIMIT
+            partial_cohort = has_more and (
+                _parse_ts(db_backlog[_WATERMARK_BACKLOG_LIMIT - 1])
+                == _parse_ts(db_backlog[_WATERMARK_BACKLOG_LIMIT]))
+            db_backlog = db_backlog[:_WATERMARK_BACKLOG_LIMIT]
 
     context_msgs: list[dict] = []
     new_target_msgs: list[dict] = []
     max_side_ts: datetime | None = None
+    max_side_id: str | None = None
+    inspected_count = 0
 
     def _add_target(m: dict) -> None:
-        nonlocal max_side_ts
+        nonlocal max_side_ts, max_side_id, inspected_count
         from app.services.memory.recording.chat_sources import excluded_from_chat_extraction, extraction_text
         excluded = excluded_from_chat_extraction(m)
         ts = _parse_ts(m)
@@ -459,9 +467,12 @@ async def _pipeline_with_watermark(
             raise MemoryProgressError("source_identity_missing")
         if not excluded and extraction_text(m).strip():
             new_target_msgs.append(m)
+        inspected_count += 1
         effective = ts if ts is not None else fallback_now
-        if max_side_ts is None or effective > max_side_ts:
+        mid = str(m.get("id") or "")
+        if max_side_ts is None or (effective, mid) > (max_side_ts, max_side_id or ""):
             max_side_ts = effective
+            max_side_id = mid or None
 
     if db_backlog is not None:
         for m in db_backlog:
@@ -470,13 +481,14 @@ async def _pipeline_with_watermark(
         # targets. A recent-window reply cannot leap over an earlier page.
         for m in recent:
             ts = _parse_ts(m)
-            is_new_target = m.get("role") == target_role and (ts is None or ts > wm)
+            is_new_target = m.get("role") == target_role and (
+                ts is None or not includes(wm, ts, str(m.get("id") or "")))
             if not is_new_target or _memory_written_by_lifecycle(m):
                 context_msgs.append(m)
     else:
         for m in recent:
             ts = _parse_ts(m)
-            is_new = wm is None or ts is None or ts > wm
+            is_new = ts is None or not includes(wm, ts, str(m.get("id") or ""))
             if is_new and m.get("role") == target_role:
                 _add_target(m)
             if not (is_new and m.get("role") == target_role) or _memory_written_by_lifecycle(m):
@@ -485,16 +497,21 @@ async def _pipeline_with_watermark(
     def outcome(status, reason, count=None, progress="unchanged"):
         return MemorySideOutcome(side, status, reason, count, progress,
             source_count=len(new_target_msgs),
-            source_binding="persisted_messages" if conversation_id else "unlinked_input")
+            source_binding="persisted_messages" if conversation_id else "unlinked_input",
+            cursor_kind=("not_applicable" if not conversation_id else "initial_window" if wm is None
+                         else "message_position" if isinstance(wm, MessageProgress) and wm.message_id is not None
+                         else "timestamp_cohort"),
+            inspected_count=inspected_count, has_more=has_more)
 
     if max_side_ts is None:
         return outcome("no_new_messages", "no_new_messages", 0)
     if not new_target_msgs:
         # A bounded page of reserved messages must not starve later messages.
         # These rows were intentionally handled outside generic extraction.
-        if conversation_id and (wm is None or max_side_ts > wm):
+        if conversation_id and not includes(wm, max_side_ts, max_side_id or ""):
             try:
-                await set_watermark(conversation_id, side, max_side_ts)
+                await set_watermark(conversation_id, side, max_side_ts,
+                                    message_id=max_side_id if partial_cohort else None, expected=wm)
             except MemoryProgressError as exc:
                 return outcome("failed", exc.reason, 0, "unknown")
             return outcome("excluded", "reserved_messages", 0, "advanced")
@@ -524,9 +541,10 @@ async def _pipeline_with_watermark(
         return outcome("disabled" if exc.kind == "prompt_disabled" else "failed", exc.kind)
 
     progress = "not_applicable" if not conversation_id else "unchanged"
-    if conversation_id and (wm is None or max_side_ts > wm):
+    if conversation_id and not includes(wm, max_side_ts, max_side_id or ""):
         try:
-            await set_watermark(conversation_id, side, max_side_ts)
+            await set_watermark(conversation_id, side, max_side_ts,
+                                message_id=max_side_id if partial_cohort else None, expected=wm)
             progress = "advanced"
         except MemoryProgressError as exc:
             return outcome("failed", exc.reason, len(stored_ids), "unknown")

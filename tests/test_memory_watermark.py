@@ -252,38 +252,38 @@ async def test_unpersisted_messages_do_not_create_progress():
 
 
 @pytest.mark.asyncio
-async def test_watermark_redis_helpers():
+async def test_watermark_redis_helpers(unit_media_scope):
     """watermark.py 读写 Redis 正确序列化 ISO 时间."""
     from app.services.memory.recording.watermark import get_watermark, set_watermark
 
     ts = datetime(2026, 4, 24, 12, 0, 0, tzinfo=UTC)
     fake_redis = AsyncMock()
     fake_redis.get = AsyncMock(return_value=ts.isoformat().encode())
-    fake_redis.set = AsyncMock()
+    fake_redis.eval = AsyncMock(return_value=1)
 
     with patch("app.services.memory.recording.watermark.get_redis", AsyncMock(return_value=fake_redis)):
         result = await get_watermark("c1", "user")
-        assert result == ts
+        assert result.timestamp == ts and result.message_id is None
 
-        await set_watermark("c1", "user", ts)
-        fake_redis.set.assert_awaited_once()
-        call_args = fake_redis.set.await_args.args
-        assert "mem:extract:wm:c1:user" in call_args[0]
-        assert call_args[1] == ts.isoformat()
+        await set_watermark("c1", "user", ts + timedelta(seconds=1), message_id="m1", expected=result)
+        fake_redis.eval.assert_awaited_once()
+        call_args = fake_redis.eval.await_args.args
+        assert call_args[2] == "mem:extract:wm:c1:user"
+        assert call_args[3:5] == ("present", ts.isoformat())
 
 
 @pytest.mark.asyncio
-async def test_watermark_redis_down_is_not_missing_or_success():
+async def test_watermark_redis_down_is_not_missing_or_success(unit_media_scope):
     """Unavailable progress must not initiate replay or claim successful advancement."""
     from app.services.memory.recording.outcomes import MemoryProgressError
     from app.services.memory.recording.watermark import get_watermark, set_watermark
 
     fake_redis = AsyncMock()
     fake_redis.get = AsyncMock(side_effect=Exception("redis down"))
-    fake_redis.set = AsyncMock(side_effect=Exception("redis down"))
+    fake_redis.eval = AsyncMock(side_effect=Exception("redis down"))
 
     with patch("app.services.memory.recording.watermark.get_redis", AsyncMock(return_value=fake_redis)):
         with pytest.raises(MemoryProgressError, match="watermark_read_unavailable"):
             await get_watermark("c1", "user")
         with pytest.raises(MemoryProgressError, match="watermark_write_unavailable"):
-            await set_watermark("c1", "user", datetime.now(UTC))
+            await set_watermark("c1", "user", datetime.now(UTC), expected=None)
