@@ -84,6 +84,7 @@ class ChatFrame:
     l3_memories: list[str] = None
     l3_task: asyncio.Task | None = None
     last_reply_count: Any = None
+    location_context: Any = None
     location_share_context: bool = None
     max_reply_count: Any = None
     max_total: Any = None

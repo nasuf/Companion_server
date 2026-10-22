@@ -63,6 +63,10 @@ from app.services.memory.interaction.contradiction import (
 from app.services.memory.interaction.retrieval_feedback import (
     resolve_retrieval_feedback_correction,
 )
+from app.services.chat.location_context import (
+    asks_about_user_location,
+    load_location_context,
+)
 from app.services.chat.memory_usage import submit_memory_usage
 from app.services.topic import push_topic
 from app.services.schedule_domain.time_service import build_time_context
@@ -1350,6 +1354,9 @@ async def _stream_legacy_response(
 
         # 图灵测试条数变化: 上一轮实际气泡数 (代码权威计数). 一次加载, 供
         # ①目标条数选取 (变化感知) ②prompt 变化段 {y} ③切分后硬兜底 三处共用.
+        # 双方所在地: 主 prompt、联网检索、地点校验共用这一份 (读失败退回"不知道")
+        location_context = await load_location_context(agent, user_id, workspace_id)
+        response_diagnostics["location_context"] = location_context.diagnostics()
         last_reply_count = (
             await load_last_reply_count(conversation_id) if conversation_id else None
         )
@@ -1479,6 +1486,7 @@ async def _stream_legacy_response(
                 red_packet_context=red_packet_context,
                 gift_context=gift_context,
                 offline_activity=offline_activity,
+                location_context=location_context,
                 last_reply_count=last_reply_count,
                 repeated_phrases=find_repeated_ai_phrases(messages_dicts),
                 needs_web_search=needs_web_search,
@@ -1587,6 +1595,7 @@ async def _stream_legacy_response(
             agent=agent,
             chat_messages_factory=_build_main_chat_messages,
             needs_web_search=needs_web_search,
+            web_search_location=location_context.web_search_location(),
             reply_count=reply_count,
             max_reply_count=max_reply_count,
             max_total=max_total,
@@ -1616,7 +1625,9 @@ async def _stream_legacy_response(
             temporal_evidence=temporal_evidence,
             timeline=fetched.timeline,
             # 「话题接续」段 (告诉模型承接句已发, 别重复) 只在主 prompt 里有
-            force_main_prompt=bool(offering_context) or bool(continuation_lines),
+            # 问到双方在哪时必须走带「你们各自在哪」段的主 prompt
+            force_main_prompt=bool(offering_context) or bool(continuation_lines)
+            or asks_about_user_location(user_message),
             diagnostics=response_diagnostics,
         )
 
@@ -1630,7 +1641,9 @@ async def _stream_legacy_response(
             replies = [*continuation_lines, *replies]
         full_response = " ".join(replies)
         from app.services.persona_grounding import guard_reply
-        guarded, corrected = await guard_reply(agent, full_response, question=user_message)
+        guarded, corrected = await guard_reply(
+            agent, full_response, question=user_message, user_location=location_context,
+        )
         if corrected:
             replies = [guarded]
             full_response = guarded

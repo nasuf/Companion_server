@@ -140,7 +140,7 @@ def _usage_tokens(payload: dict) -> tuple[int, int, int] | None:
 
 
 async def generate_with_web_search(
-    chat_messages: list[dict], *, model: str,
+    chat_messages: list[dict], *, model: str, user_location: dict[str, str] | None = None,
 ) -> str | None:
     """One-shot main reply through Ark Responses API, forcing a web search.
 
@@ -148,6 +148,10 @@ async def generate_with_web_search(
     prompt the model answers "我帮你查下" and skips the tool under the default
     "auto" (0/16 in measurement). Callers gate on web_search_gate, so by the
     time we get here a search is known to be wanted.
+
+    `user_location` is the *user's* approximate city (chat/location_context);
+    without it the plugin localizes "附近/推荐" by whatever city the model
+    puts in its query, which in production was the Agent's own city.
 
     Returns reply text, or None when the call cannot produce one (missing
     key, HTTP error, timeout, empty output). Callers must treat None as
@@ -158,7 +162,7 @@ async def generate_with_web_search(
     body = {
         "model": model,
         "input": _to_responses_input(chat_messages),
-        "tools": [{"type": "web_search"}],
+        "tools": [{"type": "web_search", **({"user_location": user_location} if user_location else {})}],
         "tool_choice": "required",
         "stream": False,
     }
@@ -218,6 +222,7 @@ async def generate_with_web_search(
         metadata={
             "web_search_calls": result.search_calls,
             "web_search_queries": result.queries,
+            "web_search_user_location": bool(user_location),
         },
         extra_outputs={
             "web_search": {

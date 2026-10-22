@@ -819,6 +819,11 @@ async def prepare_reply(ctx):
                 )
         except Exception as e:
             services.logger.warning(f"Contradiction detection failed: {e}")
+    # 双方所在地: 主 prompt、联网检索、地点校验共用这一份 (读失败退回"不知道")
+    ctx.location_context = await services.load_location_context(
+        ctx.agent, ctx.user_id, ctx.workspace_id
+    )
+    ctx.response_diagnostics["location_context"] = ctx.location_context.diagnostics()
     ctx.last_reply_count = (
         await services.load_last_reply_count(ctx.conversation_id)
         if ctx.conversation_id
@@ -943,6 +948,7 @@ async def prepare_reply(ctx):
             red_packet_context=ctx.red_packet_context,
             gift_context=ctx.gift_context,
             offline_activity=offline_activity,
+            location_context=ctx.location_context,
             last_reply_count=ctx.last_reply_count,
             repeated_phrases=find_repeated_ai_phrases(ctx.messages_dicts),
             needs_web_search=ctx.needs_web_search,
@@ -1053,6 +1059,7 @@ async def generate_reply(ctx):
         agent=ctx.agent,
         chat_messages_factory=ctx._build_main_chat_messages,
         needs_web_search=ctx.needs_web_search,
+        web_search_location=ctx.location_context.web_search_location(),
         reply_count=ctx.reply_count,
         max_reply_count=ctx.max_reply_count,
         max_total=ctx.max_total,
@@ -1073,7 +1080,9 @@ async def generate_reply(ctx):
         temporal_instructions=ctx.temporal_instructions,
         temporal_evidence=ctx.temporal_evidence,
         timeline=ctx.fetched.timeline,
-        force_main_prompt=bool(ctx.offering_context) or bool(ctx.continuation_lines),
+        # 问到双方在哪时必须走带「你们各自在哪」段的主 prompt, tier 轻量 prompt 没有它
+        force_main_prompt=bool(ctx.offering_context) or bool(ctx.continuation_lines)
+        or services.asks_about_user_location(ctx.user_message),
         diagnostics=ctx.response_diagnostics,
     )
     yield ctx.completed("generate_reply")
@@ -1085,7 +1094,10 @@ async def normalize_reply(ctx):
         ctx.replies = [*ctx.continuation_lines, *ctx.replies]
     ctx.full_response = " ".join(ctx.replies)
     from app.services.persona_grounding import guard_reply
-    guarded, corrected = await guard_reply(ctx.agent, ctx.full_response, question=ctx.user_message)
+    guarded, corrected = await guard_reply(
+        ctx.agent, ctx.full_response, question=ctx.user_message,
+        user_location=ctx.location_context,
+    )
     if corrected:
         ctx.replies = [guarded]
         ctx.full_response = guarded

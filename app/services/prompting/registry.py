@@ -28,6 +28,7 @@ from app.services.prompting.defaults import (
     CHARACTER_GENERATION_PROMPT,
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    CHAT_LOCATION_CONTEXT_SECTION_PROMPT,
     CHAT_OFFLINE_ACTIVITY_SECTION_PROMPT,
     CHAT_REPLY_EMOTION_MARKER_PROMPT,
     REPLY_COUNT_VARIATION_PROMPT,
@@ -258,7 +259,8 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "persona.grounding_check", "角色地点事实校验", "记忆录入", "记忆",
-        "【工程】批量校验日程、位置自述和自我记忆，完整返回每项判定。占位符 {facts}/{kind}/{items}/{question}。",
+        "【工程】批量校验日程、位置自述和自我记忆，完整返回每项判定；主回复还会带对方位置做双边校验。"
+        "占位符 {facts}/{user_location}/{kind}/{items}/{question}。",
         PERSONA_GROUNDING_CHECK_PROMPT,
     ),
     # ── 聊天热路径 (Part 3) ──
@@ -494,6 +496,13 @@ PROMPT_DEFINITIONS = [
         "告诉 LLM 状态但禁止主动展开, 避免跟 §3.4.3 询问当前状态分支撞主题. "
         "占位符: {activity} {status}.",
         CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.location_context_section", "双方所在地", "聊天热路径", "聊天",
+        "【工程扩展】主回复的「你们各自在哪」段: AI 档案城市 + 用户手机定位/说过的现居地, "
+        "约束推荐、天气、附近和同城判断都以对方所在地为准, 不知道就不假设同城。地点由代码"
+        "按 chat/location_context.py 填入。占位符: {ai_place} {user_place} {relation}.",
+        CHAT_LOCATION_CONTEXT_SECTION_PROMPT,
     ),
     PromptDefinition(
         "chat.offline_activity_section", "线下活动外出情境", "聊天热路径", "聊天",

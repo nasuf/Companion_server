@@ -121,7 +121,9 @@ def _build_tier_call(
     return tier_fns["weak"], {}
 
 
-async def _try_web_search_reply(chat_messages: list[dict]) -> str | None:
+async def _try_web_search_reply(
+    chat_messages: list[dict], user_location: dict[str, str] | None = None,
+) -> str | None:
     """联网搜索增强主回复 — 仅在 data_fetch 判定需要实时信息时调用.
 
     判定 (关键词粗筛 + 小模型) 在 llm/web_search_gate, 开关/路由校验也在那里,
@@ -135,13 +137,16 @@ async def _try_web_search_reply(chat_messages: list[dict]) -> str | None:
         resolved = resolve_for_current()
     except Exception:  # noqa: BLE001 — 配置读取失败不阻塞主回复
         return None
+    # 只在知道对方城市时才带, 保持旧签名的调用方 (测试替身) 不受影响
+    extra = {"user_location": user_location} if user_location else {}
     return await generate_with_web_search(
-        fold_trailing_system(chat_messages), model=resolved.remote_chat_model,
+        fold_trailing_system(chat_messages), model=resolved.remote_chat_model, **extra,
     )
 
 
 async def _run_main_llm(
     chat_messages: list[dict], *, needs_web_search: bool = False,
+    web_search_location: dict[str, str] | None = None,
 ) -> tuple[str, bool]:
     """主 LLM 流式调用，收集完整响应。
 
@@ -161,7 +166,7 @@ async def _run_main_llm(
     from app.services.llm.models import _resolve_usage_model_key
 
     if needs_web_search:
-        web_search_text = await _try_web_search_reply(chat_messages)
+        web_search_text = await _try_web_search_reply(chat_messages, web_search_location)
         if web_search_text:
             return web_search_text, False
 
@@ -255,6 +260,7 @@ async def generate_reply(
     user_id: str | None = None,
     workspace_id: str | None = None,
     needs_web_search: bool = False,
+    web_search_location: dict[str, str] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, bool, dict | None]:
     """返回 (replies, raw_response, is_fallback, reply_emotion).
@@ -419,6 +425,7 @@ async def generate_reply(
             diagnostics["tier_empty_or_failed"] = True
     raw_response, is_fallback = await _run_main_llm(
         await _get_chat_messages(), needs_web_search=needs_web_search,
+        **({"web_search_location": web_search_location} if web_search_location else {}),
     )
     logger.info(
         f"[REPLY-LLM] main reply len={len(raw_response)} fallback={is_fallback}",

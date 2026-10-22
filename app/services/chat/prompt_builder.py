@@ -599,6 +599,30 @@ async def _build_music_context_section(music_context: str | None) -> _PromptBody
     return _PromptBody(_render_section(tpl, {"music_context": music_context}), "chat.music_context_section")
 
 
+_RELATION_TEXT = {
+    "same": "在同一个城市",
+    "different": "不在同一个城市",
+    "unknown": "不确定是否在同一个城市",
+}
+
+
+async def _build_location_section(location: Any) -> _PromptBody | None:
+    """「你们各自在哪」: 地点由 chat/location_context 给, 规则在模板里。"""
+    if location is None:
+        return None
+    tpl = await _get_optional_prompt("chat.location_context_section")
+    if tpl is None:
+        return None
+    return _PromptBody(
+        _render_section(tpl, {
+            "ai_place": location.ai_place or "（档案里没写城市）",
+            "user_place": location.describe_user(),
+            "relation": _RELATION_TEXT[location.relation],
+        }),
+        "chat.location_context_section",
+    )
+
+
 async def _build_offline_activity_section(
     offline_activity: dict[str, Any] | None,
 ) -> _PromptBody | None:
@@ -681,6 +705,8 @@ async def build_system_prompt(
     gift_context: dict[str, Any] | None = None,
     # 线下活动外出情境 (title/location/reached)，已到达现场时注入「当前线下活动」段。
     offline_activity: dict[str, Any] | None = None,
+    # 双方所在地 (chat/location_context.LocationContext)，注入「你们各自在哪」段。
+    location_context: Any = None,
     last_reply_count: int | None = None,
     # 最近几次回复里已出现 ≥2 次的句子 (chat/repetition_guard), 注入「避免重复」段.
     repeated_phrases: list[str] | None = None,
@@ -781,7 +807,7 @@ async def build_system_prompt(
     # 相邻, 记忆三段 (记得的事情/相关时间记忆/L3) 相邻.
     #
     # 慢变组 (小时级~周级):
-    #   当前情绪(亲密度阶段周级+relation_meta 6h 缓存) → 用户画像(天级) →
+    #   当前情绪(亲密度阶段周级+relation_meta 6h 缓存) → 用户画像(天级) → 双方所在地(天级) →
     #   情绪状态提醒(耐心异常时才出现) → 表达习惯(抽样缓存 1h) →
     #   一起听音乐(会话级) → 隐性状态约束(作息 slot 小时级) → 时间(小时级)
     # 快变组 (轮级):
@@ -805,6 +831,16 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "用户画像")
+
+    # 双方所在地: 设备定位按天更新, 跟画像一样是慢变段。
+    location_sec = await _build_location_section(location_context)
+    if location_sec:
+        _append_section(
+            sections, components, "你们各自在哪", location_sec.body,
+            prompt_key=location_sec.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "你们各自在哪")
 
     # 5B.4: 耐心区间语气描述 (boundary.patience_instruction_* 渲染结果,
     # ManagedPromptText 自带 prompt_key → trace 内可编辑)

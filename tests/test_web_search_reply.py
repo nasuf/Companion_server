@@ -249,6 +249,7 @@ async def test_generate_with_web_search_records_trace_step(monkeypatch):
     assert recorded["cached_input_tokens"] == 0
     assert recorded["metadata"] == {
         "web_search_calls": 1, "web_search_queries": ["北京天气"],
+        "web_search_user_location": False,
     }
     # Queries + citations land in the trace outputs so the panel can show what
     # the search actually returned (previously only the reply text was kept).

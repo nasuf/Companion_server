@@ -49,10 +49,23 @@ _STABLE_SELF = re.compile(
 
 # The hot-path budget: a reply guard runs while the user waits.
 VERIFY_TIMEOUT_S = 5
+# Paths that do not pass the user's location (memories, schedules, proactive
+# messages) keep the single-sided check; the prompt skips the user rule.
+USER_LOCATION_UNCHECKED = "（本次不校验对方位置）"
+_ABOUT = frozenset({"self", "user"})
 
 
 class GroundingUnavailable(RuntimeError):
     """A risky generated claim has not passed verification; retry is possible."""
+
+
+class Rejected(list):
+    """Rejected indices — a plain list for existing callers — plus whose
+    location each one got wrong ("self" = the Agent, "user" = the user)."""
+
+    def __init__(self, subjects: dict[int, str] | None = None):
+        super().__init__(subjects or {})
+        self.subjects = dict(subjects or {})
 
 
 def canonical_facts(agent: Any) -> dict[str, Any]:
@@ -130,6 +143,7 @@ async def grounding_context(
 async def verify_generated_locations(
     agent: Any, texts: list[str], *, kind: str, always: bool = False, question: str = "",
     policy_template: str | None = None, timeout: float = VERIFY_TIMEOUT_S,
+    user_location: dict[str, Any] | None = None,
 ) -> list[int]:
     """Return rejected indices; only fully typed, complete verdicts are accepted.
 
@@ -139,18 +153,27 @@ async def verify_generated_locations(
 
     `timeout` defaults to the hot-path budget; callers off the hot path may
     allow more, since an expired check counts as unverified, never as allowed.
+
+    `user_location` (chat/location_context verifier facts) makes the check
+    two-sided: claims about where the user is, or that both are in one city,
+    must match it. Without it the user rule is skipped. The returned list
+    also says whose location each rejection was about (`Rejected.subjects`).
     """
+    from app.services.chat.location_context import claims_user_location
+
     facts = canonical_facts(agent)
     if not texts:
-        return []
+        return Rejected()
+    implicit_self = kind in {"schedule", "memory", "daily_summary"}
     indices = [i for i, t in enumerate(texts)
-               if always or needs_location_verification(t, implicit_self=kind in {"schedule", "memory", "daily_summary"})]
+               if always or needs_location_verification(t, implicit_self=implicit_self)
+               or (user_location is not None and claims_user_location(t))]
     if not indices:
-        return []
+        return Rejected()
     if not facts.get("city"):
-        if any(needs_location_verification(texts[i], implicit_self=kind in {"schedule", "memory", "daily_summary"}) for i in indices):
+        if any(needs_location_verification(texts[i], implicit_self=implicit_self) for i in indices):
             raise GroundingUnavailable("No authoritative city for a generated location")
-        return []
+        return Rejected()
     if len(texts) > 50 or any(len(t) > 4000 for t in texts):
         raise GroundingUnavailable("Grounding input exceeds its bounded batch")
     items = [{"index": i, "text": texts[i]} for i in indices]
@@ -160,25 +183,29 @@ async def verify_generated_locations(
             facts=json.dumps(facts, ensure_ascii=False, sort_keys=True),
             kind=kind, items=json.dumps(items, ensure_ascii=False),
             question=json.dumps(question, ensure_ascii=False),
+            user_location=(json.dumps(user_location, ensure_ascii=False, sort_keys=True)
+                           if user_location is not None else USER_LOCATION_UNCHECKED),
         )
         async with asyncio.timeout(timeout):
             result = await invoke_json(get_grounding_model(), prompt, temperature=0)
         verdicts = result["verdicts"]
         if not isinstance(verdicts, list) or len(verdicts) != len(indices):
             raise ValueError("Incomplete verdict set")
-        seen, rejected = set(), []
+        seen, rejected = set(), {}
         for item in verdicts:
             i, allowed = item["index"], item["allowed"]
             if type(i) is not int or i not in indices or i in seen or type(allowed) is not bool:
                 raise ValueError("Invalid grounding verdict")
             seen.add(i)
             if not allowed:
-                rejected.append(i)
+                # An unlabeled rejection keeps the original, self-sided meaning.
+                about = item.get("about")
+                rejected[i] = about if isinstance(about, str) and about in _ABOUT else "self"
         if seen != set(indices):
             raise ValueError("Missing grounding verdict")
         if rejected:
             logger.warning("[persona-grounding] rejected kind=%s count=%d", kind, len(rejected))
-        return rejected
+        return Rejected(rejected)
     except Exception as exc:
         raise GroundingUnavailable("Location claim could not be verified") from exc
 
@@ -191,7 +218,29 @@ async def location_correction(agent: Any) -> str:
     return "刚才把地点说乱了，抱歉，我不该把你的所在地说成我的。"
 
 
-async def guard_reply(agent: Any, text: str, *, question: str = "") -> tuple[str, bool]:
+def user_location_correction(agent: Any, user_location: Any) -> str:
+    """说错了对方在哪 / 是否同城时的确定性更正, 只用已知事实, 不补故事。"""
+    from app.services.chat.location_context import agent_city, city_core
+
+    mine = city_core(agent_city(agent))
+    theirs = city_core(getattr(user_location, "user_city", None))
+    relation = getattr(user_location, "relation", "unknown")
+    if relation == "different" and mine and theirs:
+        return f"刚才说岔了，我在{mine}，你在{theirs}，我们不在一个城市哈"
+    if relation == "same" and theirs:
+        return f"刚才说岔了，我们都在{theirs}"
+    if mine:
+        return f"刚才说岔了，我在{mine}，还不知道你在哪儿呢"
+    return "刚才说岔了，还不知道你在哪儿呢"
+
+
+async def guard_reply(
+    agent: Any, text: str, *, question: str = "", user_location: Any = None,
+) -> tuple[str, bool]:
+    """`user_location` (chat/location_context.LocationContext) enables the
+    two-sided check on the main reply path; other callers stay single-sided."""
+    from app.services.chat.location_context import asks_about_user_location
+
     # Ordinary activity questions must not add a geography-model round trip.
     # Match each clause independently: an activity question cannot hide a
     # second question asking whether the Agent is in a particular city.
@@ -199,12 +248,20 @@ async def guard_reply(agent: Any, text: str, *, question: str = "") -> tuple[str
         r"你.{0,16}(?:住|(?<!现)在(?!\s*(?:干嘛|干什么|做什么|忙|吃|喝|想|看|听|写|工作|学习|睡|休息|玩|等|陪))"
         r".{0,8}(?:哪|吗|？|\?)|哪(?:里|儿|个城市)|搬家|回家)", question,
     ))
+    user_facts = user_location.verifier_facts() if user_location is not None else None
+    user_question = user_facts is not None and asks_about_user_location(question)
     try:
         rejected = await verify_generated_locations(
-            agent, [text], kind="reply", always=location_question, question=question,
+            agent, [text], kind="reply", always=location_question or user_question,
+            question=question, user_location=user_facts,
         )
+        about = getattr(rejected, "subjects", {}).get(0, "self") if rejected else None
     except GroundingUnavailable:
-        rejected = [0]
-    if rejected:
+        # Fail closed on whichever side made the reply eligible.
+        self_risk = location_question or needs_location_verification(text)
+        about = "self" if self_risk or user_facts is None else "user"
+    if about == "user":
+        return user_location_correction(agent, user_location), True
+    if about:
         return await location_correction(agent), True
     return text, False

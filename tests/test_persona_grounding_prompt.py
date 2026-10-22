@@ -19,14 +19,16 @@ def _sentence(text: str, start: str) -> str:
 
 def test_placeholders_and_render():
     fields = {name for _, name, _, _ in Formatter().parse(POLICY) if name is not None}
-    assert fields == {"facts", "kind", "question", "items"}
+    assert fields == {"facts", "user_location", "kind", "question", "items"}
     rendered = POLICY.format(
         facts=json.dumps({"name": "小伴", "city": "云南省普洱市思茅区"}, ensure_ascii=False),
+        user_location="（本次不校验对方位置）",
         kind="schedule", question=json.dumps("", ensure_ascii=False),
         items=json.dumps([{"index": 0, "text": "傍晚在附近公园散步"}], ensure_ascii=False),
     )
     assert "{facts}" not in rendered and "附近公园散步" in rendered
-    assert json.loads(rendered.splitlines()[-1])["verdicts"][0]["allowed"] is True
+    example = json.loads(rendered.splitlines()[-1])["verdicts"][0]
+    assert example["allowed"] is True and example["about"] in {"self", "user"}
 
 
 def test_unnamed_place_categories_are_generic():
