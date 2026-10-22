@@ -199,6 +199,11 @@ async def load_location_context(
 
 # ── 回复里的对方位置断言 (校验器资格闸门, 不是语义判定) ─────────────────────
 
+_SAME_PLACE_QUESTION = re.compile(
+    r"(?:我们|咱们|咱俩|你我|我俩).{0,6}(?:一个|同一个?|同)(?:地方|城市|城|地儿?|个地方)",
+)
+# 回复开头就附和 —— 对"我们在一个城市吗"答"对啊…"。
+_AFFIRMATIVE_OPENING = re.compile(r"^\s*(?:对|是|嗯|没错|当然|可不|那必须|必须的)")
 _CO_LOCATION_QUESTION = re.compile(
     r"(?:我们|咱们|咱俩|你我|我俩).{0,6}(?:一个|同一个?|同)(?:地方|城市|城|地儿?|个地方)|"
     r"我(?:是)?(?:哪里|哪儿|哪个城市)(?:人|的)|我(?:现在)?(?:人)?在哪(?:儿|里|个城市)?(?=[？?吗呢啊呀]|$)|"
@@ -211,6 +216,19 @@ _USER_LOCATION_CLAIM = re.compile(
     r"离你(?:很|挺|不|这)?(?:近|远)|你(?:家)?附近|就在我(?:家|这)?附近|(?:去|到)(?:这|那)家|要不要去|"
     r"我(?:这边|这儿|这里)附近",
 )
+
+
+def affirms_same_place_wrongly(location: LocationContext | None, question: str, reply: str) -> bool:
+    """确知不同城时, 对"我们在一个地方/城市吗"开口就附和 —— 不用模型也能判错。
+
+    线上核验模型对这一句时放时拦 (2026-10-22 三轮里放过一次); 事实齐全时直接
+    判定, 更正文本只陈述已知事实, 误判的代价只是多说一句真话。
+    """
+    return bool(
+        location is not None and location.relation == "different"
+        and _SAME_PLACE_QUESTION.search(question or "")
+        and _AFFIRMATIVE_OPENING.search(reply or "")
+    )
 
 
 def asks_about_user_location(question: str) -> bool:

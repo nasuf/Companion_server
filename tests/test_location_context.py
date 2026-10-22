@@ -299,7 +299,7 @@ def checker(monkeypatch):
 
 async def test_false_co_location_answer_is_corrected_with_both_cities(checker):
     text, corrected = await g.guard_reply(
-        agent(), "对啊！我就在转塘呢 这家店就在我附近呀！", question="我们在一个地方吗",
+        agent(), "转塘这家店就在我附近呀！要不要去这家试试", question="砂锅粥不错 让我看看",
         user_location=xian(),
     )
     assert corrected and text == "刚才说岔了，我在杭州，你在西安，我们不在一个城市哈"
@@ -313,7 +313,7 @@ async def test_false_co_location_answer_is_corrected_with_both_cities(checker):
 
 async def test_question_about_the_user_forces_a_check_even_without_a_claim(checker):
     _, corrected = await g.guard_reply(
-        agent(), "对啊，转塘是杭州的呀！", question="我们在一个城市吗", user_location=xian(),
+        agent(), "杭州的吧 哈哈", question="我是哪里的？", user_location=xian(),
     )
     assert corrected and checker.await_count == 1
 
@@ -413,3 +413,24 @@ async def test_user_only_claim_without_agent_city_is_not_sent_to_the_checker(che
 
 def test_unparseable_timestamp_types_are_unknown():
     assert lc._as_datetime(None) is None and lc._as_datetime(123) is None
+
+
+@pytest.mark.parametrize("reply", [
+    "对啊，转塘是杭州的呀！ 我就在杭州西湖区转塘街道呢。", "是啊 太巧了", "嗯嗯 我也在这边",
+])
+async def test_affirming_a_known_wrong_same_place_is_corrected_without_the_model(checker, reply):
+    text, corrected = await g.guard_reply(agent(), reply, question="我们在一个城市吗",
+                                          user_location=xian())
+    assert corrected and text == "刚才说岔了，我在杭州，你在西安，我们不在一个城市哈"
+    checker.assert_not_awaited()
+
+
+@pytest.mark.parametrize("location,question,reply", [
+    (xian(), "我们在一个城市吗", "不在哦 我在杭州 你那边是西安吧"),
+    (xian(), "你在干嘛", "对啊 刚下班"),
+    (xian(user_city="杭州市"), "我们在一个城市吗", "对啊 都在杭州"),
+    (LocationContext(), "我们在一个城市吗", "对啊"),
+    (None, "我们在一个城市吗", "对啊"),
+])
+def test_same_place_affirmation_needs_known_different_cities(location, question, reply):
+    assert not lc.affirms_same_place_wrongly(location, question, reply)

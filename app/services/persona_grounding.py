@@ -239,8 +239,14 @@ async def guard_reply(
 ) -> tuple[str, bool]:
     """`user_location` (chat/location_context.LocationContext) enables the
     two-sided check on the main reply path; other callers stay single-sided."""
-    from app.services.chat.location_context import asks_about_user_location
+    from app.services.chat.location_context import (
+        affirms_same_place_wrongly,
+        asks_about_user_location,
+    )
 
+    if affirms_same_place_wrongly(user_location, question, text):
+        logger.warning("[persona-grounding] rejected kind=reply same-place affirmation")
+        return user_location_correction(agent, user_location), True
     # Ordinary activity questions must not add a geography-model round trip.
     # Match each clause independently: an activity question cannot hide a
     # second question asking whether the Agent is in a particular city.
