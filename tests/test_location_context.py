@@ -165,7 +165,7 @@ def test_ordinary_questions_are_not_location_questions(question):
 
 @pytest.mark.parametrize("text", [
     "对啊！我就在转塘呢 这家店就在我附近呀！", "你也在杭州吗？太巧了吧！", "我们都在杭州", "离你不远",
-    "转塘就有一家砂锅粥店！要不要去这家试试呀？",
+    "转塘就有一家砂锅粥店！要不要去这家试试呀？", "我刚刷到转塘有家湘菜馆！要不要去试试？",
 ])
 def test_claims_about_the_user_enter_verification(text):
     assert lc.claims_user_location(text)
@@ -306,6 +306,9 @@ async def test_false_co_location_answer_is_corrected_with_both_cities(checker):
     prompt = checker.await_args.args[1]
     assert '对方位置：{"city": "西安市雁塔区", "known": true' in prompt
     assert "顺着用户“我们在一个地方吗”的提问答“对啊”也算断言" in prompt
+    # 线上验收 (qwen3.5-plus): 只写"让对方去"时模型按第 1 条"推荐地点允许"放行了转塘的店
+    assert "哪怕只是推荐、没说角色本人到场" in prompt
+    assert "但说对方在哪、让对方现在去哪，还要过第 7 条" in prompt
 
 
 async def test_question_about_the_user_forces_a_check_even_without_a_claim(checker):
