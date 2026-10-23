@@ -96,6 +96,58 @@ async def test_browser_reads_real_dual_side_failure_and_success(origins, observa
                     assert wm.progress_time(await wm.get_watermark(msg.conversationId,'ai')) == baseline
                     assert result['data']['replay_supported'] is False
                     assert (await request(admin,path+'/missing/retry','POST'))['status']==404
+                    # A later batch commits its first fact, then a real SQL
+                    # failure rolls back its second fact. The browser must see
+                    # the lower bound and unchanged progress, never success/zero.
+                    from app.services.memory.storage import persistence as store, embedding
+                    from app.services.memory.storage.reconciliation import ReconciliationDecision
+                    from tests.test_memory_atomic_storage_postgres import durable_snapshot
+                    new_message = await db.message.create(data={
+                        'conversationId': msg.conversationId, 'role': 'user',
+                        'content': '合成用户参观展览后买了一本书'})
+                    async def partial_extract(*args, side, **kwargs):
+                        if side == 'ai':
+                            return {'_extraction_error': True}
+                        return {'memories': [
+                            {'content': '合成用户参观了展览', 'importance': .6, 'main_category': '生活',
+                             'sub_category': '生活', 'source_indices': [1]},
+                            {'content': '合成用户买了一本书', 'importance': .6, 'main_category': '生活',
+                             'sub_category': '生活', 'source_indices': [1]},
+                        ]}
+                    monkeypatch.setattr(pipeline, 'extract_memories', partial_extract)
+                    monkeypatch.setattr(store, 'db', db)
+                    monkeypatch.setattr(store, 'generate_embedding', AsyncMock(return_value=[1.] + [0.] * 1023))
+                    monkeypatch.setattr(store, 'resolve_memory_write', AsyncMock(return_value=ReconciliationDecision(action='insert_new')))
+                    monkeypatch.setattr(store, 'store_embedding', embedding.store_embedding)
+                    monkeypatch.setattr(store, 'after_memory_changelog', AsyncMock())
+                    for name in ('log_memory_evidence', 'record_entities_for_memory',
+                                 'record_topics_for_memory', 'record_preferences_for_memory'):
+                        monkeypatch.setattr(pipeline, name, AsyncMock())
+                    audit = store._audit_write
+                    writes = 0
+                    async def fail_second(database, *args, **kwargs):
+                        nonlocal writes
+                        writes += 1
+                        await audit(database, *args, **kwargs)
+                        if writes == 2:
+                            await database.execute_raw('SELECT 1 / 0')
+                    monkeypatch.setattr(store, '_audit_write', fail_second)
+                    before = (await durable_snapshot(db, uid))[0]
+                    await p._bg_memory_pipeline(uid, [], msg.conversationId, wid,
+                                                source_message_ids=[new_message.id])
+                    result = await request(admin, path)
+                    row = result['data']['records'][0]
+                    user = next(side for side in row['sides'] if side['side'] == 'user')
+                    assert row['status'] == 'incomplete'
+                    assert user['status'] == 'failed' and user['reason'] == 'memory_write_failed'
+                    assert user['confirmed_write_count'] == 1 and user['memory_count'] is None
+                    assert user['progress'] == 'unchanged'
+                    assert wm.progress_time(await wm.get_watermark(msg.conversationId, 'user')) == msg.createdAt
+                    after = (await durable_snapshot(db, uid))[0]
+                    for key in ('users', 'vectors', 'origins', 'audits'):
+                        assert after[key] == before[key] + 1
+                    assert new_message.content not in str(result)
+                    assert 'division by zero' not in str(result)
                     assert not violations
                 finally:
                     await context.tracing.stop(path=str(artifacts/'memory-processing-real-api-trace.zip'))

@@ -297,6 +297,9 @@ async def test_split_storage_links_every_output_and_rolls_back_invalid_origin(or
 async def test_name_replacement_keeps_old_name_when_origin_validation_fails(origins,monkeypatch):
     from app.services.memory.storage import persistence as p
     db,uid,wid,mid,msg,bind,detail,*_=origins
+    # Ordinary writes must not share a vector ID across owner tables.
+    await db.aimemory.delete(where={"id":mid})
+    monkeypatch.setattr(p,"after_memory_changelog",AsyncMock())
     await db.usermemory.update(where={"id":mid},data={"level":1,"content":"用户姓名为旧合成名","mainCategory":"身份","subCategory":"姓名"})
     monkeypatch.setattr(p,"db",db)
     monkeypatch.setattr(p,"generate_embedding",AsyncMock(return_value=[0.0]*1024))
@@ -342,6 +345,9 @@ async def test_reconciliation_vector_and_content_roll_back_together(origins,monk
     from app.services.memory.storage import persistence as p, embedding
     from app.services.memory.storage.reconciliation import ReconciliationDecision
     db,uid,wid,mid,msg,bind,detail,*_=origins
+    # Ordinary writes must not share a vector ID across owner tables.
+    await db.aimemory.delete(where={"id":mid})
+    monkeypatch.setattr(p,"after_memory_changelog",AsyncMock())
     monkeypatch.setattr(p,"db",db)
     monkeypatch.setattr(p,"generate_embedding",AsyncMock(return_value=[0.0,1.0]+[0.0]*1022))
     monkeypatch.setattr(p,"store_embedding",embedding.store_embedding)

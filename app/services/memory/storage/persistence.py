@@ -5,7 +5,7 @@ Classifies into L1/L2/L3 levels.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.db import db
 from app.services.memory.storage import repo as memory_repo
@@ -157,6 +157,15 @@ async def log_memory_changelog(
             operation=operation, workspace_id=workspace_id)
     except Exception as e:
         logger.warning(f"Failed to write changelog: {e}")
+
+async def _audit_write(database, user_id, workspace_id, memory_id, operation, *,
+                       old_value=None, new_value=None):
+    """Required audit for the primary write, using its owning transaction."""
+    await database.memorychangelog.create(data={
+        "userId": user_id, "workspaceId": workspace_id, "memoryId": memory_id,
+        "operation": operation, "oldValue": old_value, "newValue": new_value,
+    })
+
 
 async def find_duplicate_id(
     user_id: str,
@@ -531,28 +540,23 @@ async def store_memory(
         updated_embedding = embedding
         if updated_content != content:
             updated_embedding = await generate_embedding(updated_content)
-        if evidence_sources is not None:
-            async with db.tx() as tx:
-                await store_embedding(decision.existing_id, updated_embedding, database=tx)
-                await memory_repo.update(decision.existing_id, source=repo_source,
-                    record=decision.existing_record, database=tx,
-                    evidence_sources=evidence_sources, extractor_version=extractor_version, **update_data)
-            await memory_repo.invalidate_scope(user_id, workspace_id)
-        else:
-            await store_embedding(decision.existing_id, updated_embedding)
-            await memory_repo.update(decision.existing_id, source=repo_source,
-                record=decision.existing_record, **update_data)
-        try:
-            await log_memory_changelog(
-                user_id,
-                decision.existing_id,
-                "reconciliation_merge" if decision.action == "merge_existing" else "reconciliation_update",
-                old_value=getattr(decision.existing_record, "content", None),
-                new_value=update_data["content"],
-                workspace_id=workspace_id,
-            )
-        except Exception as e:
-            logger.warning(f"Changelog write failed for memory {decision.existing_id}: {e}")
+        from app.services.memory.manual_write import MemoryWriteError, lock_memories
+        record = decision.existing_record
+        if (record.userId, record.workspaceId, record.source) != (user_id, workspace_id, repo_source):
+            raise MemoryWriteError(409, "memory_write_scope_changed")
+        operation = "reconciliation_merge" if decision.action == "merge_existing" else "reconciliation_update"
+        async with db.tx(timeout=timedelta(seconds=15)) as tx:
+            # Preparation may call models. Lock and compare the exact persisted
+            # snapshot only now; never overwrite a concurrent edit or deletion.
+            await lock_memories(tx, [record])
+            await memory_repo.update(record.id, source=repo_source, record=record, database=tx,
+                evidence_sources=evidence_sources, extractor_version=extractor_version, **update_data)
+            await store_embedding(record.id, updated_embedding, database=tx)
+            await _audit_write(tx, user_id, workspace_id, record.id, operation,
+                               old_value=record.content, new_value=updated_content)
+        await memory_repo.invalidate_scope(user_id, workspace_id)
+        await after_memory_changelog(user_id=user_id, memory_id=record.id,
+            operation=operation, workspace_id=workspace_id)
         logger.info(
             f"Memory reconciliation updated existing "
             f"(id={decision.existing_id[:8]}): {content[:50]}"
@@ -585,14 +589,14 @@ async def store_memory(
     # Part 5 §4.2: 提醒重复规则; 仅提醒子类有效, 其他子类强制清空避免脏数据.
     if recurrence and taxonomy.sub_category == "提醒":
         create_data["recurrence"] = recurrence
-    if level == 1 and is_singleton(taxonomy.main_category, taxonomy.sub_category):
-        # Share the DB scope lock with lifecycle promotions; a Redis lock alone
-        # cannot serialize a new singleton against a simultaneous L2 promotion.
-        from datetime import timedelta
-        from app.services.memory.lifecycle.lazy_update import scope_lock_key
-        table = "memories_ai" if repo_source == "ai" else "memories_user"
-        async with db.tx(timeout=timedelta(seconds=15)) as tx:
-            await tx.execute_raw("SELECT pg_advisory_xact_lock($1::bigint)", scope_lock_key(repo_source, user_id, workspace_id))
+    async with db.tx(timeout=timedelta(seconds=15)) as tx:
+        if level == 1 and is_singleton(taxonomy.main_category, taxonomy.sub_category):
+            # Shared with lifecycle promotion and administrator replacement.
+            from app.services.memory.lifecycle.lazy_update import scope_lock_key
+            from app.services.memory.manual_write import lock_memories
+            table = "memories_ai" if repo_source == "ai" else "memories_user"
+            await tx.execute_raw("SELECT pg_advisory_xact_lock($1::bigint)",
+                                 scope_lock_key(repo_source, user_id, workspace_id))
             taken = await tx.query_raw(
                 f"SELECT id FROM {table} WHERE user_id=$1 AND workspace_id IS NOT DISTINCT FROM $2::text "
                 "AND main_category=$3 AND sub_category=$4 AND level=1 AND NOT is_archived LIMIT 1",
@@ -601,80 +605,24 @@ async def store_memory(
             if taken and (name_replacement is None or taken[0]["id"] != name_replacement.id):
                 return None
             if name_replacement is not None:
-                await tx.usermemory.update(where={"id":name_replacement.id},data={"isArchived":True})
-            memory = await memory_repo.create(source=source, database=tx,
-                evidence_sources=evidence_sources, extractor_version=extractor_version, **create_data)
-            if name_replacement is not None:
-                await store_embedding(memory.id, embedding, database=tx)
-        # A pre-commit version bump can cache the old row under the new key.
-        await memory_repo.invalidate_scope(user_id, workspace_id)
-        if name_replacement is not None:
-            try:
-                await log_memory_changelog(user_id,name_replacement.id,"singleton_replaced",
-                    old_value=name_replacement.content,new_value=content,workspace_id=workspace_id)
-            except Exception:
-                logger.warning("Singleton replacement audit failed for %s", name_replacement.id)
-    else:
-        memory = await memory_repo.create(source=source, evidence_sources=evidence_sources,
-            extractor_version=extractor_version, **create_data)
+                await lock_memories(tx, [name_replacement])
+                await tx.usermemory.update(where={"id": name_replacement.id}, data={"isArchived": True})
+                await _audit_write(tx, user_id, workspace_id, name_replacement.id, "singleton_replaced",
+                                   old_value=name_replacement.content, new_value=content)
+        memory = await memory_repo.create(source=repo_source, database=tx,
+            evidence_sources=evidence_sources, extractor_version=extractor_version, **create_data)
+        # All durable parts of this row commit together, including sources and
+        # its vector. No post-commit compensating delete can erase a later edit.
+        await store_embedding(memory.id, embedding, database=tx)
+        await _audit_write(tx, user_id, workspace_id, memory.id, "insert", new_value=content)
 
-    # Store embedding. If this fails the memory row exists but would never
-    # be retrievable by vector search — delete the orphan to keep state
-    # consistent. The caller sees the error and can retry.
-    #
-    # Phase 0.4: store_embedding 自身已有 retry (3 attempts), 走到 except 表示
-    # PG 真实故障 (非 transient). Rollback 也 retry, rollback 失败就 emit
-    # EVT_MEMORY_ORPHAN 让 admin 可查 (背景 cure 脚本扫这个事件).
-    try:
-        if name_replacement is None:
-            await store_embedding(memory.id, embedding)
-    except Exception as embed_err:
-        logger.error(
-            f"Embedding store failed for memory {memory.id} after retries; "
-            f"rolling back memory row. Error: {embed_err}"
-        )
-        rollback_succeeded = False
-        for attempt in range(3):
-            try:
-                await memory_repo.delete(memory.id, source=source)  # type: ignore[arg-type]
-                rollback_succeeded = True
-                break
-            except Exception as cleanup_err:
-                if attempt == 2:
-                    # Rollback 终极失败 — orphan 留在 DB, 标 observability
-                    from app.observability.events import EVT_MEMORY_ORPHAN
-                    logger.error(
-                        f"[ORPHAN] memory {memory.id} rollback failed 3x: "
-                        f"{cleanup_err}; orphan row retained in DB",
-                        extra={
-                            "event": EVT_MEMORY_ORPHAN,
-                            "memory_id": memory.id,
-                            "source": source,
-                            "user_id": user_id,
-                            "rollback_error": str(cleanup_err)[:100],
-                            "embed_error": str(embed_err)[:100],
-                        },
-                    )
-                else:
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(0.1 * (attempt + 1))
-        if not rollback_succeeded:
-            # changelog 也不写 (orphan 已记 EVT_MEMORY_ORPHAN, 不再额外污染 changelog)
-            pass
-        raise
-
-    # Changelog is advisory (portrait generation input); a failure here is
-    # not worth rolling back the memory for.
-    try:
-        await log_memory_changelog(
-            user_id,
-            memory.id,
-            "insert",
-            new_value=content,
-            workspace_id=workspace_id,
-        )
-    except Exception as e:
-        logger.warning(f"Changelog write failed for memory {memory.id}: {e}")
+    # Derived-state/network work belongs after commit, outside database locks.
+    await memory_repo.invalidate_scope(user_id, workspace_id)
+    if name_replacement is not None:
+        await after_memory_changelog(user_id=user_id, memory_id=name_replacement.id,
+            operation="singleton_replaced", workspace_id=workspace_id)
+    await after_memory_changelog(user_id=user_id, memory_id=memory.id,
+        operation="insert", workspace_id=workspace_id)
 
     logger.info(f"Stored memory L{level} (importance={importance:.2f}): {content[:50]}")
     return memory.id

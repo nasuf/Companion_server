@@ -494,14 +494,14 @@ async def _pipeline_with_watermark(
             if not (is_new and m.get("role") == target_role) or _memory_written_by_lifecycle(m):
                 context_msgs.append(m)
 
-    def outcome(status, reason, count=None, progress="unchanged"):
+    def outcome(status, reason, count=None, progress="unchanged", confirmed_write_count=None):
         return MemorySideOutcome(side, status, reason, count, progress,
             source_count=len(new_target_msgs),
             source_binding="persisted_messages" if conversation_id else "unlinked_input",
             cursor_kind=("not_applicable" if not conversation_id else "initial_window" if wm is None
                          else "message_position" if isinstance(wm, MessageProgress) and wm.message_id is not None
                          else "timestamp_cohort"),
-            inspected_count=inspected_count, has_more=has_more)
+            inspected_count=inspected_count, has_more=has_more, confirmed_write_count=confirmed_write_count)
 
     if max_side_ts is None:
         return outcome("no_new_messages", "no_new_messages", 0)
@@ -538,7 +538,8 @@ async def _pipeline_with_watermark(
             ),
         )
     except MemoryExtractionError as exc:
-        return outcome("disabled" if exc.kind == "prompt_disabled" else "failed", exc.kind)
+        return outcome("disabled" if exc.kind == "prompt_disabled" else "failed", exc.kind,
+                       confirmed_write_count=exc.confirmed_write_count)
 
     progress = "not_applicable" if not conversation_id else "unchanged"
     if conversation_id and not includes(wm, max_side_ts, max_side_id or ""):

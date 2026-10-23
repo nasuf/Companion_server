@@ -82,6 +82,9 @@ async def test_merge_clears_false_clock_without_legacy_rebinding(origins,monkeyp
     from app.services.memory.storage import repo
     from app.services.memory.lifecycle import quality
     db,uid,wid,mid,msg,*_=origins
+    # Ordinary writes must not share a vector ID across owner tables.
+    await db.aimemory.delete(where={"id":mid})
+    monkeypatch.setattr(store,"after_memory_changelog",AsyncMock())
     sources=await snapshot(origins)
     clock=resolve_fact_clock({'source_indices':[1],'time_quote':'昨天','time_source_index':1},sources)
     old=await repo.find_unique(mid)

@@ -9,7 +9,7 @@
 
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -24,6 +24,28 @@ from app.services.memory.storage.reconciliation import (
     ReconciliationDecision,
     resolve_memory_write,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_storage_io(monkeypatch):
+    """Unit tests replace infrastructure; real transaction guards are covered in PG tests."""
+    from app.services.memory.storage import persistence as p
+    from app.services.memory import manual_write
+
+    @asynccontextmanager
+    async def transaction(**kwargs):
+        yield SimpleNamespace()
+
+    @asynccontextmanager
+    async def lock(*args, **kwargs):
+        yield True
+
+    monkeypatch.setattr(p.db, "tx", transaction)
+    monkeypatch.setattr(p, "_audit_write", AsyncMock())
+    monkeypatch.setattr(p, "after_memory_changelog", AsyncMock())
+    monkeypatch.setattr(p.memory_repo, "invalidate_scope", AsyncMock())
+    monkeypatch.setattr(p, "distributed_lock", lock)
+    monkeypatch.setattr(manual_write, "lock_memories", AsyncMock())
 
 
 # --- _memory_to_dict ---
@@ -507,7 +529,7 @@ class TestMemoryReconciliation:
             )
 
         assert result == "old-pref"
-        mock_store_embedding.assert_awaited_once_with("old-pref", [0.1])
+        mock_store_embedding.assert_awaited_once_with("old-pref", [0.1], database=ANY)
         mock_update.assert_awaited_once()
         mock_create.assert_not_called()
 
@@ -550,7 +572,7 @@ class TestMemoryReconciliation:
         assert result == "old-life"
         assert mock_embed.await_count == 2
         mock_embed.assert_any_await("用户周末会去花鸟市场逛干花摊，也买过多肉植物")
-        mock_store_embedding.assert_awaited_once_with("old-life", [0.2])
+        mock_store_embedding.assert_awaited_once_with("old-life", [0.2], database=ANY)
         mock_create.assert_not_called()
 
 

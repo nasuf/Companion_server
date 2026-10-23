@@ -18,6 +18,9 @@ class MemorySideOutcome:
     cursor_kind: str = "unknown"
     inspected_count: int | None = None
     has_more: bool | None = None
+    # Successfully returned writes before failure, including updates. This is
+    # only a lower bound; memory_count remains unknown for a partial batch.
+    confirmed_write_count: int | None = None
 
 
 class MemoryProgressError(RuntimeError):

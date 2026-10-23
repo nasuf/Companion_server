@@ -62,11 +62,16 @@ class MemoryExtractionError(RuntimeError):
     are lost forever. A later batch will re-cover them.
     """
 
-    def __init__(self, message: str, *, kind: str = "extraction_failed"):
+    def __init__(self, message: str, *, kind: str = "extraction_failed",
+                 confirmed_write_count: int | None = None):
         super().__init__(message)
         # Only documented categories reach admin diagnostics. Provider errors
         # and source text must never be used as an API-visible reason.
-        self.kind = kind if kind in {"prompt_disabled", "source_invalid"} else "extraction_failed"
+        self.kind = kind if kind in {"prompt_disabled", "source_invalid", "processing_failed",
+            "memory_write_conflict", "memory_write_failed", "memory_followup_failed"} else "extraction_failed"
+        # Lower bound only: an interrupted write or a split may have committed
+        # additional rows before returning. Never treat this as a replay receipt.
+        self.confirmed_write_count = confirmed_write_count
 
 async def _create_reminder_timetrigger(
     *,
@@ -383,269 +388,283 @@ async def process_memory_pipeline(
     )
 
     # Step 3: Store each memory with dedup and conflict check
-    for mem in memories:
-        content = mem.get("content", "")
-        from app.services.persona_grounding import generated_stable_self_claim
-        if side == "ai" and generated_stable_self_claim(content):
-            logger.info("[MEM-ai] skipped stable self-claim regardless of category")
-            continue
-        if side == "ai" and is_user_fact_acknowledgement(content):
-            logger.info(
-                f"[MEM-{side}] skipped user-fact acknowledgement: {content[:40]}"
-            )
-            continue
-        if _is_uncertain_ai_self_memory(
-            side=side,
-            new_conversation=new_conversation,
-            content=content,
-        ):
-            logger.info(
-                f"[MEM-{side}] skipped uncertain self-memory: {content[:40]}"
-            )
-            continue
-        # LLM 偶尔把 importance 输出成字符串 ("0.8") 或 null. 下面的分层比较和
-        # clamp 都按数字走, 类型不对会抛 TypeError —— 而这个异常会被上层当成抽取
-        # 失败, 水位线卡住不动, 整批消息反复重试同一条坏数据. 在边界收口一次.
-        importance = _coerce_importance(mem.get("importance"))
-        memory_type = mem.get("type")
-        main_category = mem.get("main_category")
-        sub_category = mem.get("sub_category")
-        # ③ Block self-authored persona claims: the AI must not "learn" new
-        # preferences/identity about itself from its own chat output (that is the
-        # fabrication→fossilization drift vector). The profile is the sole source
-        # of stable persona facts; episodic 生活/情绪 self-memory still flows.
-        if side == "ai" and main_category in _AI_SELF_AUTHORED_BLOCKED_CATEGORIES:
-            logger.info(
-                f"[MEM-{side}] skipped self-authored persona claim "
-                f"({main_category}/{sub_category}): {content[:40]}"
-            )
-            continue
-        # 提前解 alias: 否则 LLM 输出"备忘"/"提醒我"等别名时, 下游 sub_category=="提醒"
-        # 比对会漏判 → recurrence 检测被跳过 → store_memory 把已 alias 解析的"提醒"
-        # 行写入但 recurrence=NULL, 一次性提醒过去时间不被降级.
-        if sub_category and sub_category in SUBCATEGORY_ALIASES:
-            sub_category = SUBCATEGORY_ALIASES[sub_category]
-
-        # 身份事实兜底: LLM 对「用户叫X」这类句式的分类不稳定, 分错时姓名会落进
-        # 身份/其他 并被压到 L2, 同时绕过 L1 singleton 保护 (详见 identity_repair).
-        if side == "user":
-            main_category, sub_category, importance, repair = (
-                repair_identity_classification(
-                    summary=content,
-                    main_category=main_category,
-                    sub_category=sub_category,
-                    importance=importance,
-                )
-            )
-            if repair:
+    write_phase = "preparing"
+    try:
+        for mem in memories:
+            write_phase = "preparing"
+            content = mem.get("content", "")
+            from app.services.persona_grounding import generated_stable_self_claim
+            if side == "ai" and generated_stable_self_claim(content):
+                logger.info("[MEM-ai] skipped stable self-claim regardless of category")
+                continue
+            if side == "ai" and is_user_fact_acknowledgement(content):
                 logger.info(
-                    f"[MEM-{side}] identity repair ({repair}): {content[:40]}",
-                    extra={"event": EVT_MEMORY_IDENTITY_REPAIR, "repair": repair},
+                    f"[MEM-{side}] skipped user-fact acknowledgement: {content[:40]}"
                 )
-
-        # Reminder importance clamp: extraction prompt asks 0.4-0.6, but LLM
-        # drifts upward; without the clamp 1 reminder/week could ride the L2
-        # frequency factor up to L1 over a year. Upper bound 0.49 (NOT 0.6) so
-        # importance always lands in L3 (level derivation: ≥0.50 → L2). Triggering
-        # is by timetrigger directly (key by sub_category="提醒"), so layer
-        # demotion is harmless to the reminder feature itself.
-        if sub_category == "提醒":
-            importance = max(0.4, min(0.49, float(importance)))
-
-        if importance >= L1_MIN_IMPORTANCE and not _l1_on_insert_allowed(
-            side,
-            main_category or LEGACY_TYPE_TO_MAIN_CATEGORY.get(memory_type or ""),
-            sub_category,
-        ):
-            importance = _NON_CORE_IMPORTANCE_CAP
-
-        # Per spec《产品手册·背景信息》§2.3 — level is derived from importance
-        # score (0-100), not whatever level the LLM may have guessed:
-        #   ≥ 0.85 → L1   |   0.50-0.84 → L2   |   0.10-0.49 → L3   |   < 0.10 → drop
-        if importance < 0.10:
-            logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10): {content[:40]}")
-            continue
-        else:
-            level = level_for_importance(importance)
-
-        # Rule engine wins when it's unambiguous; LLM occur_time is fallback.
-        # 必须 ensure_aware: LLM 输出 ISO 经常没 tz, fromisoformat 解出来是
-        # naive, 跟下面 ref_now (aware) 比较时崩 "can't compare offset-naive
-        # and offset-aware datetimes". 在边界统一规范化, 避免每个比较点打补丁.
-        clock = resolve_fact_clock({**mem, "sub_category": sub_category}, origins) if strict_clock else None
-        fact_statement_time = clock.statement_time if clock else statement_time
-        fact_origins = clock.bind(origins) if clock else origins
-        occur_time: datetime | None = clock.occur_time if clock else rule_based_occur_time
-        if occur_time is None and not strict_clock:
-            raw_time = mem.get("occur_time")
-            if raw_time and isinstance(raw_time, str):
-                try:
-                    occur_time = ensure_aware(datetime.fromisoformat(raw_time))
-                except ValueError:
-                    pass
-
-        # spec Part 5 §4.2: 提醒重复规则 (once|yearly|monthly|weekly|daily).
-        # 仅 sub_category="提醒" 有效, 其他子类强制 None (store_memory 也兜底).
-        recurrence: str | None = None
-        if sub_category == "提醒":
-            raw_rec = mem.get("recurrence")
-            recurrence = raw_rec if raw_rec in RECURRENCE_PERIODIC else "once"
-
-        # spec Part 5 §4.2: 一次性提醒 (recurrence=once) 必须含未来 event_time.
-        # 周期提醒 (yearly/monthly/weekly/daily) occur_time 是首次发生时间,
-        # 后续按 recurrence 自动重复, 不要求未来 (e.g. yearly 的 1995-03-20 合法).
-        # 用 _now_corrected (tz-aware + NTP), 否则 datetime.now() 是 naive,
-        # 跟 parser 的 tz-aware occur_time 比较会 TypeError.
-        reminder_demoted_reason: str | None = None
-        if sub_category == "提醒" and recurrence == "once":
-            ref_now = (_now_corrected() if strict_clock else statement_time or _now_corrected())
-            if occur_time is None or occur_time <= ref_now:
-                reminder_demoted_reason = (
-                    "missing_occur_time" if occur_time is None
-                    else f"past_occur_time={occur_time.isoformat()}"
-                )
-                logger.warning(
-                    f"[MEM-{side}] 提醒记忆 occur_time 缺失或非未来 "
-                    f"({occur_time}); 改归生活/其他: {content[:40]}"
-                )
-                sub_category = "其他"
-                # recurrence 不重置: store_memory 的 sub_category!="提醒" 闸门会丢弃
-
-        memory_id = await store_memory(
-            user_id=user_id,
-            content=content,
-            level=level,
-            importance=importance,
-            memory_type=memory_type,
-            main_category=main_category,
-            sub_category=sub_category,
-            occur_time=occur_time,
-            statement_time=fact_statement_time,
-            **({"infer_time": False} if strict_clock else {}),
-            workspace_id=workspace_id,
-            source=side,
-            recurrence=recurrence,
-            entities=[str(e) for e in mem.get("entities", []) if e],
-            topics=[str(t) for t in mem.get("topics", []) if t],
-            # Provenance is decided by the pipeline side, not the LLM: user
-            # utterances → user_stated, the AI's own replies → ai_authored.
-            provenance=(
-                provenance_mod.USER_STATED if side == "user"
-                else provenance_mod.AI_AUTHORED
-            ),
-            evidence_sources=fact_origins,
-            extractor_version="memory-extraction-time-v2" if strict_clock else "memory-extraction-v1",
-        )
-
-        if memory_id:
-            stored_ids.append(memory_id)
-            try:
-                await log_memory_evidence(
-                    user_id=user_id,
-                    memory_id=memory_id,
-                    # All batch inputs are guarded, but only attributed inputs
-                    # may increase this fact's evidence count.
-                    message_ids=([origins[i - 1].ref for i in clock.indices]
-                                 if clock is not None else evidence_message_ids or []),
-                    workspace_id=workspace_id,
-                    source=side,
-                    evidence_sources=fact_origins,
-                    **({"sources_already_bound": True} if strict_clock else {}),
-                )
-            except Exception as e:
-                logger.debug(f"[MEM-{side}] evidence link failed for {memory_id}: {e}")
-
-            # 提醒入库 → 同步建 timetrigger (统一提醒系统).
-            # 限 side=="user": 用户主动设置的事项才该建实际的提醒计划.
-            # AI-side 反思 (e.g. "我差点又忘记提醒用户喝水") extraction LLM 偶尔
-            # 误归 sub_category=="提醒" + 给一个 occur_time, 不能据此真的发提醒
-            # — AI 的内省不该变成产品行为. 严格限制 side="user" 避免这类误触发.
-            # once 已经在前面校验过必须是未来; 周期性 (yearly/monthly/weekly/daily)
-            # 即使 occur_time 是历史(首次发生时间)也合法, trigger handler 会按
-            # recurrence 续期到下次.
-            if (
-                side == "user"
-                and sub_category == "提醒"
-                and occur_time is not None
-                and recurrence
+                continue
+            if _is_uncertain_ai_self_memory(
+                side=side,
+                new_conversation=new_conversation,
+                content=content,
             ):
-                await _create_reminder_timetrigger(
-                    user_id=user_id,
-                    memory_id=memory_id,
-                    summary=content,
-                    occur_time=occur_time,
-                    recurrence=recurrence,
-                    side=side,
-                    **({"require_stored_clock": True} if strict_clock else {}),
+                logger.info(
+                    f"[MEM-{side}] skipped uncertain self-memory: {content[:40]}"
                 )
+                continue
+            # LLM 偶尔把 importance 输出成字符串 ("0.8") 或 null. 下面的分层比较和
+            # clamp 都按数字走, 类型不对会抛 TypeError —— 而这个异常会被上层当成抽取
+            # 失败, 水位线卡住不动, 整批消息反复重试同一条坏数据. 在边界收口一次.
+            importance = _coerce_importance(mem.get("importance"))
+            memory_type = mem.get("type")
+            main_category = mem.get("main_category")
+            sub_category = mem.get("sub_category")
+            # ③ Block self-authored persona claims: the AI must not "learn" new
+            # preferences/identity about itself from its own chat output (that is the
+            # fabrication→fossilization drift vector). The profile is the sole source
+            # of stable persona facts; episodic 生活/情绪 self-memory still flows.
+            if side == "ai" and main_category in _AI_SELF_AUTHORED_BLOCKED_CATEGORIES:
+                logger.info(
+                    f"[MEM-{side}] skipped self-authored persona claim "
+                    f"({main_category}/{sub_category}): {content[:40]}"
+                )
+                continue
+            # 提前解 alias: 否则 LLM 输出"备忘"/"提醒我"等别名时, 下游 sub_category=="提醒"
+            # 比对会漏判 → recurrence 检测被跳过 → store_memory 把已 alias 解析的"提醒"
+            # 行写入但 recurrence=NULL, 一次性提醒过去时间不被降级.
+            if sub_category and sub_category in SUBCATEGORY_ALIASES:
+                sub_category = SUBCATEGORY_ALIASES[sub_category]
 
-            # Log user emphasis so L2→L1 promotion can verify the condition
-            if user_emphasized:
-                try:
-                    await log_memory_changelog(
-                        user_id, memory_id, "user_emphasized",
-                        new_value="用户表达了该信息的重要性",
-                        workspace_id=workspace_id,
+            # 身份事实兜底: LLM 对「用户叫X」这类句式的分类不稳定, 分错时姓名会落进
+            # 身份/其他 并被压到 L2, 同时绕过 L1 singleton 保护 (详见 identity_repair).
+            if side == "user":
+                main_category, sub_category, importance, repair = (
+                    repair_identity_classification(
+                        summary=content,
+                        main_category=main_category,
+                        sub_category=sub_category,
+                        importance=importance,
                     )
-                except Exception:
-                    pass
-
-            # spec Part 5 §4.2: 提醒降级审计 trail, 让 admin 能 grep 看到
-            if reminder_demoted_reason:
-                try:
-                    await log_memory_changelog(
-                        user_id, memory_id, "reminder_past_time_demoted",
-                        new_value=reminder_demoted_reason,
-                        workspace_id=workspace_id,
+                )
+                if repair:
+                    logger.info(
+                        f"[MEM-{side}] identity repair ({repair}): {content[:40]}",
+                        extra={"event": EVT_MEMORY_IDENTITY_REPAIR, "repair": repair},
                     )
-                except Exception:
-                    pass
 
-            # Step 3: Link entities / topics / preferences to THIS memory.
-            # Must use the memory's own entities/topics (not the batch-level
-            # aggregate) — otherwise a batch that extracts N memories links
-            # every entity/topic/preference to all N rows, polluting the entity
-            # graph and entity-recall (e.g. a "cat" memory tagged with "work").
-            # Best-effort: failure here is advisory (retrieval still works from
-            # the memory row + pgvector) so we log-and-continue.
-            try:
-                mem_entities = [
-                    {"name": name, "type": entity_type_by_name.get(name, "other")}
-                    for name in mem.get("entities", [])
-                    if name
-                ]
-                await record_entities_for_memory(
-                    memory_id=memory_id,
-                    memory_source=side,
-                    user_id=user_id,
-                    workspace_id=workspace_id,
-                    entities=mem_entities,
-                )
-                await record_topics_for_memory(
-                    memory_id=memory_id,
-                    memory_source=side,
-                    user_id=user_id,
-                    workspace_id=workspace_id,
-                    topics=[str(t) for t in mem.get("topics", []) if t],
-                )
-                # Preferences have no per-memory field in the schema; attribute
-                # each batch preference only to the memory whose text actually
-                # mentions its value (no cross-memory pollution).
-                mem_prefs = [
-                    pref for pref in batch_preferences
-                    if str(pref.get("value") or "").strip()
-                    and str(pref.get("value")).strip() in content
-                ]
-                if mem_prefs:
-                    await record_preferences_for_memory(
+            # Reminder importance clamp: extraction prompt asks 0.4-0.6, but LLM
+            # drifts upward; without the clamp 1 reminder/week could ride the L2
+            # frequency factor up to L1 over a year. Upper bound 0.49 (NOT 0.6) so
+            # importance always lands in L3 (level derivation: ≥0.50 → L2). Triggering
+            # is by timetrigger directly (key by sub_category="提醒"), so layer
+            # demotion is harmless to the reminder feature itself.
+            if sub_category == "提醒":
+                importance = max(0.4, min(0.49, float(importance)))
+
+            if importance >= L1_MIN_IMPORTANCE and not _l1_on_insert_allowed(
+                side,
+                main_category or LEGACY_TYPE_TO_MAIN_CATEGORY.get(memory_type or ""),
+                sub_category,
+            ):
+                importance = _NON_CORE_IMPORTANCE_CAP
+
+            # Per spec《产品手册·背景信息》§2.3 — level is derived from importance
+            # score (0-100), not whatever level the LLM may have guessed:
+            #   ≥ 0.85 → L1   |   0.50-0.84 → L2   |   0.10-0.49 → L3   |   < 0.10 → drop
+            if importance < 0.10:
+                logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10): {content[:40]}")
+                continue
+            else:
+                level = level_for_importance(importance)
+
+            # Rule engine wins when it's unambiguous; LLM occur_time is fallback.
+            # 必须 ensure_aware: LLM 输出 ISO 经常没 tz, fromisoformat 解出来是
+            # naive, 跟下面 ref_now (aware) 比较时崩 "can't compare offset-naive
+            # and offset-aware datetimes". 在边界统一规范化, 避免每个比较点打补丁.
+            clock = resolve_fact_clock({**mem, "sub_category": sub_category}, origins) if strict_clock else None
+            fact_statement_time = clock.statement_time if clock else statement_time
+            fact_origins = clock.bind(origins) if clock else origins
+            occur_time: datetime | None = clock.occur_time if clock else rule_based_occur_time
+            if occur_time is None and not strict_clock:
+                raw_time = mem.get("occur_time")
+                if raw_time and isinstance(raw_time, str):
+                    try:
+                        occur_time = ensure_aware(datetime.fromisoformat(raw_time))
+                    except ValueError:
+                        pass
+
+            # spec Part 5 §4.2: 提醒重复规则 (once|yearly|monthly|weekly|daily).
+            # 仅 sub_category="提醒" 有效, 其他子类强制 None (store_memory 也兜底).
+            recurrence: str | None = None
+            if sub_category == "提醒":
+                raw_rec = mem.get("recurrence")
+                recurrence = raw_rec if raw_rec in RECURRENCE_PERIODIC else "once"
+
+            # spec Part 5 §4.2: 一次性提醒 (recurrence=once) 必须含未来 event_time.
+            # 周期提醒 (yearly/monthly/weekly/daily) occur_time 是首次发生时间,
+            # 后续按 recurrence 自动重复, 不要求未来 (e.g. yearly 的 1995-03-20 合法).
+            # 用 _now_corrected (tz-aware + NTP), 否则 datetime.now() 是 naive,
+            # 跟 parser 的 tz-aware occur_time 比较会 TypeError.
+            reminder_demoted_reason: str | None = None
+            if sub_category == "提醒" and recurrence == "once":
+                ref_now = (_now_corrected() if strict_clock else statement_time or _now_corrected())
+                if occur_time is None or occur_time <= ref_now:
+                    reminder_demoted_reason = (
+                        "missing_occur_time" if occur_time is None
+                        else f"past_occur_time={occur_time.isoformat()}"
+                    )
+                    logger.warning(
+                        f"[MEM-{side}] 提醒记忆 occur_time 缺失或非未来 "
+                        f"({occur_time}); 改归生活/其他: {content[:40]}"
+                    )
+                    sub_category = "其他"
+                    # recurrence 不重置: store_memory 的 sub_category!="提醒" 闸门会丢弃
+
+            write_phase = "write"
+            memory_id = await store_memory(
+                user_id=user_id,
+                content=content,
+                level=level,
+                importance=importance,
+                memory_type=memory_type,
+                main_category=main_category,
+                sub_category=sub_category,
+                occur_time=occur_time,
+                statement_time=fact_statement_time,
+                **({"infer_time": False} if strict_clock else {}),
+                workspace_id=workspace_id,
+                source=side,
+                recurrence=recurrence,
+                entities=[str(e) for e in mem.get("entities", []) if e],
+                topics=[str(t) for t in mem.get("topics", []) if t],
+                # Provenance is decided by the pipeline side, not the LLM: user
+                # utterances → user_stated, the AI's own replies → ai_authored.
+                provenance=(
+                    provenance_mod.USER_STATED if side == "user"
+                    else provenance_mod.AI_AUTHORED
+                ),
+                evidence_sources=fact_origins,
+                extractor_version="memory-extraction-time-v2" if strict_clock else "memory-extraction-v1",
+            )
+
+            write_phase = "followup"
+            if memory_id:
+                stored_ids.append(memory_id)
+                try:
+                    await log_memory_evidence(
+                        user_id=user_id,
+                        memory_id=memory_id,
+                        # All batch inputs are guarded, but only attributed inputs
+                        # may increase this fact's evidence count.
+                        message_ids=([origins[i - 1].ref for i in clock.indices]
+                                     if clock is not None else evidence_message_ids or []),
+                        workspace_id=workspace_id,
+                        source=side,
+                        evidence_sources=fact_origins,
+                        **({"sources_already_bound": True} if strict_clock else {}),
+                    )
+                except Exception as e:
+                    logger.debug(f"[MEM-{side}] evidence link failed for {memory_id}: {e}")
+
+                # 提醒入库 → 同步建 timetrigger (统一提醒系统).
+                # 限 side=="user": 用户主动设置的事项才该建实际的提醒计划.
+                # AI-side 反思 (e.g. "我差点又忘记提醒用户喝水") extraction LLM 偶尔
+                # 误归 sub_category=="提醒" + 给一个 occur_time, 不能据此真的发提醒
+                # — AI 的内省不该变成产品行为. 严格限制 side="user" 避免这类误触发.
+                # once 已经在前面校验过必须是未来; 周期性 (yearly/monthly/weekly/daily)
+                # 即使 occur_time 是历史(首次发生时间)也合法, trigger handler 会按
+                # recurrence 续期到下次.
+                if (
+                    side == "user"
+                    and sub_category == "提醒"
+                    and occur_time is not None
+                    and recurrence
+                ):
+                    await _create_reminder_timetrigger(
+                        user_id=user_id,
+                        memory_id=memory_id,
+                        summary=content,
+                        occur_time=occur_time,
+                        recurrence=recurrence,
+                        side=side,
+                        **({"require_stored_clock": True} if strict_clock else {}),
+                    )
+
+                # Log user emphasis so L2→L1 promotion can verify the condition
+                if user_emphasized:
+                    try:
+                        await log_memory_changelog(
+                            user_id, memory_id, "user_emphasized",
+                            new_value="用户表达了该信息的重要性",
+                            workspace_id=workspace_id,
+                        )
+                    except Exception:
+                        pass
+
+                # spec Part 5 §4.2: 提醒降级审计 trail, 让 admin 能 grep 看到
+                if reminder_demoted_reason:
+                    try:
+                        await log_memory_changelog(
+                            user_id, memory_id, "reminder_past_time_demoted",
+                            new_value=reminder_demoted_reason,
+                            workspace_id=workspace_id,
+                        )
+                    except Exception:
+                        pass
+
+                # Step 3: Link entities / topics / preferences to THIS memory.
+                # Must use the memory's own entities/topics (not the batch-level
+                # aggregate) — otherwise a batch that extracts N memories links
+                # every entity/topic/preference to all N rows, polluting the entity
+                # graph and entity-recall (e.g. a "cat" memory tagged with "work").
+                # Best-effort: failure here is advisory (retrieval still works from
+                # the memory row + pgvector) so we log-and-continue.
+                try:
+                    mem_entities = [
+                        {"name": name, "type": entity_type_by_name.get(name, "other")}
+                        for name in mem.get("entities", [])
+                        if name
+                    ]
+                    await record_entities_for_memory(
                         memory_id=memory_id,
                         memory_source=side,
                         user_id=user_id,
                         workspace_id=workspace_id,
-                        preferences=mem_prefs,
+                        entities=mem_entities,
                     )
-            except Exception as e:
-                logger.warning(f"Entity linking failed for memory {memory_id}: {e}")
+                    await record_topics_for_memory(
+                        memory_id=memory_id,
+                        memory_source=side,
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        topics=[str(t) for t in mem.get("topics", []) if t],
+                    )
+                    # Preferences have no per-memory field in the schema; attribute
+                    # each batch preference only to the memory whose text actually
+                    # mentions its value (no cross-memory pollution).
+                    mem_prefs = [
+                        pref for pref in batch_preferences
+                        if str(pref.get("value") or "").strip()
+                        and str(pref.get("value")).strip() in content
+                    ]
+                    if mem_prefs:
+                        await record_preferences_for_memory(
+                            memory_id=memory_id,
+                            memory_source=side,
+                            user_id=user_id,
+                            workspace_id=workspace_id,
+                            preferences=mem_prefs,
+                        )
+                except Exception as e:
+                    logger.warning(f"Entity linking failed for memory {memory_id}: {e}")
+
+    except Exception as exc:
+        from app.services.memory.manual_write import MemoryWriteError
+        kind = ("memory_write_conflict" if isinstance(exc, MemoryWriteError)
+                else "memory_write_failed" if write_phase == "write"
+                else "memory_followup_failed" if write_phase == "followup"
+                else "processing_failed")
+        raise MemoryExtractionError("Memory processing did not complete", kind=kind,
+                                    confirmed_write_count=len(stored_ids)) from exc
 
     logger.info(
         f"Pipeline complete: {len(stored_ids)}/{len(memories)} memories stored",

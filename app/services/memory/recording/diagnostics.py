@@ -28,6 +28,7 @@ _REASONS = frozenset({
     "scope_unavailable", "scope_invalid", "lock_unavailable", "backlog_unavailable",
     "watermark_read_unavailable", "watermark_write_unavailable", "watermark_invalid",
     "timestamp_page_boundary", "watermark_conflict",
+    "memory_write_conflict", "memory_write_failed", "memory_followup_failed",
     "source_identity_missing", "source_identity_invalid", "source_read_unavailable", "source_batch_limit",
 })
 _WRITE = """
@@ -57,6 +58,8 @@ def _safe_side(result: MemorySideOutcome) -> dict:
         item['progress'] = 'unknown'
     if type(result.memory_count) is not int or result.memory_count < 0:
         item['memory_count'] = None
+    if type(result.confirmed_write_count) is not int or not 0 <= result.confirmed_write_count <= 1000:
+        item["confirmed_write_count"] = None
     if type(result.source_count) is not int or not 0 <= result.source_count <= 100:
         item['source_count'] = None
     if result.source_binding not in {'persisted_messages', 'unlinked_input', 'unknown'}:
@@ -92,7 +95,7 @@ def _project_record(value: str, now: datetime) -> dict:
         **{key: side[key] for key in ('side', 'status', 'reason', 'memory_count', 'progress')},
         source_count=side.get('source_count'), source_binding=side.get('source_binding', 'unknown'),
         cursor_kind=side.get('cursor_kind', 'unknown'), inspected_count=side.get('inspected_count'),
-        has_more=side.get('has_more'),
+        has_more=side.get('has_more'), confirmed_write_count=side.get('confirmed_write_count'),
     )) for side in item['sides']]
     if len({side['side'] for side in sides}) != len(sides):
         raise ValueError('duplicate_side')
