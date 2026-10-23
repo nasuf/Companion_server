@@ -210,12 +210,19 @@ async def verify_generated_locations(
         raise GroundingUnavailable("Location claim could not be verified") from exc
 
 
+# Both corrections replace a draft the user never saw, so they state the facts
+# instead of apologising for "刚才" — 2026-10-23 a user shared a location, the
+# draft was wrongly rejected, and "抱歉，刚才地点说错了" read as the Agent
+# believing it had said it was there. Short city names, chat register.
 async def location_correction(agent: Any) -> str:
     # A deterministic correction cannot invent a journey to explain the drift.
+    from app.services.chat.location_context import agent_city, city_core
+
     city = canonical_facts(agent).get("city")
     if city:
-        return f"抱歉，刚才地点说错了。我住在{city}。"
-    return "刚才把地点说乱了，抱歉，我不该把你的所在地说成我的。"
+        short = city_core(agent_city(agent)) or re.sub(r"\s+", "", city)
+        return f"我在{short}呢"
+    return "这个我说不准哈"
 
 
 def user_location_correction(agent: Any, user_location: Any) -> str:
@@ -226,12 +233,12 @@ def user_location_correction(agent: Any, user_location: Any) -> str:
     theirs = city_core(getattr(user_location, "user_city", None))
     relation = getattr(user_location, "relation", "unknown")
     if relation == "different" and mine and theirs:
-        return f"刚才说岔了，我在{mine}，你在{theirs}，我们不在一个城市哈"
+        return f"我在{mine}，你在{theirs}，我们不在一个城市哈"
     if relation == "same" and theirs:
-        return f"刚才说岔了，我们都在{theirs}"
+        return f"我们都在{theirs}呀"
     if mine:
-        return f"刚才说岔了，我在{mine}，还不知道你在哪儿呢"
-    return "刚才说岔了，还不知道你在哪儿呢"
+        return f"我在{mine}，还不知道你在哪儿呢"
+    return "还不知道你在哪儿呢"
 
 
 async def guard_reply(

@@ -40,8 +40,12 @@ def test_unnamed_place_categories_are_generic():
     for example in ("附近公园散步", "城市公园长椅", "老城区市集", "城郊植物园", "街角咖啡馆"):
         assert f"“{example}”" in generic
     # 被问「你在外地做什么」时答「去老街走走」: 只强调泛称时模型放过了这种顺着外地接话
-    presupposed = _sentence(generic, "但顺着提问里的外地往下说")
+    presupposed = _sentence(generic, "但提问在问角色人在外地做什么时")
     assert "泛称也等于承认人在那里" in presupposed and presupposed.endswith("拒绝")
+    # 2026-10-23: 不限定"问的是角色"时, 用户分享镇江位置后回"你在润州呀 我刚搜了附近
+    # 有家手作店", 模型照这条把"附近"算成角色在镇江, 整条回复被换掉。
+    shared = _sentence(generic, "对方说或分享自己在哪时")
+    assert "“附近”是对方附近，不是角色" in shared
 
 
 def test_named_places_still_need_the_profile():

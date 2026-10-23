@@ -302,7 +302,7 @@ async def test_false_co_location_answer_is_corrected_with_both_cities(checker):
         agent(), "转塘这家店就在我附近呀！要不要去这家试试", question="砂锅粥不错 让我看看",
         user_location=xian(),
     )
-    assert corrected and text == "刚才说岔了，我在杭州，你在西安，我们不在一个城市哈"
+    assert corrected and text == "我在杭州，你在西安，我们不在一个城市哈"
     prompt = checker.await_args.args[1]
     assert '对方位置：{"city": "西安市雁塔区", "known": true' in prompt
     assert "顺着用户“我们在一个地方吗”的提问答“对啊”也算断言" in prompt
@@ -340,7 +340,7 @@ async def test_unlabeled_rejection_keeps_the_self_sided_correction(checker, abou
         verdict["about"] = about
     checker.return_value = {"verdicts": [verdict]}
     text, corrected = await g.guard_reply(agent(), "我住镇江", user_location=xian())
-    assert corrected and text == f"抱歉，刚才地点说错了。我住在{HANGZHOU}。"
+    assert corrected and text == "我在杭州呢"
 
 
 async def test_verifier_result_stays_a_plain_list_for_existing_callers(checker):
@@ -352,23 +352,48 @@ async def test_verifier_result_stays_a_plain_list_for_existing_callers(checker):
 async def test_checker_outage_fails_closed_on_the_side_that_was_risky(checker):
     checker.side_effect = RuntimeError("offline")
     text, corrected = await g.guard_reply(agent(), "离你不远呀", user_location=xian())
-    assert corrected and text.startswith("刚才说岔了")
+    assert corrected and text == "我在杭州，你在西安，我们不在一个城市哈"
     text, corrected = await g.guard_reply(agent(), "我住镇江", user_location=xian())
-    assert corrected and text.startswith("抱歉，刚才地点说错了")
+    assert corrected and text == "我在杭州呢"
 
 
 @pytest.mark.parametrize("location,expected", [
-    (xian(), "刚才说岔了，我在杭州，你在西安，我们不在一个城市哈"),
-    (xian(user_city="杭州市"), "刚才说岔了，我们都在杭州"),
-    (LocationContext(), "刚才说岔了，我在杭州，还不知道你在哪儿呢"),
-    (None, "刚才说岔了，我在杭州，还不知道你在哪儿呢"),
+    (xian(), "我在杭州，你在西安，我们不在一个城市哈"),
+    (xian(user_city="杭州市"), "我们都在杭州呀"),
+    (LocationContext(), "我在杭州，还不知道你在哪儿呢"),
+    (None, "我在杭州，还不知道你在哪儿呢"),
 ])
 def test_user_side_correction_only_states_known_facts(location, expected):
     assert g.user_location_correction(agent(), location) == expected
 
 
 def test_user_side_correction_without_agent_city():
-    assert g.user_location_correction(agent(None), None) == "刚才说岔了，还不知道你在哪儿呢"
+    assert g.user_location_correction(agent(None), None) == "还不知道你在哪儿呢"
+
+
+# 2026-10-23 生产: 用户分享镇江的位置, 草稿"你在润州呀 我刚搜了附近有家手作店"被误拦,
+# 换成"抱歉，刚才地点说错了。我住在江苏省 苏州市 姑苏区 平江街道。" —— 用户从没见过
+# 那版草稿, 读起来像 AI 以为自己说过在镇江。更正只陈述事实, 不为看不到的草稿道歉。
+@pytest.mark.parametrize("city,expected", [
+    (HANGZHOU, "我在杭州呢"),
+    ("江苏省 苏州市 姑苏区 平江街道", "我在苏州呢"),
+    ("Springfield West", "我在SpringfieldWest呢"),
+    (None, "这个我说不准哈"),
+])
+async def test_self_correction_states_the_city_without_apologising(city, expected):
+    assert await g.location_correction(agent(city)) == expected
+
+
+def test_checker_reads_you_and_nearby_as_the_user():
+    # 同一事故: 校验器把"附近"读成角色附近, 按"顺着提问里的外地往下说"判角色在镇江。
+    # 线上 A/B (qwen3.5-plus): 改前对事故原句 11 次只放行 3 次, 改后 4 次全放行;
+    # 20 例 × 4 轮整体 75/80 → 79/80, "搜到转塘的店推荐给西安用户"仍按第 7 条拒绝。
+    p = defaults.PERSONA_GROUNDING_CHECK_PROMPT
+    assert "“你在X”“你那边”“你附近”说的是对方在哪" in p
+    assert "不等于角色在那里；但把搜到的地点推荐给对方去，仍按第 7 条判断" in p
+    assert "“你在润州呀，我刚搜了附近有家手作店”均允许" in p
+    assert "对方说或分享自己在哪时，回复里的“附近”是对方附近，不是角色" in p
+    assert "提问在问角色人在外地做什么时" in p and "“我就在你附近”全部拒绝" in p
 
 
 # ── 两个执行器都接上 ──────────────────────────────────────────────────────
@@ -421,7 +446,7 @@ def test_unparseable_timestamp_types_are_unknown():
 async def test_affirming_a_known_wrong_same_place_is_corrected_without_the_model(checker, reply):
     text, corrected = await g.guard_reply(agent(), reply, question="我们在一个城市吗",
                                           user_location=xian())
-    assert corrected and text == "刚才说岔了，我在杭州，你在西安，我们不在一个城市哈"
+    assert corrected and text == "我在杭州，你在西安，我们不在一个城市哈"
     checker.assert_not_awaited()
 
 
