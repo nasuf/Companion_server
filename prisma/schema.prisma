@@ -1451,6 +1451,8 @@ model MemoryEvidenceLink {
   @@index([parentAiMemoryId], map: "memory_evidence_parent_ai_idx")
   @@map("memory_evidence_links")
   @@ignore
+  temporalVersionId BigInt? @map("temporal_version_id")
+  @@index([temporalVersionId], map: "memory_evidence_temporal_version_idx")
 }
 
 // Private immutable initialization snapshots, accessed by bounded raw queries.
@@ -2736,4 +2738,95 @@ model OfflineArrivalFollowup {
   @@index([createdAt(sort: Desc), activityId(sort: Desc)], map: "offline_arrival_recent_idx")
   @@index([status, createdAt(sort: Desc), activityId(sort: Desc)], map: "offline_arrival_status_recent_idx")
   @@map("offline_arrival_followups")
+}
+
+// Frozen chat extraction plans and durable per-piece write receipts. Raw SQL
+// avoids expanding generated relation types. Foreign-key erasure is in migration.
+model MemoryExtractionBatch {
+ id String @id
+ userId String @map("user_id")
+ workspaceId String @map("workspace_id")
+ conversationId String @map("conversation_id")
+ side String
+ scope Json
+ sources Json
+ extraction Json?
+ factCount Int? @map("fact_count")
+ preparedAt DateTime @default(now()) @map("prepared_at") @db.Timestamptz(6)
+ status String @default("preparing")
+ resultIds Json @default("[]") @map("result_ids")
+ lastError String? @map("last_error")
+ updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+ @@index([conversationId,side,preparedAt,id],map:"memory_extraction_batches_scope_idx")
+ @@index([preparedAt(sort: Desc),id(sort: Desc)],map:"memory_extraction_batches_recent_idx")
+ @@ignore
+ @@index([userId],map:"memory_extraction_batches_user_idx")
+ @@index([workspaceId,side],map:"memory_extraction_batches_workspace_idx")
+ @@map("memory_extraction_batches")
+}
+model MemoryExtractionSource {
+ messageId String @map("message_id")
+ side String
+ batchId String @map("batch_id")
+ @@id([messageId,side])
+ @@index([batchId],map:"memory_extraction_sources_batch_idx")
+ @@ignore
+ @@map("memory_extraction_sources")
+}
+model MemoryWriteReceipt {
+ batchId String @map("batch_id")
+ factIndex Int @map("fact_index")
+ pieceIndex Int @map("piece_index")
+ inputHash String @map("input_hash")
+ status String
+ memoryId String? @map("memory_id")
+ memoryVersion String? @map("memory_version")
+ memoryRevision BigInt? @map("memory_revision")
+ followupDone Boolean @default(false) @map("followup_done")
+ followupOutcome String? @map("followup_outcome")
+ createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+ @@id([batchId,factIndex,pieceIndex])
+ @@ignore
+ @@map("memory_write_receipts")
+}
+model MemoryErasureEpoch {
+ workspaceId String @id @map("workspace_id")
+ generation BigInt @default(0)
+ @@ignore
+ @@map("memory_erasure_epochs")
+}
+model MemoryErasedSource {
+ workspaceId String @map("workspace_id")
+ side String
+ messageId String @map("message_id")
+ sourceVersion String @map("source_version")
+ erasedAt DateTime @default(now()) @map("erased_at") @db.Timestamptz(6)
+ @@id([workspaceId,side,messageId,sourceVersion])
+ @@ignore
+ @@index([messageId],map:"memory_erased_sources_message_idx")
+ @@map("memory_erased_sources")
+}
+
+// SQL-managed append-only semantic history; physical erasure cascades.
+model MemoryTemporalVersion {
+  id BigInt @id @default(autoincrement())
+  memoryId String @map("memory_id")
+  side String
+  userMemoryId String? @map("user_memory_id")
+  aiMemoryId String? @map("ai_memory_id")
+  userId String @map("user_id")
+  workspaceId String? @map("workspace_id")
+  content String
+  contentVersion String @map("content_version")
+  occurTime DateTime? @map("occur_time") @db.Timestamptz
+  statementTime DateTime? @map("statement_time") @db.Timestamptz
+  isArchived Boolean @map("is_archived")
+  recordKind String @map("record_kind")
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz
+  @@index([side,memoryId,id(sort: Desc)], map: "memory_temporal_versions_page_idx")
+  @@index([userId],map:"memory_temporal_versions_user_idx")
+  @@index([workspaceId],map:"memory_temporal_versions_workspace_idx")
+  // Partial FK indexes on user_memory_id and ai_memory_id are migration-managed.
+  @@map("memory_temporal_versions")
+  @@ignore
 }

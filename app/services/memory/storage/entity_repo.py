@@ -36,6 +36,7 @@ async def upsert_entity(
     role: str | None = None,
     aliases: list[str] | None = None,
     metadata: dict | None = None,
+    database=None,
 ) -> str:
     """Idempotent upsert: returns the entity id.
 
@@ -53,7 +54,7 @@ async def upsert_entity(
     # Postgres' ON CONFLICT DO UPDATE with a RETURNING id gives us either
     # the existing id (DO UPDATE always fires) or the freshly inserted one.
     # Merging aliases: array_cat + distinct to accumulate without duplicates.
-    rows = await db.query_raw(
+    rows = await (database if database is not None else db).query_raw(
         """
         INSERT INTO memory_entities
             (id, user_id, workspace_id, canonical_name, entity_type, role,
@@ -91,6 +92,7 @@ async def link_memory_to_entity(
     entity_id: str,
     user_id: str,
     workspace_id: str | None,
+    database=None,
 ) -> bool:
     """Create a memory↔entity edge and bump stats on first creation.
 
@@ -100,7 +102,7 @@ async def link_memory_to_entity(
     Uses a single CTE so the INSERT and the counter UPDATE share one round
     trip — the UPDATE only fires when the INSERT actually produced a row.
     """
-    rows = await db.query_raw(
+    rows = await (database if database is not None else db).query_raw(
         """
         WITH ins AS (
             INSERT INTO memory_mentions
@@ -132,6 +134,7 @@ async def record_entities_for_memory(
     user_id: str,
     workspace_id: str | None,
     entities: list[dict],
+    database=None,
 ) -> int:
     """High-level helper used by the memory pipeline.
 
@@ -153,17 +156,21 @@ async def record_entities_for_memory(
                 entity_type=ent.get("type", "other"),
                 role=ent.get("role"),
                 aliases=ent.get("aliases") or None,
+                database=database,
             )
             created = await link_memory_to_entity(
                 memory_id=memory_id,
                 memory_source=memory_source,
                 entity_id=entity_id,
+                database=database,
                 user_id=user_id,
                 workspace_id=workspace_id,
             )
             if created:
                 new_edges += 1
         except Exception as e:
+            if database is not None:
+                raise
             logger.warning(f"entity upsert failed for '{name}': {e}")
     return new_edges
 
@@ -175,6 +182,7 @@ async def record_topics_for_memory(
     user_id: str,
     workspace_id: str | None,
     topics: list[str],
+    database=None,
 ) -> int:
     """Topics are modeled as entities of type='topic'."""
     as_entities = [{"name": t, "type": "topic"} for t in (topics or []) if t]
@@ -184,6 +192,7 @@ async def record_topics_for_memory(
         user_id=user_id,
         workspace_id=workspace_id,
         entities=as_entities,
+        database=database,
     )
 
 
@@ -194,6 +203,7 @@ async def record_preferences_for_memory(
     user_id: str,
     workspace_id: str | None,
     preferences: list[dict],
+    database=None,
 ) -> int:
     """Preferences as entities of type='preference'. canonical_name uses the
     pref value; role carries the category (food/color/...)."""
@@ -214,6 +224,7 @@ async def record_preferences_for_memory(
         user_id=user_id,
         workspace_id=workspace_id,
         entities=as_entities,
+        database=database,
     )
 
 

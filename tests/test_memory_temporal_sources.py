@@ -128,7 +128,8 @@ async def test_pipeline_keeps_facts_but_does_not_accept_model_invented_time(monk
     audit=AsyncMock();monkeypatch.setattr(p,'log_memory_evidence',audit)
     monkeypatch.setattr(p,'record_entities_for_memory',AsyncMock())
     monkeypatch.setattr(p,'record_topics_for_memory',AsyncMock())
-    await p.process_memory_pipeline('u','user: 昨天去看展了\nuser: 喜欢摄影',workspace_id='w',
+    # Unit-test the fact-clock core; durable admission is covered with real PG.
+    await p._process_memory_pipeline('u','user: 昨天去看展了\nuser: 喜欢摄影',workspace_id='w',
         statement_time=T+timedelta(days=1),evidence_message_ids=['m1','m2'],evidence_conversation_id='c')
     calls=[c.kwargs for c in store.await_args_list]
     assert len(calls)==3 and all(c['infer_time'] is False for c in calls)

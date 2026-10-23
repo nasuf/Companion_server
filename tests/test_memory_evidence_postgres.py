@@ -29,7 +29,13 @@ async def origins(monkeypatch):
     monkeypatch.setattr('app.db.db', db)
     from app.config import settings
     monkeypatch.setattr(settings,"jwt_secret","synthetic-memory-evidence-test-secret")
-    for mod in (e,read,repo):monkeypatch.setattr(mod,"db",db)
+    from app.services.memory.recording import receipts, receipt_followups, receipt_read
+    from app.services.memory import temporal_history
+    from app.services.memory.storage import entity_repo
+    from app.services.runtime import execution_scope
+    for mod in (e,read,repo,receipts,receipt_followups,receipt_read,
+                temporal_history,entity_repo,execution_scope):
+        monkeypatch.setattr(mod,"db",db)
     monkeypatch.setattr(repo,"_invalidate_caches",AsyncMock())
     users=[];agents=[];spaces=[];convs=[]
     try:

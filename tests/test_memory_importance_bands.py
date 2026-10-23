@@ -65,7 +65,7 @@ def test_reminder_band_matches_the_pipeline_clamp(key):
 
     from app.services.memory.recording import pipeline
 
-    src = inspect.getsource(pipeline.process_memory_pipeline)
+    src = inspect.getsource(pipeline._process_memory_pipeline)
     assert "max(0.4, min(0.49, float(importance)))" in src
 
 

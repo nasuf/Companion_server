@@ -199,3 +199,20 @@ async def apply_memory_repair(
         )
     except MemoryRepairActionError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.get("/time-history/{side}/{memory_id}")
+async def get_memory_time_history(
+    side: str, memory_id: str = Path(min_length=1, max_length=200),
+    user_id: str = Query(min_length=1, max_length=200), workspace_id: str = Query(min_length=1, max_length=200),
+    limit: int = Query(20, ge=1, le=50), before: str | None = Query(None, max_length=20),
+    _: dict = Depends(require_admin_jwt),
+) -> dict:
+    from app.services.memory.temporal_history import read_history
+    try:
+        return await read_history(user_id=user_id,workspace_id=workspace_id,side=side,
+                                  memory_id=memory_id,before=before,limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400,detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc

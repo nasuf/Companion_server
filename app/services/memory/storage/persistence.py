@@ -277,6 +277,7 @@ async def store_memory(
     _singleton_locked: bool = False,
     _split_done: bool = False,
     _consolidation_staged: bool = False,
+    write_receipt=None,
 ) -> str | None:
     """Store a memory with deduplication.
 
@@ -293,12 +294,31 @@ async def store_memory(
             非簇同类记忆, 连带把那条行内容覆盖). 常规写入切勿开启.
         _singleton_locked: 内部标志 — singleton 写锁已持有的重入调用, 勿外部使用.
     """
+    from app.services.memory.recording import receipts
+    receipt_hash = receipts.fingerprint({
+        "content": content, "level": level, "importance": importance,
+        "memory_type": memory_type, "main_category": main_category, "sub_category": sub_category,
+        "occur_time": occur_time.isoformat() if occur_time else None,
+        "statement_time": statement_time.isoformat() if statement_time else None,
+        "recurrence": recurrence, "provenance": provenance, "infer_time": infer_time,
+    }) if write_receipt is not None else ""
+    if write_receipt is not None:
+        if (user_id, workspace_id, source) != (write_receipt.scope.owner_user_id,
+                write_receipt.scope.workspace_id, write_receipt.side):
+            raise receipts.MemoryReceiptError("memory_plan_scope_changed")
+        cached = await receipts.lookup(write_receipt, receipt_hash)
+        if cached is not None:
+            return cached["memory_id"]
+    async def skipped():
+        await receipts.record_skip(write_receipt, receipt_hash)
+        return None
+
     # Source narrows to the literal Source type expected by the taxonomy
     repo_source = "ai" if source == "ai" else "user"
     if repo_source == "ai" and not await _generated_self_memory_allowed(
         user_id, workspace_id, content, provenance,
     ):
-        return None
+        return await skipped()
     if _consolidation_staged and (provenance != "consolidated" or not skip_reconciliation or level != 3):
         raise ValueError("Only independent L3 consolidation digests may be staged")
     if provenance == "daily_summary":
@@ -314,7 +334,7 @@ async def store_memory(
     if (repo_source == "ai" and provenance in {"ai_authored", "daily_summary"}
             and taxonomy.main_category in {"身份", "偏好", "思维"}):
         logger.info("Refusing generated persona memory (%s)", taxonomy.main_category)
-        return None
+        return await skipped()
     if not taxonomy.allowed:
         # The (source, level, main) combination is forbidden by the spec —
         # e.g. trying to write an AI 身份/偏好/思维 memory at L2 or L3.
@@ -324,7 +344,7 @@ async def store_memory(
             f"Refusing memory: ({repo_source}, L{level}, {taxonomy.main_category}) "
             f"is not allowed by the taxonomy spec. content={content[:60]}"
         )
-        return None
+        return await skipped()
     memory_type = normalize_memory_type(taxonomy.legacy_type)
 
     # occur_time 兜底 (2026-08): 事件类记忆 (生活/情绪) 若上游没给事件时间, 在这里
@@ -358,7 +378,7 @@ async def store_memory(
                 evidence_sources = uncertain_composite_sources(evidence_sources or (), "split_unresolved")
                 occur_time = statement_time = None
             first_id: str | None = None
-            for piece in pieces:
+            for piece_index, piece in enumerate(pieces):
                 mid = await store_memory(
                     user_id, piece, level=level, importance=importance,
                     memory_type=memory_type, main_category=taxonomy.main_category,
@@ -369,6 +389,7 @@ async def store_memory(
                     evidence_sources=evidence_sources, extractor_version=extractor_version,
                     skip_reconciliation=skip_reconciliation, infer_time=infer_time, _split_done=True,
                     _consolidation_staged=_consolidation_staged,
+                    write_receipt=write_receipt.piece(piece_index) if write_receipt is not None else None,
                 )
                 first_id = first_id or mid
             return first_id
@@ -407,6 +428,7 @@ async def store_memory(
                     skip_reconciliation=skip_reconciliation, infer_time=infer_time, _split_done=_split_done,
                     _consolidation_staged=_consolidation_staged,
                     _singleton_locked=True,
+                    write_receipt=write_receipt,
                 )
         except DistributedLockNotAcquired:
             logger.info(
@@ -414,7 +436,7 @@ async def store_memory(
                 f"{taxonomy.main_category}/{taxonomy.sub_category}) held >10s "
                 f"by another writer; dropping as duplicate. content={content[:60]}"
             )
-            return None
+            return await skipped()
 
     # spec §1.5.1 闸门: L1 SINGLETON 子类 (姓名/年龄/生日 等身份硬唯一字段) 永
     # 远只能 1 条 L1. 即便 LLM 把"我今年28岁"复述为"我今年28岁，生日是3月15号"
@@ -452,14 +474,14 @@ async def store_memory(
                         f"{taxonomy.sub_category}) 已有 L1 {existing[0].id}, 拒收新条目. "
                         f"new_content={content[:60]}"
                     )
-                    return None
+                    return await skipped()
             else:
                 logger.info(
                     f"L1 SINGLETON blocked: ({repo_source}, {taxonomy.main_category}/"
                     f"{taxonomy.sub_category}) 已有 L1 {existing[0].id}, 拒收新条目. "
                     f"new_content={content[:60]}"
                 )
-                return None
+                return await skipped()
 
     # Generate embedding
     embedding = await generate_embedding(content)
@@ -487,6 +509,22 @@ async def store_memory(
             topics=topics,
         )
     if decision.action == "drop_duplicate":
+        if write_receipt is not None:
+            # A duplicate is a durable result too. Its mention and audit must
+            # commit with its skip receipt, not repeat on a partial-batch retry.
+            async with db.tx(timeout=timedelta(seconds=15)) as tx:
+                cached = await receipts.claim(tx, write_receipt, receipt_hash)
+                if cached is not None:
+                    return cached["memory_id"]
+                table = 'memories_ai' if repo_source == 'ai' else 'memories_user'
+                updated = await tx.query_raw(f"""UPDATE {table} SET mention_count=mention_count+1
+                    WHERE id=$1 AND user_id=$2 AND workspace_id=$3 AND NOT is_archived RETURNING id""",
+                    decision.existing_id, user_id, workspace_id)
+                if updated:
+                    await _audit_write(tx, user_id, workspace_id, decision.existing_id,
+                        "dedup_drop", old_value=getattr(decision.existing_record, 'content', None),new_value=content)
+                await receipts.commit(tx, write_receipt, receipt_hash, None)
+            return None
         try:
             from app.services.memory.lifecycle.decay import increment_mention_count
 
@@ -510,13 +548,13 @@ async def store_memory(
             f"Memory reconciliation dropped duplicate "
             f"(matched_id={str(decision.existing_id)[:8]}): {content[:50]}"
         )
-        return None
+        return await skipped()
 
     if decision.action in {"update_existing", "merge_existing"} and decision.existing_id and decision.existing_record:
         updated_content = decision.merged_content or content
         if (repo_source == "ai" and updated_content != content
                 and not await _generated_self_memory_allowed(user_id, workspace_id, updated_content, provenance)):
-            return None
+            return await skipped()
         update_data = dict(
             content=updated_content,
             level=min(decision.existing_record.level, level),
@@ -546,6 +584,9 @@ async def store_memory(
             raise MemoryWriteError(409, "memory_write_scope_changed")
         operation = "reconciliation_merge" if decision.action == "merge_existing" else "reconciliation_update"
         async with db.tx(timeout=timedelta(seconds=15)) as tx:
+            cached = await receipts.claim(tx, write_receipt, receipt_hash)
+            if cached is not None:
+                return cached["memory_id"]
             # Preparation may call models. Lock and compare the exact persisted
             # snapshot only now; never overwrite a concurrent edit or deletion.
             await lock_memories(tx, [record])
@@ -554,6 +595,7 @@ async def store_memory(
             await store_embedding(record.id, updated_embedding, database=tx)
             await _audit_write(tx, user_id, workspace_id, record.id, operation,
                                old_value=record.content, new_value=updated_content)
+            await receipts.commit(tx, write_receipt, receipt_hash, record.id, updated_content)
         await memory_repo.invalidate_scope(user_id, workspace_id)
         await after_memory_changelog(user_id=user_id, memory_id=record.id,
             operation=operation, workspace_id=workspace_id)
@@ -590,6 +632,9 @@ async def store_memory(
     if recurrence and taxonomy.sub_category == "提醒":
         create_data["recurrence"] = recurrence
     async with db.tx(timeout=timedelta(seconds=15)) as tx:
+        cached = await receipts.claim(tx, write_receipt, receipt_hash)
+        if cached is not None:
+            return cached["memory_id"]
         if level == 1 and is_singleton(taxonomy.main_category, taxonomy.sub_category):
             # Shared with lifecycle promotion and administrator replacement.
             from app.services.memory.lifecycle.lazy_update import scope_lock_key
@@ -603,6 +648,7 @@ async def store_memory(
                 user_id, workspace_id, taxonomy.main_category, taxonomy.sub_category,
             )
             if taken and (name_replacement is None or taken[0]["id"] != name_replacement.id):
+                await receipts.commit(tx, write_receipt, receipt_hash, None)
                 return None
             if name_replacement is not None:
                 await lock_memories(tx, [name_replacement])
@@ -615,6 +661,7 @@ async def store_memory(
         # its vector. No post-commit compensating delete can erase a later edit.
         await store_embedding(memory.id, embedding, database=tx)
         await _audit_write(tx, user_id, workspace_id, memory.id, "insert", new_value=content)
+        await receipts.commit(tx, write_receipt, receipt_hash, memory.id, content)
 
     # Derived-state/network work belongs after commit, outside database locks.
     await memory_repo.invalidate_scope(user_id, workspace_id)

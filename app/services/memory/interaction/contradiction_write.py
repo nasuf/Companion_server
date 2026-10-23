@@ -14,6 +14,7 @@ from app.services.memory.evidence import (
     bind_memory_evidence,
     content_version,
     _resolve_source,
+    message_statement_time,
 )
 from app.services.memory.input_evidence import (
     prepare_input_origin,
@@ -28,7 +29,6 @@ from app.services.memory.storage.persistence import (
     normalize_memory_type,
 )
 from app.services.memory.taxonomy import resolve_taxonomy, is_singleton
-from app.services.schedule_domain.time_parser import resolve_occur_time
 from .contradiction_state import conversation_scope, memory_version, validate_pending
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,9 @@ async def apply_confirmed_change(
     if not content:
         return {"status": "no_change"}
     sources = tuple(
-        EvidenceSource(**s) for s in [*ticket["sources"], *confirmation_sources]
+        EvidenceSource(**{**s, 'expected_statement_time':
+            message_statement_time(s['expected_statement_time']) if s.get('expected_statement_time') else None})
+        for s in [*ticket["sources"], *confirmation_sources]
     )
     if not confirmation_sources or len(sources) > 80:
         raise MemoryWriteError(409, "contradiction_confirmation_missing")
@@ -183,6 +185,10 @@ async def apply_confirmed_change(
         ):
             raise MemoryWriteError(409, "contradiction_duplicate_fact")
         now = datetime.now(timezone.utc)
+        # The confirmation is recorded now, but the statement belongs to its
+        # source message. A multi-message span is not one precise statement.
+        times = [s.expected_statement_time for s in sources[len(ticket['sources']):]]
+        statement = times[0] if times and all(t == times[0] for t in times) else None
         new = await repo.create(
             source="user",
             database=tx,
@@ -196,14 +202,10 @@ async def apply_confirmed_change(
             subCategory=taxonomy.sub_category,
             provenance="user_stated",
             valueUpdatedAt=now,
-            statementTime=now,
-            occurTime=resolve_occur_time(
-                content,
-                statement_time=now,
-                main_category=taxonomy.main_category,
-                sub_category=taxonomy.sub_category,
-                provenance="user_stated",
-            ),
+            statementTime=statement,
+            # Rewritten model text is not a validated event-time quote. Neither
+            # confirmation time nor execution time proves when a change began.
+            occurTime=None,
         )
         await store_embedding(new.id, embedding, database=tx)
         input_source = await persist_input_origin(

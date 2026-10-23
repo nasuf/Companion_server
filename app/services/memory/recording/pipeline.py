@@ -68,7 +68,7 @@ class MemoryExtractionError(RuntimeError):
         # Only documented categories reach admin diagnostics. Provider errors
         # and source text must never be used as an API-visible reason.
         self.kind = kind if kind in {"prompt_disabled", "source_invalid", "processing_failed",
-            "memory_write_conflict", "memory_write_failed", "memory_followup_failed"} else "extraction_failed"
+            "memory_write_conflict", "memory_write_failed", "memory_followup_failed", "memory_receipt_conflict"} else "extraction_failed"
         # Lower bound only: an interrupted write or a split may have committed
         # additional rows before returning. Never treat this as a replay receipt.
         self.confirmed_write_count = confirmed_write_count
@@ -256,7 +256,36 @@ def _last_ai_line(context_conversation: str) -> str:
     return ""
 
 
-async def process_memory_pipeline(
+async def process_memory_pipeline(user_id: str, new_conversation: str, *,
+    context_conversation: str = "", statement_time: datetime | None = None,
+    side: Side = "user", workspace_id: str | None = None,
+    evidence_message_ids: list[str] | None = None, evidence_conversation_id: str | None = None,
+    prev_ai_line: str | None = None) -> list[str]:
+    kwargs = dict(user_id=user_id, new_conversation=new_conversation,
+        context_conversation=context_conversation, statement_time=statement_time, side=side,
+        workspace_id=workspace_id, evidence_message_ids=evidence_message_ids,
+        evidence_conversation_id=evidence_conversation_id, prev_ai_line=prev_ai_line)
+    if evidence_conversation_id and evidence_message_ids:
+        from app.services.memory.recording import receipts
+        kwargs['workspace_id'] = await resolve_workspace_id(workspace_id=workspace_id, user_id=user_id)
+        try:
+            return await receipts.process(execute=_process_memory_pipeline, **kwargs)
+        except MemoryExtractionError:
+            raise
+        except receipts.ExecutionScopeUnavailable as exc:
+            raise MemoryExtractionError("Memory source validation failed", kind="source_invalid") from exc
+        except receipts.MemoryReceiptError as exc:
+            if str(exc) == "memory_plan_source_changed":
+                raise MemoryExtractionError("Memory source validation failed", kind="source_invalid") from exc
+            raise MemoryExtractionError("Durable memory processing did not complete",
+                kind="memory_receipt_conflict") from exc
+        except Exception as exc:
+            raise MemoryExtractionError("Durable memory processing did not complete",
+                kind="memory_receipt_conflict") from exc
+    return await _process_memory_pipeline(**kwargs)
+
+
+async def _process_memory_pipeline(
     user_id: str,
     new_conversation: str,
     *,
@@ -267,6 +296,7 @@ async def process_memory_pipeline(
     evidence_message_ids: list[str] | None = None,
     evidence_conversation_id: str | None = None,
     prev_ai_line: str | None = None,
+    _durable_batch: dict | None = None,
 ) -> list[str]:
     """Run the full memory extraction and storage pipeline for one side.
 
@@ -308,49 +338,58 @@ async def process_memory_pipeline(
     strict_clock = bool(evidence_conversation_id and evidence_message_ids)
     from app.services.memory.recording.temporal_sources import source_table, resolve_fact_clock
 
-    # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
-    # 只对 new_conversation 判定, 历史上下文已经抽过了
-    if not should_extract_memory(new_conversation):
-        logger.debug(f"[MEM-{side}] filtered by heuristic filter")
-        return []
-
-    # Step 1 (spec §2.1.2 / §2.2.2): Small model pre-filter — "记" or "不记"
-    # Uses registered prompt `memory.judgement_{side}` via should_memorize.
-    from app.config import settings
-    if settings.enable_memory_prefilter:
-        memorize = True
-        try:
-            memorize = await should_memorize(
-                new_conversation, side=side,
-                prev_ai=(
-                    prev_ai_line
-                    if prev_ai_line is not None
-                    else _last_ai_line(context_conversation)
-                ),
-            )
-        except Exception as e:
-            logger.warning(f"[MEM-{side}] pre-filter failed ({e}), proceeding")
-        if not memorize:
-            await validate_sources()
-            logger.debug(f"[MEM-{side}] pre-filter: 不记")
+    frozen = _durable_batch.get("extraction") if _durable_batch else None
+    if frozen is not None:
+        extraction = frozen
+    else:
+        # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
+        # 只对 new_conversation 判定, 历史上下文已经抽过了
+        if not should_extract_memory(new_conversation):
+            logger.debug(f"[MEM-{side}] filtered by heuristic filter")
             return []
 
-    # Step 2 (spec §2.1.3 / §2.2.3): Big model extraction
-    extraction = await extract_memories(
-        new_conversation,
-        context_conversation=context_conversation,
-        side=side,
-        **({"source_messages": source_table(origins)} if strict_clock else {}),
-    )
-    # Hard LLM failure → propagate so the caller keeps the watermark put and a
-    # later batch retries. An empty-but-successful extraction (no error flag)
-    # falls through and legitimately advances the watermark.
-    if extraction.get("_extraction_error"):
-        kind = extraction.get("_extraction_error_kind", "llm_failure")
-        raise MemoryExtractionError(
-            f"extraction did not run for side={side} ({kind}); "
-            "watermark must not advance", kind=kind,
+        # Step 1 (spec §2.1.2 / §2.2.2): Small model pre-filter — "记" or "不记"
+        # Uses registered prompt `memory.judgement_{side}` via should_memorize.
+        from app.config import settings
+        if settings.enable_memory_prefilter:
+            memorize = True
+            try:
+                memorize = await should_memorize(
+                    new_conversation, side=side,
+                    prev_ai=(
+                        prev_ai_line
+                        if prev_ai_line is not None
+                        else _last_ai_line(context_conversation)
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"[MEM-{side}] pre-filter failed ({e}), proceeding")
+            if not memorize:
+                await validate_sources()
+                logger.debug(f"[MEM-{side}] pre-filter: 不记")
+                return []
+
+        # Step 2 (spec §2.1.3 / §2.2.3): Big model extraction
+        extraction = await extract_memories(
+            new_conversation,
+            context_conversation=context_conversation,
+            side=side,
+            **({"source_messages": source_table(origins)} if strict_clock else {}),
         )
+        # Hard LLM failure → propagate so the caller keeps the watermark put and a
+        # later batch retries. An empty-but-successful extraction (no error flag)
+        # falls through and legitimately advances the watermark.
+        if extraction.get("_extraction_error"):
+            kind = extraction.get("_extraction_error_kind", "llm_failure")
+            raise MemoryExtractionError(
+                f"extraction did not run for side={side} ({kind}); "
+                "watermark must not advance", kind=kind,
+            )
+        if _durable_batch is not None:
+            await validate_sources()
+            from app.services.memory.recording.receipts import freeze
+            extraction = await freeze(_durable_batch, extraction, origins)
+            _durable_batch['extraction'] = extraction
     memories = extraction.get("memories", [])
     await validate_sources()
 
@@ -390,17 +429,31 @@ async def process_memory_pipeline(
     # Step 3: Store each memory with dedup and conflict check
     write_phase = "preparing"
     try:
-        for mem in memories:
+        for fact_index, mem in enumerate(memories):
+            if mem.get("_erased") is True:
+                continue
+            write_token = None
+            if _durable_batch is not None:
+                from app.services.memory.recording.receipts import WriteToken
+                from app.services.runtime.execution_scope import ExecutionScope
+                write_token = WriteToken(_durable_batch['id'], fact_index, _durable_batch['epoch'],
+                    ExecutionScope.from_record(_durable_batch['scope']), side)
+            async def skip_fact():
+                if write_token is not None:
+                    from app.services.memory.recording.receipts import record_skip, fingerprint
+                    await record_skip(write_token, fingerprint({'policy_skip': mem}))
             write_phase = "preparing"
             content = mem.get("content", "")
             from app.services.persona_grounding import generated_stable_self_claim
             if side == "ai" and generated_stable_self_claim(content):
                 logger.info("[MEM-ai] skipped stable self-claim regardless of category")
+                await skip_fact()
                 continue
             if side == "ai" and is_user_fact_acknowledgement(content):
                 logger.info(
                     f"[MEM-{side}] skipped user-fact acknowledgement: {content[:40]}"
                 )
+                await skip_fact()
                 continue
             if _is_uncertain_ai_self_memory(
                 side=side,
@@ -410,6 +463,7 @@ async def process_memory_pipeline(
                 logger.info(
                     f"[MEM-{side}] skipped uncertain self-memory: {content[:40]}"
                 )
+                await skip_fact()
                 continue
             # LLM 偶尔把 importance 输出成字符串 ("0.8") 或 null. 下面的分层比较和
             # clamp 都按数字走, 类型不对会抛 TypeError —— 而这个异常会被上层当成抽取
@@ -427,6 +481,7 @@ async def process_memory_pipeline(
                     f"[MEM-{side}] skipped self-authored persona claim "
                     f"({main_category}/{sub_category}): {content[:40]}"
                 )
+                await skip_fact()
                 continue
             # 提前解 alias: 否则 LLM 输出"备忘"/"提醒我"等别名时, 下游 sub_category=="提醒"
             # 比对会漏判 → recurrence 检测被跳过 → store_memory 把已 alias 解析的"提醒"
@@ -472,6 +527,7 @@ async def process_memory_pipeline(
             #   ≥ 0.85 → L1   |   0.50-0.84 → L2   |   0.10-0.49 → L3   |   < 0.10 → drop
             if importance < 0.10:
                 logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10): {content[:40]}")
+                await skip_fact()
                 continue
             else:
                 level = level_for_importance(importance)
@@ -480,7 +536,11 @@ async def process_memory_pipeline(
             # 必须 ensure_aware: LLM 输出 ISO 经常没 tz, fromisoformat 解出来是
             # naive, 跟下面 ref_now (aware) 比较时崩 "can't compare offset-naive
             # and offset-aware datetimes". 在边界统一规范化, 避免每个比较点打补丁.
-            clock = resolve_fact_clock({**mem, "sub_category": sub_category}, origins) if strict_clock else None
+            if _durable_batch is not None:
+                from app.services.memory.recording.receipts import saved_clock
+                clock = saved_clock(mem)
+            else:
+                clock = resolve_fact_clock({**mem, "sub_category": sub_category}, origins) if strict_clock else None
             fact_statement_time = clock.statement_time if clock else statement_time
             fact_origins = clock.bind(origins) if clock else origins
             occur_time: datetime | None = clock.occur_time if clock else rule_based_occur_time
@@ -506,7 +566,7 @@ async def process_memory_pipeline(
             # 跟 parser 的 tz-aware occur_time 比较会 TypeError.
             reminder_demoted_reason: str | None = None
             if sub_category == "提醒" and recurrence == "once":
-                ref_now = (_now_corrected() if strict_clock else statement_time or _now_corrected())
+                ref_now = (ensure_aware(datetime.fromisoformat(_durable_batch["prepared_at"]) if isinstance(_durable_batch["prepared_at"], str) else _durable_batch["prepared_at"]) if _durable_batch else _now_corrected() if strict_clock else statement_time or _now_corrected())
                 if occur_time is None or occur_time <= ref_now:
                     reminder_demoted_reason = (
                         "missing_occur_time" if occur_time is None
@@ -544,11 +604,18 @@ async def process_memory_pipeline(
                 ),
                 evidence_sources=fact_origins,
                 extractor_version="memory-extraction-time-v2" if strict_clock else "memory-extraction-v1",
+                **({"write_receipt": write_token} if write_token is not None else {}),
             )
 
             write_phase = "followup"
             if memory_id:
                 stored_ids.append(memory_id)
+                if write_token is not None:
+                    from app.services.memory.recording.receipt_followups import finish_followups
+                    await finish_followups(write_token, mem=mem, entity_types=entity_type_by_name,
+                        batch_preferences=batch_preferences, user_emphasized=user_emphasized,
+                        reminder_demoted_reason=reminder_demoted_reason)
+                    continue
                 try:
                     await log_memory_evidence(
                         user_id=user_id,

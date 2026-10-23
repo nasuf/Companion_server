@@ -89,7 +89,8 @@ def resolve_fact_clock(memory: dict, origins) -> FactClock:
         return FactClock(statement, None, basis, indices)
     event = parsed.expressions[0]
     occur = ensure_aware(event.start)
-    basis.update(status='calendar_inferred' if calendar_inferred else 'resolved', event_start=occur.isoformat(),
+    basis.update(timezone=parsed.timezone, precision=event.precision,
+                 status='calendar_inferred' if calendar_inferred else 'resolved', event_start=occur.isoformat(),
                  event_end=exclusive_end(event.end, event.end_boundary).isoformat())
     return FactClock(statement, occur, basis, indices)
 
@@ -130,4 +131,16 @@ def public_temporal_basis(value):
         except (ValueError, TypeError):
             return invalid
         result.update(zip(keys, (d.isoformat() for d in dates)))
+    if 'timezone' in value:
+        try:
+            if not isinstance(value['timezone'],str) or len(value['timezone'])>64:
+                return invalid
+            ZoneInfo(value['timezone'])
+        except (ValueError,KeyError):
+            return invalid
+        result['timezone']=value['timezone']
+    if 'precision' in value:
+        if not isinstance(value['precision'], str) or value['precision'] not in {'instant','minute','hour','day','week','month','year','range','day_part'}:
+            return invalid
+        result['precision']=value['precision']
     return result

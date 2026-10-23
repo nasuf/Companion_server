@@ -177,6 +177,12 @@ async def get_memory_processing(
         raise HTTPException(status_code=503, detail="记忆录入处理记录暂时不可用，请稍后重试。") from error
 
 
+@router.get("/memory-write-receipts")
+async def memory_write_receipts(_: dict = Depends(require_admin_jwt)) -> dict:
+    from app.services.memory.recording.receipt_read import recent_receipts
+    return await recent_receipts()
+
+
 @router.get("/{job_id}")
 async def get_job(
     job_id: str,

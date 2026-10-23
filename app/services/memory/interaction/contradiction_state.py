@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from app.db import db
-from app.services.memory.evidence import EvidenceSource, content_version
+from app.services.memory.evidence import EvidenceSource, content_version, message_statement_time
 from app.services.memory.manual_write import MemoryWriteError, memory_scope
 from app.services.memory.storage import repo
 
@@ -97,6 +97,8 @@ async def message_sources(database, *, conversation_id, message_ids, text, lock=
                 relation="recorded_from",
                 expected_role="user",
                 expected_version=content_version(r["content"]),
+                expected_statement_time=message_statement_time(r["created_at"]).isoformat(),
+                expected_conversation_id=conversation_id,
             )
         )
         for r in rows

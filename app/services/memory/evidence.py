@@ -56,7 +56,8 @@ def _table(side: str) -> str:
 
 async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Side,
                                    message_ids: list[str], extraction_input: str,
-                                   conversation_id: str | None = None) -> tuple[EvidenceSource, ...]:
+                                   conversation_id: str | None = None,
+                                   database=None) -> tuple[EvidenceSource, ...]:
     """Pin the actual input versions before a model call, without holding locks.
 
     The write transaction rechecks these hashes. An edited, deleted or rebound
@@ -67,7 +68,7 @@ async def snapshot_message_sources(*, user_id: str, workspace_id: str, side: Sid
     if not ids or len(ids) > 100 or any(not isinstance(i, str) or not i or len(i) > 200 for i in ids):
         raise ValueError("invalid_evidence_batch")
     role = "user" if side == "user" else "assistant"
-    rows = await db.query_raw(
+    rows = await (database if database is not None else db).query_raw(
         """SELECT m.id,m.content,m.metadata,m.created_at,
            encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex') AS card_version FROM messages m JOIN conversations c ON c.id=m.conversation_id
            JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
@@ -154,7 +155,8 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
     if source.expected_conversation_id is not None:
         from app.services.memory.recording.chat_sources import excluded_from_chat_extraction
         if (kind != 'message' or row.get('conversation_id') != source.expected_conversation_id
-                or row.get('workspace_status') != 'active' or excluded_from_chat_extraction(row)):
+                or row.get('workspace_status') != 'active'
+                or (source.relation == 'extracted_from' and excluded_from_chat_extraction(row))):
             raise ValueError('evidence_source_changed_or_unavailable')
     if kind == "message" and source.relation == "extracted_from" and (row.get("metadata") or {}).get("memory_confirmation"):
         raise ValueError("evidence_message_reserved_for_confirmation")
@@ -214,19 +216,23 @@ async def bind_memory_evidence(
         raise ValueError("evidence_target_scope_mismatch")
     target = targets[0]
     version = content_version(target["content"])
+    revisions = await database.query_raw("""SELECT id FROM memory_temporal_versions
+        WHERE side=$1 AND memory_id=$2 AND user_id=$3 AND workspace_id=$4 ORDER BY id DESC LIMIT 1""",
+        side,memory_id,user_id,workspace_id)
+    revision_id = revisions[0]['id'] if revisions else None
     inserted = 0
     for source in sources:
         origin = await _resolve_source(database, source, target)
         identity = [side, memory_id, user_id, workspace_id, version, origin, source.side,
-                    source.relation, extractor_version]
+                    source.relation, extractor_version, revision_id]
         eid = content_version(json.dumps(identity, sort_keys=True, ensure_ascii=False))
         inserted += await database.execute_raw(
             """INSERT INTO memory_evidence_links
                (id,memory_id,memory_source,user_memory_id,ai_memory_id,user_id,workspace_id,agent_id,
                 content_version,source_kind,source_ref,source_version,source_user_id,source_workspace_id,
                 source_role,source_status,source_message_id,parent_user_memory_id,parent_ai_memory_id,
-                relation,extractor_version,source_memory_side,source_profile_id,source_input_id,source_card_version,source_statement_time,temporal_basis)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::timestamp,$27::jsonb)
+                relation,extractor_version,source_memory_side,source_profile_id,source_input_id,source_card_version,source_statement_time,temporal_basis,temporal_version_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::timestamp,$27::jsonb,$28::bigint)
                ON CONFLICT (id) DO NOTHING""",
             eid, memory_id, side, memory_id if side == "user" else None,
             memory_id if side == "ai" else None, user_id, workspace_id, target["agent_id"], version,
@@ -239,6 +245,6 @@ async def bind_memory_evidence(
             source.ref if source.kind == "profile" else None,
             source.ref if source.kind == "input" else None,
             origin.get("card_version"), source.expected_statement_time.astimezone(timezone.utc).replace(tzinfo=None) if source.expected_statement_time else None,
-            json.dumps(source.temporal_basis) if source.temporal_basis is not None else None,
+            json.dumps(source.temporal_basis) if source.temporal_basis is not None else None, revision_id,
         )
     return inserted

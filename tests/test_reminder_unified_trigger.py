@@ -429,7 +429,7 @@ async def test_pipeline_skips_reminder_trigger_for_ai_side():
     # process_memory_pipeline 调用层 (`if side == "user" and ...`). 这里用
     # source-level 验证那个 gate 仍然存在 (因为 mock 整个 pipeline 太复杂).
     import inspect
-    src = inspect.getsource(pipeline_mod.process_memory_pipeline)
+    src = inspect.getsource(pipeline_mod._process_memory_pipeline)
     assert 'side == "user"' in src and "_create_reminder_timetrigger" in src, (
         "process_memory_pipeline must gate _create_reminder_timetrigger on side=='user'"
     )
@@ -904,7 +904,7 @@ def test_pipeline_normalizes_llm_occur_time_to_aware():
     import inspect
     from app.services.memory.recording import pipeline as pipeline_mod
 
-    src = inspect.getsource(pipeline_mod.process_memory_pipeline)
+    src = inspect.getsource(pipeline_mod._process_memory_pipeline)
     # 找解析 LLM occur_time 的地方
     raw_time_idx = src.find('raw_time = mem.get("occur_time")')
     assert raw_time_idx > 0

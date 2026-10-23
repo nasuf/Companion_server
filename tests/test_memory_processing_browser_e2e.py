@@ -144,8 +144,12 @@ async def test_browser_reads_real_dual_side_failure_and_success(origins, observa
                     assert user['progress'] == 'unchanged'
                     assert wm.progress_time(await wm.get_watermark(msg.conversationId, 'user')) == msg.createdAt
                     after = (await durable_snapshot(db, uid))[0]
-                    for key in ('users', 'vectors', 'origins', 'audits'):
+                    for key in ('users', 'vectors', 'origins'):
                         assert after[key] == before[key] + 1
+                    # The committed fact now also records its real source-use
+                    # audit in the durable follow-up transaction.
+                    assert after['audits'] == before['audits'] + 2
+                    assert await db.memorychangelog.count(where={'userId':uid,'operation':'evidence_linked'}) == 1
                     assert new_message.content not in str(result)
                     assert 'division by zero' not in str(result)
                     assert not violations

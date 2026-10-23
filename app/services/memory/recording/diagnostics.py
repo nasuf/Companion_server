@@ -28,7 +28,7 @@ _REASONS = frozenset({
     "scope_unavailable", "scope_invalid", "lock_unavailable", "backlog_unavailable",
     "watermark_read_unavailable", "watermark_write_unavailable", "watermark_invalid",
     "timestamp_page_boundary", "watermark_conflict",
-    "memory_write_conflict", "memory_write_failed", "memory_followup_failed",
+    "memory_write_conflict", "memory_write_failed", "memory_followup_failed", "memory_receipt_conflict",
     "source_identity_missing", "source_identity_invalid", "source_read_unavailable", "source_batch_limit",
 })
 _WRITE = """
