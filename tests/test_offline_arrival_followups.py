@@ -1,5 +1,6 @@
 """Real PostgreSQL/Redis arrival latency, scope fencing and crash recovery."""
 import asyncio
+import re
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -195,6 +196,18 @@ async def test_invalid_location_never_registers_arrival(arrival, changes, reason
     assert await receipt(db, aid) is None
 
 
+def _mentions_fixture_coordinates(value) -> bool:
+    """The fixture point is (31.2, 121.4). A substring test over the whole
+    payload also hit timestamps such as 10:36:31.231053 (CI 2026-10-24)."""
+    if isinstance(value, dict):
+        return any(_mentions_fixture_coordinates(k) or _mentions_fixture_coordinates(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_mentions_fixture_coordinates(v) for v in value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value in (31.2, 121.4)
+    return isinstance(value, str) and bool(re.search(r"(?<![\d.])(?:31\.2|121\.4)(?!\d)", value))
+
+
 async def test_admin_diagnostics_are_bounded_redacted_and_recoverable(arrival):
     from app.api.admin.runtime_jobs import router
     from app.services.auth import create_jwt
@@ -210,7 +223,8 @@ async def test_admin_diagnostics_are_bounded_redacted_and_recoverable(arrival):
         result=await client.get(path,headers=headers)
         assert result.status_code==200
         data=result.json();assert data['denominator']=='recent_sample_only'
-        assert 'scope' not in str(data) and '31.2' not in str(data) and '合成' not in str(data)
+        assert 'scope' not in str(data) and '合成' not in str(data)
+        assert not _mentions_fixture_coordinates(data)
         assert (await client.get(path+'?limit=51',headers=headers)).status_code==422
         assert (await client.post(path+'/'+aid+'/retry',headers=headers)).status_code==200
         assert (await client.post(path+'/'+aid+'/retry',headers=headers)).status_code==409
