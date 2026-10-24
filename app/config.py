@@ -168,6 +168,8 @@ class Settings(BaseSettings):
     # True (生产): 走 spec §6 完整流程 — 按用户情绪标签/作息计算 delay_seconds,
     #   入 delayed queue, scheduler 每秒扫到期推送, 模拟真人间隔回复.
     reply_delay_enabled: bool = False
+    # Explicit active admin IDs, comma-separated; empty means alerts unconfigured.
+    redis_memory_alert_user_ids: str = ""
     # Upper bound for compute_delay_profile / delayed-queue seconds when delay is on.
     reply_delay_max_seconds: int = 300
     # Short-message aggregation (fragment + turn windows). False = every message immediate.

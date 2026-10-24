@@ -80,8 +80,10 @@ def test_resources_aggregates_host_db_redis(api_client):
     try:
         with (
             patch("app.api.admin.stats.db", fake_db),
+            patch("app.services.ops.redis_capacity.read_status", new_callable=AsyncMock,
+                  return_value={"status": "not_sampled", "notifications": []}),
             patch(
-                "app.api.admin.stats.get_redis",
+                "app.services.ops.redis_capacity.get_redis",
                 new_callable=AsyncMock,
                 return_value=_FakeRedis(),
             ),
@@ -126,8 +128,10 @@ def test_resources_degrades_when_db_and_redis_unavailable(api_client):
     try:
         with (
             patch("app.api.admin.stats.db", fake_db),
+            patch("app.services.ops.redis_capacity.read_status", new_callable=AsyncMock,
+                  return_value={"status": "not_sampled", "notifications": []}),
             patch(
-                "app.api.admin.stats.get_redis",
+                "app.services.ops.redis_capacity.get_redis",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("redis down"),
             ),

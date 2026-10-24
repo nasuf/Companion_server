@@ -39,15 +39,17 @@ def _json_dict(value: Any) -> dict:
     return {}
 
 
-async def dispatch_due_notifications(limit: int | None = None) -> int:
+async def dispatch_due_notifications(limit: int | None = None, *, event_type: str | None = None) -> int:
     batch_size = limit or settings.notification_dispatch_batch_size
+    scope_sql = " AND type = $1" if event_type else ""
     await db.execute_raw(
         """
         UPDATE notification_events
         SET status = 'pending', updated_at = CURRENT_TIMESTAMP
         WHERE status = 'dispatching'
           AND updated_at < CURRENT_TIMESTAMP - INTERVAL '5 minutes'
-        """
+        """ + scope_sql,
+        *([event_type] if event_type else []),
     )
     rows = await db.query_raw(
         """
@@ -58,10 +60,12 @@ async def dispatch_due_notifications(limit: int | None = None) -> int:
         FROM notification_events
         WHERE status = 'pending'
           AND scheduled_for <= CURRENT_TIMESTAMP
+        """ + (" AND type = $2" if event_type else "") + """
         ORDER BY scheduled_for ASC, created_at ASC
         LIMIT $1
         """,
         batch_size,
+        *([event_type] if event_type else []),
     )
     processed = 0
     for row in rows:
@@ -98,7 +102,7 @@ async def _dispatch_one(row: Any) -> None:
 
     # Admin alerts must reach every install. Presence describes the admin's
     # own companion chat, not an acknowledgement of this takeover inbox.
-    admin_alert = _field(row, "type") in {"admin_new_user", "admin_takeover_message"}
+    admin_alert = _field(row, "type") in {"admin_new_user", "admin_takeover_message", "admin_redis_capacity"}
     if admin_alert:
         admin = await db.query_raw("SELECT 1 FROM users WHERE id=$1 AND role='admin' "
             "AND status='active' AND archived_at IS NULL", user_id)
@@ -125,6 +129,8 @@ async def _dispatch_one(row: Any) -> None:
         return
 
     payload = _json_dict(_field(row, "payload"))
+    if _field(row, "type") == "admin_redis_capacity":
+        payload["notification_id"] = event_id
     collapse_id = event_id if admin_alert else f"{_field(row, 'type')}:{conversation_id or user_id}"
     thread_id = str(workspace_id or conversation_id or user_id)
     successes = 0

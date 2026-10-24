@@ -17,7 +17,7 @@ def test_apns_base_url_can_follow_device_environment():
     assert client._base_url_for("production") == "https://api.push.apple.com"
 
 
-@pytest.mark.parametrize('kind',['admin_new_user','admin_takeover_message'])
+@pytest.mark.parametrize('kind',['admin_new_user','admin_takeover_message','admin_redis_capacity'])
 async def test_admin_alert_is_not_lost_to_foreground_presence_or_collapse(monkeypatch,kind):
     from types import SimpleNamespace
     send=AsyncMock(return_value=ApnsResult(ok=True,apns_id='synthetic'))

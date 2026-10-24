@@ -1666,33 +1666,9 @@ async def _collect_db_metrics() -> dict:
 
 
 async def _collect_redis_metrics() -> dict:
-    """Redis memory / keys / hit-rate from INFO (best-effort)."""
-    try:
-        redis = await get_redis()
-        info = await redis.info()
-        dbsize = await redis.dbsize()
-    except Exception as e:
-        logger.warning("resource redis metrics failed: %s", e)
-        return {"available": False}
-
-    used = info.get("used_memory")
-    maxmem = info.get("maxmemory") or 0
-    hits = info.get("keyspace_hits", 0) or 0
-    misses = info.get("keyspace_misses", 0) or 0
-    total_ops = hits + misses
-    return {
-        "available": True,
-        "used_memory": used,
-        "maxmemory": maxmem or None,
-        "mem_percent": round(used / maxmem * 100, 1) if used and maxmem else None,
-        "keys": dbsize,
-        "connected_clients": info.get("connected_clients"),
-        "hits": hits,
-        "misses": misses,
-        "hit_rate": round(hits / total_ops * 100, 1) if total_ops else None,
-        "evicted_keys": info.get("evicted_keys"),
-        "uptime_seconds": info.get("uptime_in_seconds"),
-    }
+    from app.services.ops.redis_capacity import collect_metrics, read_status
+    metrics, alert = await asyncio.gather(collect_metrics(), read_status())
+    return {**metrics, "capacity_alert": alert}
 
 
 @router.get("/resources")

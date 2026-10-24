@@ -150,30 +150,19 @@ async def test_delayed_queue_flush_redis_down_returns_empty(caplog):
 
 
 @pytest.mark.asyncio
-async def test_delayed_queue_enqueue_redis_down_logs_warning(caplog):
-    """enqueue_delayed_message Redis zscore 失败 → warning + return, 不抛."""
+async def test_delayed_queue_enqueue_redis_down_raises(unit_media_scope):
     from app.services.interaction.delayed_queue import enqueue_delayed_message
-
-    broken = _BrokenRedis()
-    with patch("app.services.interaction.delayed_queue.get_redis", AsyncMock(return_value=broken)):
-        with caplog.at_level("WARNING"):
+    with patch("app.services.interaction.delayed_queue.get_redis", AsyncMock(return_value=_BrokenRedis())):
+        with pytest.raises(Exception):
             await enqueue_delayed_message("conv-1", {"message": "hi"}, delay_seconds=1.0)
-
-    assert any("[DELAY-ENQUEUE] Redis" in rec.message for rec in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_delayed_queue_append_redis_down_returns_false(caplog):
-    """enqueue_or_append_delayed Redis eval 失败返回 False."""
+async def test_delayed_queue_append_redis_down_raises(unit_media_scope):
     from app.services.interaction.delayed_queue import enqueue_or_append_delayed
-
-    broken = _BrokenRedis()
-    with patch("app.services.interaction.delayed_queue.get_redis", AsyncMock(return_value=broken)):
-        with caplog.at_level("WARNING"):
-            result = await enqueue_or_append_delayed("conv-1", {"message": "hi"}, delay_seconds=1.0)
-
-    assert result is False
-    assert any("[DELAY-APPEND] Redis eval failed" in rec.message for rec in caplog.records)
+    with patch("app.services.interaction.delayed_queue.get_redis", AsyncMock(return_value=_BrokenRedis())):
+        with pytest.raises(Exception):
+            await enqueue_or_append_delayed("conv-1", {"message": "hi"}, delay_seconds=1.0)
 
 
 @pytest.mark.asyncio

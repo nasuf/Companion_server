@@ -2830,3 +2830,16 @@ model MemoryTemporalVersion {
   @@map("memory_temporal_versions")
   @@ignore
 }
+// SQL-locked singleton; capacity alerts do not depend on Redis writes.
+model OpsRedisCapacity {
+  id String @id
+  sampledAt DateTime? @map("sampled_at") @db.Timestamptz
+  snapshot Json @default("{}")
+  level String @default("normal")
+  notifiedSignature String? @map("notified_signature")
+  generation Int @default(0)
+  notificationIds Json @default("[]") @map("notification_ids")
+  recipientCount Int @default(0) @map("recipient_count")
+  @@ignore
+  @@map("ops_redis_capacity")
+}

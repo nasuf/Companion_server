@@ -927,6 +927,16 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         await record_ws_online(user_id, ws_conn_id)
         logger.info("ws connected", extra={"event": EVT_WS_CONNECT})
 
+        # Reconnect must restore queued feedback even when the original pending
+        # event was sent to the old connection. No unsolicited event if empty.
+        try:
+            from app.services.interaction.delayed_queue import has_pending_delayed_messages
+            async with asyncio.timeout(2):
+                if await has_pending_delayed_messages(conversation_id):
+                    await websocket.send_json({"type": "pending", "data": {"status": "queued", "reconnected": True}})
+        except Exception:
+            logger.warning("Reply queue snapshot unavailable conv=%s", conversation_id[:8])
+
         # spec §12 开场主动第一句话: 只在首次进入 (0 消息) 时触发
         try:
             asyncio.create_task(
@@ -1753,18 +1763,22 @@ async def _handle_message(
 
     if plan.metadata.get("append_delayed"):
         delay_seconds = float((plan.final_context or {}).get("delay_seconds", 0.0) or 0.0)
-        await enqueue_or_append_delayed(
-            conversation_id,
-            {
-                "conversation_id": conversation_id,
-                "agent_id": agent.id,
-                "user_id": user_id,
-                "message": plan.final_message,
-                "message_id": user_message_id,
-                "reply_context": plan.final_context,
-            },
-            delay_seconds,
-        )
+        try:
+            await enqueue_or_append_delayed(
+                conversation_id,
+                {
+                    "conversation_id": conversation_id,
+                    "agent_id": agent.id,
+                    "user_id": user_id,
+                    "message": plan.final_message,
+                    "message_id": user_message_id,
+                    "reply_context": plan.final_context,
+                },
+                delay_seconds,
+            )
+        except Exception:
+            await ws.send_json({"type": "error", "data": {"message": "消息入队失败", "client_id": client_id}})
+            return
         await ws.send_json({
             "type": "pending",
             "data": {"status": "queued", "delay": delay_seconds},

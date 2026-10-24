@@ -65,30 +65,8 @@ async def enqueue_delayed_message(
     payload: dict[str, Any],
     delay_seconds: float,
 ) -> None:
-    """Append a delayed message payload and schedule its earliest due time."""
-    redis = await get_redis()
-    list_key = _DELAYED_LIST_KEY.format(cid=conversation_id)
-    due_at = time.time() + max(0.0, delay_seconds)
-    stored_payload = dict(payload)
-    stored_payload["due_at"] = due_at
-
-    pipe = redis.pipeline()
-    pipe.zadd(list_key, {json.dumps(stored_payload, ensure_ascii=False): due_at})
-    pipe.expire(list_key, _DELAYED_TTL)
-    try:
-        current_score = await redis.zscore(_DELAYED_ZSET_KEY, conversation_id)
-    except Exception as e:
-        logger.warning(f"[DELAY-ENQUEUE] Redis zscore failed conv={conversation_id}: {e}")
-        return
-    if current_score is None or due_at < float(current_score):
-        pipe.zadd(_DELAYED_ZSET_KEY, {conversation_id: due_at})
-    try:
-        async with user_erasure.conversation_write_scope(conversation_id):
-            await pipe.execute()
-    except Exception as e:
-        # 入队失败 = 延迟消息丢失; caller 目前无法感知, 用户看到"排队中"但无 flush.
-        # (caller 侧降级 - Redis 挂时同步走 LLM - 在 Phase C 处理)
-        logger.warning(f"[DELAY-ENQUEUE] Redis enqueue failed conv={conversation_id}: {e}")
+    """Use the same atomic append boundary as realtime ingress; propagate errors."""
+    await enqueue_or_append_delayed(conversation_id, payload, delay_seconds)
 
 
 async def flush_due_delayed_messages(conversation_id: str, now: float | None = None) -> list[dict[str, Any]]:
@@ -123,23 +101,29 @@ async def flush_due_delayed_messages(conversation_id: str, now: float | None = N
             continue
         if isinstance(item, dict):
             payloads.append(item)
+    # Equal-score Redis members are lexicographically ordered, not arrival ordered.
+    # Legacy payloads (already queued before this deployment) precede new ones.
+    payloads.sort(key=lambda item: (item.get("queue_order") is not None, item.get("queue_order", 0)))
     return payloads
 
 
-async def scan_due_delayed_messages() -> list[tuple[str, list[dict[str, Any]]]]:
-    """Scan all due conversations and return their queued payloads."""
+async def due_delayed_conversation_ids() -> list[str]:
+    """Read a bounded page; ownership must be acquired before destructive flush."""
     redis = await get_redis()
-    now = time.time()
+    ids = await redis.zrangebyscore(_DELAYED_ZSET_KEY, 0, time.time(), start=0, num=100)
+    return [item if isinstance(item, str) else item.decode() for item in ids]
+
+
+async def scan_due_delayed_messages() -> list[tuple[str, list[dict[str, Any]]]]:
+    """Legacy scan API. Scheduler uses IDs then locks before flushing."""
     try:
-        conv_ids = await redis.zrangebyscore(_DELAYED_ZSET_KEY, 0, now)
+        conv_ids = await due_delayed_conversation_ids()
     except Exception as e:
-        # scheduler 每秒 tick, 单次失败跳过
         logger.warning(f"[DELAY-SCAN] Redis zrangebyscore failed: {e}")
         return []
-    results: list[tuple[str, list[dict[str, Any]]]] = []
-    for conv_id in conv_ids:
-        cid = conv_id if isinstance(conv_id, str) else conv_id.decode()
-        payloads = await flush_due_delayed_messages(cid, now=now)
+    results = []
+    for cid in conv_ids:
+        payloads = await flush_due_delayed_messages(cid)
         if payloads:
             results.append((cid, payloads))
     return results
@@ -200,6 +184,12 @@ local conv_id = ARGV[1]
 local payload_json = ARGV[2]
 local fallback_due = tonumber(ARGV[3])
 local ttl = tonumber(ARGV[4])
+local sequence_key = KEYS[3]
+local sequence = redis.call('INCR', sequence_key)
+redis.call('EXPIRE', sequence_key, ttl)
+local payload = cjson.decode(payload_json)
+payload['queue_order'] = sequence
+payload_json = cjson.encode(payload)
 
 local existing = redis.call('ZRANGE', list_key, 0, 0, 'WITHSCORES')
 if #existing >= 2 then
@@ -238,17 +228,18 @@ async def enqueue_or_append_delayed(
     stored["due_at"] = due_at
 
     try:
-        result = await redis.eval(
-            _APPEND_OR_ENQUEUE_LUA, 2,
-            list_key, _DELAYED_ZSET_KEY,
-            conversation_id,
-            json.dumps(stored, ensure_ascii=False),
-            str(due_at),
-            str(_DELAYED_TTL),
-        )
+        async with user_erasure.conversation_write_scope(conversation_id):
+            result = await redis.eval(
+                _APPEND_OR_ENQUEUE_LUA, 3,
+                list_key, _DELAYED_ZSET_KEY, list_key + ":sequence",
+                conversation_id,
+                json.dumps(stored, ensure_ascii=False),
+                str(due_at),
+                str(_DELAYED_TTL),
+            )
     except Exception as e:
-        logger.warning(f"[DELAY-APPEND] Redis eval failed conv={conversation_id}: {e}")
-        return False
+        logger.warning("[DELAY-APPEND] enqueue failed conv=%s type=%s", conversation_id, type(e).__name__)
+        raise
     return bool(result)
 
 

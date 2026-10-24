@@ -5,6 +5,7 @@ Never register these control endpoints in app.main.
 """
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -236,3 +237,49 @@ if os.environ.get("CHAT_GRAPH_E2E") == "1":
                 "finish":graph_chat.finish_assistant_turn.await_count,
                 "background":graph_chat._background_post_process.call_count,
                 "turn_achievement":graph_io.achievement.call_count}
+
+
+if os.environ.get("CHAT_DELAY_E2E") == "1":
+    from app.services.interaction import delayed_queue
+    from app.services.runtime import user_erasure
+    from jobs import scheduler as scheduler_module
+
+    delayed_queue.get_redis = get_redis
+    ws_manager.manager = manager
+    scheduler_module.scan_due_user_turns = AsyncMock(return_value=[])
+    scheduler_module._already_covered = AsyncMock(return_value=False)
+
+    @asynccontextmanager
+    async def synthetic_owner(*args, **kwargs):
+        yield db
+    user_erasure.conversation_write_scope = synthetic_owner
+
+    async def generated_reply(**kwargs):
+        # Deterministic model/persistence fixture; queue and transport stay real.
+        record = {"text": kwargs["user_message"], "message_id": kwargs["user_message_id"]}
+        await redis.rpush("test:delay:generated", json.dumps(record))
+        yield {"event": "reply", "data": json.dumps(record)}
+        yield {"event": "done", "data": json.dumps({"message_id": record["message_id"]})}
+    graph_chat.stream_chat_response = generated_reply
+
+    @app.post("/test/delay-enqueue")
+    async def delay_enqueue(data: dict):
+        # Use the real WS queue boundary with a connection adapter. Authentication
+        # and message admission have independent route/security coverage.
+        class Sender:
+            async def send_json(self, event):
+                await manager.send_event("conv-1", event["type"], event["data"])
+        await ws._queue_reply_or_error(Sender(), conversation_id="conv-1", agent=agent,
+            user_id="owner", user_message=data["message"], user_message_id=data["id"],
+            reply_context={"delay_seconds": data.get("delay", 2)})
+        return {"ok": True}
+
+    @app.post("/test/delay-scan")
+    async def delay_scan():
+        await scheduler_module._run_aggregation_scan_body()
+        return {"generated": await redis.lrange("test:delay:generated", 0, -1)}
+
+    @app.post("/test/delay-disable")
+    async def disable_delay():
+        settings.reply_delay_enabled = False
+        return {"enabled": settings.reply_delay_enabled}

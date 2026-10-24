@@ -31,7 +31,7 @@ from app.services.interaction.boundary import recover_patience_hourly
 from app.services.relationship.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive.orchestrator import scan_proactive_states
 from app.services.interaction.delayed_queue import (
-    enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads,
+    enqueue_delayed_message, due_delayed_conversation_ids, flush_due_delayed_messages, merge_delayed_payloads,
     try_lock_conversation, unlock_conversation,
     mark_reply_inflight, clear_reply_inflight,
 )
@@ -1354,6 +1354,15 @@ async def _run_redis_health_recheck():
             await recheck_redis_health()
         except Exception as e:
             _job_failed("Redis health recheck", e)
+        # SQL claim/outbox remains usable when Redis writes fail under pressure.
+        from app.services.ops.redis_capacity import sample_and_notify
+        try:
+            await sample_and_notify()
+            # This alert must not wait for the general dispatcher's Redis lock.
+            async with asyncio.timeout(12):
+                await dispatch_due_notifications(limit=10, event_type="admin_redis_capacity")
+        except Exception as e:
+            _job_failed("Redis capacity monitor", e)
 
     await _run_local_job("redis_health_recheck", _body)
 
@@ -1505,8 +1514,8 @@ async def _run_aggregation_scan_body():
         due_user_turns = await scan_due_user_turns()
         await _enqueue_scanned_aggregation_results(due_user_turns, manager)
 
-        due_conversations = await scan_due_delayed_messages()
-        for conv_id, payloads in due_conversations:
+        due_conversations = await due_delayed_conversation_ids()
+        for conv_id in due_conversations:
             # Prevent concurrent processing of the same conversation.
             # Capture the owner token so unlock only releases our own lock (CAS).
             lock_token = await try_lock_conversation(conv_id, ttl=120)
@@ -1516,6 +1525,7 @@ async def _run_aggregation_scan_body():
 
             try:
                 try:
+                    payloads = await flush_due_delayed_messages(conv_id)
                     merged = merge_delayed_payloads(payloads)
                     if not merged:
                         continue

@@ -79,6 +79,30 @@ def protocols(ticket):
     return [auth.CHAT_PROTOCOL, auth.TICKET_PROTOCOL_PREFIX+ticket]
 
 
+@pytest.mark.parametrize("queued", [True, False])
+def test_authenticated_reconnect_restores_pending_without_breaking_ping(secured_ws, monkeypatch, queued):
+    from app.services.interaction import delayed_queue
+    lookup = AsyncMock(return_value=queued)
+    monkeypatch.setattr(delayed_queue, "has_pending_delayed_messages", lookup)
+    ticket = mint(secured_ws)
+    with secured_ws.client.websocket_connect('/ws/conv', subprotocols=protocols(ticket)) as socket:
+        if queued:
+            event = socket.receive_json()
+            assert event == {"type": "pending", "data": {"status": "queued", "reconnected": True}}
+        socket.send_json({"type": "ping"})
+        assert socket.receive_json()["type"] == "pong"
+    lookup.assert_awaited_once_with("conv")
+
+
+def test_unavailable_reconnect_queue_snapshot_does_not_close_socket(secured_ws, monkeypatch):
+    from app.services.interaction import delayed_queue
+    monkeypatch.setattr(delayed_queue, "has_pending_delayed_messages", AsyncMock(side_effect=RuntimeError("isolated offline")))
+    ticket = mint(secured_ws)
+    with secured_ws.client.websocket_connect('/ws/conv', subprotocols=protocols(ticket)) as socket:
+        socket.send_json({"type": "ping"})
+        assert socket.receive_json()["type"] == "pong"
+
+
 @pytest.mark.parametrize('state', [None, 'deleting'])
 def test_account_erased_before_registration_is_denied(secured_ws, state):
     ticket=mint(secured_ws)

@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--image", required=True)
     parser.add_argument("--graph", action="store_true", help="Qualify the G01 graph stream adapter")
     parser.add_argument("--graph-all", action="store_true", help="Test explicit full rollout with an empty allowlist")
+    parser.add_argument("--delay", action="store_true", help="Qualify delayed queue, reconnect and two-worker scan")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.graph_all and not args.graph:
@@ -49,8 +50,10 @@ def main():
         "CORS_ALLOWED_ORIGINS": "https://banshengcomp.com,https://www.banshengcomp.com",
         "JWT_SECRET": "isolated-chat-e2e-secret-at-least-32-characters",
     }
-    if args.graph:
+    if args.graph or args.delay:
         env["CHAT_GRAPH_E2E"] = "1"
+    if args.delay:
+        env["CHAT_DELAY_E2E"] = "1"
     if args.graph_all:
         env["CHAT_GRAPH_ALL_CONVERSATIONS"] = "true"
     common = ["--network", network, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
@@ -73,7 +76,7 @@ def main():
              "-v", f"{harness}:/verification:ro", "--entrypoint", "nginx", "nginx:1.24-alpine",
              "-c", "/verification/chat_safety_nginx.conf", "-g", "daemon off;"])
         result = run(["run", "--name", names[3], *common, image,
-                      "python", "/verification/graph_chat_probe.py" if args.graph else "/verification/chat_safety_probe.py"], check=False)
+                      "python", "/verification/delay_chat_probe.py" if args.delay else "/verification/graph_chat_probe.py" if args.graph else "/verification/chat_safety_probe.py"], check=False)
         (output / "probe.log").write_text(result.stdout + result.stderr)
         if result.returncode:
             raise RuntimeError(f"E2E failed; diagnostics in {output}")

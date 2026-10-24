@@ -1713,6 +1713,26 @@ async def test_handle_message_non_fragment_sends_ack_with_client_id(fake_ws):
     assert acks[0]["data"]["message_id"] == "db-msg-full-1"
 
 
+@pytest.mark.parametrize("fails", [False, True])
+async def test_append_to_delayed_turn_reports_actual_enqueue_outcome(fake_ws, fails):
+    plan = _aggregation_plan("immediate", text="再补一句", metadata={"append_delayed": True})
+    with (
+        patch.object(ws_mod, "_persist_user_message", new=AsyncMock(return_value="db-appended")),
+        patch.object(ws_mod, "plan_user_message_aggregation", new=AsyncMock(return_value=plan)),
+        patch.object(ws_mod, "enqueue_or_append_delayed", new=AsyncMock(side_effect=RuntimeError("isolated OOM") if fails else None)),
+        patch.object(ws_mod, "get_cached_schedule", new=AsyncMock(return_value=[{"activity": "自由时间", "type": "leisure"}])),
+        patch.object(ws_mod, "get_current_status", return_value={"activity": "自由时间", "type": "leisure", "status": "idle"}),
+        patch.object(ws_mod, "build_reply_timing_context", new=AsyncMock(return_value={"delay_seconds": 3})),
+    ):
+        await ws_mod._handle_message(fake_ws, "conv-1", "user-1", SimpleNamespace(id="a1", name="A"), "再补一句", client_id="appended-client")
+    events = [call.args[0] for call in fake_ws.send_json.await_args_list]
+    assert any(event["type"] == "ack" for event in events)
+    assert any(event["type"] == ("error" if fails else "pending") for event in events)
+    assert not any(event["type"] == ("pending" if fails else "error") for event in events)
+    if fails:
+        assert events[-1]["data"]["client_id"] == "appended-client"
+
+
 @pytest.mark.asyncio
 async def test_handle_message_persists_component_card_metadata(fake_ws):
     """组件卡片必须跟 client_id 一起进入用户消息 metadata, 供历史记录回放渲染。"""
