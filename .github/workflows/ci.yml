@@ -161,7 +161,7 @@ jobs:
         run: docker build -t companion-server:ci-chat-safety .
 
       - name: Verify delayed replies across two workers and reconnect
-        run: python3 scripts/test_chat_safety_e2e.py --image companion-server:ci-chat-safety --delay --output reports/chat-delay
+        run: python3 scripts/test_chat_safety_e2e.py --image companion-server:ci-chat-safety --delay --output "$RUNNER_TEMP/chat-safety-e2e/delay"
 
       - name: Verify prompt validation inside the packaged runtime
         run: |
