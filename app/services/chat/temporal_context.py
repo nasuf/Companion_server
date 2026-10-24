@@ -176,6 +176,21 @@ def dated_dialogue(messages: list[dict], *, exclude_ids: set[str] | None = None,
     return "\n".join(reversed(lines)) or "(无可用历史)"
 
 
+def elapsed_text(seconds: float) -> str:
+    """A duration to the minute ("1 小时 30 分钟"). format_gap_text rounds down
+    to a single unit for greetings; an answer to "how long" needs both."""
+    total = int(seconds)
+    if total < 60:
+        return f"{total} 秒"
+    hours, minutes = divmod(total // 60, 60)
+    if not hours:
+        return f"{minutes} 分钟"
+    days, hours = divmod(hours, 24)
+    if not days:
+        return f"{hours} 小时" + (f" {minutes} 分钟" if minutes else "")
+    return f"{days} 天" + (f" {hours} 小时" if hours else "")
+
+
 async def render_temporal_context(clock: TurnClock, policy: str,
                                   temporal_query: TemporalQuery | None = None) -> str:
     import json
@@ -186,12 +201,25 @@ async def render_temporal_context(clock: TurnClock, policy: str,
         template = await get_prompt_text("chat.temporal_context")
     except PromptDisabledError:
         return ""
+    query_context = None
+    if temporal_query is not None:
+        # Execution metadata is for routing/Trace, not evidence about whether
+        # an answer exists in dialogue or memory. In particular, an unexecuted
+        # count must not override an explicitly stated total. Keep date ranges
+        # and ambiguity here; diagnostics below retain the complete operation.
+        query_context = {key: value for key, value in temporal_query.prompt_context().items()
+                         if key in {"status", "timezone", "ranges", "reason"}}
+    last_dialogue = local_clock(clock.last_dialogue_at)
+    if clock.last_dialogue_at is not None:
+        # The model should not divide seconds itself: it copied the prompt's
+        # worked example instead ("三个小时左右" for a 1.5-hour gap).
+        last_dialogue += f"（距今约 {elapsed_text(clock.gap(clock.last_dialogue_at))}）"
     return render_template(template, {
         "now": local_clock(clock.now),
         "statement_at": local_clock(clock.statement_at),
-        "query_context": json.dumps(temporal_query.prompt_context(), ensure_ascii=False) if temporal_query else "未请求日期解析",
+        "query_context": json.dumps(query_context, ensure_ascii=False) if query_context is not None else "未请求日期解析",
         "last_user": local_clock(clock.last_user_at),
-        "last_dialogue": local_clock(clock.last_dialogue_at),
+        "last_dialogue": last_dialogue,
         "last_outbound": local_clock(clock.last_outbound_at),
         "user_gap_seconds": clock.gap(clock.last_user_at) if clock.last_user_at else "未知",
         "dialogue_gap_seconds": clock.gap(clock.last_dialogue_at) if clock.last_dialogue_at else "未知",

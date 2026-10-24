@@ -96,6 +96,27 @@ def configure_pair(patches):
     patches.setattr(store, "db", SimpleNamespace(prompttemplate=SimpleNamespace(
         find_unique=AsyncMock(return_value=None),
     )))
+    # Exercise the real location loader/renderer with synthetic domain rows.
+    # Patching chat.db alone does not replace location_context's imported db.
+    from app.services.chat import location_context
+
+    async def location_rows(query, *params):
+        if "FROM users WHERE id" in query:
+            assert params == ("u-1",)
+            return [dict(location_city="南京市", location_region="鼓楼区",
+                         location_country="中国", location_permission_status="whileInUse",
+                         location_updated_at=io.now)]
+        if "FROM memories_user" in query:
+            assert params == ("u-1", "w-1")
+            return []
+        raise AssertionError("Unexpected location fixture query")
+
+    io.location_queries = AsyncMock(side_effect=location_rows)
+    patches.setattr(location_context, "db", SimpleNamespace(query_raw=io.location_queries))
+    async def load_fixture_location(agent, user_id, workspace_id):
+        return await location_context.load_location_context(agent, user_id, workspace_id, now=io.now)
+
+    patches.setattr(chat, "load_location_context", load_fixture_location)
     patches.setattr(chat, "_generate_reply", reply_generate.generate_reply)
     io.main_calls = []
     io.tier_calls = []

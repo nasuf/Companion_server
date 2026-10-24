@@ -14,9 +14,37 @@ from app.services.chat.temporal_context import HISTORY_LIMIT, SESSION_SECONDS, p
 
 _STOP = re.compile(r"(?:别|不要|不用|不想|停止|不许|别再|不要再).{0,8}(?:追问|问我|一直问|再问|问了)|(?:能不能|可不可以).{0,5}(?:别|不要).{0,6}问|不要一直问|别一直问|别老问")
 _RESUME = re.compile(r"(?:你(?:现在|这会儿)?可以|你继续|可以继续|允许你)(?:再)?问|问我吧|你想问什么")
-_QUESTION = re.compile(r"[?？]|(?:吗|怎么样|好不好)[呀啊嘛呢哇~～…\s]*$|(?:你|您).*(?:呢|没有|咋样|干嘛|做什么|忙什么|忙啥|在哪|去哪|吃什么|吃了什么)[呀啊哇~～…\s]*$")
+_QUESTION = re.compile(
+    r"[?？]|(?:吗|怎么样|好不好)[呀啊嘛呢哇~～…\s]*$"
+    r"|(?:你|您).*(?:呢|没有|咋样|干嘛|做什么|忙什么|忙啥|在哪|去哪|吃什么|吃了什么)[呀啊哇~～…\s]*$"
+    # Short colloquial questions often omit both a pronoun and question mark.
+    # Match complete interrogative clauses, not statements such as 什么都行
+    # or 有啥事都可以说. This remains a conservative lexical guard.
+    r"|^(?:(?:那|所以|然后)\s*)?(?:你|您)?"
+    r"(?:(?:今天|最近|这会儿|现在|刚才|这两天)\s*)?(?:是有|有|是)?(?:啥|什么)"
+    r"(?:(?:(?:开心|有趣|特别|新鲜|好|烦心)的?)?事(?:情|儿)?|好消息|情况|打算|安排|想法|原因|意思)"
+    r"[呀啊呢嘛哇不~～…\s]*$"
+    # Modal + sentence-final negation is another colloquial yes/no form.
+    # Exclude declarative endings such as 勇敢说不 and conditional 或不/就不.
+    r"|^(?:(?:那|所以|然后)\s*)?(?:你|您)?"
+    r"(?:(?:今天|最近|这会儿|现在|刚才|这两天)\s*)?(?:你|您)?"
+    r"(?:可以|能|要|想|会|方便)[^。！？!?；;，,\n]{0,24}(?<!说)(?<!或)(?<!就)(?:不|没)$"
+    # Affirmative-negative questions need no final 吗 or question mark.
+    # Keep reported/conditional statements outside this complete-clause form.
+    r"|^(?:(?:那|所以|然后)\s*)?(?:你|您)?"
+    r"(?:(?:今天|现在|接下来|这会儿)\s*)?(?:你|您)?"
+    r"(?:是不是|能不能|可不可以|会不会|要不要|想不想)"
+    r"(?![^。！？!?；;，,\n]*(?:都可以|都行|都没关系|都无所谓)[呀啊啦呢~～…\s]*$)"
+    r"[^。！？!?；;，,\n]{1,24}$"
+)
 _SENTENCE = re.compile(r"[^。！？!?；;，,\n|]+[。！？!?；;，,]*")
 _NON_WORD = re.compile(r"[\W_]+")
+
+
+def _is_question(text: str) -> bool:
+    # Informal generated replies may end an interrogative clause with a full
+    # stop. Keep question marks, but ignore whitespace/declarative terminators.
+    return bool(_QUESTION.search(text.strip().rstrip("。.;；,，").rstrip()))
 
 
 def _key(text: str) -> str:
@@ -72,7 +100,7 @@ def derive_followup_policy(messages: list[dict], *, now: datetime,
             elif _RESUME.search(direct):
                 allowed, reason = True, "user_reopened"
         elif msg.get("role") == "assistant":
-            questions.extend(s.strip() for s in _SENTENCE.findall(text) if _QUESTION.search(s))
+            questions.extend(s.strip() for s in _SENTENCE.findall(text) if _is_question(s))
     current_message = _direct_request(current_message)
     if _STOP.search(current_message):
         allowed, reason = False, "user_opted_out"
@@ -94,7 +122,7 @@ def guard_optional_questions(replies: list[str], policy: FollowupPolicy, *, fall
         parts = _SENTENCE.findall(reply)
         accepted = []
         for part in parts:
-            if _QUESTION.search(part):
+            if _is_question(part):
                 removed += 1
             else:
                 accepted.append(part)
@@ -106,5 +134,5 @@ def guard_optional_questions(replies: list[str], policy: FollowupPolicy, *, fall
 
 def repeats_recent_question(text: str, policy: FollowupPolicy) -> bool:
     return any(similar_question(part, old)
-               for part in _SENTENCE.findall(text) if _QUESTION.search(part)
+               for part in _SENTENCE.findall(text) if _is_question(part)
                for old in policy.recent_questions)

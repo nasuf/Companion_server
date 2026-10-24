@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 
 from app.services.prompting.utils import safe_format
+from app.services.prompting.trace_components import ManagedPromptText
 from app.services.prompts.system_prompts import MAX_PER_REPLY, MAX_TOTAL_CHARS
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ async def build_reply_prefix() -> str:
         get_prompt_text,
     )
 
-    parts: list[str] = []
+    parts: list[tuple[str, str]] = []
     for key in PREFIX_SOURCE_KEYS:
         try:
             text = await get_prompt_text(key)
@@ -152,7 +153,9 @@ async def build_reply_prefix() -> str:
             rendered = safe_format(str(text), {
                 "n": 2, "max_per": MAX_PER_REPLY, "total": MAX_TOTAL_CHARS,
             })
-            parts.append(f"{_PREFIX_HEADER}\n{rendered}")
+            parts.append((key, f"{_PREFIX_HEADER}\n{rendered}"))
         else:
-            parts.append(str(text))
-    return "\n\n".join(parts)
+            parts.append((key, str(text)))
+    # Retain component boundaries without changing the bytes/string API.
+    # Keep each prefix editable when task and per-turn context are composed.
+    return ManagedPromptText.compose(parts, parts[0][0]) if parts else ""

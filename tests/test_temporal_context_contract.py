@@ -102,6 +102,50 @@ def test_optout_expires_or_user_explicitly_reopens():
     assert policy.optional_questions_allowed and policy.reason == "user_reopened"
 
 
+@pytest.mark.parametrize("question", ["啥好事呀", "是有啥好事不", "什么情况", "那有什么安排呀", "啥意思啊", " 啥好事呀。", "有什么安排呀;", "你吃饭了吗。", "啥好事呀，", "什么情况,", "今天有啥开心事不", "最近有什么有趣的事呀", "你这两天有什么安排呀"])
+def test_optout_removes_colloquial_questions_without_pronoun_or_punctuation(question):
+    policy = derive_followup_policy([msg("user", "不用一直追问我", ago=60)], now=NOW)
+    assert guard_optional_questions(["听着挺开心的", question], policy) == (["听着挺开心的"], 1)
+    # The same wording remains allowed after an explicit invitation.
+    resumed = derive_followup_policy([], now=NOW, current_message="你现在可以问我了")
+    assert guard_optional_questions([question], resumed) == ([question], 0)
+
+
+@pytest.mark.parametrize("statement", ["什么都行", "有什么好事都值得开心", "有啥事都可以和我说", "没什么事", "他说啥好事呀", "今天有什么事都行", "最近没有什么有趣的事", "今天有啥开心事都可以分享"])
+def test_optout_keeps_nonquestion_clauses_with_question_words(statement):
+    policy = derive_followup_policy([msg("user", "不要再追问我", ago=60)], now=NOW)
+    assert guard_optional_questions([statement], policy) == ([statement], 0)
+
+
+def test_colloquial_questions_are_retained_in_recent_question_policy():
+    policy = derive_followup_policy([msg("assistant", "有什么安排呀", ago=60)], now=NOW)
+    assert policy.recent_questions == ("有什么安排呀",)
+
+
+@pytest.mark.parametrize("question", ["今天可以早点下班不", "你能早点回来不", "那可以不", "今天你方便聊天不", "你想吃点东西不"])
+def test_optout_removes_modal_questions_with_final_negation(question):
+    policy = derive_followup_policy([], now=NOW, current_message="不要再追问我")
+    assert guard_optional_questions(["那挺好的", question], policy) == (["那挺好的"], 1)
+
+
+@pytest.mark.parametrize("statement", ["你可以勇敢说不", "可以做或不做", "今天能走就走不能就不", "我会坚决说不", "今天可以早点下班不加班"])
+def test_optout_keeps_negation_in_declarative_modal_sentences(statement):
+    policy = derive_followup_policy([], now=NOW, current_message="不要再追问我")
+    assert guard_optional_questions([statement], policy) == ([statement], 0)
+
+
+@pytest.mark.parametrize("question", ["那你接下来是不是能歇着啦", "那你今天是不是能好好歇着啦", "你要不要听听音乐", "今天能不能早点回家", "你会不会觉得无聊"])
+def test_optout_removes_affirmative_negative_followups(question):
+    policy = derive_followup_policy([], now=NOW, current_message="别再追问我了")
+    assert guard_optional_questions(["那挺好的", question], policy) == (["那挺好的"], 1)
+
+
+@pytest.mark.parametrize("statement", ["你会不会都可以", "你要不要都行", "你是不是很忙都没关系", "我不知道你是不是在忙", "朋友问我是不是很累"])
+def test_optout_keeps_declarative_affirmative_negative_mentions(statement):
+    policy = derive_followup_policy([], now=NOW, current_message="别再追问我了")
+    assert guard_optional_questions([statement], policy) == ([statement], 0)
+
+
 @pytest.mark.asyncio
 async def test_prompt_render_and_read_failure_are_observable(monkeypatch):
     from app.services.prompting import store
@@ -292,7 +336,8 @@ def test_repeated_question_guard_keeps_unrelated_questions():
 
 
 @pytest.mark.asyncio
-async def test_tier_time_suffix_preserves_custom_prompt_editing_and_single_step_replay(monkeypatch):
+@pytest.mark.parametrize("temporal,evidence", [("回合日期", "日期证据"), ("回合日期", ""), ("", "日期证据"), ("", "")])
+async def test_tier_time_context_preserves_custom_prompt_editing_and_single_step_replay(monkeypatch, temporal, evidence):
     from app.services.chat import intent_replies, trace_enrich
     from app.services.prompting import utils
     from app.services.prompting.trace_components import (
@@ -310,14 +355,48 @@ async def test_tier_time_suffix_preserves_custom_prompt_editing_and_single_step_
     token = start_prompt_render_trace()
     try:
         await intent_replies._render_tier_reply("memory.weak_reply", {"message":"你好"},
-            max_total=100, temporal_instructions="回合日期", temporal_evidence="日期证据")
+            max_total=100, temporal_instructions=temporal, temporal_evidence=evidence)
         prompt = model.await_args.args[1]
+        if temporal:
+            assert prompt.startswith("自定义回复规则\n\n定制正文：你好\n\n" + temporal)
+            assert prompt.count(temporal) == 1
+        if evidence:
+            assert prompt.endswith("\n\n" + evidence)
+            assert prompt.count(evidence) == 1
         from tests.test_trace_enrich import _fake_llm_step
         step = _fake_llm_step(prompt)
         trace_enrich.apply_prompt_render_traces([step], snapshot_prompt_render_traces())
         assert step["prompt_key"] == "memory.weak_reply"
         parts = {c["prompt_key"]:prompt[c["start"]:c["end"]] for c in step["prompt_components"]}
-        assert parts == {"chat.response_instruction":"自定义回复规则", "memory.weak_reply":"定制正文：你好",
-                         "chat.temporal_context":"回合日期", "chat.temporal_evidence":"日期证据"}
+        expected = {"chat.response_instruction":"自定义回复规则", "memory.weak_reply":"定制正文：你好"}
+        if temporal:
+            expected["chat.temporal_context"] = temporal
+        if evidence:
+            expected["chat.temporal_evidence"] = evidence
+        assert parts == expected
     finally:
         reset_prompt_render_trace(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_tier_context_is_literal_and_does_not_depend_on_trace_collection(monkeypatch, managed):
+    from app.services.chat import intent_replies
+    from app.services.prompting import utils
+    from app.services.prompting.trace_components import ManagedPromptText
+
+    template = "正文：{message}"
+    if managed:
+        template = ManagedPromptText.compose([
+            ("chat.response_instruction", "固定公共规则"), ("memory.weak_reply", template)
+        ], "memory.weak_reply")
+    monkeypatch.setattr(utils, "get_prompt_text", AsyncMock(return_value=template))
+    model = AsyncMock(return_value="回复")
+    monkeypatch.setattr(intent_replies, "invoke_text", model)
+    monkeypatch.setattr(intent_replies, "get_chat_model", lambda: None)
+    context = '查询：{"status":"resolved","literal":"{message}"}\n保留原文 {user_memory}'
+    await intent_replies._render_tier_reply("memory.weak_reply", {"message": "新消息"},
+        max_total=100, temporal_instructions=context, temporal_evidence='证据：{"count":2}')
+    prompt = model.await_args.args[1]
+    expected = '正文：新消息\n\n' + context + '\n\n证据：{"count":2}'
+    assert prompt == ("固定公共规则\n\n" + expected if managed else expected)

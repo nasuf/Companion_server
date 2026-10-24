@@ -15,6 +15,7 @@ import pytest
 from app.services.prompting.reply_prefix import (
     PREFIX_SOURCE_KEYS,
     REPLY_PROMPT_KEYS,
+    PROACTIVE_REPLY_PROMPT_KEYS,
     build_reply_prefix,
 )
 
@@ -84,6 +85,7 @@ async def test_build_reply_prefix_renders_constants():
         prefix = await build_reply_prefix()
 
     assert prefix.startswith("【通用回复规则】")
+    assert prefix.index("通用回复规则") < prefix.index("回答前的硬约束")
     assert "回答前的硬约束" in prefix
     # 装饰性占位符已渲染成常量, 不留 {max_per}/{total} 残渣
     assert "{max_per}" not in prefix and "{total}" not in prefix
@@ -155,10 +157,32 @@ async def test_get_prompt_text_injects_prefix_for_reply_keys(monkeypatch):
     assert str(reply_text).endswith("【任务】生成道别语 {message}")
     # ManagedPromptText 语义保留: prompt_key 仍是原模板 (trace 归属不变)
     assert reply_text.prompt_key == "intent.end_reply"
+    assert [key for key, _ in reply_text.parts] == [*PREFIX_SOURCE_KEYS, "intent.end_reply"]
+    assert str(reply_text) == "\n\n".join(text for _, text in reply_text.parts)
 
     classifier_text = await store.get_prompt_text("intent.unified")
     assert "通用回复规则" not in str(classifier_text)
     assert str(classifier_text) == "【任务】意图分类 {message}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", sorted(REPLY_PROMPT_KEYS - PROACTIVE_REPLY_PROMPT_KEYS))
+async def test_all_reply_templates_preserve_existing_prefix_order(monkeypatch, key):
+    """Component tracking must not reorder style and factual constraints."""
+    from contextvars import ContextVar
+    from app.services.prompting import store
+
+    snapshot = {
+        "chat.response_instruction": ("保持简短", True),
+        "chat.anti_hallucination_hard_rule": ("依据明确记录", True),
+        key: ("任务正文", True),
+    }
+    monkeypatch.setattr(store, "_prompt_snapshot", ContextVar("order_snapshot", default=snapshot))
+    monkeypatch.setattr(store, "is_prompt_enabled", AsyncMock(return_value=True))
+    text = await store.get_prompt_text(key)
+    assert text.count("保持简短") == text.count("依据明确记录") == 1
+    assert text.index("保持简短") < text.index("依据明确记录")
+    assert text.endswith("任务正文")
 
 
 @pytest.mark.asyncio

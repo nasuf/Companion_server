@@ -44,8 +44,13 @@ _RELATIVE_DAYS: list[tuple[str, int]] = sorted(
 )
 
 # Pre-compiled patterns for hot path
-_WEEK_PAT = re.compile(r"(上上?|下下?|这|本)(?:个)?周([一二三四五六日天])")
-_WEEK_RANGE_PAT = re.compile(r"(上上|下下|上|下|这|本)(?:个)?周(?![一二三四五六日天末])")
+# “上周一共三次”中的“一共”是数量副词，不是星期一。
+# 日/周匹配共用边界，避免排除星期一后又漏掉整周；“周一共进午餐”
+# 中的“共进/共同/共享/共建/共事/共鸣”不是数量副词，仍保留星期一。
+# 逗号等明确分隔不受影响。
+_WEEKDAY_TOKEN = r"(?:一(?!共(?![进同享建事鸣]))|[二三四五六日天])"
+_WEEK_PAT = re.compile(rf"(上上?|下下?|这|本)(?:个)?周({_WEEKDAY_TOKEN})")
+_WEEK_RANGE_PAT = re.compile(rf"(上上|下下|上|下|这|本)(?:个)?周(?!{_WEEKDAY_TOKEN}|末)")
 _WEEKEND_PAT = re.compile(r"(上上|下下|上|下|这|本)?(?:个)?周末")
 _DATE_PAT = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
 # 带年份的显性日期: 2026-08-23 / 2026/8/23 / 2026年8月9日 / 2026 年 8 月 9 日.

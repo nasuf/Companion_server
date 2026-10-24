@@ -535,35 +535,16 @@ async def _render_tier_reply(
     temporal_evidence: str = "",
 ) -> str | None:
     """tier reply 专用 render: strip_split=False (允许 ||), max_chars=max_total."""
-    def with_time(prompt):
-        from app.services.prompting.trace_components import (
-            prompt_hash, snapshot_prompt_render_traces, record_prompt_render,
-        )
-        suffix = [(key, text) for key, text in (
-            ("chat.temporal_context", temporal_instructions),
-            ("chat.temporal_evidence", temporal_evidence),
-        ) if text]
-        if not suffix:
-            return prompt
-        original = next((item for item in reversed(snapshot_prompt_render_traces())
-                         if item.get("prompt_hash") == prompt_hash(prompt)), {})
-        components = list(original.get("components") or [])
-        combined = prompt
-        for key, text in suffix:
-            start = len(combined) + 2
-            combined += "\n\n" + text
-            components.append({"prompt_key": key, "start": start,
-                               "end": len(combined), "editable": True})
-        record_prompt_render(combined, prompt_key=prompt_key, components=components)
-        return combined
 
     return await render_prompt(
         prompt_key,
         params,
-        lambda p: invoke_text(get_chat_model(), with_time(p)),
+        lambda p: invoke_text(get_chat_model(), p),
         max_chars=max_total,
         strip_split=False,
         optional_keys=_OPTIONAL_REFERENCE_KEYS,
+        context_parts=(("chat.temporal_context", temporal_instructions),
+                       ("chat.temporal_evidence", temporal_evidence)),
     )
 
 

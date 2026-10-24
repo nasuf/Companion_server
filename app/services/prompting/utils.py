@@ -11,7 +11,7 @@ import re
 from typing import Any, Awaitable, Callable, Iterable
 
 from app.services.prompting.store import PromptDisabledError, get_prompt_text
-from app.services.prompting.trace_components import record_prompt_render
+from app.services.prompting.trace_components import ManagedPromptText, record_prompt_render
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +231,7 @@ async def render_prompt(
     strip_split: bool = True,
     keep_bubbles: bool = False,
     optional_keys: Iterable[str] | None = None,
+    context_parts: tuple[tuple[str, str], ...] = (),
 ) -> Any:
     """取 prompt → format_map → 调 invoke_fn。
 
@@ -239,11 +240,26 @@ async def render_prompt(
     - keep_bubbles: 非主动模板保留 || 气泡分隔 (调用方出口负责拆多气泡),
       max_chars 按可见字数预算. 只给输出会进短路出口 (short_circuit_reply) 的
       回复类模板用 —— 其余出口不拆 ||, 保留会把分隔符原样漏给用户.
+    - context_parts: 已渲染的命名上下文，按顺序追加到具体任务正文之后。
+      保留生产中的规则顺序；组件位置由统一渲染器记录，
+      不依赖 Trace 是否启用。上下文中的大括号按字面保留。
     失败或空结果返回 None（或 {} 视 invoke_fn 而定，由调用方判断）。
     """
     try:
         tmpl = await get_prompt_text(prompt_key)
-        prompt = render_template(tmpl, params, optional_keys=optional_keys)
+        context_parts = tuple((key, text) for key, text in context_parts if text)
+        if context_parts:
+            # Render template components first. Pre-rendered context is literal:
+            # formatting or optional-row compaction must not consume its braces.
+            parts = [(key, render_template(ManagedPromptText(text, key), params,
+                                            optional_keys=optional_keys))
+                     for key, text in (getattr(tmpl, "parts", None) or [(prompt_key, str(tmpl))])]
+            parts.extend(context_parts)
+            composed = ManagedPromptText.compose(parts, prompt_key)
+            composed.prompt_variant = getattr(tmpl, "prompt_variant", "active")
+            prompt = composed.render_components(str)
+        else:
+            prompt = render_template(tmpl, params, optional_keys=optional_keys)
         raw = await invoke_fn(prompt)
         if isinstance(raw, str):
             if strip_split:

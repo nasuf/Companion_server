@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+from zoneinfo import ZoneInfo
+
 from app.services.schedule_domain.time_parser import (
     parse_time_expressions,
     parse_with_statement_time,
@@ -18,6 +21,42 @@ from app.services.schedule_domain.time_service import _TZ
 def _now() -> datetime:
     """固定一个非边界时刻 (周三 14:30) 让相对计算稳定."""
     return datetime(2026, 4, 22, 14, 30, tzinfo=_TZ)
+
+
+@pytest.mark.parametrize("prefix,offset", [("上上", -2), ("上", -1), ("这", 0), ("本", 0), ("下", 1), ("下下", 2)])
+@pytest.mark.parametrize("classifier", ["", "个"])
+def test_week_total_does_not_become_monday(prefix, offset, classifier):
+    now = _now()
+    label = f"{prefix}{classifier}周"
+    result, = parse_time_expressions(f"{label}一共去了几次？", now=now)
+    monday = now.date() - timedelta(days=now.weekday()) + timedelta(weeks=offset)
+    assert result.original_text == label
+    assert result.start.date() == monday
+    local_end = result.end_exclusive.astimezone(result.start.tzinfo)
+    assert local_end.date() == monday + timedelta(days=7)
+    assert result.start.hour == local_end.hour == 0
+
+
+@pytest.mark.parametrize("text", ["上周一去了", "上周一共进午餐", "上周一共同出发", "上周一共享成果", "上周一共建项目", "上周一，共去了三次", "上周一一共去了三次"])
+def test_explicit_monday_is_still_one_day(text):
+    result, = parse_time_expressions(text, now=_now())
+    assert result.original_text == "上周一"
+    assert result.start.date().isoformat() == "2026-04-13"
+    assert result.end_exclusive - result.start == timedelta(days=1)
+
+
+def test_week_total_and_explicit_monday_preserve_independent_spans():
+    result = parse_time_expressions("上周一共两次，其中上周一一次", now=_now(), all_occurrences=True)
+    assert {r.original_text: (r.end_exclusive-r.start).days for r in result} == {"上周": 7, "上周一": 1}
+
+
+@pytest.mark.parametrize("zone", ["Asia/Shanghai", "America/New_York"])
+def test_week_total_uses_calendar_timezone_across_year_boundary(zone):
+    now = datetime(2026, 1, 1, 15, tzinfo=ZoneInfo(zone))
+    result, = parse_time_expressions("上周一共两次", now=now, calendar_timezone=ZoneInfo(zone))
+    assert result.start.isoformat().startswith("2025-12-22T00:00:00")
+    assert result.end_exclusive.astimezone(ZoneInfo(zone)).isoformat().startswith("2025-12-29T00:00:00")
+    assert result.start.tzinfo == ZoneInfo(zone)
 
 
 # ── P0-1 回归: 删除"傍晚" ───────────────────────────────────────────

@@ -12,6 +12,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -19,7 +20,41 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from incident_cases import CASES
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from evals.temporal_awareness.incident_cases import CASES
+
+
+class _LocationFailures(logging.Handler):
+    """A degraded production enhancement must fail qualification, not disappear."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.failures = []
+
+    def emit(self, record):
+        if "[location-ctx] load failed" in record.getMessage():
+            self.failures.append(record.getMessage())
+
+
+def validate_location_evidence(route, diagnostics, query_count, failures):
+    if failures:
+        raise RuntimeError("Location context failed during qualification")
+    expected = 2 if route != "current_state" or diagnostics.get("location_context") else 0
+    if query_count != expected:
+        raise RuntimeError("Actual location loading was not exercised")
+
+
+def configure_time_context(patch, chat, io):
+    """Freeze external clock/calendar data, retaining the production renderer."""
+    from app.services.schedule_domain import time_service
+
+    patch.setattr(time_service, "_now_corrected", lambda: io.now.astimezone(time_service._TZ))
+    patch.setattr(time_service, "is_holiday", lambda _date: None)
+    patch.setattr(time_service, "is_workday_swap", lambda _date: False)
+    patch.setattr(time_service, "get_next_holiday", lambda _date: None)
+    patch.setattr(chat, "build_time_context", time_service.build_time_context)
 
 
 async def run(args, cases=None):
@@ -38,6 +73,7 @@ async def run(args, cases=None):
     from app.services.memory.retrieval.context_selector import select_context
     from app.services.memory.retrieval import timeline as timeline_module
     from app.services.prompting import store
+    from app.services.llm.providers import _model_runtime_options
     from tests.g02_harness_support import configure_pair
 
     rows = json.loads(args.prompt_snapshot.read_text())
@@ -56,9 +92,13 @@ async def run(args, cases=None):
     judge = AsyncOpenAI(api_key=os.environ["DASHSCOPE_API_KEY"], base_url=os.environ["DASHSCOPE_BASE_URL"],
                         timeout=60, max_retries=1)
     report = {"source_root": str(args.source_root), "model": args.model,
+              "model_options": _model_runtime_options("ark", args.model),
               "prompt_snapshot_sha256": hashlib.sha256(args.prompt_snapshot.read_bytes()).hexdigest(),
               "samples": args.samples, "runs": [],
               "limitations": "Synthetic IO and forced routing; actual prompt rendering, model and reply normalization. No production delivery."}
+    location_failures = _LocationFailures()
+    location_logger = logging.getLogger("app.services.chat.location_context")
+    location_logger.addHandler(location_failures)
     try:
         for case in (CASES if cases is None else cases):
             for sample in range(args.samples):
@@ -67,7 +107,7 @@ async def run(args, cases=None):
                 async def generate(messages):
                     started = time.monotonic()
                     result = await client.chat.completions.create(model=args.model, messages=messages,
-                        temperature=.7, max_tokens=700)
+                        **report["model_options"])
                     text = result.choices[0].message.content or ""
                     captured.append({"messages": messages, "raw": text, "duration_seconds": time.monotonic()-started,
                                      "usage": result.usage.model_dump() if result.usage else None})
@@ -81,6 +121,9 @@ async def run(args, cases=None):
 
                 with MonkeyPatch.context() as patch:
                     io = configure_pair(patch)
+                    # Same city as the shared identity fixture, in the format
+                    # used by real character profiles and the location parser.
+                    io.agent.city = "浙江省 杭州市 西湖区"
                     async def capture_reply(**kwargs):
                         result = await original_generate_reply(**kwargs)
                         captured_diagnostics.update(kwargs.get("diagnostics") or {})
@@ -89,8 +132,7 @@ async def run(args, cases=None):
                     io.now = datetime.fromisoformat(case["now"].replace("Z", "+00:00"))
                     patch.setattr(settings, "chat_executor", "langgraph")
                     patch.setattr(chat, "compute_reengagement_gap_seconds", compute_reengagement_gap_seconds)
-                    patch.setattr(chat, "build_time_context", lambda: io.now.astimezone(
-                        timezone(timedelta(hours=8))).isoformat())
+                    configure_time_context(patch, chat, io)
                     patch.setattr(reply_generate, "_run_main_llm", live_main)
                     patch.setattr(intent_replies, "invoke_text", live_text)
                     try:
@@ -171,6 +213,8 @@ async def run(args, cases=None):
                         if event["event"] == "reply" and data.get("text"):
                             texts.append(data["text"])
                     answer = " ".join(texts)
+                    validate_location_evidence(case["route"], captured_diagnostics,
+                                               io.location_queries.await_count, location_failures.failures)
                     if not captured or not answer or not any(e["event"] == "done" for e in events):
                         raise RuntimeError(f"Incomplete actual reply flow for {case['id']}")
                     try:
@@ -192,11 +236,19 @@ async def run(args, cases=None):
                     except Exception as exc:
                         assessment = {"pass": None, "reason": "judge_unavailable", "error_type": type(exc).__name__}
                     report["runs"].append({"case": case["id"], "sample": sample, "reply": answer,
+                                           "location_queries": io.location_queries.await_count,
                                            "judge": assessment, "calls": captured, "response_diagnostics": captured_diagnostics})
                     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
                     args.output.chmod(0o600)
                     print(json.dumps({"case": case["id"], "sample": sample, "pass": assessment["pass"]}), flush=True)
+    except Exception as exc:
+        report["qualification_error"] = type(exc).__name__ + ": " + str(exc)
+        report["qualification_passed"] = False
+        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+        args.output.chmod(0o600)
+        raise
     finally:
+        location_logger.removeHandler(location_failures)
         await client.close()
         await judge.close()
     report["passed"] = sum(r["judge"]["pass"] is True for r in report["runs"])
@@ -209,9 +261,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--prompt-snapshot", type=Path, required=True)
+    parser.add_argument("--cases-json", type=Path, help="Optional case list; defaults to the incident corpus")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--judge-model", default="qwen3.5-flash")
     parser.add_argument("--samples", type=int, default=3, choices=range(1,6))
     parser.add_argument("--live", action="store_true", required=True)
-    asyncio.run(run(parser.parse_args()))
+    args = parser.parse_args()
+    cases = json.loads(args.cases_json.read_text()) if args.cases_json else None
+    asyncio.run(run(args, cases))

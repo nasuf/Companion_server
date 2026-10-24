@@ -382,6 +382,8 @@ async def get_prompt_text(key: str) -> str:
             logger.warning(f"[REPLY-PREFIX] build failed for {key}, using bare template: {e}")
             prefix = ""
         if prefix:
+            if getattr(prefix, "parts", None):
+                return ManagedPromptText.compose([*prefix.parts, (key, content)], key)
             content = f"{prefix}\n\n{content}"
 
     return ManagedPromptText(content, key, prompt_variant="active")

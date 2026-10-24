@@ -114,7 +114,7 @@ def test_state_and_computation_queries_do_not_filter_away_prior_evidence(text):
 
 
 @pytest.mark.asyncio
-async def test_actual_reply_contract_renders_obligations_without_raw_text(monkeypatch):
+async def test_reply_contract_preserves_date_scope_and_keeps_operation_in_trace(monkeypatch):
     from app.services.chat.temporal_context import build_turn_clock, prepare_reply_time
     from app.services.prompting.defaults import CHAT_TEMPORAL_CONTEXT_PROMPT
     from app.services.prompting import store
@@ -124,6 +124,10 @@ async def test_actual_reply_contract_renders_obligations_without_raw_text(monkey
     diagnostics = {}
     _, _, rendered = await prepare_reply_time([], exclude_ids=set(),
         current_message="本周参加秘密活动几次", diagnostics=diagnostics, clock=c)
-    assert "complete_scope" in rendered and "not_executed" in rendered
+    assert "complete_scope" not in rendered and "not_executed" not in rendered
+    assert "2026-10-19" in rendered and "2026-10-25" in rendered
     assert "秘密活动" not in rendered
-    assert diagnostics["temporal_context"]["query"]["operation"]["type"] == "count"
+    operation = diagnostics["temporal_context"]["query"]["operation"]
+    assert operation["type"] == "count"
+    assert operation["execution"] == "not_executed"
+    assert "complete_scope" in operation["requirements"]
