@@ -160,9 +160,6 @@ jobs:
       - name: Build candidate runtime image
         run: docker build -t companion-server:ci-chat-safety .
 
-      - name: Verify delayed replies across two workers and reconnect
-        run: python3 scripts/test_chat_safety_e2e.py --image companion-server:ci-chat-safety --delay --output "$RUNNER_TEMP/chat-safety-e2e/delay"
-
       - name: Verify prompt validation inside the packaged runtime
         run: |
           docker run --rm --network none \
@@ -181,6 +178,9 @@ jobs:
           docker pull redis:7-alpine
           docker pull nginx:1.24-alpine
           docker pull pgvector/pgvector:0.8.0-pg16
+
+      - name: Verify delayed replies across two workers and reconnect
+        run: python3 scripts/test_chat_safety_e2e.py --image companion-server:ci-chat-safety --delay --output "$RUNNER_TEMP/chat-safety-e2e/delay"
 
       - name: Verify unified native backup and isolated restore
         run: python3 scripts/test_postgres_backup_e2e.py --output "$RUNNER_TEMP/chat-safety-e2e/backup"
