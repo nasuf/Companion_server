@@ -45,6 +45,7 @@ class ResolvedConfig:
     reply_delay_enabled: bool
     reply_delay_max_seconds: int
     user_message_aggregation_enabled: bool
+    filler_emoji_probability: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -232,7 +233,7 @@ _SYSTEM_CONFIG_REQUIRED_FIELDS: tuple[str, ...] = (
     "proactiveTrendingLinkProbability", "proactiveTrendingCacheTtlS",
     "replyDelayEnabled", "replyDelayMaxSeconds",
     "userMessageAggregationEnabled",
-    "proactivePolicy",
+    "proactivePolicy", "fillerEmojiProbability",
 )
 
 _STALE_CLIENT_VERIFIED = False  # 一进程只发一条告警, 别刷屏
@@ -432,6 +433,7 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
                 or 3600,
             ),
         ),
+        filler_emoji_probability=float(glob.get("fillerEmojiProbability") or 0.0),
         reply_delay_enabled=bool(
             _pick("replyDelayEnabled", settings.reply_delay_enabled),
         ),

@@ -8,32 +8,88 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 _T = TypeVar("_T")
 
 
-def _previous_assistant_message(recent_messages: list[Any], current_user_message_id: str | None) -> Any | None:
-    """Find the assistant turn immediately before the current user turn."""
+def message_field(message: Any, key: str, default: Any = None) -> Any:
+    return message.get(key, default) if isinstance(message, dict) else getattr(message, key, default)
+
+
+@dataclass(frozen=True)
+class AssistantTurn:
+    """Read-only turn text; identity/metadata belong to a real evidence-bearing bubble.
+
+    Never mutate the ORM row: feedback updates must keep targeting a real message.
+    Newline boundaries let guards examine every bubble independently.
+    """
+
+    anchor: Any
+    content: str
+    source_message_ids: tuple[str, ...]
+    previous_user_text: str | None
+    createdAt: Any
+
+    def __getattr__(self, key: str) -> Any:
+        if isinstance(self.anchor, dict):
+            if key not in self.anchor:
+                raise AttributeError(key)
+            return self.anchor[key]
+        return getattr(self.anchor, key)
+
+
+def previous_assistant_turn(recent_messages: list[Any], current_user_message_id: str | None) -> AssistantTurn | None:
+    """Merge consecutive AI bubbles before this user message, excluding notices.
+
+    Like the main history window, a user row separates turns. Current/later rows
+    are excluded when the current ID is present; missing IDs use the fetched window.
+    """
     current_index = len(recent_messages)
     if current_user_message_id:
         for idx, message in enumerate(recent_messages):
-            if getattr(message, "id", None) == current_user_message_id:
+            if message_field(message, "id") == current_user_message_id:
                 current_index = idx
                 break
+        else:
+            # Some ingress paths save after fetching history. They can still
+            # use this window, provided it has no current row to bound it.
+            current_index = len(recent_messages)
+    bubbles = []
+    previous_user_text = None
     for message in reversed(recent_messages[:current_index]):
-        if getattr(message, "role", None) != "assistant":
+        if is_offering_received_notice(message_field(message, "metadata")):
             continue
-        meta = (
-            message.get("metadata")
-            if isinstance(message, dict)
-            else getattr(message, "metadata", None)
-        )
-        if is_offering_received_notice(meta):
+        role = message_field(message, "role")
+        if role == "assistant":
+            bubbles.append(message)
             continue
-        return message
-    return None
+        if bubbles:
+            if role == "user":
+                previous_user_text = message_field(message, "content")
+            break
+    if not bubbles:
+        return None
+    # Retrieval snapshots are attached to the first bubble, while guards need
+    # the entire text and the last bubble's timestamp. Keep a real audit target
+    # instead of copying one bubble's metadata onto another database row.
+    anchor = next((m for m in reversed(bubbles) if isinstance(message_field(m, "metadata"), dict)
+                   and (message_field(m, "metadata").get("memory_retrievals")
+                        or message_field(m, "metadata").get("memory_retrieval_analysis"))), bubbles[0])
+    return AssistantTurn(
+        anchor=anchor,
+        content="\n".join(str(message_field(m, "content") or "") for m in reversed(bubbles)),
+        source_message_ids=tuple(str(message_field(m, "id")) for m in reversed(bubbles) if message_field(m, "id")),
+        previous_user_text=previous_user_text,
+        createdAt=message_field(bubbles[0], "createdAt"),
+    )
+
+
+def _previous_assistant_message(recent_messages: list[Any], current_user_message_id: str | None) -> AssistantTurn | None:
+    """Compatibility name for callers; all three consumers now see the whole turn."""
+    return previous_assistant_turn(recent_messages, current_user_message_id)
 
 
 def _current_turn_message_ids(

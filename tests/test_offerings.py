@@ -1048,7 +1048,7 @@ def test_is_offering_received_notice():
     )
     real = SimpleNamespace(id="a1", role="assistant", metadata={})
     current = SimpleNamespace(id="u1", role="user", metadata={})
-    assert _previous_assistant_message([real, notice, current], "u1") is real
+    assert _previous_assistant_message([real, notice, current], "u1").anchor is real
 
 
 def test_unbound_ttl_treats_old_rows_as_stale():

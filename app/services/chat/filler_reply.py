@@ -1,25 +1,22 @@
-"""Phase E2（拟人度）：纯语气词的概率性"仅表情"轻回应。
+"""Optional emoji-only replies, disabled by default and guarded by whole turns.
 
-真人收到"嗯 / 哈哈 / 好的"这类纯应答词时，不会每次都认真组织一句话回复——
-经常只回一个表情，甚至就让对话自然停在那里。原管线对每条消息都跑完整
-意图识别 + 主 LLM，对纯语气词输出一句"正经回复"，是"应答机感"的来源之一。
-
-此模块提供概率性短路：命中纯语气词表 + 概率命中 → 返回一个匹配情绪的
-emoji 文本，orchestrator 直接以短路回复发出（跳过意图/检索/主 LLM）；
-未命中概率（70%）仍走完整管线，保证行为多样性。
-
-安全护栏：AI 上一句是提问时**绝不**走此路径——"好"/"嗯"此时是对提问的
-答复（如作息调整确认），必须交给意图管线结合上下文理解。
+The global runtime probability is bound once per chat turn. No model or database
+calls here; diagnostics contain decisions, never message text.
 """
 
 from __future__ import annotations
 
+import math
 import random
+import unicodedata
+from datetime import UTC, datetime
+from typing import Any
 
-from app.services.emoji import EMOJI_MAP
+from app.services.chat.message_utils import _parse_message_created_at, message_field
+from app.services.runtime_config import resolve_config_sync
 
-# 概率: 命中语气词后走"仅表情"的比例; 其余走完整管线.
-FILLER_EMOJI_PROBABILITY = 0.3
+from app.services.emoji import EMOJI_MAP, is_emoji_only_message
+
 
 # 词表维护提示: interaction/aggregation.py (常用应答词→不算碎片) 与
 # memory/recording/filter.py (_FILLER_WORDS→不进记忆) 各有独立词表, 语义不同
@@ -34,35 +31,85 @@ _NEUTRAL_FILLERS = frozenset({
     "收到", "了解",
 })
 
-_QUESTION_ENDINGS = ("?", "？", "吗", "呢", "么", "不", "嘛")
+_QUESTION_ENDINGS = ("吗", "呢", "么", "不", "嘛", "对吧", "是吧", "好吧", "如何", "怎样", "怎么样")
+
+
+def _strip_question_tail(text: str) -> str:
+    value = text.rstrip()
+    while value and unicodedata.category(value[-1])[0] not in "LN":
+        value = value[:-1]
+    return value
 
 
 def is_question_like(text: str | None) -> bool:
-    """AI 上一句是否像提问（"好/嗯"很可能是在回答它）。"""
-    t = (text or "").rstrip()
-    return bool(t) and t.endswith(_QUESTION_ENDINGS)
+    """Any question bubble blocks the shortcut, including '对吧？🙂' / '好吗 😊'."""
+    value = text or ""
+    if "?" in value or "？" in value:
+        return True
+    return any(_strip_question_tail(bubble).endswith(_QUESTION_ENDINGS)
+               for bubble in value.splitlines() if bubble.strip())
 
 
 def build_filler_emoji_reply(
     user_message: str,
     *,
     previous_assistant_text: str | None = None,
+    previous_assistant: Any = None,
+    received_at: datetime | str | None = None,
+    diagnostics: dict | None = None,
+    probability: float | None = None,
     rng: random.Random | None = None,
 ) -> str | None:
-    """纯语气词 → 概率性返回一个匹配情绪的 emoji；不适用时返回 None。
-
-    返回 None 的情况：非语气词 / AI 上一句是提问 / 概率未命中。
-    """
+    """Return emoji only when every guard passes; otherwise use the full pipeline."""
     r = rng or random
-    if is_question_like(previous_assistant_text):
-        return None
+    text = (message_field(previous_assistant, "content") if previous_assistant is not None
+            else previous_assistant_text)
+    configured = resolve_config_sync().filler_emoji_probability if probability is None else probability
+    enabled_probability = float(configured)
+    if not math.isfinite(enabled_probability) or not 0 <= enabled_probability <= 1:
+        enabled_probability = 0.0
     normalized = (user_message or "").strip().lower().rstrip("~～!！。.")
-    if normalized in _POSITIVE_FILLERS:
-        pool = EMOJI_MAP["高兴"]
-    elif normalized in _NEUTRAL_FILLERS:
-        pool = EMOJI_MAP["中性"]
-    else:
+    is_filler = normalized in _POSITIVE_FILLERS or normalized in _NEUTRAL_FILLERS
+    previous_emoji = is_emoji_only_message(text or "")
+    received = _parse_message_created_at(received_at)
+    previous_at = _parse_message_created_at(message_field(previous_assistant, "createdAt"))
+    gap = (received - previous_at).total_seconds() if received and previous_at else None
+    previous_user = message_field(previous_assistant, "previous_user_text")
+    repeat: bool | None = False
+    if previous_emoji:
+        if previous_user is None:
+            repeat = None
+        elif str(previous_user).strip() == user_message.strip():
+            repeat = None if gap is None or gap < 0 else gap <= 60
+    from app.services.chat.intent_dispatcher import previous_turn_offered_schedule_change
+
+    guards = {
+        "is_filler": is_filler,
+        "previous_turn_is_question": is_question_like(text),
+        "previous_turn_is_emoji_only": previous_emoji,
+        "previous_turn_offered_schedule_change": previous_turn_offered_schedule_change(text),
+        "repeated_after_emoji_within_60s": repeat,
+    }
+    reason = (
+        "disabled" if enabled_probability == 0 else
+        "not_filler" if not is_filler else
+        "previous_turn_question" if guards["previous_turn_is_question"] else
+        "previous_turn_schedule_offer" if guards["previous_turn_offered_schedule_change"] else
+        "repeat_after_emoji" if repeat else
+        "previous_turn_emoji_only" if previous_emoji else
+        "probability_miss" if r.random() >= enabled_probability else "selected"
+    )
+    if diagnostics is not None:
+        diagnostics["filler_emoji"] = {
+            "version": 1, "reason": reason, "probability": enabled_probability,
+            "guards": guards,
+            "previous_turn_bubble_count": len(message_field(previous_assistant, "source_message_ids", ()) or ()),
+            "seconds_since_previous_reply": gap,
+            "repeat_window_seconds": 60,
+            "sampled_at": datetime.now(UTC).isoformat(),
+        }
+        if reason == "selected":
+            diagnostics.update(version=1, reply_path="filler_emoji", main_prompt_built=False)
+    if reason != "selected":
         return None
-    if r.random() >= FILLER_EMOJI_PROBABILITY:
-        return None
-    return r.choice(pool)
+    return r.choice(EMOJI_MAP["高兴" if normalized in _POSITIVE_FILLERS else "中性"])

@@ -179,7 +179,9 @@ async def pending(ctx):
             return
         filler_emoji = services.build_filler_emoji_reply(
             ctx.user_message,
-            previous_assistant_text=getattr(ctx.previous_assistant, "content", None),
+            previous_assistant=ctx.previous_assistant,
+            received_at=ctx.turn_clock.statement_at,
+            diagnostics=ctx.response_diagnostics,
         )
         if filler_emoji is not None:
             services.logger.info(
@@ -215,6 +217,7 @@ async def prepare_reads(ctx):
         and services.detect_current_state_fast_path(ctx.user_message)
     )
     ctx.response_diagnostics: dict[str, services.Any] = {
+        **ctx.response_diagnostics,
         "version": 1,
         "reply_path": None,
         "memory_relevance": None,

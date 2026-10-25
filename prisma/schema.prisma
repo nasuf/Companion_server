@@ -2274,6 +2274,8 @@ model SystemConfig {
   replyDelayMaxSeconds           Int?     @map("reply_delay_max_seconds")
   // Short-message / turn-window aggregation before replying. null = env default.
   userMessageAggregationEnabled  Boolean? @map("user_message_aggregation_enabled")
+  // Emoji-only filler replies are disabled until their benefit is qualified.
+  fillerEmojiProbability         Float    @default(0) @map("filler_emoji_probability")
   // 后台「聊天管理 → 主动交流」改过的参数 (只存与默认不同的项; 登记表见
   // app/services/proactive/tuning.py). null = 全部用默认。
   proactivePolicy                Json?    @map("proactive_policy")
@@ -2842,4 +2844,17 @@ model OpsRedisCapacity {
   recipientCount Int @default(0) @map("recipient_count")
   @@ignore
   @@map("ops_redis_capacity")
+}
+
+// Audited global runtime settings; only filler probability writes opt in for now.
+model RuntimeConfigChange {
+  id        String   @id
+  adminId   String?  @map("admin_id")
+  key       String
+  before    Json
+  after     Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([key, createdAt(sort: Desc)])
+  @@map("runtime_config_changes")
 }

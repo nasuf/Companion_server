@@ -5,7 +5,6 @@ from __future__ import annotations
 import random
 
 from app.services.chat.filler_reply import (
-    FILLER_EMOJI_PROBABILITY,
     build_filler_emoji_reply,
     is_question_like,
 )
@@ -35,29 +34,29 @@ class TestQuestionGuard:
     def test_filler_after_ai_question_never_shortcuts(self):
         """护栏: "好"/"嗯" 是对 AI 提问的答复, 必须交给意图管线."""
         out = build_filler_emoji_reply(
-            "好", previous_assistant_text="要我再陪你一会儿吗?", rng=_AlwaysHit(),
+            "好", previous_assistant_text="要我再陪你一会儿吗?", probability=0.3, rng=_AlwaysHit(),
         )
         assert out is None
 
 
 class TestFillerMatching:
     def test_positive_filler_gets_happy_emoji(self):
-        out = build_filler_emoji_reply("哈哈哈", rng=_AlwaysHit())
+        out = build_filler_emoji_reply("哈哈哈", probability=0.3, rng=_AlwaysHit())
         assert out in EMOJI_MAP["高兴"]
 
     def test_neutral_filler_gets_neutral_emoji(self):
-        out = build_filler_emoji_reply("嗯嗯", rng=_AlwaysHit())
+        out = build_filler_emoji_reply("嗯嗯", probability=0.3, rng=_AlwaysHit())
         assert out in EMOJI_MAP["中性"]
 
     def test_trailing_punctuation_normalized(self):
-        assert build_filler_emoji_reply("好的~", rng=_AlwaysHit()) is not None
-        assert build_filler_emoji_reply("哈哈！", rng=_AlwaysHit()) is not None
+        assert build_filler_emoji_reply("好的~", probability=0.3, rng=_AlwaysHit()) is not None
+        assert build_filler_emoji_reply("哈哈！", probability=0.3, rng=_AlwaysHit()) is not None
 
     def test_non_filler_returns_none(self):
-        assert build_filler_emoji_reply("今天加班到十点", rng=_AlwaysHit()) is None
-        assert build_filler_emoji_reply("嗯，但是我有点难过", rng=_AlwaysHit()) is None
+        assert build_filler_emoji_reply("今天加班到十点", probability=0.3, rng=_AlwaysHit()) is None
+        assert build_filler_emoji_reply("嗯，但是我有点难过", probability=0.3, rng=_AlwaysHit()) is None
 
     def test_probability_gate(self):
         assert build_filler_emoji_reply("嗯", rng=_NeverHit()) is None
         # 默认概率应是少数派行为 (大多数时候仍走完整管线)
-        assert 0 < FILLER_EMOJI_PROBABILITY <= 0.5
+        assert build_filler_emoji_reply("嗯", probability=0, rng=_AlwaysHit()) is None

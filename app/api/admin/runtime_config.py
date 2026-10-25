@@ -18,6 +18,9 @@ embedding 不在此 — 跨 agent 共享 vector store 不能动态切.
 from __future__ import annotations
 
 import logging
+import json
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -100,6 +103,7 @@ class ConfigPayload(BaseModel):
     reply_delay_enabled: bool | None = None
     reply_delay_max_seconds: int | None = Field(default=None, ge=1, le=3600)
     user_message_aggregation_enabled: bool | None = None
+    filler_emoji_probability: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
 
 
 def _row_to_payload(row) -> dict[str, Any]:
@@ -113,7 +117,7 @@ def _row_to_payload(row) -> dict[str, Any]:
             "proactive_trending_enabled", "proactive_trending_probability",
             "proactive_trending_link_probability", "proactive_trending_cache_ttl_s",
             "reply_delay_enabled", "reply_delay_max_seconds",
-            "user_message_aggregation_enabled",
+            "user_message_aggregation_enabled", "filler_emoji_probability",
         )}
     return {
         "online_model": row.onlineModel,
@@ -139,6 +143,7 @@ def _row_to_payload(row) -> dict[str, Any]:
         "proactive_trending_cache_ttl_s": getattr(
             row, "proactiveTrendingCacheTtlS", None,
         ),
+        "filler_emoji_probability": getattr(row, "fillerEmojiProbability", None),
         "reply_delay_enabled": getattr(row, "replyDelayEnabled", None),
         "reply_delay_max_seconds": getattr(row, "replyDelayMaxSeconds", None),
         "user_message_aggregation_enabled": getattr(
@@ -167,6 +172,7 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
         "proactive_trending_probability": r.proactive_trending_probability,
         "proactive_trending_link_probability": r.proactive_trending_link_probability,
         "proactive_trending_cache_ttl_s": r.proactive_trending_cache_ttl_s,
+        "filler_emoji_probability": r.filler_emoji_probability,
         "reply_delay_enabled": r.reply_delay_enabled,
         "reply_delay_max_seconds": r.reply_delay_max_seconds,
         "user_message_aggregation_enabled": r.user_message_aggregation_enabled,
@@ -253,6 +259,8 @@ def _payload_to_update_data(
             )
         if "proactive_trending_cache_ttl_s" in explicit:
             data["proactiveTrendingCacheTtlS"] = payload.proactive_trending_cache_ttl_s
+        if "filler_emoji_probability" in explicit:
+            data["fillerEmojiProbability"] = payload.filler_emoji_probability or 0.0
         if "reply_delay_enabled" in explicit:
             data["replyDelayEnabled"] = payload.reply_delay_enabled
         if "reply_delay_max_seconds" in explicit:
@@ -485,7 +493,9 @@ async def get_system_config() -> dict[str, Any]:
 
 
 @router.put("")
-async def put_system_config(payload: ConfigPayload) -> dict[str, Any]:
+async def put_system_config(
+    payload: ConfigPayload, admin: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
     """更新全局 SystemConfig + 重 load 缓存 + 清模型 lru_cache. 立即生效 (in-flight chain 仍旧)."""
     await _validate_payload_models(
         payload,
@@ -501,10 +511,29 @@ async def put_system_config(payload: ConfigPayload) -> dict[str, Any]:
     data = _payload_to_update_data(payload, include_global_only=True)
     if not data:
         raise HTTPException(status_code=400, detail="至少需要提供一个配置字段")
-    row = await db.systemconfig.upsert(
-        where={"id": 1},
-        data={"create": {"id": 1, **data}, "update": data},
-    )
+    if "fillerEmojiProbability" in data:
+        # Lock before reading the old value: simultaneous admin edits must have
+        # an exact before/after chain. Configuration and audit commit together.
+        async with db.tx() as tx:
+            await tx.systemconfig.upsert(where={"id": 1}, data={"create": {"id": 1}, "update": {}})
+            rows = await tx.query_raw(
+                "SELECT filler_emoji_probability FROM system_config WHERE id = 1 FOR UPDATE"
+            )
+            before = float(rows[0]["filler_emoji_probability"])
+            row = await tx.systemconfig.update(where={"id": 1}, data=data)
+            after = data["fillerEmojiProbability"]
+            if before != after:
+                await tx.execute_raw(
+                    'INSERT INTO runtime_config_changes (id, admin_id, key, "before", "after", created_at) '
+                    'VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, clock_timestamp())',
+                    str(uuid.uuid4()), admin.get("sub"), "filler_emoji_probability",
+                    json.dumps(before), json.dumps(after),
+                )
+    else:
+        row = await db.systemconfig.upsert(
+            where={"id": 1},
+            data={"create": {"id": 1, **data}, "update": data},
+        )
     # 先 reload caches (原子赋值, 期间 sync 读者读旧值不阻塞), 再清模型 lru_cache.
     # 顺序: DB 写 → reload module-cache → clear lru_cache. 任何时刻读者拿到的
     # 都是有效配置 (旧 cache+旧 lru / 旧 cache+新 lru / 新 cache+新 lru),
@@ -520,6 +549,23 @@ async def put_system_config(payload: ConfigPayload) -> dict[str, Any]:
         "config": _row_to_payload(row),
         "resolved": _resolved_to_dict(resolve_config_sync(agent_id=None)),
     }
+
+
+@router.get("/filler-emoji-history")
+async def get_filler_emoji_history() -> dict[str, Any]:
+    """Admin-only, bounded history for the global filler probability."""
+    rows = await db.query_raw(
+        'SELECT id, admin_id, "before", "after", created_at FROM runtime_config_changes '
+        'WHERE key = $1 ORDER BY created_at DESC, id DESC LIMIT 30',
+        "filler_emoji_probability",
+    )
+    changes = []
+    for row in rows:
+        created = row["created_at"]
+        if isinstance(created, datetime) and created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        changes.append({**row, "created_at": created.isoformat() if isinstance(created, datetime) else created})
+    return {"changes": changes, "limit": 30, "sampled_at": datetime.now(UTC).isoformat()}
 
 
 class TtsProbabilityPayload(BaseModel):

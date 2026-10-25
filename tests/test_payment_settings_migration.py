@@ -51,6 +51,17 @@ async def test_payment_gate_upgrade_defaults_closed_and_preserves_wallet(tmp_pat
         before = await client.query_raw('SELECT * FROM user_wallets WHERE user_id=$1', user.id)
         shutil.copytree(candidate, migrations / candidate.name)
         await deploy(); await deploy()  # second deployment is a no-op, not a reset
+        # Assert this migration at its own historical boundary without asking
+        # today's generated client for columns introduced by later migrations.
+        assert (await client.query_raw(
+            'SELECT real_money_payments_enabled FROM system_config WHERE id=1'
+        ))[0]['real_money_payments_enabled'] is False
+        assert await client.query_raw('SELECT * FROM user_wallets WHERE user_id=$1', user.id) == before
+        # Current application compatibility must use the complete schema.
+        for source in sorted(Path('prisma/migrations').glob('*/migration.sql')):
+            if source.parent.name > candidate.name:
+                shutil.copytree(source.parent, migrations / source.parent.name)
+        await deploy(); await deploy()
         from app.services.payments import availability
         monkeypatch.setattr(availability, 'db', client)
         assert await availability.get_payment_settings() == {'real_money_payments_enabled': False}

@@ -314,7 +314,7 @@ async def _record_memory_retrieval_feedback(
         metadata = previous.metadata if isinstance(previous.metadata, dict) else {}
         feedback = build_memory_retrieval_feedback(
             user_message=user_message,
-            previous_assistant_reply=getattr(previous, "content", None) or assistant_reply,
+            previous_assistant_reply=assistant_reply or getattr(previous, "content", None) or "",
             previous_metadata=metadata,
         )
         if not feedback:
@@ -707,9 +707,12 @@ async def _stream_legacy_response(
             # 不会每次都认真回一句话. AI 上一句是提问时不走此路径 (那是答复,
             # 交给意图管线); 未命中概率仍走完整管线. 位置在 preflight 之后:
             # pending 矛盾/删除确认的 "嗯/好" 已被上方消费, 不会误吞.
+            filler_diagnostics: dict[str, Any] = {}
             filler_emoji = build_filler_emoji_reply(
                 user_message,
-                previous_assistant_text=getattr(previous_assistant, "content", None),
+                previous_assistant=previous_assistant,
+                received_at=turn_clock.statement_at,
+                diagnostics=filler_diagnostics,
             )
             if filler_emoji is not None:
                 logger.info(
@@ -723,6 +726,7 @@ async def _stream_legacy_response(
                 preflight_ctx.last_short_circuit_reply = filler_emoji
                 for evt in await _short_circuit_reply(
                     filler_emoji, conversation_id, agent_id, user_id,
+                    extra_metadata={"response_diagnostics": filler_diagnostics},
                     trace_id=tracer.safe_trace_id,
                     turn_user_message_ids=sorted(current_turn_ids),
                     workspace_id=workspace_id,
@@ -738,6 +742,7 @@ async def _stream_legacy_response(
             and detect_current_state_fast_path(user_message)
         )
         response_diagnostics: dict[str, Any] = {
+            **(filler_diagnostics if not sub_intent_mode and not crisis_care_turn else {}),
             "version": 1,
             "reply_path": None,
             "memory_relevance": None,
