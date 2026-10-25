@@ -10,7 +10,7 @@ import math
 import time
 import uuid
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from prisma import Json
 from starlette.websockets import WebSocketState
 
@@ -770,19 +770,34 @@ async def _queue_reply(
 
     # 用户连发非碎片：若已有 pending payload，append 到同一 due_at（沿用 spec §6.3
     # 时间戳沿用语义），scheduler flush 时一次拿到合并处理，避免双发。
-    appended = await enqueue_or_append_delayed(
-        conversation_id,
-        {
-            "conversation_id": conversation_id,
-            "agent_id": agent.id,
-            "user_id": user_id,
-            "message": user_message,
-            "message_id": user_message_id,
-            "reply_context": reply_context,
-            "forced_intent": getattr(forced_intent, "value", None),
-        },
-        delay_seconds,
-    )
+    try:
+        appended = await enqueue_or_append_delayed(
+            conversation_id,
+            {
+                "conversation_id": conversation_id,
+                "agent_id": agent.id,
+                "user_id": user_id,
+                "message": user_message,
+                "message_id": user_message_id,
+                "reply_context": reply_context,
+                "forced_intent": getattr(forced_intent, "value", None),
+            },
+            delay_seconds,
+        )
+    except HTTPException:
+        # Erasure/authorization rejection must stay fail-closed.
+        raise
+    except Exception as exc:
+        logger.warning("[DELAY-FALLBACK] conv=%s message=%s type=%s",
+                       conversation_id, user_message_id, type(exc).__name__)
+        await _queue_reply(
+            ws, conversation_id=conversation_id, agent=agent, user_id=user_id,
+            user_message=user_message, user_message_id=user_message_id,
+            reply_context={**(reply_context or {}), "delay_seconds": 0.0,
+                           "delay_reason": "enqueue_failed", "delayed_enqueue_fallback": True},
+            forced_intent=forced_intent,
+        )
+        return
     if delay_seconds > 5 and not appended:
         await ws.send_json({"type": "delay", "data": {"duration": delay_seconds}})
     await ws.send_json({"type": "pending", "data": {"status": "queued", "delay": delay_seconds}})
@@ -1776,8 +1791,17 @@ async def _handle_message(
                 },
                 delay_seconds,
             )
-        except Exception:
-            await ws.send_json({"type": "error", "data": {"message": "消息入队失败", "client_id": client_id}})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("[DELAY-FALLBACK] conv=%s message=%s type=%s",
+                           conversation_id, user_message_id, type(exc).__name__)
+            await _queue_reply_or_error(
+                ws, conversation_id=conversation_id, agent=agent, user_id=user_id,
+                user_message=plan.final_message, user_message_id=user_message_id,
+                reply_context={**(plan.final_context or {}), "delay_seconds": 0.0,
+                               "delay_reason": "enqueue_failed", "delayed_enqueue_fallback": True},
+            )
             return
         await ws.send_json({
             "type": "pending",

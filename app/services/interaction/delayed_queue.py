@@ -6,6 +6,8 @@ so scheduler can consume them later and generate replies asynchronously.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager, suppress
 import json
 import logging
 import time
@@ -189,17 +191,20 @@ local sequence = redis.call('INCR', sequence_key)
 redis.call('EXPIRE', sequence_key, ttl)
 local payload = cjson.decode(payload_json)
 payload['queue_order'] = sequence
-payload_json = cjson.encode(payload)
 
 local existing = redis.call('ZRANGE', list_key, 0, 0, 'WITHSCORES')
 if #existing >= 2 then
     -- 已有待处理消息：使用已有最早 due_at
     local due_at = tonumber(existing[2])
+    payload['due_at'] = due_at
+    payload_json = cjson.encode(payload)
     redis.call('ZADD', list_key, due_at, payload_json)
     redis.call('EXPIRE', list_key, ttl)
     return 1
 else
     -- 无待处理消息：使用 fallback_due
+    payload['due_at'] = fallback_due
+    payload_json = cjson.encode(payload)
     redis.call('ZADD', list_key, fallback_due, payload_json)
     redis.call('EXPIRE', list_key, ttl)
     -- 更新全局索引
@@ -263,7 +268,7 @@ _INFLIGHT_KEY = "reply:inflight:{cid}"
 _INFLIGHT_TTL = 120
 
 
-async def mark_reply_inflight(conversation_id: str, ttl: int = _INFLIGHT_TTL) -> None:
+async def mark_reply_inflight(conversation_id: str, ttl: int = _INFLIGHT_TTL, *, token: str | None = None) -> None:
     """Flag that a reply is currently being generated for a conversation.
 
     Consumed by ``plan_user_message_aggregation`` so a message that arrives
@@ -276,18 +281,21 @@ async def mark_reply_inflight(conversation_id: str, ttl: int = _INFLIGHT_TTL) ->
         return
     try:
         redis = await get_redis()
-        await redis.set(_INFLIGHT_KEY.format(cid=conversation_id), "1", ex=ttl)
+        await redis.set(_INFLIGHT_KEY.format(cid=conversation_id), token or "1", ex=ttl)
     except Exception as e:
         logger.warning(f"[INFLIGHT] mark failed conv={conversation_id}: {e}")
 
 
-async def clear_reply_inflight(conversation_id: str) -> None:
+async def clear_reply_inflight(conversation_id: str, *, token: str | None = None) -> None:
     """Clear the in-flight reply flag once generation finishes (or fails)."""
     if not conversation_id:
         return
     try:
         redis = await get_redis()
-        await redis.delete(_INFLIGHT_KEY.format(cid=conversation_id))
+        if token is None:
+            await redis.delete(_INFLIGHT_KEY.format(cid=conversation_id))
+        else:
+            await redis.eval(_RELEASE_LUA, 1, _INFLIGHT_KEY.format(cid=conversation_id), token)
     except Exception as e:
         logger.warning(f"[INFLIGHT] clear failed conv={conversation_id}: {e}")
 
@@ -332,3 +340,39 @@ async def unlock_conversation(conversation_id: str, token: str | None = None) ->
         await redis.eval(_RELEASE_LUA, 1, lock_key, token)
     except Exception as e:
         logger.warning(f"[LOCK] conversation unlock CAS failed conv={conversation_id}: {e}")
+
+
+_RENEW_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+if redis.call('GET', KEYS[2]) == ARGV[1] then
+    redis.call('EXPIRE', KEYS[2], ARGV[2])
+end
+return 1
+"""
+
+
+@asynccontextmanager
+async def maintain_conversation_lock(conversation_id: str, token: str, *, ttl: int = 120, interval: float = 30):
+    """Renew an already acquired lease; fail closed if ownership becomes uncertain."""
+    owner = asyncio.current_task()
+    async def renew():
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                async with asyncio.timeout(min(5, ttl / 4)):
+                    redis = await get_redis()
+                    held = await redis.eval(_RENEW_LUA, 2, _LOCK_KEY.format(cid=conversation_id),
+                                            _INFLIGHT_KEY.format(cid=conversation_id), token, ttl)
+                if not held:
+                    raise RuntimeError("conversation lease lost")
+        except Exception:
+            logger.exception("[DELAY-LEASE-LOST] conv=%s", conversation_id)
+            owner.cancel()
+    task = asyncio.create_task(renew())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task

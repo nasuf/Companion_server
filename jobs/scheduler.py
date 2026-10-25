@@ -1503,103 +1503,161 @@ async def _run_aggregation_scan():
     await _run_distributed_job("aggregation_scan", 120, _run_aggregation_scan_body)
 
 
+# Per API worker, including claims; excess due work stays in Redis. Two API
+# workers therefore generate at most eight delayed replies concurrently.
+_DELAYED_REPLY_CONCURRENCY = 4
+_delayed_reply_tasks: dict[str, asyncio.Task] = {}
+
+
 async def _run_aggregation_scan_body():
-    """Scan aggregation windows and due delayed replies, then deliver asynchronously."""
+    """Dispatch bounded claims; never await model generation under the scan lock."""
+    from app.services.runtime.tasks import fire_background
+    from app.services.runtime.ws_manager import manager
+
+    try:
+        due_user_turns = await scan_due_user_turns()
+        await _enqueue_scanned_aggregation_results(due_user_turns, manager)
+        for conv_id in await due_delayed_conversation_ids():
+            if len(_delayed_reply_tasks) >= _DELAYED_REPLY_CONCURRENCY:
+                break
+            if conv_id in _delayed_reply_tasks:
+                continue
+            # Acquire and dequeue inside the owned task. Cancellation before its
+            # first instruction cannot orphan a lock or a dequeued payload.
+            claimed = asyncio.get_running_loop().create_future()
+            task = fire_background(_run_due_delayed_reply(conv_id, claimed))
+            _delayed_reply_tasks[conv_id] = task
+            task.add_done_callback(
+                lambda done, cid=conv_id, ready=claimed: _forget_delayed_reply(cid, done, ready)
+            )
+            # Wait only for claim/dequeue, never for generation. Busy conversations
+            # must not consume all slots and starve other due conversations.
+            await asyncio.shield(claimed)
+    except Exception as e:
+        _job_failed("Aggregation scan", e)
+
+
+def _forget_delayed_reply(conv_id: str, task: asyncio.Task, claimed: asyncio.Future) -> None:
+    if _delayed_reply_tasks.get(conv_id) is task:
+        del _delayed_reply_tasks[conv_id]
+    if not claimed.done():
+        claimed.set_result(False)
+
+
+def _record_delayed_generation_start(conv_id, payloads, merged):
+    import math
+    import time as clock
+
+    now = clock.time()
+    timings = []
+    for payload in payloads:
+        due_at = payload.get("due_at")
+        valid = isinstance(due_at, (int, float)) and not isinstance(due_at, bool) and math.isfinite(due_at)
+        waiting = round(max(0.0, now - due_at), 3) if valid else None
+        timing = {"message_id": payload.get("message_id"), "due_at": due_at if valid else None,
+                  "generation_started_at": now, "due_to_start_seconds": waiting}
+        timings.append(timing)
+        logger.info("[DELAY-START] conv=%s message=%s due_to_start_seconds=%s reason=%s",
+                    conv_id, timing["message_id"], waiting,
+                    (payload.get("reply_context") or {}).get("delay_reason", "unknown"))
+    merged["reply_context"]["delayed_delivery_timings"] = timings
+
+
+async def _run_due_delayed_reply(conv_id: str, claimed: asyncio.Future | None = None):
+    from app.services.runtime.ws_manager import manager
+    from app.services.interaction.delayed_queue import maintain_conversation_lock
+
+    # The lease surrounds dequeue and generation. Renewal failure cancels the
+    # owner before another worker can acquire its expired lease.
+    try:
+        lock_token = await try_lock_conversation(conv_id, ttl=120)
+        if not lock_token:
+            return
+        try:
+            async with maintain_conversation_lock(conv_id, lock_token):
+                await _deliver_locked_delayed_reply(conv_id, lock_token, claimed)
+        finally:
+            try:
+                await clear_reply_inflight(conv_id, token=lock_token)
+            finally:
+                await unlock_conversation(conv_id, lock_token)
+    except asyncio.CancelledError:
+        logger.warning("[DELAY-CANCELLED] conv=%s", conv_id)
+        raise
+    except Exception as exc:
+        logger.exception("Delayed reply failed conv=%s type=%s", conv_id, type(exc).__name__)
+        await _record_job_outcome("delayed_reply", ok=False, detail=type(exc).__name__)
+        try:
+            await manager.send_event(conv_id, "done", {"message_id": "error", "error": "回复生成失败"})
+        except Exception:
+            logger.warning("Unable to deliver delayed reply failure conv=%s", conv_id)
+
+
+async def _deliver_locked_delayed_reply(conv_id: str, lock_token: str, claimed: asyncio.Future | None = None):
     from app.services.chat.orchestrator import stream_chat_response
     from app.services.runtime.ws_manager import manager
     from app.api.realtime.ws import stream_to_ws
     from app.db import db
 
-    try:
-        due_user_turns = await scan_due_user_turns()
-        await _enqueue_scanned_aggregation_results(due_user_turns, manager)
+    payloads = await flush_due_delayed_messages(conv_id)
+    merged = merge_delayed_payloads(payloads)
+    if not merged:
+        return
+    if claimed is not None and not claimed.done():
+        claimed.set_result(True)
+    # 去重 gate: ws.py 已用 enqueue_or_append_delayed 关闭主要 race;
+    # 这里兜底 "msg1 已被 flush 出队但仍在 LLM 中, msg2 才到达" 窗口:
+    # 上一轮 LLM 数据拉取若已隐式包含本 user_msg(写到 reply 的
+    # metadata.covered_until_user_ts), 则跳过避免重复回复。
+    # 仅看 metadata 显式字段 → 不会因短路/边界 reply 误伤未覆盖消息。
+    user_msg_id = merged.get("user_message_id")
+    if user_msg_id and await _already_covered(conv_id, user_msg_id):
+        logger.info(
+            f"[DEDUP-GATE] skip conv={conv_id[:8]} "
+            f"user_msg={user_msg_id[:8]} already covered by prior reply"
+        )
+        return
 
-        due_conversations = await due_delayed_conversation_ids()
-        for conv_id in due_conversations:
-            # Prevent concurrent processing of the same conversation.
-            # Capture the owner token so unlock only releases our own lock (CAS).
-            lock_token = await try_lock_conversation(conv_id, ttl=120)
-            if not lock_token:
-                logger.debug(f"Conversation {conv_id[:8]} is locked, skipping this scan")
-                continue
+    conv = await db.conversation.find_unique(
+        where={"id": conv_id},
+        include={"agent": True},
+    )
+    if not conv or not conv.agent:
+        return
 
-            try:
-                try:
-                    payloads = await flush_due_delayed_messages(conv_id)
-                    merged = merge_delayed_payloads(payloads)
-                    if not merged:
-                        continue
+    merged["reply_context"] = dict(merged.get("reply_context") or {})
+    gen = stream_chat_response(
+        conversation_id=conv_id,
+        user_message=merged["user_message"],
+        agent=conv.agent,
+        user_id=merged["user_id"],
+        reply_context=merged.get("reply_context"),
+        save_user_message=False,
+        user_message_id=merged.get("user_message_id"),
+        delivered_from_queue=True,
+    )
 
-                    # 去重 gate: ws.py 已用 enqueue_or_append_delayed 关闭主要 race;
-                    # 这里兜底 "msg1 已被 flush 出队但仍在 LLM 中, msg2 才到达" 窗口:
-                    # 上一轮 LLM 数据拉取若已隐式包含本 user_msg(写到 reply 的
-                    # metadata.covered_until_user_ts), 则跳过避免重复回复。
-                    # 仅看 metadata 显式字段 → 不会因短路/边界 reply 误伤未覆盖消息。
-                    user_msg_id = merged.get("user_message_id")
-                    if user_msg_id and await _already_covered(conv_id, user_msg_id):
-                        logger.info(
-                            f"[DEDUP-GATE] skip conv={conv_id[:8]} "
-                            f"user_msg={user_msg_id[:8]} already covered by prior reply"
-                        )
-                        continue
+    # stream_to_ws 内部每条 chunk 走 manager.send_event,
+    # fast path 本地命中或 slow path publish 跨 worker, 无需手工查 WS.
+    # 离线用户 (无 WS / 跨进程 publish 也无人订阅): 仍 await 消费完
+    # generator 触发 LLM + 持久化, 避免漏存回复.
+    # 标记回复生成中: 生成期间到达的新消息在 plan_user_message_aggregation
+    # 里会被路由到 delayed queue 合并, 而非另起一轮近似重复的回复.
+    from app.api.realtime.ui_delay import send_processing_event
 
-                    conv = await db.conversation.find_unique(
-                        where={"id": conv_id},
-                        include={"agent": True},
-                    )
-                    if not conv or not conv.agent:
-                        continue
-
-                    gen = stream_chat_response(
-                        conversation_id=conv_id,
-                        user_message=merged["user_message"],
-                        agent=conv.agent,
-                        user_id=merged["user_id"],
-                        reply_context=merged.get("reply_context"),
-                        save_user_message=False,
-                        user_message_id=merged.get("user_message_id"),
-                        delivered_from_queue=True,
-                    )
-
-                    # stream_to_ws 内部每条 chunk 走 manager.send_event,
-                    # fast path 本地命中或 slow path publish 跨 worker, 无需手工查 WS.
-                    # 离线用户 (无 WS / 跨进程 publish 也无人订阅): 仍 await 消费完
-                    # generator 触发 LLM + 持久化, 避免漏存回复.
-                    # 标记回复生成中: 生成期间到达的新消息在 plan_user_message_aggregation
-                    # 里会被路由到 delayed queue 合并, 而非另起一轮近似重复的回复.
-                    from app.api.realtime.ui_delay import send_processing_event
-
-                    await mark_reply_inflight(conv_id)
-                    await send_processing_event(
-                        lambda payload: manager.send_event(
-                            conv_id, payload["type"], payload["data"],
-                        ),
-                        conversation_id=conv_id,
-                        message_id=merged.get("user_message_id"),
-                        reply_context=merged.get("reply_context"),
-                        ui_delay_seconds=0.0,
-                    )
-                    await stream_to_ws(gen, conv_id)
-                    logger.debug(f"Delayed reply pushed for conv={conv_id[:8]}")
-                except Exception as conv_err:
-                    # 单个会话的处理失败不能阻塞批次内其他会话; 推 done 事件给前端
-                    # 解卡"消息处理中"状态, 防用户卡死 UI.
-                    logger.exception(
-                        f"Aggregation scan: conv {conv_id[:8]} processing failed: {conv_err}"
-                    )
-                    try:
-                        await manager.send_event(
-                            conv_id, "done", {"message_id": "error", "error": str(conv_err)},
-                        )
-                    except Exception as notify_err:
-                        logger.warning(
-                            f"Failed to notify conv {conv_id[:8]} of error: {notify_err}"
-                        )
-            finally:
-                await clear_reply_inflight(conv_id)
-                await unlock_conversation(conv_id, lock_token)
-    except Exception as e:
-        _job_failed("Aggregation scan", e)
+    await mark_reply_inflight(conv_id, token=lock_token)
+    await send_processing_event(
+        lambda payload: manager.send_event(
+            conv_id, payload["type"], payload["data"],
+        ),
+        conversation_id=conv_id,
+        message_id=merged.get("user_message_id"),
+        reply_context=merged.get("reply_context"),
+        ui_delay_seconds=0.0,
+    )
+    _record_delayed_generation_start(conv_id, payloads, merged)
+    await stream_to_ws(gen, conv_id)
+    logger.info("[DELAY-COMPLETE] conv=%s message=%s", conv_id, merged.get("user_message_id"))
 
 
 async def _already_covered(conversation_id: str, user_msg_id: str) -> bool:
@@ -1701,3 +1759,14 @@ def shutdown_scheduler():
     if scheduler.running:
         scheduler.shutdown(wait=False)
         logger.info("Job scheduler stopped")
+
+
+async def drain_delayed_replies(timeout: float = 20.0) -> None:
+    """Finish owned reply tasks before DB/Redis disconnect; cancel bounded stragglers."""
+    tasks = tuple(_delayed_reply_tasks.values())
+    if not tasks:
+        return
+    _, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)

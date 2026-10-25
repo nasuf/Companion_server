@@ -183,16 +183,18 @@ async def lifespan(app: FastAPI):
                 await config_refresh_task
             except asyncio.CancelledError:
                 pass
-        if ws_manager is not None:
-            try:
-                await ws_manager.stop_subscriber()
-            except Exception as e:
-                logger.warning(f"WS subscriber shutdown failed: {e!r}")
         if scheduler_started:
             try:
                 shutdown_scheduler()
             except Exception as e:
                 logger.warning(f"Scheduler shutdown failed: {e!r}")
+        from jobs.scheduler import drain_delayed_replies
+        await drain_delayed_replies()
+        if ws_manager is not None:
+            try:
+                await ws_manager.stop_subscriber()
+            except Exception as e:
+                logger.warning(f"WS subscriber shutdown failed: {e!r}")
         try:
             from app.services.speech_output.client import close_tts_client
 

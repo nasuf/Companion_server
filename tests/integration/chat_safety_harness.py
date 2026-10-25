@@ -256,7 +256,16 @@ if os.environ.get("CHAT_DELAY_E2E") == "1":
 
     async def generated_reply(**kwargs):
         # Deterministic model/persistence fixture; queue and transport stay real.
-        record = {"text": kwargs["user_message"], "message_id": kwargs["user_message_id"]}
+        import time
+        record = {"text": kwargs["user_message"], "message_id": kwargs["user_message_id"],
+                  "conversation_id": kwargs["conversation_id"], "started_at": time.time(),
+                  "save_user_message": kwargs["save_user_message"],
+                  "timings": (kwargs.get("reply_context") or {}).get("delayed_delivery_timings")}
+        await redis.rpush("test:delay:started", json.dumps(record))
+        if kwargs["user_message"].startswith("held-"):
+            async with asyncio.timeout(15):
+                while not await redis.exists("test:delay:release"):
+                    await asyncio.sleep(.02)
         await redis.rpush("test:delay:generated", json.dumps(record))
         yield {"event": "reply", "data": json.dumps(record)}
         yield {"event": "done", "data": json.dumps({"message_id": record["message_id"]})}
@@ -266,18 +275,31 @@ if os.environ.get("CHAT_DELAY_E2E") == "1":
     async def delay_enqueue(data: dict):
         # Use the real WS queue boundary with a connection adapter. Authentication
         # and message admission have independent route/security coverage.
+        cid = data.get("conversation_id", "conv-1")
         class Sender:
             async def send_json(self, event):
-                await manager.send_event("conv-1", event["type"], event["data"])
-        await ws._queue_reply_or_error(Sender(), conversation_id="conv-1", agent=agent,
-            user_id="owner", user_message=data["message"], user_message_id=data["id"],
-            reply_context={"delay_seconds": data.get("delay", 2)})
+                await manager.send_event(cid, event["type"], event["data"])
+        from unittest.mock import patch
+        async def rejected(*a, **kw):
+            raise RuntimeError("isolated enqueue rejected")
+        from contextlib import nullcontext
+        override = patch.object(ws, "enqueue_or_append_delayed", rejected) if data.get("reject_enqueue") else nullcontext()
+        with override:
+            await ws._queue_reply_or_error(Sender(), conversation_id=cid, agent=agent,
+                user_id="owner", user_message=data["message"], user_message_id=data["id"],
+                reply_context={"delay_seconds": data.get("delay", 2)})
         return {"ok": True}
 
     @app.post("/test/delay-scan")
     async def delay_scan():
-        await scheduler_module._run_aggregation_scan_body()
-        return {"generated": await redis.lrange("test:delay:generated", 0, -1)}
+        await scheduler_module._run_aggregation_scan()
+        return {"generated": await redis.lrange("test:delay:generated", 0, -1),
+                "started": await redis.lrange("test:delay:started", 0, -1)}
+
+    @app.post("/test/delay-release")
+    async def release_delay_generations():
+        await redis.set("test:delay:release", "1", ex=60)
+        return {"ok": True}
 
     @app.post("/test/delay-disable")
     async def disable_delay():

@@ -50,8 +50,45 @@ async def main():
             raise AssertionError("duplicate delivery: " + extra)
         except asyncio.TimeoutError:
             pass
+        # Enqueue rejection still delivers once using the already persisted ID.
+        response = await client.post(a + "/test/delay-enqueue", json={"message": "fallback", "id": "fallback-1", "delay": 3, "reject_enqueue": True})
+        assert response.status_code == 200
+        fallback_events = []
+        while not fallback_events or fallback_events[-1]["type"] != "done":
+            fallback_events.append(json.loads(await asyncio.wait_for(second.recv(), 4)))
+        assert [e["type"] for e in fallback_events] == ["reply", "done"], fallback_events
+        assert fallback_events[0]["data"]["message_id"] == "fallback-1"
+        assert fallback_events[0]["data"]["save_user_message"] is False
         await second.close()
-    print(json.dumps({"passed": True, "checks": ["delay merge preserves arrival order", "queued event", "authenticated reconnect restores queued state", "two workers claim once", "cross-worker reply delivered once", "disabled switch drains existing queue"], "synthetic": ["model", "message persistence", "admission fixture"], "real": ["Redis Lua", "scheduler scan", "WS tickets", "Redis pubsub", "two processes"]}))
+        # Models stay blocked until all independent conversations have started.
+        # This would deadlock/time out with serial generation under the scan lock.
+        for i in range(3):
+            await client.post(a + "/test/delay-enqueue", json={"conversation_id": f"due-{i}", "message": f"held-{i}", "id": f"due-message-{i}", "delay": .01})
+        await asyncio.sleep(.03)
+        scan_start = time.monotonic()
+        scans = await asyncio.gather(client.post(a + "/test/delay-scan"), client.post(b + "/test/delay-scan"))
+        assert all(r.status_code == 200 for r in scans)
+        assert time.monotonic() - scan_start < 2
+        async with asyncio.timeout(4):
+            while True:
+                state = (await client.post(a + "/test/delay-scan")).json()
+                concurrent = [json.loads(x) for x in state["started"] if json.loads(x)["conversation_id"].startswith("due-")]
+                if len(concurrent) == 3:
+                    break
+                await asyncio.sleep(.03)
+        assert len({x["conversation_id"] for x in concurrent}) == 3
+        assert max(x["started_at"] for x in concurrent) - min(x["started_at"] for x in concurrent) < 1
+        assert all(x["timings"][0]["due_to_start_seconds"] < 2 for x in concurrent)
+        await client.post(a + "/test/delay-release")
+        async with asyncio.timeout(4):
+            while True:
+                state = (await client.post(b + "/test/delay-scan")).json()
+                delivered = [json.loads(x) for x in state["generated"] if json.loads(x)["conversation_id"].startswith("due-")]
+                if len(delivered) == 3:
+                    break
+                await asyncio.sleep(.03)
+        assert len({x["conversation_id"] for x in delivered}) == 3
+    print(json.dumps({"passed": True, "concurrent_due_samples": concurrent, "checks": ["three due conversations start before any completes", "global scan lock released before model completion", "enqueue failure delivers zero-delay once without resaving", "delay merge preserves arrival order", "queued event", "authenticated reconnect restores queued state", "two workers claim once", "cross-worker reply delivered once", "disabled switch drains existing queue"], "synthetic": ["model", "message persistence", "admission fixture"], "real": ["Redis Lua", "scheduler scan", "WS tickets", "Redis pubsub", "two processes"]}))
 
 
 if __name__ == "__main__":
