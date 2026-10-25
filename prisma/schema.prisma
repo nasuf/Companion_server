@@ -2856,5 +2856,7 @@ model RuntimeConfigChange {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([key, createdAt(sort: Desc)])
+  // SQL-only audit writes/readback: avoid unused generated CRUD/type expansion.
+  @@ignore
   @@map("runtime_config_changes")
 }
