@@ -9,43 +9,105 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
 
 _T = TypeVar("_T")
+
+# Bubbles of one reply land seconds apart (the reply delay is capped at 30s).
+# A wider gap means a separate AI turn: an offer made hours ago must not ground
+# today's "好".
+TURN_BUBBLE_MAX_GAP = timedelta(minutes=10)
 
 
 def message_field(message: Any, key: str, default: Any = None) -> Any:
     return message.get(key, default) if isinstance(message, dict) else getattr(message, key, default)
 
 
+def _is_retrieval_snapshot(message: Any) -> bool:
+    metadata = message_field(message, "metadata")
+    return isinstance(metadata, dict) and bool(
+        metadata.get("memory_retrievals") or metadata.get("memory_retrieval_analysis")
+    )
+
+
+@dataclass(frozen=True)
+class RetrievalTurnView:
+    """Whole-turn text addressed to the bubble holding the retrieval snapshot."""
+
+    id: Any
+    conversationId: Any
+    metadata: Any
+    content: str
+
+
 @dataclass(frozen=True)
 class AssistantTurn:
-    """Read-only turn text; identity/metadata belong to a real evidence-bearing bubble.
+    """The AI's previous turn, read-only; never mutate the rows behind it.
 
-    Never mutate the ORM row: feedback updates must keep targeting a real message.
-    Newline boundaries let guards examine every bubble independently.
+    Two bubbles matter and they are usually different rows:
+    - ``last`` is the turn's identity. The topic-completion verdict, the
+      B-followup marker and the reply time all belong to the last AI message,
+      so ``id`` / ``metadata`` / ``createdAt`` read from it.
+    - ``retrieval_anchor`` holds the memory retrieval snapshot (normally the
+      first bubble). Only retrieval feedback targets it, via ``retrieval_view``.
+    ``content`` joins every bubble with newlines so guards see each bubble.
     """
 
-    anchor: Any
+    last: Any
+    retrieval_anchor: Any
     content: str
     source_message_ids: tuple[str, ...]
     previous_user_text: str | None
-    createdAt: Any
 
-    def __getattr__(self, key: str) -> Any:
-        if isinstance(self.anchor, dict):
-            if key not in self.anchor:
-                raise AttributeError(key)
-            return self.anchor[key]
-        return getattr(self.anchor, key)
+    @property
+    def id(self) -> Any:
+        return message_field(self.last, "id")
+
+    @property
+    def conversationId(self) -> Any:
+        return message_field(self.last, "conversationId")
+
+    @property
+    def metadata(self) -> Any:
+        return message_field(self.last, "metadata")
+
+    @property
+    def createdAt(self) -> Any:
+        return message_field(self.last, "createdAt")
+
+    def retrieval_view(self) -> RetrievalTurnView:
+        return RetrievalTurnView(
+            id=message_field(self.retrieval_anchor, "id"),
+            conversationId=message_field(self.retrieval_anchor, "conversationId"),
+            metadata=message_field(self.retrieval_anchor, "metadata"),
+            content=self.content,
+        )
+
+
+def _is_proactive(message: Any) -> bool:
+    metadata = message_field(message, "metadata")
+    return isinstance(metadata, dict) and bool(metadata.get("proactive"))
+
+
+def _same_assistant_turn(earlier: Any, later: Any) -> bool:
+    """A proactive message never joins a reply, and a long silence splits turns."""
+    if _is_proactive(earlier) != _is_proactive(later):
+        return False
+    earlier_at = _parse_message_created_at(message_field(earlier, "createdAt"))
+    later_at = _parse_message_created_at(message_field(later, "createdAt"))
+    if earlier_at is None or later_at is None:
+        return True
+    return later_at - earlier_at <= TURN_BUBBLE_MAX_GAP
 
 
 def previous_assistant_turn(recent_messages: list[Any], current_user_message_id: str | None) -> AssistantTurn | None:
-    """Merge consecutive AI bubbles before this user message, excluding notices.
+    """Merge the AI bubbles of the turn right before this user message, excluding notices.
 
-    Like the main history window, a user row separates turns. Current/later rows
-    are excluded when the current ID is present; missing IDs use the fetched window.
+    Like the main history window, a user row separates turns; so do a switch
+    between proactive and reply messages and a gap over ``TURN_BUBBLE_MAX_GAP``.
+    Current/later rows are excluded when the current ID is present; missing IDs
+    use the fetched window.
     """
     current_index = len(recent_messages)
     if current_user_message_id:
@@ -64,6 +126,8 @@ def previous_assistant_turn(recent_messages: list[Any], current_user_message_id:
             continue
         role = message_field(message, "role")
         if role == "assistant":
+            if bubbles and not _same_assistant_turn(message, bubbles[-1]):
+                break
             bubbles.append(message)
             continue
         if bubbles:
@@ -72,23 +136,20 @@ def previous_assistant_turn(recent_messages: list[Any], current_user_message_id:
             break
     if not bubbles:
         return None
-    # Retrieval snapshots are attached to the first bubble, while guards need
-    # the entire text and the last bubble's timestamp. Keep a real audit target
-    # instead of copying one bubble's metadata onto another database row.
-    anchor = next((m for m in reversed(bubbles) if isinstance(message_field(m, "metadata"), dict)
-                   and (message_field(m, "metadata").get("memory_retrievals")
-                        or message_field(m, "metadata").get("memory_retrieval_analysis"))), bubbles[0])
+    ordered = bubbles[::-1]
     return AssistantTurn(
-        anchor=anchor,
-        content="\n".join(str(message_field(m, "content") or "") for m in reversed(bubbles)),
-        source_message_ids=tuple(str(message_field(m, "id")) for m in reversed(bubbles) if message_field(m, "id")),
+        last=ordered[-1],
+        # Retrieval snapshots sit on the first bubble; point feedback at that real
+        # row instead of copying its metadata onto another one.
+        retrieval_anchor=next((m for m in ordered if _is_retrieval_snapshot(m)), ordered[-1]),
+        content="\n".join(str(message_field(m, "content") or "") for m in ordered),
+        source_message_ids=tuple(str(message_field(m, "id")) for m in ordered if message_field(m, "id")),
         previous_user_text=previous_user_text,
-        createdAt=message_field(bubbles[0], "createdAt"),
     )
 
 
 def _previous_assistant_message(recent_messages: list[Any], current_user_message_id: str | None) -> AssistantTurn | None:
-    """Compatibility name for callers; all three consumers now see the whole turn."""
+    """Compatibility name for callers; every consumer sees the whole turn."""
     return previous_assistant_turn(recent_messages, current_user_message_id)
 
 

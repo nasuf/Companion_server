@@ -64,8 +64,12 @@ restarts production, accesses DB, or enables LangGraph/checkpoint execution.
 
 ## G03.05 delay-safe rollback floor (2026-10-25)
 
-The routine rollback target must contain commit `410f2ba1` (lease retries and
-post-dequeue-only cancellation notifications). Verify Git ancestry of the exact
+The routine rollback target must contain commit `c302aa61`, which keeps
+emoji-only filler replies paused; it also contains `410f2ba1` (lease retries and
+post-dequeue-only cancellation notifications). A `410f2ba1`..pre-`c302aa61`
+target is delay-safe but restores the hardcoded 30% emoji-only shortcut, so the
+gate rejects it unless `--accept-filler-shortcut` records that regression.
+Verify Git ancestry of the exact
 source commit with `scripts/check_rollback_version.py --target-commit SHA` from a
 checkout with the relevant history. Map that commit to the immutable image by
 source hashes; a tag or the archive's `incoming_commit` does not prove this.
@@ -76,7 +80,8 @@ using it, turn **reply_delay_enabled OFF in the admin settings**, verify the act
 value, and drain or explicitly resolve every queued/in-flight reply. Turning off
 the switch does not drain existing jobs. This also applies conservatively to
 `db8f60f9` through pre-`410f2ba1` targets. Run the version gate with `--emergency
---delay-enabled false --queued 0 --inflight 0` only using freshly verified values.
+--accept-filler-shortcut --delay-enabled false --queued 0 --inflight 0` only using
+freshly verified values.
 Never reopen delay on these emergency targets. The gate does not certify schema,
 receipts, data, or the truth of operator-supplied state; those checks remain mandatory.
 
@@ -127,10 +132,9 @@ private environment for older qualified images. When rolling back into a
 pre-retirement image, verify those effective flags select LangGraph for all
 conversations and preserve the qualified delay configuration. Do not restore an
 old cohort/legacy rollout JSON or treat its contents as the running state.
-The 410f2ba1 rollback floor and emergency delay-off gate above still apply.
+The `c302aa61` routine floor and emergency delay-off gate above still apply.
 
-Prefer a target containing `c302aa61` (the whole-turn filler guard and qualified
-SQL-only audit client) as well.
 Older images can read the additive schema but ignore `filler_emoji_probability=0`
 and restore the old 30% emoji-only shortcut. Schema compatibility does not preserve
-the paused behavior; record that regression explicitly before an emergency rollback.
+the paused behavior, which is why the gate requires `--accept-filler-shortcut`
+for them.

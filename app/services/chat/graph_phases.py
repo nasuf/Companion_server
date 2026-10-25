@@ -67,10 +67,11 @@ async def load_turn(ctx):
             ctx.recent_messages, ctx.user_message_id
         )
         if ctx.previous_assistant is not None:
+            retrieval_turn = ctx.previous_assistant.retrieval_view()
             services._fire_background(
                 services._record_memory_retrieval_feedback(
-                    assistant_message_id=ctx.previous_assistant.id,
-                    assistant_reply=ctx.previous_assistant.content,
+                    assistant_message_id=retrieval_turn.id,
+                    assistant_reply=retrieval_turn.content,
                     user_message=ctx.user_message,
                     user_message_id=ctx.user_message_id,
                 )
@@ -170,7 +171,10 @@ async def pending(ctx):
             return
         async for evt in services.resolve_retrieval_feedback_correction(
             user_message=ctx.user_message,
-            previous_assistant=ctx.previous_assistant,
+            previous_assistant=(
+                ctx.previous_assistant.retrieval_view()
+                if ctx.previous_assistant is not None else None
+            ),
             ctx=ctx.preflight_ctx,
             workspace_id=ctx.workspace_id,
         ):
