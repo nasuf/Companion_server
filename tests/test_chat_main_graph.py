@@ -143,86 +143,62 @@ async def test_cancelled_classification_cleans_prefetch_and_context(
 
 
 @pytest.mark.asyncio
-async def test_legacy_and_graph_emit_same_ordinary_protocol(chat_io, monkeypatch):
-    monkeypatch.setattr(settings, "chat_executor", "legacy")
-    legacy = await run(chat_io, save_user_message=False)
-    monkeypatch.setattr(settings, "chat_executor", "langgraph")
-    graph = await run(chat_io, save_user_message=False)
-    assert graph == legacy
-
-
-@pytest.mark.asyncio
-async def test_executor_change_during_turn_does_not_switch_or_replay(
-    chat_io, monkeypatch
-):
-    async def classify(*_, **__):
-        monkeypatch.setattr(settings, "chat_executor", "legacy")
-        return IntentResult(intent=IntentType.NONE, confidence=0.9)
-
-    chat.detect_intent_unified.side_effect = classify
-    monkeypatch.setattr(
-        chat,
-        "_stream_legacy_response",
-        MagicMock(side_effect=AssertionError("legacy replay")),
-    )
-    events = await run(chat_io)
-    assert events[-1]["event"] == "done"
-    chat._stream_legacy_response.assert_not_called()
-
-
-def test_allowlist_and_default_fail_closed(monkeypatch):
-    from app.services.chat.graph_executor import select_executor
-
-    monkeypatch.setattr(settings, "chat_executor", "legacy")
-    monkeypatch.setattr(settings, "chat_graph_all_conversations", False)
-    assert select_executor("c-1") == "legacy"
-    monkeypatch.setattr(settings, "chat_executor", "langgraph")
-    monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "")
-    assert select_executor("c-1") == "legacy"
-    monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "c-1,c-2")
-    assert select_executor("c-1") == "langgraph"
-    assert select_executor("c-3") == "legacy"
-
-
-def test_full_rollout_covers_existing_and_future_conversations_and_master_rollback(monkeypatch):
-    from app.services.chat.graph_executor import select_executor
-
-    monkeypatch.setattr(settings, "chat_executor", "langgraph")
-    monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "")
-    monkeypatch.setattr(settings, "chat_graph_all_conversations", True)
-    for conversation in ("c-1", "c-existing", "c-created-after-deploy"):
-        assert select_executor(conversation) == "langgraph"
-    assert select_executor("") == "legacy"
-    monkeypatch.setattr(settings, "chat_executor", "legacy")
-    assert select_executor("c-created-after-deploy") == "legacy"
-    monkeypatch.setattr(settings, "chat_executor", "langgraph")
-    monkeypatch.setattr(settings, "chat_graph_all_conversations", False)
-    assert select_executor("c-created-after-deploy") == "legacy"
-
-
-@pytest.mark.asyncio
-async def test_full_rollout_rollback_does_not_switch_an_inflight_graph(chat_io, monkeypatch):
-    from app.services.chat.graph_executor import select_executor
-
-    monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "")
-    monkeypatch.setattr(settings, "chat_graph_all_conversations", True)
-
-    async def classify(*_, **__):
-        monkeypatch.setattr(settings, "chat_executor", "legacy")
-        monkeypatch.setattr(settings, "chat_graph_all_conversations", False)
-        return IntentResult(intent=IntentType.NONE, confidence=0.9)
-
-    chat.detect_intent_unified.side_effect = classify
-    monkeypatch.setattr(chat, "_stream_legacy_response", MagicMock(side_effect=AssertionError("legacy replay")))
-    events = await run(chat_io)
-    assert events[-1]["event"] == "done"
-    chat._stream_legacy_response.assert_not_called()
+@pytest.mark.parametrize("old_executor,old_all", [("legacy", "false"), ("langgraph", "false"), ("langgraph", "true")])
+async def test_retired_flags_cannot_change_graph_protocol(chat_io, monkeypatch, old_executor, old_all):
+    from app.config import Settings
+    from app.services.chat import graph_executor
+    monkeypatch.setenv("CHAT_EXECUTOR", old_executor)
+    monkeypatch.setenv("CHAT_GRAPH_ALL_CONVERSATIONS", old_all)
+    monkeypatch.setenv("CHAT_GRAPH_CONVERSATION_ALLOWLIST", "unrelated-conversation")
+    fresh = Settings(_env_file=None)
+    assert "chat_executor" not in type(fresh).model_fields
+    assert not hasattr(graph_executor, "select_executor")
+    assert not hasattr(chat, "_stream_legacy_response")
+    events = await run(chat_io, save_user_message=False)
+    assert [event["event"] for event in events] == ["reply", "done"]
+    chat_io.db.message.create.assert_not_awaited()
+    chat._save_replies.assert_awaited_once()
     chat.finish_assistant_turn.assert_awaited_once()
-    assert select_executor("c-1") == "legacy"
 
 
 @pytest.mark.asyncio
-async def test_main_prompt_factory_matches_legacy_arguments(chat_io, monkeypatch):
+async def test_environment_change_during_turn_cannot_replay(chat_io, monkeypatch):
+    async def classify(*_, **__):
+        monkeypatch.setenv("CHAT_EXECUTOR", "legacy")
+        monkeypatch.setenv("CHAT_GRAPH_ALL_CONVERSATIONS", "false")
+        return IntentResult(intent=IntentType.NONE, confidence=0.9)
+    chat.detect_intent_unified.side_effect = classify
+    events = await run(chat_io)
+    assert events[-1]["event"] == "done"
+    chat._save_replies.assert_awaited_once()
+    chat.finish_assistant_turn.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recursive_child_rejected_before_storage(chat_io):
+    with pytest.raises(ValueError, match="recursive child"):
+        await run(chat_io, sub_intent_mode=True)
+    chat_io.db.conversation.find_unique.assert_not_awaited()
+    chat_io.db.message.create.assert_not_awaited()
+    chat._save_replies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_graph_failure_never_replays_persisted_user(chat_io):
+    chat.detect_intent_unified.side_effect = RuntimeError("synthetic classifier unavailable")
+    with pytest.raises(RuntimeError, match="synthetic classifier unavailable"):
+        await run(chat_io)
+    chat_io.db.message.create.assert_awaited_once()
+    chat.detect_intent_unified.assert_awaited_once()
+    chat._save_replies.assert_not_awaited()
+    chat.finish_assistant_turn.assert_not_awaited()
+
+
+
+
+
+@pytest.mark.asyncio
+async def test_main_prompt_arguments_ignore_retired_environment(chat_io, monkeypatch):
     from app.services import music
     from app.services.offline import module_settings
 
@@ -244,10 +220,10 @@ async def test_main_prompt_factory_matches_legacy_arguments(chat_io, monkeypatch
         return ["ordinary reply"], "ordinary reply", False, {"emotion": "中性"}
 
     chat._generate_reply.side_effect = generate
-    monkeypatch.setattr(settings, "chat_executor", "legacy")
+    monkeypatch.setenv("CHAT_EXECUTOR", "legacy")
     await run(chat_io, save_user_message=False)
     legacy = dict(prompt.await_args.kwargs)
-    monkeypatch.setattr(settings, "chat_executor", "langgraph")
+    monkeypatch.setenv("CHAT_EXECUTOR", "langgraph")
     await run(chat_io, save_user_message=False)
     graph = dict(prompt.await_args.kwargs)
     legacy.pop("diagnostics")
@@ -637,9 +613,8 @@ async def test_current_state_fast_path_still_skips_classifier_and_full_fetch(
     assert chat._background_post_process.call_args.kwargs["skip_ai_memory"] is True
 
 
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_background_sources_cover_all_fragments_before_submission(chat_io,monkeypatch,executor):
-    monkeypatch.setattr(settings,'chat_executor',executor)
     chat.detect_intent_unified.return_value=IntentResult(intent=IntentType.NONE,confidence=.9,
         metadata={'fragments':{'日常交流':'今天开心','终结意图':'先不聊了'}})
     async def farewell(text,ctx,*args,**kwargs):
@@ -665,19 +640,16 @@ async def test_background_sources_cover_all_fragments_before_submission(chat_io,
 
 
 @pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
-async def test_legacy_interrupted_subintent_keeps_saved_parent_background(chat_io, monkeypatch, failure):
-    monkeypatch.setattr(settings, 'chat_executor', 'legacy')
+async def test_interrupted_graph_fragment_does_not_complete_parent(chat_io, monkeypatch, failure):
     chat.detect_intent_unified.return_value = IntentResult(intent=IntentType.NONE, confidence=.9,
-        metadata={'fragments': {'日常交流': '今天开心', '终结意图': '先不聊了'}})
+        metadata={"fragments": {"日常交流": "今天开心", "终结意图": "先不聊了"}})
     async def interrupted(*args, **kwargs):
-        raise failure('subintent interrupted')
-        yield  # async generator contract
-    monkeypatch.setattr(chat, '_process_sub_intents', interrupted)
+        raise failure("fragment interrupted")
+        yield
+    monkeypatch.setattr(chat, "handle_conversation_end", interrupted)
     with pytest.raises(failure):
-        await run(chat_io, text='今天开心，先不聊了')
+        await run(chat_io, text="今天开心，先不聊了")
     chat._save_replies.assert_awaited_once()
-    chat._background_post_process.assert_called_once()
-    source = chat._background_post_process.call_args.kwargs
-    assert source['source_message_ids'] == ['u-new']
-    assert source['reply_turn_id'] == chat._save_replies.await_args.kwargs['achievement_turn_id']
     chat.finish_assistant_turn.assert_not_awaited()
+    chat._background_post_process.assert_not_called()
+    chat_io.tracer.close.assert_called_once()

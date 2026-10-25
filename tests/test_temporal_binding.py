@@ -173,7 +173,7 @@ async def test_unbound_ranges_preserve_vector_recall_and_skip_date_search(monkey
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_main_executors_share_original_message_binding(monkeypatch, executor):
     from app.config import settings
     from app.services.chat import orchestrator as chat
@@ -181,7 +181,6 @@ async def test_main_executors_share_original_message_binding(monkeypatch, execut
     from tests.g02_harness_support import configure_pair
     io = configure_pair(monkeypatch)
     io.now = NOW
-    monkeypatch.setattr(settings, "chat_executor", executor)
     monkeypatch.setattr(chat, "_generate_reply", AsyncMock(return_value=(["是两件不同的事"], "", False, None)))
     events = [e async for e in chat.stream_chat_response(
         "c-1", UNBOUND[0], io.agent, "u-1", forced_intent=IntentType.NONE,

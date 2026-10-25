@@ -78,7 +78,6 @@ async def test_both_executors_share_unbound_date_contract(monkeypatch, executor)
     from tests.g02_harness_support import configure_pair
     io = configure_pair(monkeypatch)
     io.now = NOW
-    monkeypatch.setattr(settings, 'chat_executor', executor)
     monkeypatch.setattr(chat, '_generate_reply', AsyncMock(return_value=(['是那次旅行'], '', False, None)))
     events = [e async for e in chat.stream_chat_response('c-1','昨天告诉你的收养日期是什么？',io.agent,'u-1',
         forced_intent=IntentType.NONE, reply_context={'received_at':NOW.isoformat()})]

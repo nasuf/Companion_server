@@ -400,7 +400,7 @@ async def test_real_preflight_never_reports_a_failed_write_as_success(
         generate.assert_awaited_once()
 
 
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 @pytest.mark.parametrize("failed", [False, True])
 async def test_real_confirmation_through_both_chat_executors(
     confirming, monkeypatch, executor, failed
@@ -427,8 +427,6 @@ async def test_real_confirmation_through_both_chat_executors(
 
     monkeypatch.setattr(chat, "_fire_background", fire)
     monkeypatch.setattr(multi_intent, "_fire_background", fire)
-    monkeypatch.setattr(settings, "chat_executor", executor)
-    monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", f.convs[0])
     monkeypatch.setattr(chat, "db", f.db)
     monkeypatch.setattr(
         chat, "resolve_pending_contradiction", preflight.resolve_pending_contradiction

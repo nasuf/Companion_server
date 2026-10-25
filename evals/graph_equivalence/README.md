@@ -1,3 +1,16 @@
+# Current status after CONV01.01
+
+The legacy executor is retired. The paired live CLI below is historical and now
+fails closed before DB/Redis/model calls; it cannot produce a new paired PASS.
+`--preflight-only` and historical report readers remain supported. The reusable
+`evaluate_turn` helper accepts only `langgraph`; existing single-graph quality
+runners (including `evals/temporal_awareness/run_incident_eval.py`) remain in use.
+Compare qualified baseline and candidate checkouts using identical fixtures and
+prompt snapshots, not two names for the same implementation. Retiring the paired
+CLI does not waive quality/cost gates for future prompt or model changes.
+
+The rest of this document describes the historical G02 methodology and evidence.
+
 # G02 paired graph qualification
 
 This runner compares the released legacy executor with the opt-in LangGraph

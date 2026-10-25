@@ -19,11 +19,6 @@ class Settings(BaseSettings):
     # Total LLM-capable processes in a split topology; independent of API workers.
     llm_process_count: int | None = None
 
-    # Legacy by default; graph requires an exact cohort or explicit full rollout.
-    chat_executor: Literal["legacy", "langgraph"] = "legacy"
-    chat_graph_conversation_allowlist: str = ""
-    chat_graph_all_conversations: bool = False
-
     # SQL entrypoint adapters are staged until consumers/delivery/handover qualify.
     chat_ingress_backend: Literal["redis", "sql"] = "redis"
 

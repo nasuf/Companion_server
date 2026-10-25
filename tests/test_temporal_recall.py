@@ -189,7 +189,6 @@ async def test_both_executors_deliver_qualified_recall_once(monkeypatch, executo
     monkeypatch.setattr(recall, 'get_grounding_model', lambda: 'grounding')
     invoke = AsyncMock(side_effect=[answer(), {'grounded':True}]); monkeypatch.setattr(recall,'invoke_json',invoke)
     io.now = datetime(2026,10,21,4,tzinfo=timezone.utc)
-    monkeypatch.setattr(settings,'chat_executor',executor)
     io.db.message.find_many.side_effect = lambda **_: [SimpleNamespace(id='old',role='user',content='聊聊',createdAt=io.now-timedelta(minutes=3),metadata={})]
     records = select_context([{'id':'m-1','source':'user','content':'在白鹭诊所看牙','main_category':'生活','sub_category':'日常','importance':.7,'similarity':.9,'rank_score':.8,'occur_time':'2026-10-20T04:00:00Z','statement_time':'2026-10-20T12:00:00Z'}])
     chat.fetch_parallel_context.return_value = FetchedContext(memory_relevance='strong',classified_memories=records)

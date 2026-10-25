@@ -147,7 +147,7 @@ def test_reply_or_user_text_cannot_supply_missing_judge_reference():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case_id", list(REQUIREMENTS))
 @pytest.mark.parametrize("relevance", ["weak", "medium", "strong"])
-async def test_actual_tier_render_delivers_known_identity_to_both_executors(monkeypatch, case_id, relevance):
+async def test_actual_tier_render_delivers_known_identity_to_graph(monkeypatch, case_id, relevance):
     from app.config import settings
     from app.services.chat import intent_replies, orchestrator as chat
     from app.services.chat.data_fetch_phase import FetchedContext
@@ -157,35 +157,33 @@ async def test_actual_tier_render_delivers_known_identity_to_both_executors(monk
     from evals.graph_equivalence.scenarios import history_for, witness_for
     from evals.reply_register.judge import build_judge_prompt
     c = case(case_id)
-    for executor in ("legacy", "langgraph"):
-        with monkeypatch.context() as patch:
-            io = configure_pair(patch)
-            history = [SimpleNamespace(id=f"history-{i}", role=role, content=text, metadata={}, createdAt=io.now)
-                       for i, (role, text) in enumerate(history_for(c))]
-            history.append(SimpleNamespace(id="u-new", role="user", content=c.message, metadata={}, createdAt=io.now))
-            io.db.message.find_many.side_effect = lambda **_: list(reversed(history))
-            patch.setattr(settings, "chat_executor", executor)
-            patch.setattr(chat, "detect_relational_context", lambda *_: None)
-            chat.fetch_parallel_context.return_value = FetchedContext(memory_relevance=relevance)
-            patch.setattr(intent_replies, "get_chat_model", lambda: "synthetic-model")
-            invoke = AsyncMock(return_value="我想不起来了")
-            patch.setattr(intent_replies, "invoke_text", invoke)
-            references = [witness_for(c)] if witness_for(c) else []
-            for kind in ("weak", "medium", "strong"):
-                async def tier(_reply=getattr(intent_replies, f"memory_{kind}_reply"), **kwargs):
-                    references.extend(str(kwargs[key]) for key in ("personality_brief", "ai_memory", "l3_memory")
-                                      if kwargs.get(key))
-                    return await _reply(**kwargs)
-                patch.setattr(chat, f"_memory_{kind}_reply", tier)
-            await collect(io, c.message, forced_intent=IntentType.NONE)
-            invoke.assert_awaited_once()
-            facts = fixture_facts(io.agent)
-            statement = facts[REQUIREMENTS[c.id].key].statement
-            judge_input = build_judge_prompt(c.group, "", c.message, "合成回复", known_facts=statement)
-            result = audit_case(c, facts, {}, trusted_references=references,
-                                response_inputs=[[invoke.await_args.args[1]]],
-                                judge_references=[statement], judge_inputs=[[judge_input]])
-            assert result["passed"]
+    with monkeypatch.context() as patch:
+        io = configure_pair(patch)
+        history = [SimpleNamespace(id=f"history-{i}", role=role, content=text, metadata={}, createdAt=io.now)
+                   for i, (role, text) in enumerate(history_for(c))]
+        history.append(SimpleNamespace(id="u-new", role="user", content=c.message, metadata={}, createdAt=io.now))
+        io.db.message.find_many.side_effect = lambda **_: list(reversed(history))
+        patch.setattr(chat, "detect_relational_context", lambda *_: None)
+        chat.fetch_parallel_context.return_value = FetchedContext(memory_relevance=relevance)
+        patch.setattr(intent_replies, "get_chat_model", lambda: "synthetic-model")
+        invoke = AsyncMock(return_value="我想不起来了")
+        patch.setattr(intent_replies, "invoke_text", invoke)
+        references = [witness_for(c)] if witness_for(c) else []
+        for kind in ("weak", "medium", "strong"):
+            async def tier(_reply=getattr(intent_replies, f"memory_{kind}_reply"), **kwargs):
+                references.extend(str(kwargs[key]) for key in ("personality_brief", "ai_memory", "l3_memory")
+                                  if kwargs.get(key))
+                return await _reply(**kwargs)
+            patch.setattr(chat, f"_memory_{kind}_reply", tier)
+        await collect(io, c.message, forced_intent=IntentType.NONE)
+        invoke.assert_awaited_once()
+        facts = fixture_facts(io.agent)
+        statement = facts[REQUIREMENTS[c.id].key].statement
+        judge_input = build_judge_prompt(c.group, "", c.message, "合成回复", known_facts=statement)
+        result = audit_case(c, facts, {}, trusted_references=references,
+                            response_inputs=[[invoke.await_args.args[1]]],
+                            judge_references=[statement], judge_inputs=[[judge_input]])
+        assert result["passed"]
 
 
 def test_older_rows_without_case_evidence_cannot_pass_summary():
@@ -388,7 +386,6 @@ async def test_tier_respects_personality_section_disable_without_loading_main_pr
     from tests.g02_harness_support import configure_pair
     from tests.test_chat_graph_equivalence import collect
     io = configure_pair(monkeypatch)
-    monkeypatch.setattr(settings, "chat_executor", "langgraph")
     snapshot = prompt_snapshot()
     snapshot["chat.personality_section"].isEnabled = False
     monkeypatch.setattr(store, "db", SimpleNamespace(prompttemplate=SimpleNamespace(

@@ -49,9 +49,9 @@ async def main(args) -> int:
     from app.services.chat.main_graph import DURABLE_EXECUTION_READY, GRAPH_VERSION
 
     runtime = {
-        "executor": settings.chat_executor,
-        "allowlist": settings.chat_graph_conversation_allowlist,
-        "all_conversations": settings.chat_graph_all_conversations,
+        "executor": "langgraph",
+        "allowlist": "",
+        "all_conversations": True,
         "graph_version": GRAPH_VERSION,
         "durable_execution_ready": DURABLE_EXECUTION_READY,
         "trace_backend": settings.trace_backend,

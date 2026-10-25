@@ -151,8 +151,6 @@ def test_bound_snapshot_has_actual_prompt_content_and_no_env_credentials(monkeyp
     from app.services import runtime_config as config
     from app.services.prompting import store
     from app.services.runtime_config import ConfigurationSnapshot
-    monkeypatch.setattr(settings,"chat_executor","langgraph")
-    monkeypatch.setattr(settings,"chat_graph_all_conversations",True)
     monkeypatch.setattr(settings,"dashscope_api_key","must-not-be-exported")
     token=config._current_snapshot.set(ConfigurationSnapshot(None,{},
         {"synthetic/model":{"input":1.5,"output":2.5}},{}))

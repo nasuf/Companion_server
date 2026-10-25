@@ -386,18 +386,23 @@ async def test_boundary_replies_opt_out_of_proactive(monkeypatch):
     assert impl.await_args.kwargs["proactive_reason"] == "short_circuit"
 
 
-def test_preflight_uses_system_reply_variant():
-    """pending 流程 (矛盾回答 / 删除确认 / 撤回) 的回复不能触发 B 追问."""
-    import inspect
+@pytest.mark.asyncio
+async def test_graph_preflight_reply_does_not_arm_proactive_question(monkeypatch):
+    from tests.graph_harness_support import configure_chat
+    from app.services.chat import orchestrator as chat
+    from app.services.proactive.state import ARM_REASON_SYSTEM
+    io = configure_chat(monkeypatch)
+    async def pending(text, ctx):
+        ctx.last_short_circuit_reply = "好的已经帮你删掉啦"
+        for event in await ctx.short_circuit_fn(ctx.last_short_circuit_reply, "c-1", io.agent.id, "u-1"):
+            yield event
+        ctx.stopped = True
+    monkeypatch.setattr(chat, "resolve_pending_deletion", pending)
+    events = [event async for event in chat.stream_chat_response("c-1", "确认删除", io.agent, "u-1")]
+    assert events[-1]["event"] == "done"
+    assert chat.finish_assistant_turn.await_args.kwargs["proactive_reason"] == ARM_REASON_SYSTEM
+    chat.detect_intent_unified.assert_not_awaited()
 
-    from app.services.chat import orchestrator
-
-    # Public entry now selects an executor; the legacy phase wiring lives here.
-    src = inspect.getsource(orchestrator._stream_legacy_response)
-    preflight = src[src.index("preflight_ctx = PreflightCtx("):]
-    assert "_system_short_circuit_reply" in preflight[:500]
-    boundary = src[src.index("boundary_ctx = BoundaryPhaseCtx("):]
-    assert "short_circuit_fn=_boundary_short_circuit_reply" in boundary[:600]
 
 
 async def test_short_circuit_ctx_maps_kind_to_reason(monkeypatch):

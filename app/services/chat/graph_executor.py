@@ -1,24 +1,7 @@
-"""Select an executor once per turn, and preserve a permanent legacy fallback.
-
-Failures after graph execution starts are surfaced, never rerun in legacy.
-"""
+"""Drive the sole chat graph; failures never replay a turn."""
 
 from __future__ import annotations
 
-
-def select_executor(conversation_id: str) -> str:
-    from app.config import settings
-
-    if settings.chat_executor != "langgraph":
-        return "legacy"
-    if settings.chat_graph_all_conversations and conversation_id:
-        return "langgraph"
-    allowed = {
-        item.strip()
-        for item in settings.chat_graph_conversation_allowlist.split(",")
-        if item.strip()
-    }
-    return "langgraph" if conversation_id in allowed else "legacy"
 
 
 async def stream_graph_response(
@@ -57,8 +40,7 @@ async def stream_graph_response(
     )
     from app.services.runtime_config import bind_agent_context, reset_current_agent
 
-    # Existing recursive legacy child calls stay on the legacy executor. Graph
-    # children are explicit fragment transitions and never enter this driver.
+    # Children are explicit graph fragment transitions, never recursive turns.
     if sub_intent_mode:
         raise ValueError("Graph executor cannot start a recursive child turn")
     agent_id = getattr(agent, "id", None)

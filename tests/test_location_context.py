@@ -400,7 +400,7 @@ def test_checker_reads_you_and_nearby_as_the_user():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_both_executors_use_one_location_context(monkeypatch, executor):
     from app.config import settings
     from app.services import persona_grounding
@@ -410,7 +410,6 @@ async def test_both_executors_use_one_location_context(monkeypatch, executor):
     from tests.g02_harness_support import configure_pair
 
     io = configure_pair(monkeypatch)
-    monkeypatch.setattr(settings, "chat_executor", executor)
     chat.fetch_parallel_context.return_value = FetchedContext(memory_relevance="weak")
     monkeypatch.setattr(chat, "load_location_context", AsyncMock(return_value=xian()))
     verify = AsyncMock(return_value=[])

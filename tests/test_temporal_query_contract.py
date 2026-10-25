@@ -140,7 +140,7 @@ def test_adjacent_calendar_day_binds_time_of_day(word, offset, period, start, en
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_real_executor_passes_original_anchor_to_retrieval(monkeypatch, executor):
     from app.config import settings
     from app.services.chat import orchestrator as chat
@@ -148,7 +148,6 @@ async def test_real_executor_passes_original_anchor_to_retrieval(monkeypatch, ex
     from tests.g02_harness_support import configure_pair
     io = configure_pair(monkeypatch)
     io.now = datetime(2026, 10, 22, 1, tzinfo=UTC)
-    monkeypatch.setattr(settings, "chat_executor", executor)
     monkeypatch.setattr(chat, "_generate_reply", AsyncMock(return_value=(["我记得你提过面试"], "", False, None)))
     events = [e async for e in chat.stream_chat_response("c-1", "昨天的面试记得吗", io.agent, "u-1",
         forced_intent=IntentType.NONE, reply_context={"received_at":"2026-10-20T01:00:00Z"})]
@@ -241,7 +240,7 @@ def test_synthetic_prompt_row_never_forges_persisted_message_provenance():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 @pytest.mark.parametrize("enabled", [True, False])
 async def test_date_evidence_uses_one_full_reply_and_respects_prompt_disable(monkeypatch, executor, enabled):
     from app.config import settings
@@ -252,7 +251,6 @@ async def test_date_evidence_uses_one_full_reply_and_respects_prompt_disable(mon
     from app.services.prompting.defaults import CHAT_TIMELINE_SECTION_PROMPT
     from tests.g02_harness_support import configure_pair
     io = configure_pair(monkeypatch)
-    monkeypatch.setattr(settings, "chat_executor", executor)
     timeline = format_timeline(build_timeline([{"content":"去了博物馆", "occur_time":"2024-02-29T00:00:00Z", "source":"user"}]))
     chat.fetch_parallel_context.return_value = FetchedContext(memory_relevance="weak", timeline=timeline)
     token = store._prompt_snapshot.set({"chat.timeline_section":(CHAT_TIMELINE_SECTION_PROMPT,enabled)})

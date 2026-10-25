@@ -327,10 +327,9 @@ jobs:
               done
             fi
 
-            # Persistent private config; validate before stopping the server.
+            # Fixed graph flags preserve qualified older-image rollback compatibility.
             python3 scripts/chat_graph_deploy_config.py \
-              --env-file .env \
-              --config-file /app/companion-secrets/chat-graph-rollout.json
+              --env-file .env
             python3 scripts/redis_alert_deploy_config.py \
               --env-file .env \
               --config-file /app/companion-secrets/redis-alert-recipients.json

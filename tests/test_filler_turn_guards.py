@@ -1,4 +1,4 @@
-"""Whole-turn guard contract, both live executors and bound runtime configuration."""
+"""Whole-turn guard contract, sole live graph and bound runtime configuration."""
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -87,15 +87,12 @@ def test_schedule_offer_in_earlier_bubble_is_preserved():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('executor', ['langgraph', 'legacy'])
 @pytest.mark.parametrize('prior,probability,selected', [(['晚安'], 1, True), (['晚安'], 0, False),
                                                       (['对吧？', '我听着'], 1, False), (['👌'], 1, False)])
-async def test_live_paths_persist_decisions_and_do_not_drop_reply(monkeypatch, executor, prior, probability, selected):
+async def test_live_graph_persists_decisions_and_does_not_drop_reply(monkeypatch, prior, probability, selected):
     from tests.graph_harness_support import configure_chat
     from app.services.chat import orchestrator as chat
-    from app.config import settings
     io = configure_chat(monkeypatch)
-    monkeypatch.setattr(settings, 'chat_executor', executor)
     monkeypatch.setattr(chat, 'build_filler_emoji_reply', build_filler_emoji_reply)
     monkeypatch.setattr(runtime_config, '_GLOBAL_CACHE', {'fillerEmojiProbability': probability})
     history = [message('u0', 'user', '好')] + [message(f'a{i}', 'assistant', text) for i,text in enumerate(prior)]

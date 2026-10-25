@@ -26,7 +26,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--graph", action="store_true", help="Qualify the G01 graph stream adapter")
-    parser.add_argument("--graph-all", action="store_true", help="Test explicit full rollout with an empty allowlist")
+    parser.add_argument("--graph-all", action="store_true", help="Verify graph-only execution (retained CLI alias)")
     parser.add_argument("--delay", action="store_true", help="Qualify delayed queue, reconnect and two-worker scan")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

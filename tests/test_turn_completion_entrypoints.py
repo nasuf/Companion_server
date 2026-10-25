@@ -11,7 +11,7 @@ from tests.g02_harness_support import configure_pair
 from tests.test_turn_followups_postgres import turn, followups, redis, origins, receipt
 
 
-@pytest.mark.parametrize("executor", ["langgraph", "legacy"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 @pytest.mark.parametrize("failure", [None, "last_save", "registration", "cancel"])
 async def test_parent_completion_waits_for_all_fragments(turn, monkeypatch, executor, failure):
     db, user, old_replies, args = turn
@@ -19,8 +19,6 @@ async def test_parent_completion_waits_for_all_fragments(turn, monkeypatch, exec
         await db.message.delete(where={"id": reply.id})
     register = t.register_completed_turn
     io = configure_pair(monkeypatch)
-    monkeypatch.setattr(settings, "chat_executor", executor)
-    monkeypatch.setattr(settings, "chat_graph_all_conversations", True)
     monkeypatch.setattr(post_process, "db", db)
     monkeypatch.setattr(post_process, "fire_background", lambda coro: coro.close())
     monkeypatch.setattr(t, "register_completed_turn", AsyncMock(

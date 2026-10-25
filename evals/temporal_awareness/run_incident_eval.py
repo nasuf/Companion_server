@@ -130,7 +130,6 @@ async def run(args, cases=None):
                         return result
                     patch.setattr(chat, "_generate_reply", capture_reply)
                     io.now = datetime.fromisoformat(case["now"].replace("Z", "+00:00"))
-                    patch.setattr(settings, "chat_executor", "langgraph")
                     patch.setattr(chat, "compute_reengagement_gap_seconds", compute_reengagement_gap_seconds)
                     configure_time_context(patch, chat, io)
                     patch.setattr(reply_generate, "_run_main_llm", live_main)

@@ -463,12 +463,22 @@ def test_red_packet_prompts_are_registered_without_hardcoded_tiers():
     assert "大于100" not in reply
 
 
-def test_orchestrator_red_packet_forces_main_prompt_and_skips_memory():
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parents[1] / "app/services/chat/orchestrator.py").read_text()
-    assert "skip_memory=bool(offering_context)" in src
-    assert "force_main_prompt=bool(offering_context)" in src
+@pytest.mark.asyncio
+async def test_graph_red_packet_forces_main_prompt_and_skips_memory(monkeypatch):
+    from tests.g02_harness_support import configure_pair
+    from app.services.chat import orchestrator as chat
+    io = configure_pair(monkeypatch)
+    events = [event async for event in chat.stream_chat_response(
+        "c-1", "早点休息呀", io.agent, "u-1",
+        reply_context={"received_at": io.now.isoformat(), "red_packet": {
+            "offering_id": "synthetic-offering", "amount": 18, "message": "早点休息呀",
+        }},
+    )]
+    assert len(io.main_calls) == 1 and not io.tier_calls
+    assert chat._background_post_process.call_args.kwargs["skip_memory"] is True
+    chat._save_replies.assert_awaited_once()
+    chat.finish_assistant_turn.assert_awaited_once()
+    assert events[-1]["event"] == "done"
 
 
 @pytest.mark.asyncio

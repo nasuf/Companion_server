@@ -17,7 +17,7 @@ NOW = datetime(2026, 10, 21, 9, 22)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_contradiction_turn_uses_context_and_credits_candidates_only(monkeypatch, executor):
     from app.config import settings
     from app.services.chat import graph_phases, orchestrator as chat
@@ -26,7 +26,6 @@ async def test_contradiction_turn_uses_context_and_credits_candidates_only(monke
     from tests.g02_harness_support import configure_pair
 
     io = configure_pair(monkeypatch)
-    monkeypatch.setattr(settings, "chat_executor", executor)
     io.db.message.find_many.side_effect = lambda **_: [SimpleNamespace(
         id="prev-ai", role="assistant", content="你也在北京吗？",
         createdAt=io.now - timedelta(minutes=1), metadata={},

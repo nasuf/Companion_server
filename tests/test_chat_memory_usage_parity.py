@@ -24,7 +24,6 @@ from tests.g02_harness_support import configure_pair
 
 def configure_accounting(monkeypatch, executor):
     io = configure_pair(monkeypatch)
-    monkeypatch.setattr(settings, "chat_executor", executor)
     io.memory = ClassifiedMemory(
         id="memory-selected", text="用户喜欢在周末做陶艺", relevance="medium",
         score=0.8, source="user",
@@ -91,7 +90,7 @@ def assert_scoped_batches(io, *, event_id, selected=True, candidate=True):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 @pytest.mark.parametrize("aggregated", [False, True])
 async def test_ordinary_memory_usage_reaches_storage_with_ingress_identity(
     monkeypatch, executor, aggregated,
@@ -118,7 +117,7 @@ async def test_ordinary_memory_usage_reaches_storage_with_ingress_identity(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 @pytest.mark.parametrize("followup", [False, True])
 async def test_crisis_memory_usage_keeps_same_identity_and_no_candidate_reward(
     monkeypatch, executor, followup,
@@ -164,7 +163,7 @@ async def test_crisis_memory_usage_keeps_same_identity_and_no_candidate_reward(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_child_memory_usage_reuses_persisted_parent_event(monkeypatch, executor):
     io = configure_accounting(monkeypatch, executor)
     chat.detect_intent_unified.return_value = IntentResult(
@@ -184,7 +183,7 @@ async def test_child_memory_usage_reuses_persisted_parent_event(monkeypatch, exe
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_parent_and_child_share_event_with_distinct_and_overlapping_memories(
     monkeypatch, executor,
 ):
@@ -220,7 +219,7 @@ async def test_parent_and_child_share_event_with_distinct_and_overlapping_memori
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_queued_input_without_persisted_identity_cannot_reward_or_infer_history(
     monkeypatch, executor,
 ):

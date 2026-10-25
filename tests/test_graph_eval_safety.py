@@ -394,3 +394,31 @@ async def test_live_context_retains_production_fast_gate_and_relevance_classifie
         assert classifier.await_count == expected_calls
         assert decisions == ([{"phase": "memory_relevance", "level": "medium", "enhanced_query": ""}]
                              if expected_calls else [])
+
+
+@pytest.mark.asyncio
+async def test_retired_evaluator_rejects_legacy_before_io(monkeypatch):
+    from evals.graph_equivalence import run_eval
+    def forbidden(*args, **kwargs):
+        raise AssertionError("retired evaluation started IO")
+    monkeypatch.setattr(run_eval, "configure_pair", forbidden)
+    with pytest.raises(ValueError, match="Legacy executor retired"):
+        await run_eval.evaluate_turn(None, "legacy", None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_retired_paired_cli_never_reads_live_snapshot(tmp_path, monkeypatch):
+    import json
+    import sys
+    from evals.graph_equivalence import run_eval
+    from unittest.mock import AsyncMock
+    output = tmp_path / "retired.json"
+    read = AsyncMock(side_effect=AssertionError("unexpected live snapshot"))
+    monkeypatch.setattr(run_eval, "read_snapshot", read)
+    monkeypatch.setattr(sys, "argv", ["run_eval", "--read-only-production-snapshot", "--output", str(output)])
+    with pytest.raises(SystemExit, match="Legacy executor retired"):
+        await run_eval.main()
+    read.assert_not_called()
+    report = json.loads(output.read_text())
+    assert report["stage"] == "legacy_comparison_retired"
+    assert not report["qualification_passed"] and report["rows"] == []

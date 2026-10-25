@@ -1,15 +1,8 @@
-"""Paired real-model G02 evaluation with synthetic domain IO.
+"""Historical G02 report readers and single-graph evaluation helpers.
 
-    python -m evals.graph_equivalence.run_eval --read-only-production-snapshot \
-        --output /tmp/g02.json
-
-Run in a disposable process, never import into an application worker. The only
-production DB access is an explicit read-only transaction loading configuration,
-prompt templates and model prices; no conversation/user/agent rows are read.
-After disconnect, business DB and Redis access are denied, notifications and
-background actions are closed, and network access is fenced to model providers.
-Credentials remain in that process; reports include hashes, never prompt text or
-credentials. Real-model and judge calls are opt-in and consume provider quota.
+The paired live CLI is retired and fails before external IO. Offline preflight
+remains available. evaluate_turn rejects legacy rather than comparing graph to
+itself. Existing quality runners retain their independent qualification gates.
 """
 
 from __future__ import annotations
@@ -413,10 +406,11 @@ async def grade_response(model, group, prompt):
 
 
 async def evaluate_turn(case, executor, snapshot, requests, live_main, classifier_pair=None):
+    if executor != "langgraph":
+        raise ValueError("Legacy executor retired; historical paired reports remain readable")
     with Patches() as patches:
         io = configure_pair(patches)
         configure_live_context(patches, requests.decisions, classifier_pair)
-        patches.setattr(settings, "chat_executor", executor)
         patches.setattr(settings, "trace_backend", "off")
         patches.setattr(store, "db", SimpleNamespace(prompttemplate=SimpleNamespace(
             find_unique=AsyncMock(side_effect=lambda *, where: snapshot.get(where["key"])),
@@ -566,99 +560,11 @@ async def main():
         if not preconditions["passed"]:
             raise SystemExit(2)
         return
-    logging.basicConfig(level=logging.ERROR)
-    settings.trace_backend = "off"
-    os.environ["LANGSMITH_TRACING"] = "false"
-    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-        os.environ.pop(name, None)
-    snapshot, prompt_changes = prospective_prompt_snapshot(await read_snapshot())
-    # Replace the DB root before importing additional application helpers.
-    import app.db
-    app.db.db = DeniedIO()
-    settings.database_url = settings.direct_database_url = "postgresql://synthetic:synthetic@127.0.0.1:1/synthetic"
-    settings.redis_url = "redis://127.0.0.1:1/0"
-    import app.redis_client
-    app.redis_client.get_redis = AsyncMock(side_effect=RuntimeError("Evaluation forbids business Redis"))
-    requests = Requests()
-    chat_model, utility_model = models.get_chat_model(), models.get_utility_model()
-    for model in (chat_model, utility_model):
-        model.callbacks = [requests]
-    urls = [str(getattr(model, "openai_api_base", "")) for model in (chat_model, utility_model)]
-    report.update({
-              "comparison_mode": "common parsed classifier decisions; both sides invoke real classifiers" if args.paired_classifiers
-                                 else "independently sampled classifiers",
-              "scope": "Real intent/relevance/tier/main/reply-emotion models; synthetic domain, no external business actions",
-              "routes": {"chat_provider": models._provider_for("chat"), "chat_model": models._chat_model_name(),
-                         "utility_provider": models._provider_for("utility"), "utility_model": models._utility_model_name()},
-              "dependencies": {name: version(name) for name in ("langgraph", "langchain-core", "langchain-openai")},
-              "prospective_code_sync": prompt_changes,
-              "source_hashes": {name: hashlib.sha256(Path(import_module(name[:-3].replace("/", ".")).__file__).read_bytes()).hexdigest() for name in (
-                  "app/services/chat/orchestrator.py", "app/services/chat/graph_phases.py",
-                  "app/services/chat/graph_runtime.py", "app/services/chat/main_graph.py",
-                  "app/services/chat/reply_generate.py", "app/services/chat/intent_dispatcher.py",
-                  "app/services/chat/data_fetch_phase.py", "app/services/memory/retrieval/relevance.py")},
-              "synthetic_conditions": {"personality": "neutral", "memory_relevance": "production classifier and fast gates",
-                                       "memory_candidates": "empty", "user_emotion_signal": None,
-                                       "web_search": False, "current_activity": "在家整理工作台",
-                                       "time": "2026-10-04T04:00:00+00:00", "reply_count": 2,
-                                       "business_background_disabled": True, "artificial_sleep_disabled": True},
-              "prompt_versions": [{"key": row.key, "hash": digest(row.content), "enabled": row.isEnabled,
-                                  "updated_at": row.updatedAt.isoformat()} for row in snapshot.values()],
-              "calibration_passed": False, "rows": []})
-    save(args.output, report)
-    live_main = reply_generate._run_main_llm
-    with model_network_fence(urls) as fence:
-        report["calibration_passed"] = await run_calibration(utility_model, concurrency=1, grounded_false_premises=True)
-        report["network_fence_violations"] = list(fence.violations)
-        save(args.output, report)
-        if not report["calibration_passed"] or fence.violations:
-            raise SystemExit("Judge calibration failed; no qualification claim or gate relaxation")
-        for case_index, case in enumerate(cases):
-            for sample in range(args.samples):
-                # Alternate pair order to balance warm-cache/time-of-day bias.
-                order = ("legacy", "langgraph") if (case_index + sample) % 2 == 0 else ("langgraph", "legacy")
-                classifier_pair = ClassifierPair() if args.paired_classifiers else None
-                for index, executor in enumerate(order):
-                    if classifier_pair is not None:
-                        classifier_pair.begin(recording=index == 0)
-                    row = {"case": case.id, "group": case.group, "sample": sample, "executor": executor}
-                    hits_before = len(fence.violations)
-                    try:
-                        row.update(await evaluate_turn(case, executor, snapshot, requests, live_main, classifier_pair))
-                        if row["case_precondition"]["passed"]:
-                            row["verdict"], row["judge_attempts"] = await grade_response(
-                                utility_model, case.group, requests.judge_prompt,
-                            )
-                        else:
-                            row["verdict"] = None
-                    except Exception as error:
-                        row["error"] = type(error).__name__
-                        # Preserve actual request/decision/cancellation evidence
-                        # even when a contract fails before turn analysis returns.
-                        row.setdefault("requests", list(requests.rows))
-                        row.setdefault("routing_decisions", list(requests.decisions))
-                        row.setdefault("model_errors", list(requests.errors))
-                        row.setdefault("classifier_cancellations", list(classifier_pair.cancellations) if classifier_pair else [])
-                        if isinstance(error, SampleRejected):
-                            row.update(usage=error.usage, requests=error.requests, model_errors=error.model_errors)
-                        row["error_location"] = [{"file": Path(frame.filename).name, "line": frame.lineno,
-                                                  "function": frame.name} for frame in traceback.extract_tb(error.__traceback__)]
-                    row["network_fence_hits"] = len(fence.violations) - hits_before
-                    if classifier_pair is not None:
-                        row["classifier_pair_valid"] = not classifier_pair.violations
-                        row["classifier_decision_source"] = order[0]
-                    report["network_fence_violations"] = list(fence.violations)
-                    report["rows"].append(row)
-                    report["summary"] = report_summary(report["rows"], cases, args.samples)
-                    report["full_case_bank"] = len(cases) == len(ALL_CASES)
-                    save(args.output, report)
-                    print(f"pair {case.id} #{sample + 1} {executor}: {'error' if 'error' in row else 'recorded'}", flush=True)
+    report["stage"] = "legacy_comparison_retired"
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
-    report["qualification_passed"] = report["summary"]["passed"] and report["full_case_bank"]
     save(args.output, report)
-    print(json.dumps(report["summary"], ensure_ascii=False), flush=True)
-    if not (report["summary"]["passed"] and report["full_case_bank"]):
-        raise SystemExit(1)
+    raise SystemExit("Legacy executor retired: paired live evaluation is unavailable. "
+                     "Use the existing single-graph quality evaluations; historical reports remain readable.")
 
 
 if __name__ == "__main__":

@@ -204,7 +204,7 @@ def test_dated_evidence_scoping_preserves_history_identity_and_unknown_times():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 @pytest.mark.parametrize("route", ["ordinary", "crisis_care", "contradiction", "persona_correction", "current_state"])
 async def test_actual_executor_optout_and_protected_questions(monkeypatch, executor, route):
     import json
@@ -217,7 +217,6 @@ async def test_actual_executor_optout_and_protected_questions(monkeypatch, execu
     from tests.g02_harness_support import configure_pair
     io = configure_pair(monkeypatch)
     io.now = NOW
-    monkeypatch.setattr(settings, "chat_executor", executor)
     io.db.message.find_many.side_effect = lambda **_: [SimpleNamespace(
         id="old", role="user", content="不要一直问我", createdAt=NOW-timedelta(minutes=3), metadata={})]
     monkeypatch.setattr(persona_grounding, "guard_reply", AsyncMock(return_value=("在整理东西，你在干嘛？", route == "persona_correction")))
@@ -298,7 +297,7 @@ async def test_temporal_prompts_disabled_or_failed_are_explicit(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_actual_date_guard_rejects_unbacked_today_claim(monkeypatch, executor):
     import json
     from app.config import settings
@@ -307,7 +306,6 @@ async def test_actual_date_guard_rejects_unbacked_today_claim(monkeypatch, execu
     from app.services import persona_grounding
     from tests.g02_harness_support import configure_pair
     io=configure_pair(monkeypatch);io.now=NOW
-    monkeypatch.setattr(settings, "chat_executor", executor)
     old=ClassifiedMemory("旧午饭吃了三明治", "strong", .8, main_category="生活", occur_time="2026-09-08T04:00:00Z")
     chat.fetch_parallel_context.return_value=FetchedContext(memory_relevance="strong", classified_memories=[old])
     monkeypatch.setattr(chat, "_generate_reply", AsyncMock(return_value=(["今天中午吃了牛肉面"], "", False, None)))

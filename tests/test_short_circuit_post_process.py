@@ -1200,66 +1200,48 @@ def test_ctx_classes_have_last_short_circuit_reply_field():
         )
 
 
-def test_orchestrator_finally_logic_present():
-    """grep orchestrator source 验证 finally 兜底逻辑存在 (P0 BUG 修复回归)."""
-    import inspect
-    from app.services.chat import orchestrator as orch_mod
+@pytest.mark.asyncio
+async def test_failed_reply_persistence_never_submits_background(monkeypatch):
+    from tests.graph_harness_support import configure_chat
+    from app.services.chat import orchestrator as chat
+    io = configure_chat(monkeypatch)
+    chat._save_replies.side_effect = RuntimeError("save failed")
+    with pytest.raises(RuntimeError, match="save failed"):
+        await _drain(chat.stream_chat_response("c-1", "今天心情不错", io.agent, "u-1"))
+    chat._background_post_process.assert_not_called()
+    chat.finish_assistant_turn.assert_not_awaited()
+    io.tracer.close.assert_called_once()
 
-    src = inspect.getsource(orch_mod._stream_legacy_response)
-    assert "post_process_fired" in src, "缺少 post_process_fired flag"
-    assert "last_short_circuit_reply" in src, "未读取 ctx.last_short_circuit_reply"
-    # 正向 gate: sc_reply is not None (防 mid-try exception phantom fire)
-    assert "sc_reply is not None" in src
-    # boundary 路径必须通过 boundary_ctx.stopped 直接判别跳过 (不用独立 flag)
-    assert "boundary_ctx.stopped" in src
-    assert "boundary_handled" in src  # 保留 sentinel: boundary_handled = boundary_ctx... and ...stopped
-
-
-def test_orchestrator_current_state_fast_path_precedes_full_fetch_and_intent_llm():
-    """当前状态常见短语必须在 full fetch / intent LLM 之前本地判定。"""
-    import inspect
-    from app.services.chat import orchestrator as orch_mod
-
-    src = inspect.getsource(orch_mod._stream_legacy_response)
-    fast_detect_pos = src.find("detect_current_state_fast_path(user_message)")
-    fetch_guard_pos = src.find("elif forced_intent is None and not current_state_fast_path")
-    intent_fast_pos = src.find("elif current_state_fast_path:")
-    intent_llm_pos = src.find("detected_intent = await detect_intent_unified")
-    light_fetch_pos = src.find("elif current_state_fast_path:", intent_fast_pos + 1)
-    full_fetch_pos = src.find("fetched = await fetch_task")
-
-    assert fast_detect_pos != -1, "缺 current-state fast path 本地判定"
-    assert fetch_guard_pos != -1, "fetch_parallel_context 启动前必须排除 current_state_fast_path"
-    assert intent_fast_pos != -1, "意图识别阶段缺 current_state_fast_path 分支"
-    assert intent_fast_pos < intent_llm_pos, "fast path 必须排在 detect_intent_unified 之前"
-    assert light_fetch_pos != -1, "fast path 必须走轻量 schedule fetch 分支"
-    assert full_fetch_pos < light_fetch_pos, (
-        "轻量 current-state fetch 必须作为 fetch_task 分支的 elif；"
-        "fast path 下 fetch_task 为 None，因此不会进入 full fetch await"
-    )
-
-
-def test_orchestrator_skips_ai_memory_for_state_and_schedule_short_circuits():
-    """当前状态/计划查询回复是临场回答，不应进入 AI 自我记忆。"""
-    import inspect
-    from app.services.chat import orchestrator as orch_mod
-
-    src = inspect.getsource(orch_mod._stream_legacy_response)
-    assert "skip_ai_memory=(" in src
-    assert '{"schedule_query", "current_state"}' in src
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+async def test_current_state_fast_path_skips_full_fetch_and_intent_llm(monkeypatch):
+    from tests.graph_harness_support import configure_chat
+    from app.services.chat import orchestrator as chat
+    io = configure_chat(monkeypatch)
+    async def current(text, ctx, **kwargs):
+        return True, ctx.finalize("在整理工作台", kind="current_state")
+    monkeypatch.setattr(chat, "handle_current_state", current)
+    await _drain(chat.stream_chat_response("c-1", "你在干嘛", io.agent, "u-1"))
+    chat.detect_intent_unified.assert_not_awaited()
+    chat.fetch_parallel_context.assert_not_awaited()
+    assert chat._background_post_process.call_args.kwargs["skip_ai_memory"] is True
+
+
+
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_orchestrator_intent_short_circuit_fires_post_process(monkeypatch, executor):
-    """Both executors submit a query turn once and exclude AI self-memory."""
+    """Graph submits a query turn once and excludes AI self-memory."""
     from app.config import settings
     from tests.graph_harness_support import configure_chat
     from app.services.chat import orchestrator as orch_mod
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
 
     io = configure_chat(monkeypatch)
-    monkeypatch.setattr(settings, "chat_executor", executor)
     orch_mod.detect_intent_unified.return_value = IntentResult(
         intent=IntentType.SCHEDULE_QUERY, confidence=1.0,
         metadata={"query_type": "date"},

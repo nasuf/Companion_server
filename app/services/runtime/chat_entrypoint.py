@@ -72,7 +72,6 @@ class PreparedChatAcceptance:
 
 def _bound_execution_snapshot(conversation_id: str) -> ChatExecutionSnapshot:
     from app.config import settings
-    from app.services.chat.graph_executor import select_executor
     from app.services.chat.main_graph import GRAPH_VERSION
     from app.services.prompting.registry import PROMPT_DEFINITIONS
     from app.services.prompting.store import get_prompt_snapshot
@@ -90,9 +89,8 @@ def _bound_execution_snapshot(conversation_id: str) -> ChatExecutionSnapshot:
             "content": definition.default_text, "enabled": True,
             "sha256": sha256(definition.default_text.encode()).hexdigest(),
         })
-    executor = select_executor(conversation_id)
     return ChatExecutionSnapshot.capture(
-        executor=executor, graph_version=GRAPH_VERSION if executor == "langgraph" else "legacy-chat-v1",
+        executor="langgraph", graph_version=GRAPH_VERSION,
         state_version=1, config=export_bound_chat_configuration(),
         prompts={"schema_version": 1, "templates": templates},
         budget={"schema_version": 1,

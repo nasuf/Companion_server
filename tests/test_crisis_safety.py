@@ -965,9 +965,14 @@ def _close_background_arg(arg):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_direct_crisis_bypasses_boundary_when_blocked():
+async def test_orchestrator_direct_crisis_bypasses_boundary_when_blocked(monkeypatch):
     """已拉黑时的直接危机消息必须跳过 boundary blacklist_reply。"""
     from app.services.chat import orchestrator as orch_mod
+    from tests.g02_harness_support import configure_pair
+    real_guard = orch_mod.run_crisis_guard
+    configure_pair(monkeypatch)
+    monkeypatch.setattr(orch_mod, "run_crisis_guard", real_guard)
+    monkeypatch.setattr(orch_mod, "discard_pending_states_for_crisis", AsyncMock())
 
     agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
     conv = SimpleNamespace(workspaceId=None)
@@ -979,11 +984,13 @@ async def test_orchestrator_direct_crisis_bypasses_boundary_when_blocked():
         boundary_called = True
         raise AssertionError("direct crisis must bypass boundary")
         if False:
-            yield {}
+            async for event in ctx.finalize("我在", kind="crisis"):
+                yield event
 
     async def _fake_handle_crisis(message, ctx, **kwargs):
         crisis_calls.append((message, ctx, kwargs))
-        yield {"event": "reply", "data": json.dumps({"text": "我在"})}
+        async for event in ctx.finalize("我在", kind="crisis"):
+            yield event
 
     with (
         patch.object(orch_mod, "db", new=MagicMock(
@@ -1038,9 +1045,14 @@ async def test_orchestrator_direct_crisis_bypasses_boundary_when_blocked():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_farewell_crisis_bypasses_boundary_when_blocked():
+async def test_orchestrator_farewell_crisis_bypasses_boundary_when_blocked(monkeypatch):
     """拉黑态下的告别世界隐喻也必须命中 crisis, 不能走 blacklist_reply。"""
     from app.services.chat import orchestrator as orch_mod
+    from tests.g02_harness_support import configure_pair
+    real_guard = orch_mod.run_crisis_guard
+    configure_pair(monkeypatch)
+    monkeypatch.setattr(orch_mod, "run_crisis_guard", real_guard)
+    monkeypatch.setattr(orch_mod, "discard_pending_states_for_crisis", AsyncMock())
 
     agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
     conv = SimpleNamespace(workspaceId=None)
@@ -1049,11 +1061,13 @@ async def test_orchestrator_farewell_crisis_bypasses_boundary_when_blocked():
     async def _boundary_should_not_run(_ctx):
         raise AssertionError("farewell crisis must bypass boundary")
         if False:
-            yield {}
+            async for event in ctx.finalize("我在", kind="crisis"):
+                yield event
 
     async def _fake_handle_crisis(message, ctx, **kwargs):
         crisis_calls.append((message, ctx, kwargs))
-        yield {"event": "reply", "data": json.dumps({"text": "别走，我在"})}
+        async for event in ctx.finalize("我在", kind="crisis"):
+            yield event
 
     with (
         patch.object(orch_mod, "db", new=MagicMock(
@@ -1106,9 +1120,14 @@ async def test_orchestrator_farewell_crisis_bypasses_boundary_when_blocked():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_semantic_crisis_bypasses_boundary_when_blocked():
+async def test_orchestrator_semantic_crisis_bypasses_boundary_when_blocked(monkeypatch):
     """关键词未直接命中但语义判定为 crisis 时, 拉黑态也不能吞掉。"""
     from app.services.chat import orchestrator as orch_mod
+    from tests.g02_harness_support import configure_pair
+    real_guard = orch_mod.run_crisis_guard
+    configure_pair(monkeypatch)
+    monkeypatch.setattr(orch_mod, "run_crisis_guard", real_guard)
+    monkeypatch.setattr(orch_mod, "discard_pending_states_for_crisis", AsyncMock())
 
     agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
     conv = SimpleNamespace(workspaceId=None)
@@ -1117,11 +1136,13 @@ async def test_orchestrator_semantic_crisis_bypasses_boundary_when_blocked():
     async def _boundary_should_not_run(_ctx):
         raise AssertionError("semantic crisis must bypass boundary")
         if False:
-            yield {}
+            async for event in ctx.finalize("我在", kind="crisis"):
+                yield event
 
     async def _fake_handle_crisis(message, ctx, **kwargs):
         crisis_calls.append((message, ctx, kwargs))
-        yield {"event": "reply", "data": json.dumps({"text": "先别走"})}
+        async for event in ctx.finalize("我在", kind="crisis"):
+            yield event
 
     with (
         patch.object(orch_mod, "db", new=MagicMock(
@@ -1176,9 +1197,14 @@ async def test_orchestrator_semantic_crisis_bypasses_boundary_when_blocked():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary():
+async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary(monkeypatch):
     """危机照护仍活跃时, 用户辱骂也必须先走 follow-up 守护而不是攻击回复。"""
     from app.services.chat import orchestrator as orch_mod
+    from tests.g02_harness_support import configure_pair
+    real_guard = orch_mod.run_crisis_guard
+    configure_pair(monkeypatch)
+    monkeypatch.setattr(orch_mod, "run_crisis_guard", real_guard)
+    monkeypatch.setattr(orch_mod, "discard_pending_states_for_crisis", AsyncMock())
 
     agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
     conv = SimpleNamespace(workspaceId=None)
@@ -1187,11 +1213,13 @@ async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary():
     async def _boundary_should_not_run(_ctx):
         raise AssertionError("crisis followup must bypass attack boundary")
         if False:
-            yield {}
+            async for event in ctx.finalize("我在", kind="crisis_followup"):
+                yield event
 
     async def _fake_handle_followup(message, ctx, **kwargs):
         crisis_calls.append((message, ctx, kwargs))
-        yield {"event": "reply", "data": json.dumps({"text": "我还在"})}
+        async for event in ctx.finalize("我在", kind="crisis_followup"):
+            yield event
 
     with (
         patch.object(orch_mod, "db", new=MagicMock(
@@ -1260,9 +1288,14 @@ async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_crisis_release_completion_still_bypasses_boundary():
+async def test_orchestrator_crisis_release_completion_still_bypasses_boundary(monkeypatch):
     """第二次安全确认清掉 crisis state 的当轮, 也不能立刻回到拉黑回复。"""
     from app.services.chat import orchestrator as orch_mod
+    from tests.g02_harness_support import configure_pair
+    real_guard = orch_mod.run_crisis_guard
+    configure_pair(monkeypatch)
+    monkeypatch.setattr(orch_mod, "run_crisis_guard", real_guard)
+    monkeypatch.setattr(orch_mod, "discard_pending_states_for_crisis", AsyncMock())
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
 
     agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
@@ -1271,10 +1304,12 @@ async def test_orchestrator_crisis_release_completion_still_bypasses_boundary():
     async def _boundary_should_not_run(_ctx):
         raise AssertionError("crisis release turn must bypass boundary")
         if False:
-            yield {}
+            async for event in ctx.finalize("我在", kind="crisis_followup"):
+                yield event
 
     async def _fake_end(message, ctx, _fallback_fn):
-        yield {"event": "reply", "data": json.dumps({"text": "好，先稳住"})}
+        async for event in ctx.finalize("我在", kind="crisis_followup"):
+            yield event
 
     with (
         patch.object(orch_mod, "db", new=MagicMock(
@@ -1873,66 +1908,55 @@ def test_format_recent_context_handles_messages_without_id():
 # ════════════════════════════════════════════════════════════════════
 
 
-def test_orchestrator_crisis_skips_full_fetch_parallel_context():
-    """orchestrator 在 crisis_force_intent 命中时**不调** fetch_parallel_context,
-    而是只起 retrieve_crisis_memories + portrait 轻量 fetch.
-
-    防回归: 实测 trace 2026-05-07 16:57 走完整 fetch 浪费 4s 无关 LLM
-    (relevance + 用户情绪等). 修复后 crisis 路径不应再触发这些.
-
-    用 inspect.getsource 验证: orchestrator 中 crisis_force_intent 分支
-    不包含 fetch_parallel_context() 调用, 包含 retrieve_crisis_memories + get_latest_portrait.
-    """
-    import inspect
-    from app.services.chat import orchestrator
-
-    src = inspect.getsource(orchestrator._stream_legacy_response)
-
-    # crisis_force_intent 分支必须出现这两个轻量 fetch
-    assert "crisis_memory_task" in src, "crisis 轻量 memory fetch 缺失"
-    assert "crisis_portrait_task" in src, "crisis 轻量 portrait fetch 缺失"
-    assert "retrieve_crisis_memories" in src, "crisis 路径必须用安全专用记忆召回"
-    assert "get_latest_portrait" in src, "crisis 路径必须用 get_latest_portrait 直调"
-    assert "if crisis_memory_task is None" in src, (
-        "LLM 识别为 CRISIS 但非关键词强制时, 也必须兜底创建安全记忆召回"
-    )
-
-    # CRISIS dispatch 必须在 fetch_parallel_context await 之前 — 通过位置验证
-    # (在源码中, CRISIS dispatch 'if detected_intent.intent == IntentType.CRISIS'
-    #  必须出现 BEFORE 'fetched = await fetch_task' 的 main path)
-    crisis_dispatch_pos = src.find("if detected_intent.intent == IntentType.CRISIS")
-    main_fetch_pos = src.find("fetched = await fetch_task")
-    assert crisis_dispatch_pos != -1, "缺 CRISIS dispatch"
-    assert main_fetch_pos != -1, "缺 main path fetch await"
-    assert crisis_dispatch_pos < main_fetch_pos, (
-        "CRISIS dispatch 必须排在 fetch_parallel_context await 之前 "
-        f"(crisis@{crisis_dispatch_pos}, fetch@{main_fetch_pos}). "
-        "否则 crisis 仍要等 4s 无关 LLM, 修复 1 失效."
-    )
+@pytest.mark.asyncio
+async def test_graph_crisis_uses_safety_retrieval_without_full_fetch(monkeypatch):
+    from tests.g02_harness_support import configure_pair
+    from app.services.chat import orchestrator as chat
+    from app.services.memory.retrieval import safety
+    from app.services import portrait
+    io = configure_pair(monkeypatch)
+    io.decision.crisis_force_intent = True
+    io.decision.crisis_care_turn = True
+    retrieve = AsyncMock(return_value=[])
+    profile = AsyncMock(return_value=None)
+    monkeypatch.setattr(safety, "retrieve_crisis_memories", retrieve)
+    monkeypatch.setattr(portrait, "get_latest_portrait", profile)
+    async def handle(text, ctx, **kwargs):
+        async for event in ctx.finalize("先去安全的地方", kind="crisis"):
+            yield event
+    monkeypatch.setattr(chat, "handle_crisis", handle)
+    events = [event async for event in chat.stream_chat_response("c-1", "现在很难受", io.agent, "u-1")]
+    retrieve.assert_awaited_once()
+    profile.assert_awaited_once()
+    chat.fetch_parallel_context.assert_not_awaited()
+    chat.detect_intent_unified.assert_not_awaited()
+    assert events[-1]["event"] == "done"
 
 
-def test_orchestrator_crisis_followup_skips_current_state_fast_path_and_full_fetch():
-    """危机余波守护必须早于 current_state 和完整 fetch。"""
-    import inspect
-    from app.services.chat import orchestrator as orch_mod
-    from app.services.chat import crisis_guard_phase
-
-    src = inspect.getsource(orch_mod._stream_legacy_response)
-    guard_src = inspect.getsource(crisis_guard_phase.run_crisis_guard)
-    guard_pos = src.find("run_crisis_guard(")
-    fast_path_pos = src.find("current_state_fast_path =")
-    dispatch_pos = src.find("if detected_intent.intent == IntentType.CRISIS")
-    main_fetch_pos = src.find("fetched = await fetch_task")
-
-    assert guard_pos != -1
-    assert fast_path_pos != -1
-    assert dispatch_pos != -1
-    assert main_fetch_pos != -1
-    assert guard_pos < fast_path_pos
-    assert dispatch_pos < main_fetch_pos
-    assert "and not crisis_care_turn" in src
-    assert "handle_crisis_followup" in src
-    assert "crisis_followup_classify" in guard_src
-    assert "release_count < 2" in guard_src
-    assert "followup_release_pending" in guard_src
-    assert "decision.skip_boundary = decision.crisis_care_turn" in guard_src
+@pytest.mark.asyncio
+async def test_graph_crisis_followup_precedes_current_state_fast_path(monkeypatch):
+    from tests.g02_harness_support import configure_pair
+    from app.services.chat import orchestrator as chat
+    from app.services.memory.retrieval import safety
+    from app.services import portrait
+    io = configure_pair(monkeypatch)
+    monkeypatch.setattr(chat, "discard_pending_states_for_crisis", AsyncMock())
+    io.decision.crisis_followup_active = True
+    io.decision.crisis_care_turn = True
+    io.decision.intent_metadata = {"followup": True}
+    retrieve = AsyncMock(return_value=[])
+    monkeypatch.setattr(safety, "retrieve_crisis_followup_memories", retrieve)
+    monkeypatch.setattr(portrait, "get_latest_portrait", AsyncMock(return_value=None))
+    current = AsyncMock(side_effect=AssertionError("current-state bypassed crisis guard"))
+    monkeypatch.setattr(chat, "handle_current_state", current)
+    async def handle(text, ctx, **kwargs):
+        async for event in ctx.finalize("我在，先陪着你", kind="crisis_followup"):
+            yield event
+    monkeypatch.setattr(chat, "handle_crisis_followup", handle)
+    events = [event async for event in chat.stream_chat_response("c-1", "你在干嘛", io.agent, "u-1")]
+    retrieve.assert_awaited_once()
+    current.assert_not_awaited()
+    chat.fetch_parallel_context.assert_not_awaited()
+    chat.detect_intent_unified.assert_not_awaited()
+    chat.discard_pending_states_for_crisis.assert_awaited_once_with("c-1")
+    assert events[-1]["event"] == "done"

@@ -520,14 +520,13 @@ async def test_real_recording_failure_keeps_watermark_for_retry(checker, monkeyp
     watermark.assert_awaited_once()
 
 
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_real_chat_executor_delivers_and_records_same_correction(checker, monkeypatch, executor):
     from app.config import settings
     from app.services.chat import orchestrator as chat
     from tests.g02_harness_support import configure_pair
     io = configure_pair(monkeypatch)
     io.agent.city = agent().city
-    monkeypatch.setattr(settings, "chat_executor", executor)
     monkeypatch.setattr(chat, "_memory_weak_reply", AsyncMock(return_value="我本来就住镇江"))
     events = [evt async for evt in chat.stream_chat_response("c-1", "今天怎么样", io.agent, "u-1",
               reply_context={"received_at": io.now.isoformat()})]

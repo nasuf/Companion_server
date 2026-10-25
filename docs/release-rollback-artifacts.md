@@ -118,3 +118,19 @@ and accumulated messages are bounded. Truncation, retention gaps in a sampled
 window, missing sources or overdue unproved replies block acceptance and remain
 recorded. Between-container observation gaps remain explicitly unobserved; no
 claim is made about unsampled conversations or whole-site reliability.
+
+## After legacy executor retirement (CONV01.01)
+
+Current chat code has one executor; restoring `CHAT_EXECUTOR=legacy` is not a
+rollback. Deployment still writes fixed graph/all-conversation flags into the
+private environment for older qualified images. When rolling back into a
+pre-retirement image, verify those effective flags select LangGraph for all
+conversations and preserve the qualified delay configuration. Do not restore an
+old cohort/legacy rollout JSON or treat its contents as the running state.
+The 410f2ba1 rollback floor and emergency delay-off gate above still apply.
+
+Prefer a target containing `c302aa61` (the whole-turn filler guard and qualified
+SQL-only audit client) as well.
+Older images can read the additive schema but ignore `filler_emoji_probability=0`
+and restore the old 30% emoji-only shortcut. Schema compatibility does not preserve
+the paused behavior; record that regression explicitly before an emergency rollback.

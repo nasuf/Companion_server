@@ -131,7 +131,7 @@ def test_identical_instants_keep_elapsed_query_and_cache_contract():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 @pytest.mark.parametrize("kind", ["missing", "elapsed", "calendar", "conflict", "cross_day"])
 async def test_real_executors_use_complete_original_time_evidence(monkeypatch, executor, kind):
     from types import SimpleNamespace
@@ -142,7 +142,6 @@ async def test_real_executors_use_complete_original_time_evidence(monkeypatch, e
     from tests.g02_harness_support import configure_pair
     io = configure_pair(monkeypatch)
     io.now = NOW
-    monkeypatch.setattr(settings, "chat_executor", executor)
     message = "一小时前去了哪里" if kind == "elapsed" else "昨天去了哪里"
     rows = [row("a")]
     if kind != "missing":

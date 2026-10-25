@@ -2,16 +2,21 @@
 
 G01 implementation baseline: server `51a1501006b795d4daf1ec584fea4a588a571d47`.
 
-The public `stream_chat_response` selects one executor for the entire logical
-turn. The code default is `legacy`. `CHAT_EXECUTOR=langgraph` selects graph for
-an exact ID in `CHAT_GRAPH_CONVERSATION_ALLOWLIST`, or for every nonempty ID
-when `CHAT_GRAPH_ALL_CONVERSATIONS=true`. Full mode uses an empty allowlist;
-without that explicit boolean, an empty list selects legacy. The legacy master
-switch overrides both modes. Legacy recursive children remain in legacy.
-Once graph execution starts, failure is surfaced without replaying legacy.
-Production was explicitly authorized for full coverage on 2026-10-04 after the
-internal trial. Remaining G03 business/observation/actual-worker rollback checks
-are still pending; full activation does not imply checkpoint readiness.
+## Current contract: CONV01.01 (2026-10-25)
+
+`stream_chat_response` always runs LangGraph. The legacy executor and application
+cohort/master selection settings are removed. Failures are surfaced without
+replaying an already started turn. Recursive public child calls are rejected;
+fragments remain transitions owned by one parent graph.
+
+Deployment writes fixed `CHAT_EXECUTOR=langgraph`,
+`CHAT_GRAPH_ALL_CONVERSATIONS=true`, and an empty allowlist **only for qualified
+older-image rollback compatibility**. Current application code ignores these
+retired environment keys. The old private host rollout JSON is retained but no
+longer read or modified. Changing it cannot switch current traffic to legacy.
+Rollback uses the qualified immutable image procedure in
+[release-rollback-artifacts.md](release-rollback-artifacts.md), never a runtime
+executor toggle. SQL ingress and checkpoint execution remain separately gated.
 
 G01 uses a real StateGraph with production phase adapters:
 
@@ -26,13 +31,17 @@ owns user persistence, usage, trace root, the final achievement, background
 processing and the single `done` event. Per-message achievement/notification
 hooks remain in the existing reply persistence layer.
 
-The legacy implementation is retained as the migration reference and fallback.
-`graph_phases.py` adapts the current production code without changing registry
-prompts, model routing or intent rules. This temporarily duplicates orchestration
-code. Subsequent domain changes must qualify both executors until adapters are
-consolidated through later rollout stages; wholesale frozen-candidate merging
-is prohibited. The source-reference tests explicitly inspect the legacy
-implementation; graph behavior is checked with runtime tests and paired inputs.
+`graph_phases.py` is the sole orchestration path. Domain handlers, registry
+prompts, model routing and intent rules are unchanged by this retirement.
+The former paired tests now assert the graph's existing business, persistence,
+cancellation, memory, proactive and wire contracts. Source-string assertions on
+the deleted executor are replaced by runtime assertions. Historical paired reports
+and old Trace schemas remain readable. The old live paired CLI rejects execution
+before provider/DB calls; it must never label two graph runs as legacy vs graph.
+
+The shared service exports in `orchestrator.py` remain because graph adapters use
+them. Further compatibility/helper removal requires the CONV01.05 read-only
+inventory and user approval; it is not bundled into executor retirement.
 
 Graph state contains only JSON decisions and diagnostics. Agent/service objects,
 provider results and owned tasks live in invocation context. Each node declares
@@ -84,7 +93,7 @@ placeholders/rendering before publishing, preserve enabled state, and verify
 DB, Redis, version provenance and the runtime getter afterward. Do not relabel
 an existing `code_sync` revision as a Web save.
 
-## G03: controlled activation and observation
+## Historical G03 migration procedure (superseded; do not execute)
 
 The trace and read-only observation changes can be released independently while
 keeping `CHAT_EXECUTOR=legacy` and the conversation allowlist empty. An internal

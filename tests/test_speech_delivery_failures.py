@@ -130,14 +130,13 @@ async def test_cancelled_attachment_creation_removes_file_after_metering(monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+@pytest.mark.parametrize("executor", ["langgraph"])
 async def test_ordinary_chat_save_failure_cleans_prepared_voice(monkeypatch, executor):
     from app.config import settings
     from app.services.chat import orchestrator as chat
     from tests.graph_harness_support import configure_chat
 
     io = configure_chat(monkeypatch)
-    monkeypatch.setattr(settings, "chat_executor", executor)
     monkeypatch.setattr(policy, "should_generate_voice", AsyncMock(return_value=True))
     prepared = prepared_voice()
     discard = AsyncMock()
