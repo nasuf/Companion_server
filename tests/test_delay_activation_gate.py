@@ -309,14 +309,72 @@ async def test_later_message_waits_for_own_conversation_but_not_other_conversati
     assert delivery.generated[-1]['user_message_id'] == 'msg-2'
 
 
-async def test_lease_redis_failure_cancels_owner(isolated, monkeypatch):
-    token = await q.try_lock_conversation('conv')
+async def test_lease_redis_failure_cancels_owner_before_expiry(isolated, monkeypatch):
+    token = await q.try_lock_conversation('conv', ttl=1)
     broken = AsyncMock(side_effect=ConnectionError('renew unavailable'))
     monkeypatch.setattr(isolated, 'eval', broken)
+    loop = asyncio.get_running_loop()
     async def owning():
-        async with q.maintain_conversation_lock('conv', token, interval=.01):
+        async with q.maintain_conversation_lock('conv', token, ttl=1, interval=.05):
             await asyncio.sleep(5)
+    started = loop.time()
     task = asyncio.create_task(owning())
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 1)
-    assert broken.await_count == 1
+        await asyncio.wait_for(task, 2)
+    # Retried while the lease was still valid, cancelled before it could expire.
+    assert broken.await_count > 1
+    assert .5 <= loop.time() - started < 1
+
+
+async def test_transient_lease_renewal_failure_keeps_owner(isolated, monkeypatch):
+    token = await q.try_lock_conversation('conv', ttl=1)
+    real_eval = isolated.eval
+    calls = []
+    async def flaky(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise ConnectionError('one slow renewal')
+        return await real_eval(*args, **kwargs)
+    monkeypatch.setattr(isolated, 'eval', flaky)
+    async def owning():
+        async with q.maintain_conversation_lock('conv', token, ttl=1, interval=.1):
+            await asyncio.sleep(1.3)
+    await asyncio.wait_for(owning(), 2)
+    assert len(calls) > 2
+    assert await isolated.get(q._LOCK_KEY.format(cid='conv')) == token
+    await q.unlock_conversation('conv', token)
+
+
+def done_errors(manager):
+    return [c for c in manager.send_event.await_args_list
+            if c.args[1] == 'done' and c.args[2].get('message_id') == 'error']
+
+
+async def test_cancel_after_dequeue_reports_failure(delivery, isolated):
+    await q.enqueue_or_append_delayed('conv', payload(), 0)
+    task = asyncio.create_task(delivery.s._run_due_delayed_reply('conv'))
+    await wait_for(lambda: len(delivery.generated) == 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(done_errors(delivery.manager)) == 1
+    assert not await isolated.exists(q._LOCK_KEY.format(cid='conv'))
+
+
+async def test_cancel_before_dequeue_reports_nothing(delivery, isolated):
+    await q.enqueue_or_append_delayed('conv', payload(), 0)
+    task = asyncio.create_task(delivery.s._run_due_delayed_reply('conv'))
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert not done_errors(delivery.manager)
+    assert await q.has_pending_delayed_messages('conv')
+
+
+async def test_lock_error_before_dequeue_keeps_queue_without_false_failure(delivery, isolated, monkeypatch):
+    await q.enqueue_or_append_delayed('conv', payload(), 0)
+    monkeypatch.setattr(delivery.s, 'try_lock_conversation',
+                        AsyncMock(side_effect=ConnectionError('lock unavailable')))
+    await delivery.s._run_due_delayed_reply('conv')
+    assert not done_errors(delivery.manager)
+    assert await q.has_pending_delayed_messages('conv')
+    delivery.s._record_job_outcome.assert_awaited_once_with('delayed_reply', ok=False, detail='ConnectionError')

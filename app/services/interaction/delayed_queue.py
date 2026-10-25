@@ -354,18 +354,41 @@ return 1
 
 @asynccontextmanager
 async def maintain_conversation_lock(conversation_id: str, token: str, *, ttl: int = 120, interval: float = 30):
-    """Renew an already acquired lease; fail closed if ownership becomes uncertain."""
+    """Renew an already acquired lease; cancel the owner before it could expire.
+
+    A failed renewal is retried: the lease stays ours until its TTL runs out,
+    and cancelling then would drop an already dequeued reply. The owner is
+    cancelled when Redis reports another owner, or when no renewal succeeded
+    early enough to be sure the lease is still held.
+    """
     owner = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    margin = min(15.0, ttl / 4)
+    retry = min(interval, 5.0)
     async def renew():
+        # Renewal anchors are request send times, so the server-side expiry is
+        # never earlier; the first anchor trails acquisition by one scheduling
+        # step, far inside the margin.
+        renewed_at = loop.time()
+        delay = interval
         try:
             while True:
-                await asyncio.sleep(interval)
-                async with asyncio.timeout(min(5, ttl / 4)):
-                    redis = await get_redis()
-                    held = await redis.eval(_RENEW_LUA, 2, _LOCK_KEY.format(cid=conversation_id),
-                                            _INFLIGHT_KEY.format(cid=conversation_id), token, ttl)
+                await asyncio.sleep(delay)
+                if loop.time() >= renewed_at + ttl - margin:
+                    raise RuntimeError("conversation lease renewal overdue")
+                sent_at = loop.time()
+                try:
+                    async with asyncio.timeout(min(5, ttl / 4)):
+                        redis = await get_redis()
+                        held = await redis.eval(_RENEW_LUA, 2, _LOCK_KEY.format(cid=conversation_id),
+                                                _INFLIGHT_KEY.format(cid=conversation_id), token, ttl)
+                except Exception as exc:
+                    logger.warning("[DELAY-LEASE-RETRY] conv=%s type=%s", conversation_id, type(exc).__name__)
+                    delay = min(retry, max(0.0, renewed_at + ttl - margin - loop.time()))
+                    continue
                 if not held:
                     raise RuntimeError("conversation lease lost")
+                renewed_at, delay = sent_at, interval
         except Exception:
             logger.exception("[DELAY-LEASE-LOST] conv=%s", conversation_id)
             owner.cancel()

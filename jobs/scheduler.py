@@ -1569,6 +1569,9 @@ async def _run_due_delayed_reply(conv_id: str, claimed: asyncio.Future | None = 
 
     # The lease surrounds dequeue and generation. Renewal failure cancels the
     # owner before another worker can acquire its expired lease.
+    if claimed is None:
+        claimed = asyncio.get_running_loop().create_future()
+    finished = False
     try:
         lock_token = await try_lock_conversation(conv_id, ttl=120)
         if not lock_token:
@@ -1576,6 +1579,7 @@ async def _run_due_delayed_reply(conv_id: str, claimed: asyncio.Future | None = 
         try:
             async with maintain_conversation_lock(conv_id, lock_token):
                 await _deliver_locked_delayed_reply(conv_id, lock_token, claimed)
+                finished = True
         finally:
             try:
                 await clear_reply_inflight(conv_id, token=lock_token)
@@ -1583,14 +1587,30 @@ async def _run_due_delayed_reply(conv_id: str, claimed: asyncio.Future | None = 
                 await unlock_conversation(conv_id, lock_token)
     except asyncio.CancelledError:
         logger.warning("[DELAY-CANCELLED] conv=%s", conv_id)
+        # Shutdown or lease loss after dequeue: this turn gets no reply, so
+        # the user must see a failure instead of waiting silently.
+        if _dequeued(claimed) and not finished:
+            await _notify_delayed_reply_failed(manager, conv_id)
         raise
     except Exception as exc:
         logger.exception("Delayed reply failed conv=%s type=%s", conv_id, type(exc).__name__)
         await _record_job_outcome("delayed_reply", ok=False, detail=type(exc).__name__)
-        try:
+        # Before dequeue the messages are still in Redis and the next scan
+        # retries them; reporting a failure then would be false.
+        if _dequeued(claimed) and not finished:
+            await _notify_delayed_reply_failed(manager, conv_id)
+
+
+def _dequeued(claimed: asyncio.Future) -> bool:
+    return claimed.done() and not claimed.cancelled() and claimed.result() is True
+
+
+async def _notify_delayed_reply_failed(manager, conv_id: str) -> None:
+    try:
+        async with asyncio.timeout(2):
             await manager.send_event(conv_id, "done", {"message_id": "error", "error": "回复生成失败"})
-        except Exception:
-            logger.warning("Unable to deliver delayed reply failure conv=%s", conv_id)
+    except Exception:
+        logger.warning("Unable to deliver delayed reply failure conv=%s", conv_id)
 
 
 async def _deliver_locked_delayed_reply(conv_id: str, lock_token: str, claimed: asyncio.Future | None = None):
