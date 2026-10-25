@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import time
 
 import httpx
@@ -29,20 +28,20 @@ async def main():
                 await asyncio.sleep(1)
             else:
                 raise AssertionError(f"Test service {host} did not start")
-        if os.environ.get("CHAT_GRAPH_ALL_CONVERSATIONS") == "true":
-            before = (await client.get("http://worker-a:8000/test/state")).json()["effects"]
-            for unauthorized, expected_status in (
-                ({}, 401),
-                ({"Authorization": "Bearer " + create_jwt("missing-account", "user")}, 401),
-                ({"Authorization": "Bearer " + create_jwt("intruder", "user")}, 403),
-            ):
-                denied = await client.post(
-                    "http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=unauthorized,
-                )
-                assert denied.status_code == expected_status, denied.text
-            after = (await client.get("http://worker-a:8000/test/state")).json()["effects"]
-            assert after == before
-            completed.append("Full rollout still rejects anonymous/cross-account access without business effects")
+        # Both retained CLI modes now exercise the single graph executor.
+        before = (await client.get("http://worker-a:8000/test/state")).json()["effects"]
+        for unauthorized, expected_status in (
+            ({}, 401),
+            ({"Authorization": "Bearer " + create_jwt("missing-account", "user")}, 401),
+            ({"Authorization": "Bearer " + create_jwt("intruder", "user")}, 403),
+        ):
+            denied = await client.post(
+                "http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=unauthorized,
+            )
+            assert denied.status_code == expected_status, denied.text
+        after = (await client.get("http://worker-a:8000/test/state")).json()["effects"]
+        assert after == before
+        completed.append("Full rollout still rejects anonymous/cross-account access without business effects")
         response = await client.post(
             "http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=headers
         )
@@ -119,11 +118,9 @@ async def main():
         # Nginx may assign a WebSocket to either worker. Reset/control both and
         # assert global side-effect counts instead of assuming round-robin parity.
         controls = await control_workers({"reset": True})
-        expect_all = os.environ.get("CHAT_GRAPH_ALL_CONVERSATIONS") == "true"
-        assert all(state["all_conversations"] is expect_all for state in controls)
-        assert all(state["allowlist"] == ("" if expect_all else "conv-1") for state in controls)
-        if expect_all:
-            completed.append("Explicit full rollout reaches real graph with an empty allowlist")
+        assert all(state["all_conversations"] is True for state in controls)
+        assert all(state["allowlist"] == "" for state in controls)
+        completed.append("Graph-only execution reaches the real graph with no cohort selection")
         async def mint():
             result = await client.post("http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=headers)
             result.raise_for_status()
