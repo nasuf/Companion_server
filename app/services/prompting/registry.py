@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.prompting.defaults import (
+    DIALOGUE_HISTORY_HEADER, DIALOGUE_CURRENT_MESSAGE_HEADER, DIALOGUE_CONTINUATION_HINT,
     MEMORY_EXTRACTION_SOURCE_CONTRACT_PROMPT,
     CHAT_TEMPORAL_RECALL_PROMPT, CHAT_TEMPORAL_RECALL_CHECK_PROMPT,
     CHAT_TEMPORAL_CONTEXT_PROMPT,
@@ -216,6 +217,7 @@ class PromptDefinition:
     category: str
     description: str
     default_text: str
+    default_enabled: bool = True
 
 
 # spec 文档来源标记约定 (description 内统一格式):
@@ -228,6 +230,13 @@ class PromptDefinition:
 # 工程项以 【工程补丁】/【工程附加】/【工程扩展】/【工程主导】 前缀标识, 不带 spec 引用.
 
 PROMPT_DEFINITIONS = [
+    PromptDefinition("chat.dialogue_history_header", "最近对话标题", "聊天热路径", "聊天",
+                     "【工程】8 个登记回复模板的历史标题；停用任一结构标题恢复原布局。", DIALOGUE_HISTORY_HEADER),
+    PromptDefinition("chat.dialogue_current_message_header", "本轮用户消息标题", "聊天热路径", "聊天",
+                     "【工程】历史之后的本轮消息标题；正文仅注入一次。", DIALOGUE_CURRENT_MESSAGE_HEADER),
+    PromptDefinition("chat.dialogue_continuation_hint", "本轮回复承接提示", "聊天热路径", "聊天",
+                     "【工程】末尾承接句（配对评测选定候选 B，默认启用）；只追加在轻量回复与询问当前状态回复后，告别、日程查询和作息调整不追加。",
+                     DIALOGUE_CONTINUATION_HINT),
     PromptDefinition(
         "chat.temporal_recall", "回忆问答与来源匹配", "聊天热路径", "聊天",
         "【工程】有界只读回忆问答，关联已有候选与人物/日期；不执行记忆或业务写入。材料以独立用户消息传入，无占位符。",

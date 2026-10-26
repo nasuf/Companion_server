@@ -262,6 +262,7 @@ async def generate_reply(
     needs_web_search: bool = False,
     web_search_location: dict[str, str] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    exclude_message_ids: set[str] | None = None,
 ) -> tuple[list[str], str, bool, dict | None]:
     """返回 (replies, raw_response, is_fallback, reply_emotion).
 
@@ -328,13 +329,11 @@ async def generate_reply(
         # This adds no business read or model call and respects admin disable.
         from app.services.chat.prompt_builder import _build_personality_section
 
-        # 与主路径 build_chat_messages 一致: 带时间前缀让 tier 回复也感知对话时间轴
-        from app.services.chat.prompt_builder import format_message_timestamp
-
-        context_text = "\n".join(
-            f"{format_message_timestamp(m.get('createdAt'))}{m['role']}: {m['content']}"
-            for m in messages_dicts[-6:]
-        ) or "(无)"
+        from app.services.chat.dialogue_context import render_dialogue
+        dialogue = render_dialogue(messages_dicts, exclude_ids=exclude_message_ids, purpose="tier")
+        context_text = dialogue.text
+        if diagnostics is not None:
+            diagnostics["dialogue_context"] = dialogue.metrics
         portrait_text = str(portrait) if portrait else "(未知)"
         user_lines, ai_lines = split_by_source(classified_memories)
         user_memory_text = "\n".join(f"- {t}" for t in user_lines) if user_lines else "(无)"
@@ -381,7 +380,7 @@ async def generate_reply(
                     user_message, classified_memories, diagnostics, max_chars=max_total,
                     recent_context=base_params["context"],
                     personality=base_params["personality_brief"],
-                    recent_user_context="\n".join(m["content"] for m in messages_dicts[-6:] if m["role"] == "user"),
+                    recent_user_context=dialogue.user_text,
                 )
                 temporal_recall_selected = tier_reply_text is not None
             if not temporal_recall_selected:

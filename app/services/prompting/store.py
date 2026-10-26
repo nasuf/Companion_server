@@ -72,7 +72,7 @@ async def _sync_cache(row) -> bool:
 
 def _response(definition, row, *, cache_synced=True, version_id=None, publication=None) -> dict:
     return {**asdict(definition), "content": row.content if row else definition.default_text,
-            "is_enabled": row.isEnabled if row else True, "source": "db" if row else "default",
+            "is_enabled": row.isEnabled if row else definition.default_enabled, "source": "db" if row else "default",
             "updated_at": row.updatedAt.isoformat() if row else None,
             "revision": row.revision if row else 0, "web_managed": row.webManaged if row else False,
             "cache_synced": cache_synced, "version_id": version_id,
@@ -130,7 +130,8 @@ async def _lock(tx, key):
 def _new_data(definition):
     return {"key": definition.key, "stage": definition.stage, "category": definition.category,
             "title": definition.title, "description": definition.description,
-            "content": definition.default_text, "defaultContent": definition.default_text}
+            "content": definition.default_text, "defaultContent": definition.default_text,
+            "isEnabled": definition.default_enabled}
 
 
 async def _version(tx, row, change_type, source):
@@ -162,7 +163,8 @@ async def is_prompt_enabled(key: str) -> bool:
     row = await db.prompttemplate.find_unique(where={"key": key})
     snapshot = _prompt_snapshot.get()
     # A live disable is a safety switch; enabling a prompt mid-turn waits for the next turn.
-    return (bool(row.isEnabled) if row else True) and (not snapshot or snapshot.get(key, (None, True))[1])
+    default_enabled = PROMPT_DEFINITION_MAP[key].default_enabled
+    return (bool(row.isEnabled) if row else default_enabled) and (not snapshot or snapshot.get(key, (None, default_enabled))[1])
 
 
 async def _mutate(key, change_type, *, content=None, enabled=None, version_id=None,
@@ -365,6 +367,7 @@ async def get_prompt_text(key: str) -> str:
         build_reply_prefix,
     )
 
+    template = ManagedPromptText(content, key, prompt_variant="active")
     if key in PROACTIVE_REPLY_PROMPT_KEYS:
         # Keep source components separate so Web trace editing targets the right key.
         try:
@@ -383,10 +386,12 @@ async def get_prompt_text(key: str) -> str:
             prefix = ""
         if prefix:
             if getattr(prefix, "parts", None):
-                return ManagedPromptText.compose([*prefix.parts, (key, content)], key)
-            content = f"{prefix}\n\n{content}"
+                template = ManagedPromptText.compose([*prefix.parts, (key, content)], key)
+            else:
+                template = ManagedPromptText(f"{prefix}\n\n{content}", key)
 
-    return ManagedPromptText(content, key, prompt_variant="active")
+    from app.services.prompting.dialogue_layout import attach_layout
+    return await attach_layout(template, get_prompt_text)
 
 
 async def get_prompt_text_or_default(key: str) -> str:

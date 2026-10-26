@@ -48,6 +48,7 @@ def create_tracer(
     user_message: str, conversation_id: str, *,
     executor: str | None = None, graph_version: str | None = None,
     usage_scope: str | None = None, owner_user_id: str | None = None,
+    chat_context_policy: dict | None = None,
 ) -> "LocalTracer | LangSmithTracer":
     """Trace backend switch (settings.trace_backend).
 
@@ -55,6 +56,8 @@ def create_tracer(
     is_active only fires for "local" ("off" turns tracing into a no-op).
     """
     metadata = {}
+    if chat_context_policy is not None:
+        metadata["chat_context_policy"] = chat_context_policy
     if owner_user_id is not None:
         metadata["owner_user_id"] = owner_user_id
     if usage_scope is not None:

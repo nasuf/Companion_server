@@ -22,7 +22,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.observability.events import EVT_CHAT_TOPIC_CONTINUATION
-from app.services.chat.message_utils import last_user_turns
 from app.services.interaction.topic_continuity import (
     FOLLOWUP_TRIGGER_TYPE,
     ContinuationCue,
@@ -30,7 +29,6 @@ from app.services.interaction.topic_continuity import (
     explain_cue,
     is_dialogue_noise,
     load_continuity,
-    render_dialogue,
 )
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_text
 from app.services.prompting.utils import render_prompt
@@ -40,8 +38,7 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
-# 提示词文档: "前20轮对话上下文". 按用户回合截, 不按行 (AI 回复拆成多个气泡各占一行).
-_CONTEXT_USER_TURNS = 20
+# 被动承接使用统一模板窗口；主动完结判断和 B 追问仍由各自的 20 轮窗口负责。
 _LLM_TIMEOUT_S = 6.0
 # 主回复已经准备好时最多再等这么久: 承接句是锦上添花, 不能把整轮回复拖慢
 _AWAIT_BUDGET_S = 3.0
@@ -91,17 +88,18 @@ def _history_text(history: list[Any], current_turn_ids: set[str]) -> str:
     """history 是 orchestrator 取出的消息行 (带 metadata, 才能滤掉游戏播报/收礼小灰条)."""
     from app.services.chat_media.prompt import render_message_content_for_prompt
 
+    from app.services.chat.dialogue_context import render_dialogue as render_recent
     entries = []
     for m in history:
-        if getattr(m, "id", None) in current_turn_ids:
-            continue
         metadata = m.metadata if isinstance(getattr(m, "metadata", None), dict) else None
         if is_dialogue_noise(metadata):
             continue
         text = render_message_content_for_prompt(str(m.content or ""), metadata).strip()
         if text:
-            entries.append((m.role, text, _as_datetime(getattr(m, "createdAt", None))))
-    return render_dialogue(last_user_turns(entries, _CONTEXT_USER_TURNS, lambda e: e[0]))
+            entries.append({"id": getattr(m, "id", None), "role": m.role, "content": text,
+                            "metadata": metadata, "createdAt": getattr(m, "createdAt", None)})
+    return render_recent(entries, exclude_ids=current_turn_ids, purpose="continuation").text
+
 
 
 def _clean_line(raw: str | None) -> str | None:

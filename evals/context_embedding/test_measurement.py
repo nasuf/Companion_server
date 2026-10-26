@@ -210,3 +210,53 @@ def test_corpus_category_minimum_and_unique_scenarios():
         len(c["turns"]) >= 2 and all(t["criterion"] for t in c["turns"]) for c in corpus
     )
     assert any(c["route"] == "web_search" for c in corpus)
+
+
+def test_full_message_prefix_sees_dynamic_segments_and_unicode():
+    from evals.context_embedding.measurement import message_list_prefix
+    a = [{'role': 'system', 'content': '稳定'}, {'role': 'system', 'content': '当前时间10:00'}]
+    b = [dict(a[0]), {'role': 'system', 'content': '当前时间11:00'}]
+    result = message_list_prefix(a, b)
+    assert result['equal_leading_messages'] == 1
+    assert not result['entire_list_equal']
+    assert 0 < result['common_prefix_bytes'] < result['previous_bytes']
+    assert message_list_prefix(None, a) is None
+    assert message_list_prefix(a, a)['entire_list_equal']
+
+
+def test_cache_excludes_first_turn_even_when_warmed():
+    rows = []
+    for turn, hit in [(0, 1000), (1, 100), (0, 1000), (1, 100)]:
+        measurement = dict(status='measured', input_tokens=1000, output_tokens=1,
+                           cached_input_tokens=hit, web_search_calls=0)
+        rows.append(dict(model=ARK_MODEL, route='chat.completions', measurement=measurement,
+                         price=priced_call(ARK_MODEL, 'chat.completions', measurement),
+                         replay_id='a' if len(rows)<2 else 'b', turn_index=turn, cache_eligible=turn>=1))
+    report = report_routes(rows)[0]
+    assert report['cache_hit_token_rate'] == .1
+    assert report['cache_eligible_calls'] == 2
+    assert report['cache_denominator_input_tokens'] == 2000
+    for row in rows:
+        row['full_message_prefix'] = {'common_prefix_bytes': 9000 if row['turn_index'] == 0 else 120,
+                                      'equal_leading_messages': 1, 'entire_list_equal': False}
+    prefixes = report_routes(rows)[0]['full_message_prefix']
+    assert prefixes['adjacent_pairs'] == 2
+    assert prefixes['p50_common_prefix_bytes'] == prefixes['p90_common_prefix_bytes'] == 120
+    assert prefixes['entire_list_equal_pairs'] == 0
+    for row in rows: row.pop('replay_id')
+    assert report_routes(rows)[0]['cache_hit_token_rate'] is None
+    assert report_routes(rows)[0]['full_message_prefix']['p50_common_prefix_bytes'] is None
+
+
+def test_repetition_metric_has_explicit_normalization_and_exact_06_boundary():
+    from evals.context_embedding.measurement import previous_reply_repetition
+    assert previous_reply_repetition(' 你好 ', '你好')['exact']
+    assert not previous_reply_repetition('你好！', '你好')['exact']
+    assert previous_reply_repetition('ＡＢＣＤ', 'abcd')['high_similarity']
+    assert previous_reply_repetition('abcde', 'abcdxyz')['bigram_similarity'] == .6
+    assert previous_reply_repetition('abcde', 'abcdxyz')['high_similarity']
+    assert not previous_reply_repetition('abcde', 'abcxyz')['high_similarity']
+    assert not previous_reply_repetition('🙂', '🙂')['high_similarity']
+    assert previous_reply_repetition('🙂', '🙂')['exact']
+    assert not previous_reply_repetition('你好', None)['comparable']
+    assert not previous_reply_repetition('你好', '   ')['comparable']

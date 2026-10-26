@@ -59,6 +59,7 @@ class AssistantTurn:
     content: str
     source_message_ids: tuple[str, ...]
     previous_user_text: str | None
+    bubble_count: int = 1
 
     @property
     def id(self) -> Any:
@@ -145,6 +146,7 @@ def previous_assistant_turn(recent_messages: list[Any], current_user_message_id:
         content="\n".join(str(message_field(m, "content") or "") for m in ordered),
         source_message_ids=tuple(str(message_field(m, "id")) for m in ordered if message_field(m, "id")),
         previous_user_text=previous_user_text,
+        bubble_count=len(ordered),
     )
 
 

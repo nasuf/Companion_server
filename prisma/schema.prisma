@@ -2279,6 +2279,8 @@ model SystemConfig {
   // 后台「聊天管理 → 主动交流」改过的参数 (只存与默认不同的项; 登记表见
   // app/services/proactive/tuning.py). null = 全部用默认。
   proactivePolicy                Json?    @map("proactive_policy")
+  // SQL-only field: read in the consistent runtime-config snapshot.
+  chatContextPolicy              Json?    @map("chat_context_policy") @ignore
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String?  @map("default_template_agent_id")
@@ -2859,4 +2861,16 @@ model RuntimeConfigChange {
   // SQL-only audit writes/readback: avoid unused generated CRUD/type expansion.
   @@ignore
   @@map("runtime_config_changes")
+}
+
+// SQL-only audit history, no generated CRUD graph required.
+model ChatContextPolicyChange {
+  id        String   @id @default(uuid())
+  adminId   String?  @map("admin_id")
+  changes   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@ignore
+  @@index([createdAt(sort: Desc)])
+  @@map("chat_context_policy_changes")
 }

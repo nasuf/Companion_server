@@ -200,6 +200,9 @@ class ChatFrame:
 
         # Persist diagnostics using the existing metadata/API contract. Runtime
         # handles and entire graph state never enter message metadata.
+        from copy import deepcopy
+        from app.services.chat.context_policy import observation
+
         payloads = []
         for reply in replies:
             payload = dict(reply) if isinstance(reply, dict) else {"text": reply}
@@ -212,6 +215,8 @@ class ChatFrame:
                 fragment_index=self.owner.fragment_index,
                 checkpoint_enabled=False,
             )
+            if observation() is not None:
+                diagnostics["chat_context_policy"] = deepcopy(observation())
             payload["response_diagnostics"] = diagnostics
             if self.contradiction_inquiry or (self.preflight_ctx and self.preflight_ctx.memory_confirmation):
                 payload["memory_confirmation"] = True

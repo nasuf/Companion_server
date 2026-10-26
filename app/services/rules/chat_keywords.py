@@ -102,6 +102,15 @@ CURRENT_STATE_PREDICATE_TERMS = (
     "干嘛", "做什么", "做啥", "忙", "有空", "怎么样", "还好吗",
     "心情", "感觉", "开心", "难过", "状态", "睡", "困",
 )
+# "现在在干嘛呢" / "手头在忙什么" / "此刻在哪里" ask about AI's present state
+# without naming it. Only activity, availability and whereabouts qualify:
+# "那只猫现在怎么样了" asks about something else, so state-of-being words stay out.
+CURRENT_STATE_DEIXIS_TERMS = ("现在", "这会儿", "手头", "此刻")
+CURRENT_STATE_DEIXIS_PREDICATE_TERMS = ("干嘛", "做什么", "做啥", "忙", "有空", "在哪")
+# Someone else is the subject: a third party, or the user ("我现在在哪儿")
+# when the AI is not named at all.
+CURRENT_STATE_THIRD_PARTY_TERMS = ("他", "她", "它")
+CURRENT_STATE_SELF_TERM = "我"
 
 L3_EXPLICIT_OLD_RE = re.compile(
     r"("

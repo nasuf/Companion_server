@@ -181,8 +181,22 @@ def render_template(
     *,
     optional_keys: Iterable[str] | None = None,
     safe: bool = True,
+    context_parts: tuple[tuple[str, str], ...] = (),
 ) -> str:
     """Format a prompt template after dropping optional empty reference rows."""
+    from app.services.prompting.dialogue_layout import DialoguePromptText
+    if isinstance(template, DialoguePromptText):
+        return template.render_dialogue(params, optional_keys=optional_keys,
+                                        safe=safe, context_parts=context_parts)
+    if context_parts:
+        key = getattr(template, "prompt_key", "")
+        parts = [(part_key, render_template(ManagedPromptText(text, part_key), params,
+                                            optional_keys=optional_keys, safe=safe))
+                 for part_key, text in (getattr(template, "parts", None) or [(key, str(template))])]
+        parts.extend((part_key, text) for part_key, text in context_parts if text)
+        composed = ManagedPromptText.compose(parts, key)
+        composed.prompt_variant = getattr(template, "prompt_variant", "active")
+        return composed.render_components(str)
     if getattr(template, "parts", None):
         def render_part(part):
             compacted = compact_optional_reference_rows(str(part), params, optional_keys)
@@ -248,18 +262,7 @@ async def render_prompt(
     try:
         tmpl = await get_prompt_text(prompt_key)
         context_parts = tuple((key, text) for key, text in context_parts if text)
-        if context_parts:
-            # Render template components first. Pre-rendered context is literal:
-            # formatting or optional-row compaction must not consume its braces.
-            parts = [(key, render_template(ManagedPromptText(text, key), params,
-                                            optional_keys=optional_keys))
-                     for key, text in (getattr(tmpl, "parts", None) or [(prompt_key, str(tmpl))])]
-            parts.extend(context_parts)
-            composed = ManagedPromptText.compose(parts, prompt_key)
-            composed.prompt_variant = getattr(tmpl, "prompt_variant", "active")
-            prompt = composed.render_components(str)
-        else:
-            prompt = render_template(tmpl, params, optional_keys=optional_keys)
+        prompt = render_template(tmpl, params, optional_keys=optional_keys, context_parts=context_parts)
         raw = await invoke_fn(prompt)
         if isinstance(raw, str):
             if strip_split:

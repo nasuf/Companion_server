@@ -23,7 +23,7 @@ from app.observability.events import (
 from app.services.temporal_query import TemporalQuery
 from app.services.temporal import parse_time
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
-from app.services.chat.message_utils import last_user_turns
+from app.services.chat.dialogue_context import render_dialogue
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
 from app.services.memory.retrieval.knowledge_hits import probe_knowledge_memories
 from app.services.memory.retrieval.l3_awakening import search_l3_memories
@@ -268,72 +268,23 @@ def _unwrap(result: _T, default: _T, label: str) -> _T:
     return result
 
 
-RECENT_CONTEXT_TURNS = 3
-_RECENT_CONTEXT_LINE_CHARS = 150
-_RECENT_CONTEXT_MAX_CHARS = 900
+# Compatibility exports share the same formatter; explicit window callers retain theirs.
+def format_dialogue_lines(messages, *, turns=None, line_chars=800) -> list[str]:
+    return list(render_dialogue(messages, turns=turns, line_chars=line_chars).lines)
 
 
-def format_dialogue_lines(
-    messages: list[dict],
-    *,
-    turns: int = RECENT_CONTEXT_TURNS,
-    line_chars: int = _RECENT_CONTEXT_LINE_CHARS,
-) -> list[str]:
-    """Last ``turns`` user turns as "用户: …" / "AI: …" lines, one line per speaker turn.
-
-    The bubbles of one AI reply are joined into one line first — otherwise a
-    3-bubble reply reads as "AI spoke three times" and, under a row-count window,
-    pushes every earlier user line out (2026-10-15 trace: the relevance check saw
-    only the last AI reply's bubbles plus the current message).
-
-    Over-long user lines keep their head; AI lines keep their tail, because the
-    end of a reply (usually a question) is what the user is answering.
-    """
-    merged: list[tuple[str, str]] = []
-    for m in messages:
-        text = (m.get("content") or "").strip()
-        if not text:
-            continue
-        role = "assistant" if m.get("role") == "assistant" else "user"
-        if merged and merged[-1][0] == role:
-            merged[-1] = (role, f"{merged[-1][1]} {text}")
-        else:
-            merged.append((role, text))
-    lines: list[str] = []
-    for role, text in last_user_turns(merged, turns, lambda item: item[0]):
-        if len(text) > line_chars:
-            text = f"…{text[-line_chars:]}" if role == "assistant" else f"{text[:line_chars]}…"
-        lines.append(f"{'AI' if role == 'assistant' else '用户'}: {text}")
-    return lines
-
-
-def format_recent_context(
-    messages_dicts: list[dict],
-    *,
-    turns: int = RECENT_CONTEXT_TURNS,
-    max_chars: int = _RECENT_CONTEXT_MAX_CHARS,
-    exclude_message_id: str | None = None,
-    exclude_message_ids: set[str] | None = None,
-) -> str:
-    """Recent dialogue (last ``turns`` user turns) for lightweight classifiers and prompts.
-
-    exclude_message_id(s): 当前用户消息已经在 prompt 的 {message} 占位符里, 不排除
-    LLM 会看到它两遍 (生产 trace 2026-05-07 16:57 实测). 超出 max_chars 时从最旧
-    的整行开始丢, 不在行中间截断.
-    """
-    excluded_ids = set(exclude_message_ids or set())
+def format_recent_context(messages_dicts, *, turns=None, max_chars=None,
+                          exclude_message_id=None, exclude_message_ids=None, purpose="checks") -> str:
+    from app.services.chat import context_policy
+    excluded = set(exclude_message_ids or ())
     if exclude_message_id:
-        excluded_ids.add(exclude_message_id)
-    kept = [m for m in messages_dicts or [] if m.get("id") not in excluded_ids]
-    lines = format_dialogue_lines(kept, turns=turns)
-    selected: list[str] = []
-    used = 0
-    for line in reversed(lines):
-        if selected and used + len(line) + 1 > max_chars:
-            break
-        selected.append(line)
-        used += len(line) + 1
-    return "\n".join(reversed(selected)) or EMPTY_RECENT_CONTEXT
+        excluded.add(exclude_message_id)
+    judgement = purpose in {"intent", "relevance"}
+    if judgement:
+        max_chars = min(max_chars, context_policy.JUDGEMENT_MAX_CHARS) if max_chars is not None else context_policy.JUDGEMENT_MAX_CHARS
+    return render_dialogue(messages_dicts, turns=turns, max_chars=max_chars,
+                           line_chars=context_policy.JUDGEMENT_LINE_CHARS if judgement else context_policy.LINE_CHARS,
+                           exclude_ids=excluded, purpose=purpose).text
 
 
 async def _load_portrait(user_id: str, agent_id: str | None) -> Any:
@@ -610,7 +561,7 @@ async def fetch_parallel_context(
     # The relevance / web-search prompts carry the current message in {message};
     # leaving it in {context} too showed it twice and cost a window slot.
     recent_context = format_recent_context(
-        messages_dicts, exclude_message_ids=exclude_message_ids,
+        messages_dicts, exclude_message_ids=exclude_message_ids, purpose="relevance",
     )
 
     fast_weak_relevance = _should_fast_weak_relevance(user_message)

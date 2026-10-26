@@ -12,6 +12,7 @@ from app.config import settings
 from app.services.chat import orchestrator as chat
 from app.services.chat.data_fetch_phase import FetchedContext
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
+from app.services.prompting.defaults import DIALOGUE_CONTINUATION_HINT
 from tests.g02_harness_support import configure_pair
 from evals.reply_register.cases import ALL_CASES
 
@@ -143,7 +144,11 @@ async def test_graph_reply_paths_and_prompt_inputs(monkeypatch, case):
         else:
             assert len(io.tier_calls) == 1
             assert io.tier_calls[0][0] == ("l3" if case == "l3" else relevance)
-            assert "[2026-10-04 12:00] user: 今天有点累了" in io.tier_calls[0][1]["context"]
+            params = io.tier_calls[0][1]
+            assert params['message'] == '今天有点累了'
+            assert '今天有点累了' not in params['context']
+            assert '[10-03 08:00] 用户: hello' in params['context']
+            assert '[10-03 08:00] AI: hello' in params['context']
 
 
 @pytest.mark.asyncio
@@ -410,5 +415,9 @@ async def test_full_bank_classifier_decision_renders_expected_tier_prompt(monkey
         events = await collect(io, case.message, forced_intent=IntentType.NONE)
         invoke.assert_awaited_once()
         assert not io.main_calls
-        assert "用户刚才说：" + case.message in invoke.await_args.args[1]
+        rendered = invoke.await_args.args[1]
+        assert "用户刚才说：见文末【用户这次发来的消息】" in rendered
+        assert rendered.endswith("用户: " + case.message + "\n\n" + DIALOGUE_CONTINUATION_HINT)
+        # Template examples can coincidentally contain a short user utterance.
+        assert rendered.count("用户: " + case.message) == 1
         assert chat.finish_assistant_turn.await_count == 1

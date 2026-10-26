@@ -344,10 +344,15 @@ async def test_real_graph_traces_link_nodes_and_manual_provider(chat_io, monkeyp
     rows = [c.kwargs["data"] for c in fake.tracerun.create.await_args_list]
     roots = [row for row in rows if row["name"] == "chat_request"]
     assert len(roots) == 1
-    assert roots[0]["extraJson"].data["metadata"] == {
+    metadata = roots[0]["extraJson"].data["metadata"]
+    assert {k:v for k,v in metadata.items() if k != 'chat_context_policy'} == {
         "executor": "langgraph", "graph_version": "chat-g01-v1",
         "checkpoint_enabled": False, "usage_scope": "chat",
     }
+    assert metadata['chat_context_policy']['effective_rounds'] == 5
+    assert metadata['chat_context_policy']['format_version'] == 'dialogue-turns-v1'
+    assert metadata['chat_context_policy']['main_history_mode'] == 'budget'
+    assert isinstance(metadata['chat_context_policy']['windows'], dict)
     root = roots[0]["id"]
     nodes = [row for row in rows if row["name"] == "generate_reply"]
     assert len(nodes) == 1

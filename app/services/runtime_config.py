@@ -154,10 +154,11 @@ async def _load_caches_unlocked() -> None:
             overrides = await tx.agentconfigoverride.find_many()
             registry = await tx.modelregistry.find_many()
             prompts = await tx.prompttemplate.find_many()
-            revision_rows = await tx.query_raw("SELECT revision FROM configuration_revisions WHERE scope='models'")
+            revision_rows = await tx.query_raw("SELECT revision, (SELECT chat_context_policy FROM system_config WHERE id=1) AS chat_context_policy FROM configuration_revisions WHERE scope='models'")
         revision = int(revision_rows[0]["revision"])
         _verify_prisma_client_fields(sys_row)
         new_global = _row_to_dict(sys_row)
+        new_global["chatContextPolicy"] = revision_rows[0].get("chat_context_policy")
         new_agent = {row.agentId: _row_to_dict(row) for row in overrides}
         new_prompts = {row.key: (row.content, row.isEnabled) for row in prompts}
         identifier_counts: dict[str, int] = {}
@@ -340,6 +341,15 @@ def proactive_policy_overrides() -> dict:
     snapshot = _current_snapshot.get()
     glob = (snapshot.global_config if snapshot else _GLOBAL_CACHE) or {}
     raw = glob.get("proactivePolicy")
+    return raw if isinstance(raw, dict) else _EMPTY_POLICY
+
+
+
+def chat_context_policy_overrides() -> dict:
+    """Read the once-bound turn snapshot; worker refresh cannot mix a live turn."""
+    snapshot = _current_snapshot.get()
+    glob = (snapshot.global_config if snapshot else _GLOBAL_CACHE) or {}
+    raw = glob.get("chatContextPolicy")
     return raw if isinstance(raw, dict) else _EMPTY_POLICY
 
 

@@ -16,11 +16,15 @@ from app.services.interaction.boundary import APOLOGY_KEYWORDS
 from app.services.rules.chat_keywords import (
     AI_SCHEDULE_OFFER_CUES,
     CONVERSATION_END_KEYWORDS,
+    CURRENT_STATE_DEIXIS_PREDICATE_TERMS,
+    CURRENT_STATE_DEIXIS_TERMS,
     CURRENT_STATE_EXPLICIT_PHRASES,
     CURRENT_STATE_FAST_PHRASES,
     CURRENT_STATE_HISTORY_BLOCKERS,
     CURRENT_STATE_PREDICATE_TERMS,
+    CURRENT_STATE_SELF_TERM,
     CURRENT_STATE_SUBJECT_TERMS,
+    CURRENT_STATE_THIRD_PARTY_TERMS,
     CURRENT_STATE_TIME_BLOCKERS,
     L3_EXPLICIT_OLD_RE,
     L3_RECALL_CUE_RE,
@@ -141,6 +145,11 @@ def is_explicit_current_state_query(message: str) -> bool:
     if detect_current_state_fast_path(message):
         return True
     if normalized in CURRENT_STATE_EXPLICIT_PHRASES:
+        return True
+    if (any(term in normalized for term in CURRENT_STATE_DEIXIS_TERMS)
+            and any(term in normalized for term in CURRENT_STATE_DEIXIS_PREDICATE_TERMS)
+            and not any(term in normalized for term in CURRENT_STATE_THIRD_PARTY_TERMS)
+            and (CURRENT_STATE_SELF_TERM not in normalized or "你" in normalized)):
         return True
     if not any(term in normalized for term in CURRENT_STATE_SUBJECT_TERMS):
         return False

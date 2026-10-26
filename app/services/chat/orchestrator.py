@@ -171,7 +171,6 @@ from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
 from app.services.chat.data_fetch_phase import (
     FetchedContext,
     fetch_parallel_context,
-    format_dialogue_lines,
     format_recent_context,
     maybe_awaken_l3,
 )
@@ -340,11 +339,7 @@ async def _record_memory_retrieval_feedback(
         logger.exception("[MEM-FEEDBACK] failed to record memory retrieval feedback")
 
 
-# 最近 3 个用户回合, 覆盖 "好" / "嗯" / "对" 类短应答对前一两轮 AI 问话的依赖.
-# 曾是 6 行 (注释说 ≈3 轮), 但 AI 一次回复拆成多个气泡各占一行, 6 行实际只剩
-# 1.5 轮 (2026-10-15 trace). 取数上限只为装下 3 个回合的气泡, 不决定窗口大小.
-_INTENT_CONTEXT_TURNS = 3
-_INTENT_CONTEXT_FETCH_LIMIT = 40
+# 模板上下文轮数由 chat.context_policy 控制，取数上限与主回复共用。
 
 # 历史消息的取数上限. 真正决定注入多少的是 build_chat_messages 的 token 预算
 # (CHAT_HISTORY_TOKEN_BUDGET=4000); 这里只是给 DB 查询一个安全上界.
@@ -380,7 +375,7 @@ async def _fetch_intent_context(
         rows = await db.message.find_many(
             where={"conversationId": conversation_id},
             order={"createdAt": "desc"},
-            take=_INTENT_CONTEXT_FETCH_LIMIT,
+            take=_HISTORY_FETCH_LIMIT,
         )
     except Exception as e:
         # 静默降级对意图识别质量影响较大, 生产环境需能 grep 到
@@ -412,11 +407,12 @@ async def _fetch_intent_context(
         ):
             content_fallback_consumed = True
             continue
-        kept.append({"role": role, "content": content})
+        kept.append({"id": getattr(row, "id", None), "role": role, "content": content,
+                     "createdAt": getattr(row, "createdAt", None), "metadata": getattr(row, "metadata", None)})
 
     # desc 顺序 → 反转为时间顺序
     kept.reverse()
-    return "\n".join(format_dialogue_lines(kept, turns=_INTENT_CONTEXT_TURNS))
+    return format_recent_context(kept, purpose="intent") if kept else ""
 
 
 

@@ -39,6 +39,7 @@ async def stream_graph_response(
         start_prompt_render_trace,
     )
     from app.services.runtime_config import bind_agent_context, reset_current_agent
+    from app.services.chat import context_policy
 
     # Children are explicit graph fragment transitions, never recursive turns.
     if sub_intent_mode:
@@ -50,7 +51,7 @@ async def stream_graph_response(
     workspace_id = getattr(conversation, "workspaceId", None)
     context = None
     tracer = None
-    agent_token = usage_token = retrieval_token = prompt_token = None
+    agent_token = usage_token = retrieval_token = prompt_token = context_policy_token = None
     try:
         if save_user_message:
             saved = await services.db.message.create(
@@ -63,10 +64,11 @@ async def stream_graph_response(
             user_message_id = saved.id
             # Statistics registration commits with the message INSERT.
         agent_token = await bind_agent_context(agent_id)
+        context_policy_token = context_policy.start_observation()
         usage_token = usage_tracker.start_session()
         tracer = services.create_tracer(
             user_message, conversation_id, executor="langgraph",
-            graph_version=GRAPH_VERSION,
+            graph_version=GRAPH_VERSION, chat_context_policy=context_policy.observation(),
         ).enter()
         retrieval_token = start_retrieval_trace()
         prompt_token = start_prompt_render_trace()
@@ -138,6 +140,7 @@ async def stream_graph_response(
                 reset_retrieval_trace(retrieval_token)
             if prompt_token is not None:
                 reset_prompt_render_trace(prompt_token)
+            context_policy.reset_observation(context_policy_token)
             reset_current_agent(agent_token)
             if tracer is not None:
                 tracer.close()

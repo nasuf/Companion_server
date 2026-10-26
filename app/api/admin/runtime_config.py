@@ -555,8 +555,9 @@ async def put_system_config(
 async def get_filler_emoji_history() -> dict[str, Any]:
     """Admin-only, bounded history for the global filler probability."""
     rows = await db.query_raw(
-        'SELECT id, admin_id, "before", "after", created_at FROM runtime_config_changes '
-        'WHERE key = $1 ORDER BY created_at DESC, id DESC LIMIT 30',
+        'SELECT c.id, c.admin_id, u.username AS admin_name, c."before", c."after", c.created_at '
+        'FROM runtime_config_changes c LEFT JOIN users u ON u.id=c.admin_id '
+        'WHERE c.key = $1 ORDER BY c.created_at DESC, c.id DESC LIMIT 30',
         "filler_emoji_probability",
     )
     changes = []

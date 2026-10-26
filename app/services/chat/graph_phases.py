@@ -57,6 +57,9 @@ async def load_turn(ctx):
     )
     ctx.covered_until_user_ts = services._max_user_created_at(ctx.messages_dicts)
     ctx.turn_clock = build_turn_clock(ctx.messages_dicts, exclude_ids=ctx.current_turn_ids, received_at=(ctx.reply_context or {}).get("received_at"))
+    from app.services.chat.context_policy import observation
+    if observation() is not None:
+        observation()["message_received_at"] = ctx.turn_clock.now.isoformat()
     ctx.reengagement_gap_seconds = services.compute_reengagement_gap_seconds(
         ctx.messages_dicts, exclude_ids=ctx.current_turn_ids, now=ctx.turn_clock.now
     )
@@ -90,6 +93,7 @@ async def guard(ctx):
         sub_intent_mode=ctx.sub_intent_mode,
         messages_dicts=ctx.messages_dicts,
         user_message_id=ctx.user_message_id,
+        exclude_message_ids=ctx.current_turn_ids,
     )
     ctx.crisis_force_intent = ctx.crisis_decision.crisis_force_intent
     ctx.crisis_followup_active = ctx.crisis_decision.crisis_followup_active
@@ -1103,6 +1107,7 @@ async def generate_reply(ctx):
         force_main_prompt=bool(ctx.offering_context) or bool(ctx.continuation_lines)
         or services.asks_about_user_location(ctx.user_message),
         diagnostics=ctx.response_diagnostics,
+        exclude_message_ids=ctx.current_turn_ids,
     )
     yield ctx.completed("generate_reply")
 

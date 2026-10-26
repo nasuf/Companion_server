@@ -58,14 +58,14 @@ class TestLastUserTurns:
 class TestRecentContext:
     def test_trace_window_keeps_three_user_turns(self):
         text = format_recent_context(_trace_dialogue(), exclude_message_ids={"cur"})
-        assert text.splitlines() == [
+        assert text.splitlines() == ["[10-15 15:24] " + line for line in [
             "用户: 还以为你长这样呢",
             "AI: 哈哈 那你觉得我长啥样呀？ 是偏甜的还是酷的呀？🤪",
             "用户: 甜吧",
             "AI: 被你说甜还挺开心的✨ 你觉得我是软甜还是酷甜呀？",
             "用户: 有什么区别啊",
             "AI: 软甜就是说话温温的👌 酷甜是带点小拽的那种 你更喜欢那种呀？",
-        ]
+        ]]
 
     def test_current_message_is_not_shown_twice(self):
         assert "我喜欢你" not in format_recent_context(
@@ -76,15 +76,13 @@ class TestRecentContext:
         text = format_recent_context(
             _trace_dialogue(), exclude_message_ids={"cur"}, max_chars=60,
         )
-        assert text.splitlines() == [
-            "用户: 有什么区别啊",
-            "AI: 软甜就是说话温温的👌 酷甜是带点小拽的那种 你更喜欢那种呀？",
-        ]
+        assert len(text) <= 60
+        assert text.splitlines() == ["[10-15 15:24] AI: 软甜就是说话温温的👌 酷甜是带点小拽的那种 你更喜欢那种呀？"]
 
     def test_long_ai_reply_keeps_its_final_question(self):
         msgs = [
             {"id": "u", "role": "user", "content": "在吗"},
-            {"id": "a", "role": "assistant", "content": "铺垫" * 200 + "你周末去哪玩？"},
+            {"id": "a", "role": "assistant", "content": "铺垫" * 1000 + "你周末去哪玩？"},
         ]
         line = format_recent_context(msgs).splitlines()[-1]
         assert line.startswith("AI: …") and line.endswith("你周末去哪玩？")
@@ -138,7 +136,7 @@ async def test_relevance_and_web_search_exclude_the_current_turn():
 
     for key in ("relevance", "web"):
         assert "我喜欢你" not in seen[key]
-        assert seen[key].startswith("用户: 还以为你长这样呢")
+        assert seen[key].startswith("[10-15 15:24] 用户: 还以为你长这样呢")
 
 
 class TestTwentyTurnWindows:
@@ -160,7 +158,7 @@ class TestTwentyTurnWindows:
         assert sum(t.role == "user" for t in turns) == 20
         assert turns[0].id == "u10" and turns[-1].id == "a292"
 
-    def test_topic_continuation_keeps_twenty_user_turns(self):
+    def test_topic_continuation_uses_five_turns_without_changing_followup_judge(self):
         from app.services.chat.topic_continuation import _history_text
 
         history = []
@@ -174,8 +172,8 @@ class TestTwentyTurnWindows:
 
         lines = _history_text(history, set()).splitlines()
 
-        assert sum(line.startswith("用户") for line in lines) == 20
-        assert lines[0] == "用户: 用户说10"
+        assert sum(line.startswith("用户") for line in lines) == 5
+        assert lines[0] == "用户: 用户说25"
 
 
 class TestMemoryPipelineContext:

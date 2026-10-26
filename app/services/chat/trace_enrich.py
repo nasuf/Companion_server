@@ -78,6 +78,9 @@ _BOUNDARY_BODY_PROMPT_KEYS = {
 
 # Registry 中不作为独立 LangSmith LLM step 出现、但会作为组合 prompt 的可编辑片段出现.
 _COMPONENT_ONLY_PROMPT_KEYS = {
+    "chat.dialogue_history_header",
+    "chat.dialogue_current_message_header",
+    "chat.dialogue_continuation_hint",
     "memory.extraction_source_contract",
     "chat.temporal_context",
     "chat.temporal_evidence",

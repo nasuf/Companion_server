@@ -13,6 +13,8 @@ historical phrases 搬到本文件作:
 
 from __future__ import annotations
 
+import pytest
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 历史 phrase 清单 — 必须分类为 RECORD_REQUEST
@@ -80,6 +82,27 @@ def test_current_state_fast_path_is_narrow():
     assert not is_explicit_current_state_query("这么晚还能看到云啊")
     assert not is_explicit_current_state_query("你刚才说在看云？")
     assert not is_explicit_current_state_query("去过哪些城市呢")
+
+
+@pytest.mark.parametrize("message", ["现在在干嘛呢？", "手头在忙什么呀？", "现在有空聊吗？",
+                                     "你此刻在哪里呀？", "这会儿在做啥"])
+def test_present_state_questions_without_you_stay_current_state(message):
+    from app.services.chat.intent_dispatcher import is_explicit_current_state_query
+    assert is_explicit_current_state_query(message)
+
+
+@pytest.mark.parametrize("message", [
+    "那只猫现在怎么样了",      # state of something else
+    "他现在在干嘛",            # a third party
+    "她这会儿在哪",
+    "我现在在哪儿？",          # the user is the subject
+    "你刚才说现在在忙什么来着",  # follow-up about the previous reply
+    "现在",                    # no predicate
+    "什么花呀", "大概内容是啥", "去哪里上班",
+])
+def test_follow_ups_and_third_parties_are_still_demoted(message):
+    from app.services.chat.intent_dispatcher import is_explicit_current_state_query
+    assert not is_explicit_current_state_query(message)
 
 
 def test_l3_recall_requires_explicit_oldness():

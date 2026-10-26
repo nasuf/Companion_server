@@ -104,3 +104,27 @@ async def test_search_counts_and_nonstream_latency(monkeypatch, status):
                     web_search_location={"city": "镇江"},
                 )
             assert calls[0]["price"]["cost_cny"] is None
+
+
+@pytest.mark.asyncio
+async def test_replay_namespace_stable_only_within_replay(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, 'ark_api_key', 'fixture')
+    monkeypatch.setattr(settings, 'ark_base_url', 'https://ark.invalid/api/v3')
+    sent = []
+    def handle(request):
+        sent.append(json.loads(request.content)['messages'])
+        return httpx.Response(200, text='data: '+json.dumps({'choices':[{'delta':{'content':'好'},'finish_reason':'stop'}], 'usage':{'prompt_tokens':20,'completion_tokens':1,'prompt_tokens_details':{'cached_tokens':0}}})+'\n\ndata: [DONE]\n\n')
+    original = [{'role':'system','content':'稳定'},{'role':'user','content':'你好'}]
+    calls=[]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        first=Transport(client,'doubao-seed-character-260628',False,calls,replay_id='one')
+        await first(original)
+        second=Transport(client,'doubao-seed-character-260628',False,calls,replay_id='one',turn_index=1,previous_messages=first.sent_messages)
+        await second(original+[{'role':'assistant','content':'好'},{'role':'user','content':'继续'}])
+        repeat=Transport(client,'doubao-seed-character-260628',False,calls,replay_id='two')
+        await repeat(original)
+    assert original[0]['content']=='稳定'
+    assert sent[0][0]==sent[1][0] and sent[0][0]!=sent[2][0]
+    assert [c['cache_eligible'] for c in calls]==[False,True,False]
+    assert calls[1]['full_message_prefix']['equal_leading_messages']==2

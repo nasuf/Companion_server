@@ -224,6 +224,7 @@ async def run_crisis_guard(
     sub_intent_mode: bool,
     messages_dicts: list[dict],
     user_message_id: str | None,
+    exclude_message_ids: set[str] | None = None,
     semantic_classify_fn: Callable[..., Awaitable[bool]] | None = None,
     followup_classify_fn: Callable[..., Awaitable[str]] | None = None,
 ) -> CrisisGuardDecision:
@@ -237,6 +238,7 @@ async def run_crisis_guard(
 
     recent_context_text = format_recent_context(
         messages_dicts, exclude_message_id=user_message_id,
+        exclude_message_ids=exclude_message_ids, purpose="crisis",
     )
 
     direct_keyword_hit = is_crisis_message(user_message)
