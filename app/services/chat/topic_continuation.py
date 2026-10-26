@@ -27,10 +27,10 @@ from app.services.interaction.topic_continuity import (
     FOLLOWUP_TRIGGER_TYPE,
     ContinuationCue,
     clean_single_line,
+    explain_cue,
     is_dialogue_noise,
     load_continuity,
     render_dialogue,
-    resolve_cue,
 )
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_text
 from app.services.prompting.utils import render_prompt
@@ -52,6 +52,28 @@ class TopicContinuation:
     cue: ContinuationCue
     # 排在正常回复之前的独立气泡 (承接短句 / 过渡句), 可能为空
     lines: list[str] = field(default_factory=list)
+    # explain_cue 的结论: followup_reply / finished / unfinished
+    reason: str = "unfinished"
+    # 生成失败的句子数 (失败只是少一句, 但要看得见)
+    failed_lines: int = 0
+
+
+@dataclass(frozen=True)
+class ContinuationSkip:
+    """Why this turn carries no continuation; written to the reply diagnostics."""
+
+    status: str  # patience_low / offering_turn / nothing_to_continue
+    detail: str | None = None
+    gap_seconds: float | None = None
+
+
+def record_topic_continuation(diagnostics: dict[str, Any], status: str, **fields: Any) -> None:
+    """One bounded record per reply; never contains message or generated text.
+
+    status: applied / not_spawned / user_low / patience_low / offering_turn /
+    timeout / error / nothing_to_continue.
+    """
+    diagnostics["topic_continuation"] = {"version": 1, "status": status, **fields}
 
 
 def _as_datetime(value: Any) -> datetime | None:
@@ -142,18 +164,22 @@ async def build_topic_continuation(
     agent: Any,
     offering_turn: bool,
     patience_low: bool,
-) -> TopicContinuation | None:
-    """None = 不适用 (维持原有重逢感知逻辑)."""
-    if offering_turn or patience_low or previous_assistant is None:
-        # 红包/礼物本身就是新话题; AI 还在生气时语气交给「情绪状态提醒」段
-        return None
+) -> TopicContinuation | ContinuationSkip:
+    """ContinuationSkip = 不适用 (维持原有重逢感知逻辑), 并说明原因."""
+    # 红包/礼物本身就是新话题; AI 还在生气时语气交给「情绪状态提醒」段
+    if offering_turn:
+        return ContinuationSkip("offering_turn")
+    if patience_low:
+        return ContinuationSkip("patience_low")
+    if previous_assistant is None:
+        return ContinuationSkip("nothing_to_continue", "no_previous_turn")
     ai_last_at = _as_datetime(getattr(previous_assistant, "createdAt", None))
     if ai_last_at is None:
-        return None
+        return ContinuationSkip("nothing_to_continue", "no_previous_reply_time")
     reply_at = replied_at or datetime.now(UTC)
     gap = max(0.0, (reply_at - ai_last_at).total_seconds())
     metadata = getattr(previous_assistant, "metadata", None)
-    cue = resolve_cue(
+    cue, reason = explain_cue(
         await load_continuity(conversation_id),
         previous_assistant_id=getattr(previous_assistant, "id", None),
         gap_seconds=gap,
@@ -161,8 +187,10 @@ async def build_topic_continuation(
             isinstance(metadata, dict) and metadata.get("trigger_type") == FOLLOWUP_TRIGGER_TYPE
         ),
     )
-    if cue is None or not cue.unfinished:
-        return TopicContinuation(cue) if cue else None
+    if cue is None:
+        return ContinuationSkip("nothing_to_continue", reason, gap)
+    if not cue.unfinished:
+        return TopicContinuation(cue, reason=reason)
 
     from app.services.chat.prompt_builder import format_gap_text
     from app.services.mbti import build_personality_brief
@@ -178,9 +206,9 @@ async def build_topic_continuation(
     tasks.append(_transition_line(conversation, user_message=user_message, personality=personality))
     results = await asyncio.gather(*tasks, return_exceptions=True)
     lines = [r for r in results if isinstance(r, str) and r]
-    for r in results:
-        if isinstance(r, BaseException):
-            logger.warning(f"[CONTINUITY] line generation failed: {r!r}")
+    failed = [r for r in results if isinstance(r, BaseException)]
+    for r in failed:
+        logger.warning(f"[CONTINUITY] line generation failed: {r!r}")
     logger.info(
         f"[CONTINUITY] return_line={cue.return_line} lines={len(lines)} gap={int(gap)}s",
         extra={
@@ -190,28 +218,45 @@ async def build_topic_continuation(
             "gap_seconds": int(gap),
         },
     )
-    return TopicContinuation(cue, lines)
+    return TopicContinuation(cue, lines, reason=reason, failed_lines=len(failed))
 
 
 async def await_topic_continuation(
     task: asyncio.Task | None,
     diagnostics: dict[str, Any],
+    *,
+    not_spawned_detail: str | None = None,
 ) -> TopicContinuation | None:
-    """主回复生成前取结果; 已被短路路径取消 / 出错都按"没有"处理."""
+    """主回复生成前取结果; 已被短路路径取消 / 出错都按"没有"处理, 但记下原因."""
+    if task is None:
+        record_topic_continuation(diagnostics, "not_spawned", detail=not_spawned_detail)
+        return None
     # 已被取消的任务不能 await (CancelledError 不是 Exception)
-    if task is None or task.cancelled():
+    if task.cancelled():
+        record_topic_continuation(diagnostics, "error", detail="cancelled")
         return None
     try:
         result = await asyncio.wait_for(task, timeout=_AWAIT_BUDGET_S)
     except asyncio.TimeoutError:
         logger.info("[CONTINUITY] skipped: not ready within budget")
+        record_topic_continuation(diagnostics, "timeout", budget_seconds=_AWAIT_BUDGET_S)
         return None
     except Exception as e:  # noqa: BLE001 — 锦上添花, 失败就按没有判定处理
-        logger.debug(f"[CONTINUITY] skipped: {e}")
+        logger.warning(f"[CONTINUITY] skipped: {type(e).__name__}")
+        record_topic_continuation(diagnostics, "error", detail=type(e).__name__)
         return None
-    if result is not None:
-        diagnostics["topic_continuation"] = {
-            "unfinished": result.cue.unfinished,
-            "n_lines": len(result.lines),
-        }
-    return result
+    if isinstance(result, TopicContinuation):
+        record_topic_continuation(
+            diagnostics, "applied", detail=result.reason,
+            unfinished=result.cue.unfinished, n_lines=len(result.lines),
+            failed_lines=result.failed_lines, gap_seconds=int(result.cue.gap_seconds),
+        )
+        return result
+    if isinstance(result, ContinuationSkip):
+        record_topic_continuation(
+            diagnostics, result.status, detail=result.detail,
+            gap_seconds=None if result.gap_seconds is None else int(result.gap_seconds),
+        )
+    else:
+        record_topic_continuation(diagnostics, "nothing_to_continue")
+    return None

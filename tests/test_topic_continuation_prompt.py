@@ -15,6 +15,7 @@ import pytest
 
 from app.services.chat import topic_continuation as tcont
 from app.services.chat.topic_continuation import (
+    ContinuationSkip,
     TopicContinuation,
     await_topic_continuation,
     build_topic_continuation,
@@ -257,7 +258,8 @@ async def test_followup_used_drops_return_line(monkeypatch, llm):
 @pytest.mark.asyncio
 async def test_finished_topic_generates_nothing(monkeypatch, llm):
     result = await _run(monkeypatch, continuity=_continuity(verdict=TopicVerdict("finished", "llm")))
-    assert result is not None and result.cue.unfinished is False and result.lines == []
+    assert isinstance(result, TopicContinuation) and result.cue.unfinished is False and result.lines == []
+    assert result.reason == "finished"
     assert llm.calls == {}
 
 
@@ -269,12 +271,30 @@ async def test_reply_to_followup_generates_nothing(monkeypatch, llm):
     })
     result = await _run(monkeypatch, previous=previous)
     assert result.cue.unfinished is False and result.lines == []
+    assert result.reason == "followup_reply"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kw", [{"offering_turn": True}, {"patience_low": True}])
-async def test_offering_or_annoyed_is_not_applicable(monkeypatch, llm, kw):
-    assert await _run(monkeypatch, **kw) is None
+@pytest.mark.parametrize("kw,status", [({"offering_turn": True}, "offering_turn"),
+                                       ({"patience_low": True}, "patience_low")])
+async def test_offering_or_annoyed_is_not_applicable(monkeypatch, llm, kw, status):
+    assert await _run(monkeypatch, **kw) == ContinuationSkip(status)
+    assert llm.calls == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("continuity,minutes_ago,detail", [
+    (_continuity(verdict=None), 25, "no_verdict"),
+    (_continuity(anchor_message_id="ai-other"), 25, "anchor_mismatch"),
+    (_continuity(), 200, "gap_over_session"),
+])
+async def test_missing_cue_explains_why(monkeypatch, llm, continuity, minutes_ago, detail):
+    history = _history()
+    previous = SimpleNamespace(**{**vars(history[2]), "createdAt": NOW - timedelta(minutes=minutes_ago)})
+    result = await _run(monkeypatch, continuity=continuity, previous=previous)
+    assert isinstance(result, ContinuationSkip)
+    assert (result.status, result.detail) == ("nothing_to_continue", detail)
+    assert result.gap_seconds == minutes_ago * 60
     assert llm.calls == {}
 
 
@@ -287,7 +307,7 @@ async def test_unknown_continuity_keeps_old_behaviour(monkeypatch, llm):
         user_message="x", history=history, current_turn_ids=set(), agent=None,
         offering_turn=False, patience_low=False,
     )
-    assert result is None
+    assert result == ContinuationSkip("nothing_to_continue", "state_unavailable", 25 * 60)
 
 
 @pytest.mark.asyncio
@@ -297,6 +317,7 @@ async def test_failed_or_needy_lines_are_dropped(monkeypatch, llm):
     result = await _run(monkeypatch)
     assert result.lines == []
     assert result.cue.unfinished is True
+    assert result.failed_lines == 1  # the raised one; the needy line is filtered, not failed
 
 
 @pytest.mark.asyncio
@@ -338,7 +359,22 @@ async def test_await_records_diagnostics():
     diagnostics: dict = {}
     result = await await_topic_continuation(asyncio.ensure_future(_ok()), diagnostics)
     assert result.lines == ["忙完啦～"]
-    assert diagnostics["topic_continuation"] == {"unfinished": True, "n_lines": 1}
+    assert diagnostics["topic_continuation"] == {
+        "version": 1, "status": "applied", "detail": "unfinished", "unfinished": True,
+        "n_lines": 1, "failed_lines": 0, "gap_seconds": 2400,
+    }
+
+
+@pytest.mark.asyncio
+async def test_await_records_skip_reason_without_text():
+    async def _skip():
+        return ContinuationSkip("nothing_to_continue", "anchor_mismatch", 615.7)
+
+    diagnostics: dict = {}
+    assert await await_topic_continuation(asyncio.ensure_future(_skip()), diagnostics) is None
+    assert diagnostics["topic_continuation"] == {
+        "version": 1, "status": "nothing_to_continue", "detail": "anchor_mismatch", "gap_seconds": 615,
+    }
 
 
 @pytest.mark.asyncio
@@ -346,13 +382,18 @@ async def test_await_tolerates_missing_failed_and_cancelled_tasks():
     async def _boom():
         raise RuntimeError("redis down")
 
-    assert await await_topic_continuation(None, {}) is None
-    assert await await_topic_continuation(asyncio.ensure_future(_boom()), {}) is None
+    diagnostics: dict = {}
+    assert await await_topic_continuation(None, diagnostics, not_spawned_detail="crisis_care") is None
+    assert diagnostics["topic_continuation"] == {"version": 1, "status": "not_spawned", "detail": "crisis_care"}
+    assert await await_topic_continuation(asyncio.ensure_future(_boom()), diagnostics) is None
+    # Exception class only: messages can carry user or model text.
+    assert diagnostics["topic_continuation"] == {"version": 1, "status": "error", "detail": "RuntimeError"}
 
     cancelled = asyncio.ensure_future(asyncio.sleep(10))
     cancelled.cancel()
     await asyncio.sleep(0)
-    assert await await_topic_continuation(cancelled, {}) is None
+    assert await await_topic_continuation(cancelled, diagnostics) is None
+    assert diagnostics["topic_continuation"]["detail"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -360,9 +401,11 @@ async def test_await_gives_up_after_budget(monkeypatch):
     """承接句还没生成好就不等了 —— 不能把整轮回复拖慢."""
     monkeypatch.setattr(tcont, "_AWAIT_BUDGET_S", 0.01)
     slow = asyncio.ensure_future(asyncio.sleep(1))
-    assert await await_topic_continuation(slow, {}) is None
+    diagnostics: dict = {}
+    assert await await_topic_continuation(slow, diagnostics) is None
     await asyncio.sleep(0)
     assert slow.cancelled()
+    assert diagnostics["topic_continuation"] == {"version": 1, "status": "timeout", "budget_seconds": 0.01}
 
 
 def test_turn_started_at_takes_earliest_fragment():
@@ -376,3 +419,64 @@ def test_turn_started_at_takes_earliest_fragment():
     ]
     assert _turn_started_at(messages, {"f1", "f2"}) == early
     assert _turn_started_at(messages, set()) is None
+
+
+# ── graph wiring: every main reply records why it did or did not continue ──
+
+def _graph_history(*, followup: bool):
+    now = datetime.now(UTC)
+    rows = [SimpleNamespace(id="u-0", role="user", content="我去洗澡了", metadata={},
+                            createdAt=now - timedelta(hours=2), conversationId="c-1"),
+            SimpleNamespace(id="a-0", role="assistant", content="好呀", metadata={},
+                            createdAt=now - timedelta(hours=2) + timedelta(seconds=5), conversationId="c-1")]
+    if followup:
+        rows.append(SimpleNamespace(id="f-0", role="assistant", content="洗完了吗",
+                                    metadata={"proactive": True, "trigger_type": FOLLOWUP_TRIGGER_TYPE},
+                                    createdAt=now - timedelta(minutes=90), conversationId="c-1"))
+    return rows
+
+
+async def _graph_diagnostics(monkeypatch, *, history, relational=None):
+    from tests.graph_harness_support import configure_chat
+    from app.services.chat import orchestrator as chat
+
+    io = configure_chat(monkeypatch)
+    monkeypatch.setattr(chat, "build_topic_continuation", build_topic_continuation)
+    monkeypatch.setattr(tcont, "load_continuity", _load(None))
+    monkeypatch.setattr(chat, "detect_relational_context", lambda *_a, **_k: relational)
+    # The real query returns newest first; load_turn reverses it.
+    io.db.message.find_many.side_effect = lambda **_: history[::-1]
+    events = [e async for e in chat.stream_chat_response("c-1", "洗完了", io.agent, "u-1")]
+    assert events[-1]["event"] == "done"
+    return chat._save_replies.await_args.args[1][0]["response_diagnostics"]["topic_continuation"]
+
+
+@pytest.mark.asyncio
+async def test_graph_records_followup_reply_cue(monkeypatch):
+    record = await _graph_diagnostics(monkeypatch, history=_graph_history(followup=True))
+    assert record["status"] == "applied" and record["detail"] == "followup_reply"
+    assert record["unfinished"] is False and record["n_lines"] == 0
+    assert 85 * 60 <= record["gap_seconds"] <= 95 * 60
+
+
+@pytest.mark.asyncio
+async def test_graph_records_user_low_skip(monkeypatch):
+    record = await _graph_diagnostics(monkeypatch, history=_graph_history(followup=True),
+                                      relational="用户这句带明显低落或烦闷情绪。")
+    assert record == {"version": 1, "status": "user_low"}
+
+
+@pytest.mark.asyncio
+async def test_graph_records_reason_when_no_verdict_is_known(monkeypatch):
+    record = await _graph_diagnostics(monkeypatch, history=_graph_history(followup=False))
+    assert record["status"] == "nothing_to_continue"
+    # Within 3h, but the continuity state could not be read (load_continuity -> None).
+    assert record["detail"] == "state_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_graph_records_not_spawned_without_previous_reply(monkeypatch):
+    history = [SimpleNamespace(id="u-0", role="user", content="在吗", metadata={},
+                               createdAt=datetime.now(UTC) - timedelta(minutes=1), conversationId="c-1")]
+    record = await _graph_diagnostics(monkeypatch, history=history)
+    assert record == {"version": 1, "status": "not_spawned", "detail": "no_previous_turn"}

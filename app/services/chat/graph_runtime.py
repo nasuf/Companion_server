@@ -59,6 +59,7 @@ class ChatFrame:
     classified_memories: list = None
     continuation_lines: list[str] = None
     continuation_task: asyncio.Task | None = None
+    continuation_not_spawned: str | None = None
     contradiction_inquiry: str | None = None
     covered_until_user_ts: Any = None
     crisis_care_turn: bool = False

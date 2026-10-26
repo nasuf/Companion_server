@@ -342,17 +342,39 @@ def resolve_cue(
 
     "是否跳了话题"要看用户这条消息, 由 chat/topic_continuation.py 另行判定。
     """
+    return explain_cue(
+        state,
+        previous_assistant_id=previous_assistant_id,
+        gap_seconds=gap_seconds,
+        previous_assistant_is_followup=previous_assistant_is_followup,
+    )[0]
+
+
+def explain_cue(
+    state: ContinuityState | None,
+    *,
+    previous_assistant_id: str | None,
+    gap_seconds: float | None,
+    previous_assistant_is_followup: bool = False,
+) -> tuple[ContinuationCue | None, str]:
+    """`resolve_cue` plus why: the reason labels the cue, or explains its absence.
+
+    Reasons: followup_reply / finished / unfinished when a cue applies;
+    gap_over_session / state_unavailable / no_verdict / anchor_mismatch otherwise.
+    """
     if gap_seconds is None or gap_seconds >= SESSION_GAP_SECONDS:
-        return None
+        return None, "gap_over_session"
     if previous_assistant_is_followup:
         # 对方在回 B 追问: 追问本身已经把旧话题接住了, spec 要求不再带承接话术
-        return ContinuationCue(unfinished=False, return_line=False, gap_seconds=gap_seconds)
-    if state is None or state.verdict is None:
-        return None
+        return ContinuationCue(unfinished=False, return_line=False, gap_seconds=gap_seconds), "followup_reply"
+    if state is None:
+        return None, "state_unavailable"
+    if state.verdict is None:
+        return None, "no_verdict"
     if not previous_assistant_id or state.anchor_message_id != previous_assistant_id:
-        return None
+        return None, "anchor_mismatch"
     if not state.verdict.unfinished:
-        return ContinuationCue(unfinished=False, return_line=False, gap_seconds=gap_seconds)
+        return ContinuationCue(unfinished=False, return_line=False, gap_seconds=gap_seconds), "finished"
     return ContinuationCue(
         unfinished=True,
         return_line=(
@@ -360,4 +382,4 @@ def resolve_cue(
             and not state.followup_used
         ),
         gap_seconds=gap_seconds,
-    )
+    ), "unfinished"

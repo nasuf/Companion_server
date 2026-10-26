@@ -188,6 +188,7 @@ from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.chat.topic_continuation import (
     await_topic_continuation,
     build_topic_continuation,
+    record_topic_continuation,
 )
 from app.services.proactive.state import ARM_REASON_CRISIS, ARM_REASON_REPLY, ARM_REASON_SYSTEM
 from app.services.runtime.tasks import fire_background as _fire_background

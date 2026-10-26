@@ -262,6 +262,7 @@ async def prepare_reads(ctx):
         from app.services.portrait import get_latest_portrait
 
         ctx.get_latest_portrait = get_latest_portrait
+        ctx.continuation_not_spawned = "crisis_care"
         if ctx.crisis_followup_active:
             ctx.crisis_memory_task = ctx.spawn(
                 ctx.retrieve_crisis_followup_memories(
@@ -308,7 +309,11 @@ async def prepare_reads(ctx):
                 exclude_ids=ctx.current_turn_ids,
             )
         )
-        if ctx.previous_assistant is not None and (not ctx.crisis_care_turn):
+        if ctx.crisis_care_turn:
+            ctx.continuation_not_spawned = "crisis_care"
+        elif ctx.previous_assistant is None:
+            ctx.continuation_not_spawned = "sub_intent" if ctx.sub_intent_mode else "no_previous_turn"
+        else:
             ctx.continuation_task = ctx.spawn(
                 services.build_topic_continuation(
                     conversation_id=ctx.conversation_id,
@@ -324,6 +329,10 @@ async def prepare_reads(ctx):
                     patience_low=ctx.cached_patience < services.PATIENCE_NORMAL_MIN,
                 )
             )
+    else:
+        ctx.continuation_not_spawned = (
+            "sub_intent" if ctx.forced_intent is not None else "current_state_fast_path"
+        )
     yield ctx.completed("prepare_reads")
 
 
@@ -1027,10 +1036,13 @@ async def prepare_reply(ctx):
         if actual_sleep > 0:
             await services.asyncio.sleep(actual_sleep)
     if ctx.relational_context:
+        # 用户正低落/抱怨: 先接情绪, 不提旧话题
         topic_continuation = None
+        services.record_topic_continuation(ctx.response_diagnostics, "user_low")
     else:
         topic_continuation = await services.await_topic_continuation(
-            ctx.continuation_task, ctx.response_diagnostics
+            ctx.continuation_task, ctx.response_diagnostics,
+            not_spawned_detail=ctx.continuation_not_spawned,
         )
     ctx.continuation_lines = topic_continuation.lines if topic_continuation else []
     if ctx.continuation_lines:

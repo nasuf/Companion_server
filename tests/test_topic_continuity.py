@@ -12,6 +12,7 @@ from app.services.interaction.topic_continuity import (
     ContinuityState,
     TopicVerdict,
     clean_single_line,
+    explain_cue,
     is_dialogue_noise,
     render_dialogue,
     resolve_cue,
@@ -335,3 +336,20 @@ def test_return_line_gap_is_tunable(monkeypatch):
     )
     assert resolve_cue(_state(), previous_assistant_id="ai-1", gap_seconds=20 * 60).return_line is False
     assert resolve_cue(_state(), previous_assistant_id="ai-1", gap_seconds=31 * 60).return_line is True
+
+
+@pytest.mark.parametrize(("state", "previous_id", "gap", "followup", "reason", "has_cue"), [
+    (_state(), "ai-1", 3 * 3600, False, "gap_over_session", False),
+    (_state(), "ai-1", 900, True, "followup_reply", True),
+    (None, "ai-1", 900, False, "state_unavailable", False),
+    (_state(verdict=None), "ai-1", 900, False, "no_verdict", False),
+    (_state(), "ai-2", 900, False, "anchor_mismatch", False),
+    (_state(verdict=TopicVerdict("finished", "llm")), "ai-1", 900, False, "finished", True),
+    (_state(), "ai-1", 900, False, "unfinished", True),
+])
+def test_explain_cue_reasons_match_resolve_cue(state, previous_id, gap, followup, reason, has_cue):
+    kwargs = dict(previous_assistant_id=previous_id, gap_seconds=gap,
+                  previous_assistant_is_followup=followup)
+    cue, why = explain_cue(state, **kwargs)
+    assert why == reason and (cue is not None) is has_cue
+    assert resolve_cue(state, **kwargs) == cue
