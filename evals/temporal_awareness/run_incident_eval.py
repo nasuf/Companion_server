@@ -104,8 +104,15 @@ async def run(args, cases=None):
             for sample in range(args.samples):
                 captured = []
                 captured_diagnostics = {}
-                async def generate(messages):
+                async def generate(messages, **runtime_options):
                     started = time.monotonic()
+                    transport = getattr(args, "provider_call", None)
+                    if transport is not None:
+                        result = await transport(messages, **runtime_options)
+                        captured.append({"messages": messages, "raw": result["text"],
+                                         "duration_seconds": time.monotonic()-started,
+                                         "usage": result["usage"]})
+                        return result["text"]
                     result = await client.chat.completions.create(model=args.model, messages=messages,
                         **report["model_options"])
                     text = result.choices[0].message.content or ""
@@ -116,8 +123,8 @@ async def run(args, cases=None):
                 async def live_text(_model, prompt):
                     return await generate([{"role": "user", "content": str(prompt)}])
 
-                async def live_main(messages, **_):
-                    return await generate(messages), False
+                async def live_main(messages, **runtime_options):
+                    return await generate(messages, **runtime_options), False
 
                 with MonkeyPatch.context() as patch:
                     io = configure_pair(patch)
@@ -199,6 +206,9 @@ async def run(args, cases=None):
                     intent = IntentType.CURRENT_STATE if case["route"] == "current_state" else IntentType.NONE
                     chat.detect_intent_unified.return_value = IntentResult(intent=intent, confidence=1)
                     intent_handlers.resolve_implicit_time.return_value = (io.now, "在家整理工作台")
+                    fixture_hook = getattr(args, "fixture_hook", None)
+                    if fixture_hook is not None:
+                        fixture_hook(patch, chat, io, case)
                     token = store._prompt_snapshot.set(snapshot)
                     try:
                         events = [e async for e in chat.stream_chat_response(

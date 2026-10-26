@@ -92,6 +92,9 @@ jobs:
           python evals/persona_grounding/run_eval.py --validate-only --output /tmp/persona-validation.json
           python -m evals.memory_baseline.run_eval --validate-only
 
+      - name: Verify context evaluation accounting without live providers
+        run: python -m pytest -q evals/context_embedding --junitxml=reports/context-eval-tests.xml
+
       - name: Prepare isolated memory evaluation database
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/companion_memory_eval_ci

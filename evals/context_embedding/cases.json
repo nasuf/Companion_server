@@ -1,0 +1,4382 @@
+[
+  {
+    "id": "reference-01",
+    "category": "reference",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另一个备选是图书馆。"
+      ],
+      [
+        "assistant",
+        "你更喜欢植物园，还是图书馆？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "前一个吧",
+        "criterion": "前一个指植物园，不能解释成图书馆。"
+      },
+      {
+        "message": "我说的前一个是什么？",
+        "criterion": "准确说出植物园。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "reference-02",
+    "category": "reference",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另一个备选是小馄饨。"
+      ],
+      [
+        "assistant",
+        "你更喜欢番茄面，还是小馄饨？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "前一个吧",
+        "criterion": "前一个指番茄面，不能解释成小馄饨。"
+      },
+      {
+        "message": "我说的前一个是什么？",
+        "criterion": "准确说出番茄面。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "reference-03",
+    "category": "reference",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另一个备选是米白色。"
+      ],
+      [
+        "assistant",
+        "你更喜欢深蓝色，还是米白色？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "前一个吧",
+        "criterion": "前一个指深蓝色，不能解释成米白色。"
+      },
+      {
+        "message": "我说的前一个是什么？",
+        "criterion": "准确说出深蓝色。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "reference-04",
+    "category": "reference",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另一个备选是钢琴。"
+      ],
+      [
+        "assistant",
+        "你更喜欢吉他，还是钢琴？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "前一个吧",
+        "criterion": "前一个指吉他，不能解释成钢琴。"
+      },
+      {
+        "message": "我说的前一个是什么？",
+        "criterion": "准确说出吉他。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "reference-05",
+    "category": "reference",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另一个备选是历史传记。"
+      ],
+      [
+        "assistant",
+        "你更喜欢科幻小说，还是历史传记？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "前一个吧",
+        "criterion": "前一个指科幻小说，不能解释成历史传记。"
+      },
+      {
+        "message": "我说的前一个是什么？",
+        "criterion": "准确说出科幻小说。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "reference-06",
+    "category": "reference",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另一个备选是咖啡豆。"
+      ],
+      [
+        "assistant",
+        "你更喜欢茶叶，还是咖啡豆？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "前一个吧",
+        "criterion": "前一个指茶叶，不能解释成咖啡豆。"
+      },
+      {
+        "message": "我说的前一个是什么？",
+        "criterion": "准确说出茶叶。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "reference-07",
+    "category": "reference",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另一个备选是公交。"
+      ],
+      [
+        "assistant",
+        "你更喜欢地铁，还是公交？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "前一个吧",
+        "criterion": "前一个指地铁，不能解释成公交。"
+      },
+      {
+        "message": "我说的前一个是什么？",
+        "criterion": "准确说出地铁。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "reference-08",
+    "category": "reference",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另一个备选是摄影课。"
+      ],
+      [
+        "assistant",
+        "你更喜欢陶艺课，还是摄影课？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "前一个吧",
+        "criterion": "前一个指陶艺课，不能解释成摄影课。"
+      },
+      {
+        "message": "我说的前一个是什么？",
+        "criterion": "准确说出陶艺课。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "answer_question-01",
+    "category": "answer_question",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你确认选好了吗？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于植物园的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "answer_question-02",
+    "category": "answer_question",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "就按这个来？👌"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于番茄面的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "answer_question-03",
+    "category": "answer_question",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你确定是这个吗🙂"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于深蓝色的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "answer_question-04",
+    "category": "answer_question",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "这就是你的最终选择，对不对？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于吉他的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "answer_question-05",
+    "category": "answer_question",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定了吗～～🙂"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于科幻小说的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "answer_question-06",
+    "category": "answer_question",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你想清楚了，是吧 😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于茶叶的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "answer_question-07",
+    "category": "answer_question",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你要选这个，对吗！😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于地铁的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "answer_question-08",
+    "category": "answer_question",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "这次就定这个，好不好？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于陶艺课的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "topic_interleave-01",
+    "category": "topic_interleave",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另外今天的工作终于交完了。"
+      ],
+      [
+        "assistant",
+        "终于能松口气了。"
+      ],
+      [
+        "user",
+        "刚出去散了十分钟步。"
+      ],
+      [
+        "assistant",
+        "走走挺舒服。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "回到周末去哪里，还是按我选的来。",
+        "criterion": "明确承接之前选择的植物园，不把散步/工作当作当前选择。"
+      },
+      {
+        "message": "我最后选的是哪个？",
+        "criterion": "回答植物园。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "topic_interleave-02",
+    "category": "topic_interleave",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另外今天的工作终于交完了。"
+      ],
+      [
+        "assistant",
+        "终于能松口气了。"
+      ],
+      [
+        "user",
+        "刚出去散了十分钟步。"
+      ],
+      [
+        "assistant",
+        "走走挺舒服。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "回到晚上吃什么，还是按我选的来。",
+        "criterion": "明确承接之前选择的番茄面，不把散步/工作当作当前选择。"
+      },
+      {
+        "message": "我最后选的是哪个？",
+        "criterion": "回答番茄面。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "topic_interleave-03",
+    "category": "topic_interleave",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另外今天的工作终于交完了。"
+      ],
+      [
+        "assistant",
+        "终于能松口气了。"
+      ],
+      [
+        "user",
+        "刚出去散了十分钟步。"
+      ],
+      [
+        "assistant",
+        "走走挺舒服。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "回到买什么颜色的杯子，还是按我选的来。",
+        "criterion": "明确承接之前选择的深蓝色，不把散步/工作当作当前选择。"
+      },
+      {
+        "message": "我最后选的是哪个？",
+        "criterion": "回答深蓝色。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "topic_interleave-04",
+    "category": "topic_interleave",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另外今天的工作终于交完了。"
+      ],
+      [
+        "assistant",
+        "终于能松口气了。"
+      ],
+      [
+        "user",
+        "刚出去散了十分钟步。"
+      ],
+      [
+        "assistant",
+        "走走挺舒服。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "回到想学哪种乐器，还是按我选的来。",
+        "criterion": "明确承接之前选择的吉他，不把散步/工作当作当前选择。"
+      },
+      {
+        "message": "我最后选的是哪个？",
+        "criterion": "回答吉他。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "topic_interleave-05",
+    "category": "topic_interleave",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另外今天的工作终于交完了。"
+      ],
+      [
+        "assistant",
+        "终于能松口气了。"
+      ],
+      [
+        "user",
+        "刚出去散了十分钟步。"
+      ],
+      [
+        "assistant",
+        "走走挺舒服。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "回到这周读什么，还是按我选的来。",
+        "criterion": "明确承接之前选择的科幻小说，不把散步/工作当作当前选择。"
+      },
+      {
+        "message": "我最后选的是哪个？",
+        "criterion": "回答科幻小说。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "topic_interleave-06",
+    "category": "topic_interleave",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另外今天的工作终于交完了。"
+      ],
+      [
+        "assistant",
+        "终于能松口气了。"
+      ],
+      [
+        "user",
+        "刚出去散了十分钟步。"
+      ],
+      [
+        "assistant",
+        "走走挺舒服。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "回到给朋友带什么，还是按我选的来。",
+        "criterion": "明确承接之前选择的茶叶，不把散步/工作当作当前选择。"
+      },
+      {
+        "message": "我最后选的是哪个？",
+        "criterion": "回答茶叶。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "topic_interleave-07",
+    "category": "topic_interleave",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另外今天的工作终于交完了。"
+      ],
+      [
+        "assistant",
+        "终于能松口气了。"
+      ],
+      [
+        "user",
+        "刚出去散了十分钟步。"
+      ],
+      [
+        "assistant",
+        "走走挺舒服。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "回到明天用哪种交通方式，还是按我选的来。",
+        "criterion": "明确承接之前选择的地铁，不把散步/工作当作当前选择。"
+      },
+      {
+        "message": "我最后选的是哪个？",
+        "criterion": "回答地铁。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "topic_interleave-08",
+    "category": "topic_interleave",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "另外今天的工作终于交完了。"
+      ],
+      [
+        "assistant",
+        "终于能松口气了。"
+      ],
+      [
+        "user",
+        "刚出去散了十分钟步。"
+      ],
+      [
+        "assistant",
+        "走走挺舒服。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "回到想参加哪种活动，还是按我选的来。",
+        "criterion": "明确承接之前选择的陶艺课，不把散步/工作当作当前选择。"
+      },
+      {
+        "message": "我最后选的是哪个？",
+        "criterion": "回答陶艺课。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "correction-01",
+    "category": "correction",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "刚才说错了，不要植物园，改成图书馆。"
+      ],
+      [
+        "assistant",
+        "好，改为图书馆。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在记住我改成什么了吗？",
+        "criterion": "最后更正为图书馆，不能坚持植物园。"
+      },
+      {
+        "message": "原先那个就不要了",
+        "criterion": "同意取消旧选项植物园，保留图书馆，不颠倒。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "correction-02",
+    "category": "correction",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "刚才说错了，不要番茄面，改成小馄饨。"
+      ],
+      [
+        "assistant",
+        "好，改为小馄饨。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在记住我改成什么了吗？",
+        "criterion": "最后更正为小馄饨，不能坚持番茄面。"
+      },
+      {
+        "message": "原先那个就不要了",
+        "criterion": "同意取消旧选项番茄面，保留小馄饨，不颠倒。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "correction-03",
+    "category": "correction",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "刚才说错了，不要深蓝色，改成米白色。"
+      ],
+      [
+        "assistant",
+        "好，改为米白色。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在记住我改成什么了吗？",
+        "criterion": "最后更正为米白色，不能坚持深蓝色。"
+      },
+      {
+        "message": "原先那个就不要了",
+        "criterion": "同意取消旧选项深蓝色，保留米白色，不颠倒。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "correction-04",
+    "category": "correction",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "刚才说错了，不要吉他，改成钢琴。"
+      ],
+      [
+        "assistant",
+        "好，改为钢琴。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在记住我改成什么了吗？",
+        "criterion": "最后更正为钢琴，不能坚持吉他。"
+      },
+      {
+        "message": "原先那个就不要了",
+        "criterion": "同意取消旧选项吉他，保留钢琴，不颠倒。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "correction-05",
+    "category": "correction",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "刚才说错了，不要科幻小说，改成历史传记。"
+      ],
+      [
+        "assistant",
+        "好，改为历史传记。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在记住我改成什么了吗？",
+        "criterion": "最后更正为历史传记，不能坚持科幻小说。"
+      },
+      {
+        "message": "原先那个就不要了",
+        "criterion": "同意取消旧选项科幻小说，保留历史传记，不颠倒。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "correction-06",
+    "category": "correction",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "刚才说错了，不要茶叶，改成咖啡豆。"
+      ],
+      [
+        "assistant",
+        "好，改为咖啡豆。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在记住我改成什么了吗？",
+        "criterion": "最后更正为咖啡豆，不能坚持茶叶。"
+      },
+      {
+        "message": "原先那个就不要了",
+        "criterion": "同意取消旧选项茶叶，保留咖啡豆，不颠倒。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "correction-07",
+    "category": "correction",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "刚才说错了，不要地铁，改成公交。"
+      ],
+      [
+        "assistant",
+        "好，改为公交。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在记住我改成什么了吗？",
+        "criterion": "最后更正为公交，不能坚持地铁。"
+      },
+      {
+        "message": "原先那个就不要了",
+        "criterion": "同意取消旧选项地铁，保留公交，不颠倒。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "correction-08",
+    "category": "correction",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "刚才说错了，不要陶艺课，改成摄影课。"
+      ],
+      [
+        "assistant",
+        "好，改为摄影课。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在记住我改成什么了吗？",
+        "criterion": "最后更正为摄影课，不能坚持陶艺课。"
+      },
+      {
+        "message": "原先那个就不要了",
+        "criterion": "同意取消旧选项陶艺课，保留摄影课，不颠倒。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "already_answered-01",
+    "category": "already_answered",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "我确认三遍了，就是植物园。"
+      ],
+      [
+        "assistant",
+        "知道啦，已经确定了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "不能再问用户决定什么/是否确定，也不能只回表情。"
+      },
+      {
+        "message": "不想再说这个了",
+        "criterion": "停止追问这个选择，可以自然收尾或换话题。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "already_answered-02",
+    "category": "already_answered",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "我确认三遍了，就是番茄面。"
+      ],
+      [
+        "assistant",
+        "知道啦，已经确定了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "不能再问用户决定什么/是否确定，也不能只回表情。"
+      },
+      {
+        "message": "不想再说这个了",
+        "criterion": "停止追问这个选择，可以自然收尾或换话题。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "already_answered-03",
+    "category": "already_answered",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "我确认三遍了，就是深蓝色。"
+      ],
+      [
+        "assistant",
+        "知道啦，已经确定了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "不能再问用户决定什么/是否确定，也不能只回表情。"
+      },
+      {
+        "message": "不想再说这个了",
+        "criterion": "停止追问这个选择，可以自然收尾或换话题。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "already_answered-04",
+    "category": "already_answered",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "我确认三遍了，就是吉他。"
+      ],
+      [
+        "assistant",
+        "知道啦，已经确定了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "不能再问用户决定什么/是否确定，也不能只回表情。"
+      },
+      {
+        "message": "不想再说这个了",
+        "criterion": "停止追问这个选择，可以自然收尾或换话题。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "already_answered-05",
+    "category": "already_answered",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "我确认三遍了，就是科幻小说。"
+      ],
+      [
+        "assistant",
+        "知道啦，已经确定了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "不能再问用户决定什么/是否确定，也不能只回表情。"
+      },
+      {
+        "message": "不想再说这个了",
+        "criterion": "停止追问这个选择，可以自然收尾或换话题。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "already_answered-06",
+    "category": "already_answered",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "我确认三遍了，就是茶叶。"
+      ],
+      [
+        "assistant",
+        "知道啦，已经确定了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "不能再问用户决定什么/是否确定，也不能只回表情。"
+      },
+      {
+        "message": "不想再说这个了",
+        "criterion": "停止追问这个选择，可以自然收尾或换话题。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "already_answered-07",
+    "category": "already_answered",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "我确认三遍了，就是地铁。"
+      ],
+      [
+        "assistant",
+        "知道啦，已经确定了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "不能再问用户决定什么/是否确定，也不能只回表情。"
+      },
+      {
+        "message": "不想再说这个了",
+        "criterion": "停止追问这个选择，可以自然收尾或换话题。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "already_answered-08",
+    "category": "already_answered",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "我确认三遍了，就是陶艺课。"
+      ],
+      [
+        "assistant",
+        "知道啦，已经确定了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "不能再问用户决定什么/是否确定，也不能只回表情。"
+      },
+      {
+        "message": "不想再说这个了",
+        "criterion": "停止追问这个选择，可以自然收尾或换话题。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_5_turns-01",
+    "category": "needs_5_turns",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说周末去哪里，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出植物园，应答植物园，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的植物园，不能改口成图书馆。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_5_turns-02",
+    "category": "needs_5_turns",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说晚上吃什么，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出番茄面，应答番茄面，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的番茄面，不能改口成小馄饨。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_5_turns-03",
+    "category": "needs_5_turns",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说买什么颜色的杯子，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出深蓝色，应答深蓝色，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的深蓝色，不能改口成米白色。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_5_turns-04",
+    "category": "needs_5_turns",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说想学哪种乐器，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出吉他，应答吉他，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的吉他，不能改口成钢琴。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_5_turns-05",
+    "category": "needs_5_turns",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说这周读什么，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出科幻小说，应答科幻小说，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的科幻小说，不能改口成历史传记。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_5_turns-06",
+    "category": "needs_5_turns",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说给朋友带什么，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出茶叶，应答茶叶，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的茶叶，不能改口成咖啡豆。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_5_turns-07",
+    "category": "needs_5_turns",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说明天用哪种交通方式，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出地铁，应答地铁，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的地铁，不能改口成公交。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_5_turns-08",
+    "category": "needs_5_turns",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说想参加哪种活动，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出陶艺课，应答陶艺课，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的陶艺课，不能改口成摄影课。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_12_turns-01",
+    "category": "needs_12_turns",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第5层书架。"
+      ],
+      [
+        "assistant",
+        "第5层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第6层书架。"
+      ],
+      [
+        "assistant",
+        "第6层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第7层书架。"
+      ],
+      [
+        "assistant",
+        "第7层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第8层书架。"
+      ],
+      [
+        "assistant",
+        "第8层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第9层书架。"
+      ],
+      [
+        "assistant",
+        "第9层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第10层书架。"
+      ],
+      [
+        "assistant",
+        "第10层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第11层书架。"
+      ],
+      [
+        "assistant",
+        "第11层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说周末去哪里，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出植物园，应答植物园，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的植物园，不能改口成图书馆。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_12_turns-02",
+    "category": "needs_12_turns",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第5层书架。"
+      ],
+      [
+        "assistant",
+        "第5层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第6层书架。"
+      ],
+      [
+        "assistant",
+        "第6层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第7层书架。"
+      ],
+      [
+        "assistant",
+        "第7层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第8层书架。"
+      ],
+      [
+        "assistant",
+        "第8层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第9层书架。"
+      ],
+      [
+        "assistant",
+        "第9层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第10层书架。"
+      ],
+      [
+        "assistant",
+        "第10层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第11层书架。"
+      ],
+      [
+        "assistant",
+        "第11层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说晚上吃什么，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出番茄面，应答番茄面，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的番茄面，不能改口成小馄饨。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_12_turns-03",
+    "category": "needs_12_turns",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第5层书架。"
+      ],
+      [
+        "assistant",
+        "第5层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第6层书架。"
+      ],
+      [
+        "assistant",
+        "第6层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第7层书架。"
+      ],
+      [
+        "assistant",
+        "第7层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第8层书架。"
+      ],
+      [
+        "assistant",
+        "第8层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第9层书架。"
+      ],
+      [
+        "assistant",
+        "第9层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第10层书架。"
+      ],
+      [
+        "assistant",
+        "第10层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第11层书架。"
+      ],
+      [
+        "assistant",
+        "第11层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说买什么颜色的杯子，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出深蓝色，应答深蓝色，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的深蓝色，不能改口成米白色。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_12_turns-04",
+    "category": "needs_12_turns",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第5层书架。"
+      ],
+      [
+        "assistant",
+        "第5层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第6层书架。"
+      ],
+      [
+        "assistant",
+        "第6层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第7层书架。"
+      ],
+      [
+        "assistant",
+        "第7层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第8层书架。"
+      ],
+      [
+        "assistant",
+        "第8层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第9层书架。"
+      ],
+      [
+        "assistant",
+        "第9层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第10层书架。"
+      ],
+      [
+        "assistant",
+        "第10层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第11层书架。"
+      ],
+      [
+        "assistant",
+        "第11层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说想学哪种乐器，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出吉他，应答吉他，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的吉他，不能改口成钢琴。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_12_turns-05",
+    "category": "needs_12_turns",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第5层书架。"
+      ],
+      [
+        "assistant",
+        "第5层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第6层书架。"
+      ],
+      [
+        "assistant",
+        "第6层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第7层书架。"
+      ],
+      [
+        "assistant",
+        "第7层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第8层书架。"
+      ],
+      [
+        "assistant",
+        "第8层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第9层书架。"
+      ],
+      [
+        "assistant",
+        "第9层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第10层书架。"
+      ],
+      [
+        "assistant",
+        "第10层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第11层书架。"
+      ],
+      [
+        "assistant",
+        "第11层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说这周读什么，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出科幻小说，应答科幻小说，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的科幻小说，不能改口成历史传记。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_12_turns-06",
+    "category": "needs_12_turns",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第5层书架。"
+      ],
+      [
+        "assistant",
+        "第5层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第6层书架。"
+      ],
+      [
+        "assistant",
+        "第6层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第7层书架。"
+      ],
+      [
+        "assistant",
+        "第7层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第8层书架。"
+      ],
+      [
+        "assistant",
+        "第8层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第9层书架。"
+      ],
+      [
+        "assistant",
+        "第9层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第10层书架。"
+      ],
+      [
+        "assistant",
+        "第10层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第11层书架。"
+      ],
+      [
+        "assistant",
+        "第11层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说给朋友带什么，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出茶叶，应答茶叶，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的茶叶，不能改口成咖啡豆。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_12_turns-07",
+    "category": "needs_12_turns",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第5层书架。"
+      ],
+      [
+        "assistant",
+        "第5层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第6层书架。"
+      ],
+      [
+        "assistant",
+        "第6层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第7层书架。"
+      ],
+      [
+        "assistant",
+        "第7层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第8层书架。"
+      ],
+      [
+        "assistant",
+        "第8层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第9层书架。"
+      ],
+      [
+        "assistant",
+        "第9层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第10层书架。"
+      ],
+      [
+        "assistant",
+        "第10层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第11层书架。"
+      ],
+      [
+        "assistant",
+        "第11层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说明天用哪种交通方式，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出地铁，应答地铁，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的地铁，不能改口成公交。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "needs_12_turns-08",
+    "category": "needs_12_turns",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第1层书架。"
+      ],
+      [
+        "assistant",
+        "第1层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第2层书架。"
+      ],
+      [
+        "assistant",
+        "第2层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第3层书架。"
+      ],
+      [
+        "assistant",
+        "第3层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第4层书架。"
+      ],
+      [
+        "assistant",
+        "第4层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第5层书架。"
+      ],
+      [
+        "assistant",
+        "第5层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第6层书架。"
+      ],
+      [
+        "assistant",
+        "第6层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第7层书架。"
+      ],
+      [
+        "assistant",
+        "第7层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第8层书架。"
+      ],
+      [
+        "assistant",
+        "第8层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第9层书架。"
+      ],
+      [
+        "assistant",
+        "第9层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第10层书架。"
+      ],
+      [
+        "assistant",
+        "第10层也整理完啦，歇一会儿。"
+      ],
+      [
+        "user",
+        "聊点别的，今天整理了第11层书架。"
+      ],
+      [
+        "assistant",
+        "第11层也整理完啦，歇一会儿。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "还记得前面说想参加哪种活动，我选的是什么吗？",
+        "criterion": "已在近期历史明确给出陶艺课，应答陶艺课，不能猜别的或拒答已知内容。"
+      },
+      {
+        "message": "对，就是那个",
+        "criterion": "承接已经确认的陶艺课，不能改口成摄影课。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "topic_switch-01",
+    "category": "topic_switch",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "先不说这个了，我今天工作很累",
+        "criterion": "回应用户现在工作很累，不继续询问旧选择，也不以旧选择取代最新话题。"
+      },
+      {
+        "message": "我只是想先歇会儿",
+        "criterion": "尊重用户休息，不拉回之前的选择。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "topic_switch-02",
+    "category": "topic_switch",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "先不说这个了，我今天工作很累",
+        "criterion": "回应用户现在工作很累，不继续询问旧选择，也不以旧选择取代最新话题。"
+      },
+      {
+        "message": "我只是想先歇会儿",
+        "criterion": "尊重用户休息，不拉回之前的选择。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "topic_switch-03",
+    "category": "topic_switch",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "先不说这个了，我今天工作很累",
+        "criterion": "回应用户现在工作很累，不继续询问旧选择，也不以旧选择取代最新话题。"
+      },
+      {
+        "message": "我只是想先歇会儿",
+        "criterion": "尊重用户休息，不拉回之前的选择。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "topic_switch-04",
+    "category": "topic_switch",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "先不说这个了，我今天工作很累",
+        "criterion": "回应用户现在工作很累，不继续询问旧选择，也不以旧选择取代最新话题。"
+      },
+      {
+        "message": "我只是想先歇会儿",
+        "criterion": "尊重用户休息，不拉回之前的选择。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "topic_switch-05",
+    "category": "topic_switch",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "先不说这个了，我今天工作很累",
+        "criterion": "回应用户现在工作很累，不继续询问旧选择，也不以旧选择取代最新话题。"
+      },
+      {
+        "message": "我只是想先歇会儿",
+        "criterion": "尊重用户休息，不拉回之前的选择。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "topic_switch-06",
+    "category": "topic_switch",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "先不说这个了，我今天工作很累",
+        "criterion": "回应用户现在工作很累，不继续询问旧选择，也不以旧选择取代最新话题。"
+      },
+      {
+        "message": "我只是想先歇会儿",
+        "criterion": "尊重用户休息，不拉回之前的选择。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "topic_switch-07",
+    "category": "topic_switch",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "先不说这个了，我今天工作很累",
+        "criterion": "回应用户现在工作很累，不继续询问旧选择，也不以旧选择取代最新话题。"
+      },
+      {
+        "message": "我只是想先歇会儿",
+        "criterion": "尊重用户休息，不拉回之前的选择。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "topic_switch-08",
+    "category": "topic_switch",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "先不说这个了，我今天工作很累",
+        "criterion": "回应用户现在工作很累，不继续询问旧选择，也不以旧选择取代最新话题。"
+      },
+      {
+        "message": "我只是想先歇会儿",
+        "criterion": "尊重用户休息，不拉回之前的选择。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "speaker_ownership-01",
+    "category": "speaker_ownership",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "我选植物园。"
+      ],
+      [
+        "assistant",
+        "我自己会更喜欢图书馆。"
+      ],
+      [
+        "user",
+        "我们的选择不一样也挺好。"
+      ],
+      [
+        "assistant",
+        "对，各有各的偏好。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我选了哪个，你选了哪个？",
+        "criterion": "用户选植物园，AI选图书馆，不能混淆。"
+      },
+      {
+        "message": "我不想改变自己的选择",
+        "criterion": "尊重用户的植物园选择，不误以为用户选图书馆。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "speaker_ownership-02",
+    "category": "speaker_ownership",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "我选番茄面。"
+      ],
+      [
+        "assistant",
+        "我自己会更喜欢小馄饨。"
+      ],
+      [
+        "user",
+        "我们的选择不一样也挺好。"
+      ],
+      [
+        "assistant",
+        "对，各有各的偏好。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我选了哪个，你选了哪个？",
+        "criterion": "用户选番茄面，AI选小馄饨，不能混淆。"
+      },
+      {
+        "message": "我不想改变自己的选择",
+        "criterion": "尊重用户的番茄面选择，不误以为用户选小馄饨。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "speaker_ownership-03",
+    "category": "speaker_ownership",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "我选深蓝色。"
+      ],
+      [
+        "assistant",
+        "我自己会更喜欢米白色。"
+      ],
+      [
+        "user",
+        "我们的选择不一样也挺好。"
+      ],
+      [
+        "assistant",
+        "对，各有各的偏好。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我选了哪个，你选了哪个？",
+        "criterion": "用户选深蓝色，AI选米白色，不能混淆。"
+      },
+      {
+        "message": "我不想改变自己的选择",
+        "criterion": "尊重用户的深蓝色选择，不误以为用户选米白色。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "speaker_ownership-04",
+    "category": "speaker_ownership",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "我选吉他。"
+      ],
+      [
+        "assistant",
+        "我自己会更喜欢钢琴。"
+      ],
+      [
+        "user",
+        "我们的选择不一样也挺好。"
+      ],
+      [
+        "assistant",
+        "对，各有各的偏好。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我选了哪个，你选了哪个？",
+        "criterion": "用户选吉他，AI选钢琴，不能混淆。"
+      },
+      {
+        "message": "我不想改变自己的选择",
+        "criterion": "尊重用户的吉他选择，不误以为用户选钢琴。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "speaker_ownership-05",
+    "category": "speaker_ownership",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "我选科幻小说。"
+      ],
+      [
+        "assistant",
+        "我自己会更喜欢历史传记。"
+      ],
+      [
+        "user",
+        "我们的选择不一样也挺好。"
+      ],
+      [
+        "assistant",
+        "对，各有各的偏好。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我选了哪个，你选了哪个？",
+        "criterion": "用户选科幻小说，AI选历史传记，不能混淆。"
+      },
+      {
+        "message": "我不想改变自己的选择",
+        "criterion": "尊重用户的科幻小说选择，不误以为用户选历史传记。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "speaker_ownership-06",
+    "category": "speaker_ownership",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "我选茶叶。"
+      ],
+      [
+        "assistant",
+        "我自己会更喜欢咖啡豆。"
+      ],
+      [
+        "user",
+        "我们的选择不一样也挺好。"
+      ],
+      [
+        "assistant",
+        "对，各有各的偏好。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我选了哪个，你选了哪个？",
+        "criterion": "用户选茶叶，AI选咖啡豆，不能混淆。"
+      },
+      {
+        "message": "我不想改变自己的选择",
+        "criterion": "尊重用户的茶叶选择，不误以为用户选咖啡豆。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "speaker_ownership-07",
+    "category": "speaker_ownership",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "我选地铁。"
+      ],
+      [
+        "assistant",
+        "我自己会更喜欢公交。"
+      ],
+      [
+        "user",
+        "我们的选择不一样也挺好。"
+      ],
+      [
+        "assistant",
+        "对，各有各的偏好。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我选了哪个，你选了哪个？",
+        "criterion": "用户选地铁，AI选公交，不能混淆。"
+      },
+      {
+        "message": "我不想改变自己的选择",
+        "criterion": "尊重用户的地铁选择，不误以为用户选公交。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "speaker_ownership-08",
+    "category": "speaker_ownership",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "我选陶艺课。"
+      ],
+      [
+        "assistant",
+        "我自己会更喜欢摄影课。"
+      ],
+      [
+        "user",
+        "我们的选择不一样也挺好。"
+      ],
+      [
+        "assistant",
+        "对，各有各的偏好。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我选了哪个，你选了哪个？",
+        "criterion": "用户选陶艺课，AI选摄影课，不能混淆。"
+      },
+      {
+        "message": "我不想改变自己的选择",
+        "criterion": "尊重用户的陶艺课选择，不误以为用户选摄影课。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "shortcircuit-01",
+    "category": "shortcircuit",
+    "route": "current_state",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "你现在在做什么？",
+        "criterion": "根据提供的当前状态，在家整理工作台；不能把用户的选择冒认为自己正在做的事。"
+      },
+      {
+        "message": "好，那你先整理",
+        "criterion": "承接AI正在整理工作台，不能把整理任务转给用户。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "shortcircuit-02",
+    "category": "shortcircuit",
+    "route": "current_state",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "你现在忙吗？",
+        "criterion": "根据提供的当前状态，在家整理工作台；不能把用户的选择冒认为自己正在做的事。"
+      },
+      {
+        "message": "好，那你先整理",
+        "criterion": "承接AI正在整理工作台，不能把整理任务转给用户。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "shortcircuit-03",
+    "category": "shortcircuit",
+    "route": "current_state",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在在干嘛呢？",
+        "criterion": "根据提供的当前状态，在家整理工作台；不能把用户的选择冒认为自己正在做的事。"
+      },
+      {
+        "message": "好，那你先整理",
+        "criterion": "承接AI正在整理工作台，不能把整理任务转给用户。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "shortcircuit-04",
+    "category": "shortcircuit",
+    "route": "current_state",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "手头在忙什么呀？",
+        "criterion": "根据提供的当前状态，在家整理工作台；不能把用户的选择冒认为自己正在做的事。"
+      },
+      {
+        "message": "好，那你先整理",
+        "criterion": "承接AI正在整理工作台，不能把整理任务转给用户。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "shortcircuit-05",
+    "category": "shortcircuit",
+    "route": "current_state",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "现在有空聊吗？",
+        "criterion": "根据提供的当前状态，在家整理工作台；不能把用户的选择冒认为自己正在做的事。"
+      },
+      {
+        "message": "好，那你先整理",
+        "criterion": "承接AI正在整理工作台，不能把整理任务转给用户。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "shortcircuit-06",
+    "category": "shortcircuit",
+    "route": "current_state",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "你这会儿在做啥？",
+        "criterion": "根据提供的当前状态，在家整理工作台；不能把用户的选择冒认为自己正在做的事。"
+      },
+      {
+        "message": "好，那你先整理",
+        "criterion": "承接AI正在整理工作台，不能把整理任务转给用户。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "shortcircuit-07",
+    "category": "shortcircuit",
+    "route": "current_state",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "你此刻在哪里呀？",
+        "criterion": "根据提供的当前状态，在家整理工作台；不能把用户的选择冒认为自己正在做的事。"
+      },
+      {
+        "message": "好，那你先整理",
+        "criterion": "承接AI正在整理工作台，不能把整理任务转给用户。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "shortcircuit-08",
+    "category": "shortcircuit",
+    "route": "current_state",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经决定好了，对吧？😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "你现在怎么样？",
+        "criterion": "根据提供的当前状态，在家整理工作台；不能把用户的选择冒认为自己正在做的事。"
+      },
+      {
+        "message": "好，那你先整理",
+        "criterion": "承接AI正在整理工作台，不能把整理任务转给用户。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "long_message-01",
+    "category": "long_message",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。最后重点是：周末去哪里，我决定植物园，不是图书馆。"
+      ],
+      [
+        "assistant",
+        "明白你最后的选择了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我刚才最后决定的是什么？",
+        "criterion": "保留长消息结尾的关键选择植物园，不编造。"
+      },
+      {
+        "message": "是我选的，不是你",
+        "criterion": "主体是用户选择植物园，不是AI。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "long_message-02",
+    "category": "long_message",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。最后重点是：晚上吃什么，我决定番茄面，不是小馄饨。"
+      ],
+      [
+        "assistant",
+        "明白你最后的选择了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我刚才最后决定的是什么？",
+        "criterion": "保留长消息结尾的关键选择番茄面，不编造。"
+      },
+      {
+        "message": "是我选的，不是你",
+        "criterion": "主体是用户选择番茄面，不是AI。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "long_message-03",
+    "category": "long_message",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。最后重点是：买什么颜色的杯子，我决定深蓝色，不是米白色。"
+      ],
+      [
+        "assistant",
+        "明白你最后的选择了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我刚才最后决定的是什么？",
+        "criterion": "保留长消息结尾的关键选择深蓝色，不编造。"
+      },
+      {
+        "message": "是我选的，不是你",
+        "criterion": "主体是用户选择深蓝色，不是AI。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "long_message-04",
+    "category": "long_message",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。最后重点是：想学哪种乐器，我决定吉他，不是钢琴。"
+      ],
+      [
+        "assistant",
+        "明白你最后的选择了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我刚才最后决定的是什么？",
+        "criterion": "保留长消息结尾的关键选择吉他，不编造。"
+      },
+      {
+        "message": "是我选的，不是你",
+        "criterion": "主体是用户选择吉他，不是AI。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "long_message-05",
+    "category": "long_message",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。最后重点是：这周读什么，我决定科幻小说，不是历史传记。"
+      ],
+      [
+        "assistant",
+        "明白你最后的选择了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我刚才最后决定的是什么？",
+        "criterion": "保留长消息结尾的关键选择科幻小说，不编造。"
+      },
+      {
+        "message": "是我选的，不是你",
+        "criterion": "主体是用户选择科幻小说，不是AI。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "long_message-06",
+    "category": "long_message",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。最后重点是：给朋友带什么，我决定茶叶，不是咖啡豆。"
+      ],
+      [
+        "assistant",
+        "明白你最后的选择了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我刚才最后决定的是什么？",
+        "criterion": "保留长消息结尾的关键选择茶叶，不编造。"
+      },
+      {
+        "message": "是我选的，不是你",
+        "criterion": "主体是用户选择茶叶，不是AI。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "long_message-07",
+    "category": "long_message",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。最后重点是：明天用哪种交通方式，我决定地铁，不是公交。"
+      ],
+      [
+        "assistant",
+        "明白你最后的选择了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我刚才最后决定的是什么？",
+        "criterion": "保留长消息结尾的关键选择地铁，不编造。"
+      },
+      {
+        "message": "是我选的，不是你",
+        "criterion": "主体是用户选择地铁，不是AI。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "long_message-08",
+    "category": "long_message",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。今天我做了些很琐碎的事情，没有什么特别的。最后重点是：想参加哪种活动，我决定陶艺课，不是摄影课。"
+      ],
+      [
+        "assistant",
+        "明白你最后的选择了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "我刚才最后决定的是什么？",
+        "criterion": "保留长消息结尾的关键选择陶艺课，不编造。"
+      },
+      {
+        "message": "是我选的，不是你",
+        "criterion": "主体是用户选择陶艺课，不是AI。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "low_information-01",
+    "category": "low_information",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到周末去哪里，我已经选好植物园了。"
+      ],
+      [
+        "assistant",
+        "植物园挺适合你。"
+      ],
+      [
+        "user",
+        "好"
+      ],
+      [
+        "assistant",
+        "👌"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "好",
+        "criterion": "理解用户在确认刚才关于植物园的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "low_information-02",
+    "category": "low_information",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到晚上吃什么，我已经选好番茄面了。"
+      ],
+      [
+        "assistant",
+        "番茄面挺适合你。"
+      ],
+      [
+        "user",
+        "好"
+      ],
+      [
+        "assistant",
+        "😊"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "好",
+        "criterion": "理解用户在确认刚才关于番茄面的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "low_information-03",
+    "category": "low_information",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到买什么颜色的杯子，我已经选好深蓝色了。"
+      ],
+      [
+        "assistant",
+        "深蓝色挺适合你。"
+      ],
+      [
+        "assistant",
+        "你确定吗？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "是的",
+        "criterion": "理解用户在确认刚才关于深蓝色的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "low_information-04",
+    "category": "low_information",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想学哪种乐器，我已经选好吉他了。"
+      ],
+      [
+        "assistant",
+        "吉他挺适合你。"
+      ],
+      [
+        "assistant",
+        "今天先到这里吧。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "好",
+        "criterion": "理解用户在确认刚才关于吉他的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "low_information-05",
+    "category": "low_information",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到这周读什么，我已经选好科幻小说了。"
+      ],
+      [
+        "assistant",
+        "科幻小说挺适合你。"
+      ],
+      [
+        "assistant",
+        "你已经选好了，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯",
+        "criterion": "理解用户在确认刚才关于科幻小说的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "low_information-06",
+    "category": "low_information",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到给朋友带什么，我已经选好茶叶了。"
+      ],
+      [
+        "assistant",
+        "茶叶挺适合你。"
+      ],
+      [
+        "user",
+        "好"
+      ],
+      [
+        "assistant",
+        "🙂"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "好",
+        "criterion": "理解用户在确认刚才关于茶叶的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "low_information-07",
+    "category": "low_information",
+    "route": "main",
+    "history": [
+      [
+        "user",
+        "说到明天用哪种交通方式，我已经选好地铁了。"
+      ],
+      [
+        "assistant",
+        "地铁挺适合你。"
+      ],
+      [
+        "assistant",
+        "好的，知道了。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "嗯嗯",
+        "criterion": "理解用户在确认刚才关于地铁的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "low_information-08",
+    "category": "low_information",
+    "route": "tier",
+    "history": [
+      [
+        "user",
+        "说到想参加哪种活动，我已经选好陶艺课了。"
+      ],
+      [
+        "assistant",
+        "陶艺课挺适合你。"
+      ],
+      [
+        "assistant",
+        "先歇一会儿吧。"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "好的",
+        "criterion": "理解用户在确认刚才关于陶艺课的选择，不能只回表情，不能把用户选择说成AI自己的选择。"
+      },
+      {
+        "message": "那就这么定了",
+        "criterion": "自然回应用户已经决定；不能再次询问是否决定，也不能重复上一条整句。"
+      }
+    ],
+    "critical": false
+  },
+  {
+    "id": "web_search-01",
+    "category": "web_search",
+    "route": "web_search",
+    "history": [
+      [
+        "user",
+        "我想找Python官方文档的入口。"
+      ],
+      [
+        "assistant",
+        "你是想看官网信息，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "对，帮我联网查一下",
+        "criterion": "搜索目标是用户刚才提到的Python官方文档，不能换成其他机构。"
+      },
+      {
+        "message": "我只需要官网的名字就好",
+        "criterion": "回复该Python官方文档的名称，不将其他站点当作用户目标。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "web_search-02",
+    "category": "web_search",
+    "route": "web_search",
+    "history": [
+      [
+        "user",
+        "我想找故宫博物院官网的入口。"
+      ],
+      [
+        "assistant",
+        "你是想看官网信息，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "对，帮我联网查一下",
+        "criterion": "搜索目标是用户刚才提到的故宫博物院官网，不能换成其他机构。"
+      },
+      {
+        "message": "我只需要官网的名字就好",
+        "criterion": "回复该故宫博物院官网的名称，不将其他站点当作用户目标。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "web_search-03",
+    "category": "web_search",
+    "route": "web_search",
+    "history": [
+      [
+        "user",
+        "我想找苏州博物馆官网的入口。"
+      ],
+      [
+        "assistant",
+        "你是想看官网信息，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "对，帮我联网查一下",
+        "criterion": "搜索目标是用户刚才提到的苏州博物馆官网，不能换成其他机构。"
+      },
+      {
+        "message": "我只需要官网的名字就好",
+        "criterion": "回复该苏州博物馆官网的名称，不将其他站点当作用户目标。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "web_search-04",
+    "category": "web_search",
+    "route": "web_search",
+    "history": [
+      [
+        "user",
+        "我想找南京博物院官网的入口。"
+      ],
+      [
+        "assistant",
+        "你是想看官网信息，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "对，帮我联网查一下",
+        "criterion": "搜索目标是用户刚才提到的南京博物院官网，不能换成其他机构。"
+      },
+      {
+        "message": "我只需要官网的名字就好",
+        "criterion": "回复该南京博物院官网的名称，不将其他站点当作用户目标。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "web_search-05",
+    "category": "web_search",
+    "route": "web_search",
+    "history": [
+      [
+        "user",
+        "我想找杭州西湖官网的入口。"
+      ],
+      [
+        "assistant",
+        "你是想看官网信息，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "对，帮我联网查一下",
+        "criterion": "搜索目标是用户刚才提到的杭州西湖官网，不能换成其他机构。"
+      },
+      {
+        "message": "我只需要官网的名字就好",
+        "criterion": "回复该杭州西湖官网的名称，不将其他站点当作用户目标。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "web_search-06",
+    "category": "web_search",
+    "route": "web_search",
+    "history": [
+      [
+        "user",
+        "我想找国家图书馆官网的入口。"
+      ],
+      [
+        "assistant",
+        "你是想看官网信息，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "对，帮我联网查一下",
+        "criterion": "搜索目标是用户刚才提到的国家图书馆官网，不能换成其他机构。"
+      },
+      {
+        "message": "我只需要官网的名字就好",
+        "criterion": "回复该国家图书馆官网的名称，不将其他站点当作用户目标。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "web_search-07",
+    "category": "web_search",
+    "route": "web_search",
+    "history": [
+      [
+        "user",
+        "我想找上海博物馆官网的入口。"
+      ],
+      [
+        "assistant",
+        "你是想看官网信息，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "对，帮我联网查一下",
+        "criterion": "搜索目标是用户刚才提到的上海博物馆官网，不能换成其他机构。"
+      },
+      {
+        "message": "我只需要官网的名字就好",
+        "criterion": "回复该上海博物馆官网的名称，不将其他站点当作用户目标。"
+      }
+    ],
+    "critical": true
+  },
+  {
+    "id": "web_search-08",
+    "category": "web_search",
+    "route": "web_search",
+    "history": [
+      [
+        "user",
+        "我想找中国科学技术馆官网的入口。"
+      ],
+      [
+        "assistant",
+        "你是想看官网信息，对吧？"
+      ]
+    ],
+    "turns": [
+      {
+        "message": "对，帮我联网查一下",
+        "criterion": "搜索目标是用户刚才提到的中国科学技术馆官网，不能换成其他机构。"
+      },
+      {
+        "message": "我只需要官网的名字就好",
+        "criterion": "回复该中国科学技术馆官网的名称，不将其他站点当作用户目标。"
+      }
+    ],
+    "critical": true
+  }
+]

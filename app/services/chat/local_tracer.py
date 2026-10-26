@@ -211,7 +211,12 @@ def _extract_usage_from_outputs(outputs: dict[str, Any] | None) -> dict[str, Any
         result["total_tokens"] = _as_int(usage_meta.get("total_tokens"))
         details = usage_meta.get("input_token_details")
         if isinstance(details, dict):
-            cache_read = _as_int(details.get("cache_read") or details.get("cached_tokens"))
+            # Zero is a measured cache miss (Ark returns cached_tokens=0),
+            # not missing telemetry. Never infer zero when both keys are absent.
+            value = details.get("cache_read")
+            if value is None:
+                value = details.get("cached_tokens")
+            cache_read = _as_int(value)
             if cache_read is not None:
                 result["prompt_token_details"] = {"cache_read": cache_read}
         if result["total_tokens"] is None and (

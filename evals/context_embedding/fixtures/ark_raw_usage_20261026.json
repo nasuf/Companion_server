@@ -1,0 +1,61 @@
+[
+  {
+    "source": "chat-cold",
+    "route": "chat.completions",
+    "sampled_at": "2026-10-26T00:23:10.856683+00:00",
+    "model": "doubao-seed-character-260628",
+    "usage": {
+      "completion_tokens": 1,
+      "prompt_tokens": 77,
+      "total_tokens": 78,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    }
+  },
+  {
+    "source": "chat-stream-cold",
+    "route": "chat.completions",
+    "sampled_at": "2026-10-26T00:23:11.327564+00:00",
+    "model": "doubao-seed-character-260628",
+    "usage": {
+      "completion_tokens": 1,
+      "prompt_tokens": 80,
+      "total_tokens": 81,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    }
+  },
+  {
+    "source": "responses-search",
+    "route": "responses.web_search",
+    "sampled_at": "2026-10-26T00:23:14.153110+00:00",
+    "model": "doubao-seed-character-260628",
+    "usage": {
+      "input_tokens": 4791,
+      "output_tokens": 71,
+      "total_tokens": 4862,
+      "input_tokens_details": {
+        "cached_tokens": 0
+      },
+      "output_tokens_details": {
+        "reasoning_tokens": 0
+      },
+      "tool_usage": {
+        "web_search": 1
+      },
+      "tool_usage_details": {
+        "web_search": {
+          "search_engine": 1
+        }
+      }
+    }
+  }
+]

@@ -486,6 +486,22 @@ class TestCallbackCollection:
 
 
 class TestUsageExtraction:
+    @pytest.mark.parametrize("details, expected", [
+        ({"cache_read": 0}, {"cache_read": 0}),
+        ({"cached_tokens": 0}, {"cache_read": 0}),
+        ({"cache_read": 0, "cached_tokens": 10}, {"cache_read": 0}),
+        ({"cache_read": None, "cached_tokens": 0}, {"cache_read": 0}),
+        ({}, None),
+    ])
+    def test_measured_zero_is_not_missing(self, details, expected):
+        from app.services.chat.local_tracer import _extract_usage_from_outputs
+
+        outputs = {"generations": [[{"message": {"kwargs": {"usage_metadata": {
+            "input_tokens": 77, "output_tokens": 1, "total_tokens": 78,
+            "input_token_details": details,
+        }}}}]]}
+        assert _extract_usage_from_outputs(outputs)["prompt_token_details"] == expected
+
     def test_usage_metadata_path(self):
         from app.services.chat.local_tracer import _extract_usage_from_outputs
 
