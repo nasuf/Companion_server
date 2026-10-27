@@ -123,8 +123,10 @@ async def _seed(pg):
     await _message(pg, ext_side, "assistant", _local(DAY, 15), {**event, "component_card": {"t": 1}})
     await _message(pg, ext_side, "assistant", _local(DAY, 15, 0, 1), event)
     await _message(pg, ext_side, "user", _local(DAY, 16))
-    # 事件 ID 上线前的旧主动消息: 只能按条计, 无人回应
+    # 事件 ID 上线前的旧主动消息: 只能按条计, 无人回应; 键存在但值为 null 也算旧消息
     await _message(pg, ext_side, "assistant", _local(DAY, 18), {"proactive": True})
+    await _message(pg, ext_side, "assistant", _local(DAY, 19),
+                   {"proactive": True, "proactive_event_id": None})
     # admin 的主动发送 (外部口径下不计)
     await _message(pg, others[0], "assistant", _local(DAY, 12),
                    {"proactive": True, "proactive_event_id": "evt-" + uuid4().hex})
@@ -147,9 +149,9 @@ async def test_effect_metrics_exclude_every_internal_kind_and_dedupe_events(pg):
     assert (everyone["turns"], everyone["continued"]) == (6, 4)
     assert external["sessions"] == 2
     # 一次发送 = 一个事件; 旧消息单独计数, 不和事件混在一起看不出口径
-    assert (external["proactive_sent"], external["proactive_answered"]) == (2, 1)
-    assert (external["proactive_legacy_messages"], external["proactive_bubbles"]) == (1, 3)
-    assert (everyone["proactive_sent"], everyone["proactive_bubbles"]) == (3, 4)
+    assert (external["proactive_sent"], external["proactive_answered"]) == (3, 1)
+    assert (external["proactive_legacy_messages"], external["proactive_bubbles"]) == (2, 4)
+    assert (everyone["proactive_sent"], everyone["proactive_bubbles"]) == (4, 5)
 
     # 原始 SQL 核对: 不经过统计代码, 直接数外部用户当天的用户消息发送人
     start, end = local_day_bounds(DAY)

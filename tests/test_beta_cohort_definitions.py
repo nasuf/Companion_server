@@ -82,24 +82,40 @@ async def test_cache_is_bypassed_when_the_population_is_unknown():
     assert redis.data == {}
 
 
-async def test_settled_day_is_cached_long_but_a_failed_day_only_briefly():
+async def test_settled_day_is_cached_long_but_a_failed_day_is_not_cached():
     redis = _Redis()
     old = date.today() - timedelta(days=10)
+    broken_day = old - timedelta(days=1)
     ok = EffectMetrics(date=old.isoformat(), turns=3)
-    broken = EffectMetrics(date=(old - timedelta(days=1)).isoformat(), failed=["core"])
+    broken = EffectMetrics(date=broken_day.isoformat(), failed=["core"])
+    healed = EffectMetrics(date=broken_day.isoformat(), turns=5)
     with (
         patch.object(store, "population_fingerprint", AsyncMock(return_value="fp")),
         patch("app.redis_client.get_redis", AsyncMock(return_value=redis)),
-        patch.object(store, "collect", AsyncMock(side_effect=[ok, broken])) as collect,
+        patch.object(store, "collect", AsyncMock(side_effect=[ok, broken, healed])) as collect,
     ):
         await store.get_day(old)
         cached = await store.get_day(old)  # 第二次命中缓存, 不再计算
-        await store.get_day(old - timedelta(days=1))
-    assert collect.await_count == 2 and cached["turns"] == 3
+        first = await store.get_day(broken_day)
+        retried = await store.get_day(broken_day)  # 失败不进缓存, 刷新即重算
+    assert collect.await_count == 3 and cached["turns"] == 3
+    assert first["failed"] == ["core"] and retried["turns"] == 5
     ttls = {json.loads(redis.data[k])["date"]: redis.ttls[k] for k in redis.data}
-    assert ttls[old.isoformat()] == store._TTL_SETTLED_S
-    assert ttls[(old - timedelta(days=1)).isoformat()] == store._TTL_PENDING_S
+    assert ttls == {old.isoformat(): store._TTL_SETTLED_S, broken_day.isoformat(): store._TTL_SETTLED_S}
     assert all(f":{definitions.DEFINITION_VERSION}:external:fp:" in k for k in redis.data)
+
+
+async def test_result_is_not_cached_when_the_population_changed_during_computation():
+    """计算期间有人改了内部账号: 这份数不属于读取时的指纹, 不能写进去."""
+    redis = _Redis()
+    old = date.today() - timedelta(days=10)
+    with (
+        patch.object(store, "population_fingerprint", AsyncMock(side_effect=["fp-before", "fp-after"])),
+        patch("app.redis_client.get_redis", AsyncMock(return_value=redis)),
+        patch.object(store, "collect", AsyncMock(return_value=EffectMetrics(date=old.isoformat(), turns=4))),
+    ):
+        payload = await store.get_day(old)
+    assert payload["turns"] == 4 and redis.data == {}
 
 
 async def test_range_reads_the_population_fingerprint_once_for_all_days():
@@ -113,8 +129,9 @@ async def test_range_reads_the_population_fingerprint_once_for_all_days():
         result = await store.get_range(3)
     dates = [d["date"] for d in result.days]
     assert dates == sorted(dates) and len(dates) == 3
-    assert fingerprint.await_count == 1  # 一段区间只查一次内部账号集合
-    assert all(":external:fp:" in key for key in redis.data)
+    # 读取一次用于整段区间的缓存键; 每天写入前再核对一次 (见计算期间人群变化的测试)。
+    assert fingerprint.await_count == 1 + 3
+    assert len(redis.data) == 3 and all(":external:fp:" in key for key in redis.data)
 
 
 async def test_forced_refresh_recomputes_even_when_cached():

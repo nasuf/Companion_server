@@ -18,6 +18,7 @@ from app.services.llm.pricing import estimate_cost_cny
 from app.services.notifications.presence import count_online_users, list_online_user_ids
 from app.services.operations.metrics import summarize_crisis_events, summarize_visible_use
 from app.services.effect.definitions import (
+    DEFINITION_VERSION,
     chat_activity_sql,
     describe,
     local_day_bounds,
@@ -1217,8 +1218,8 @@ _MONITORING_CACHE_TTL = 25
 
 
 def _monitoring_cache_key(days: int, cohort: str = "external", fingerprint: str = "-") -> str:
-    # 内部账号集合变化 (fingerprint) 时旧缓存自然失效, 不必在每个改动入口清缓存。
-    return f"admin:stats:monitoring:{cohort}:{fingerprint}:{days}"
+    # 口径版本或内部账号集合 (fingerprint) 变化时旧缓存自然失效, 不必在每个改动入口清缓存。
+    return f"admin:stats:monitoring:{DEFINITION_VERSION}:{cohort}:{fingerprint}:{days}"
 
 
 @router.get("/online")
@@ -1388,6 +1389,7 @@ async def _compute_monitoring(days: int, cohort: Literal["external", "all"] = "e
     start_iso = _day_start(days - 1) if days and days > 0 else None
     start = datetime.fromisoformat(start_iso).replace(tzinfo=timezone.utc) if start_iso else None
     activity = chat_activity_sql(cohort)
+    cohort_filter = population_sql("c.user_id", cohort)
 
     def _clause(col: str) -> tuple[str, list]:
         """窗口过滤: 有 start 时 `col >= $1::timestamp`, 否则全量."""
@@ -1501,13 +1503,14 @@ async def _compute_monitoring(days: int, cohort: Literal["external", "all"] = "e
             """,
         ),
         db.query_raw(
+            # 近 5 分钟活跃与实时在线放在同一张卡里, 两者都不分人群; DAU/WAU/MAU 按人群。
             f"""
             SELECT
-                COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $1::timestamp)::int AS dau,
-                COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $2::timestamp)::int AS wau,
-                COUNT(DISTINCT c.user_id)::int AS mau,
+                COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $1::timestamp AND {cohort_filter})::int AS dau,
+                COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $2::timestamp AND {cohort_filter})::int AS wau,
+                COUNT(DISTINCT c.user_id) FILTER (WHERE {cohort_filter})::int AS mau,
                 COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $4::timestamp)::int AS active_5min
-            FROM {activity} AND m.created_at >= $3::timestamp
+            FROM {chat_activity_sql("all")} AND m.created_at >= $3::timestamp
             """,
             *activity_params,
         ),

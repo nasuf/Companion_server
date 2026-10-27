@@ -95,16 +95,20 @@ async def get_day(
 
     payload = (await collect(day, now=now, cohort=cohort)).as_dict()
 
-    if redis is not None:
-        try:
-            # 查询失败的那一天不能长期固化成 0, 下次读取时要重算。
-            settled = _is_settled(day, now) and not payload.get("failed")
-            await redis.set(
-                key, json.dumps(payload, ensure_ascii=False),
-                ex=_TTL_SETTLED_S if settled else _TTL_PENDING_S,
-            )
-        except Exception as exc:
-            logger.warning(f"effect: cache write failed for {day}: {exc}")
+    # 查询失败的那一天不缓存: 下次读取 (含页面刷新) 直接重算, 一次超时不会被固化。
+    if redis is None or payload.get("failed"):
+        return payload
+    # 计算要跑好几条查询; 期间有人改了内部账号, 这份数就不属于读取时的指纹。
+    # 不写入, 否则指纹恢复原值后这份错数会被当成已定型的结果读出来。
+    if cohort != "all" and await _fingerprint(cohort) != fingerprint:
+        return payload
+    try:
+        await redis.set(
+            key, json.dumps(payload, ensure_ascii=False),
+            ex=_TTL_SETTLED_S if _is_settled(day, now) else _TTL_PENDING_S,
+        )
+    except Exception as exc:
+        logger.warning(f"effect: cache write failed for {day}: {exc}")
     return payload
 
 

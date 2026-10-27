@@ -151,7 +151,7 @@ def test_monitoring_skips_cache_when_internal_population_is_unknown(api_client):
     app, require_admin_jwt = _admin_override()
     fake_db = MagicMock()
     fake_db.query_raw = AsyncMock(side_effect=_monitoring_side_effect())
-    shared_redis = _FakeRedis({"admin:stats:monitoring:external:fp-test:7": '{"stale": true}'})
+    shared_redis = _FakeRedis({"admin:stats:monitoring:beta-metrics-v1:external:fp-test:7": '{"stale": true}'})
     try:
         with (
             patch("app.api.admin.stats.db", fake_db),
@@ -163,7 +163,7 @@ def test_monitoring_skips_cache_when_internal_population_is_unknown(api_client):
             response = api_client.get("/admin-api/stats/monitoring", params={"days": 7})
         assert response.status_code == 200
         assert response.json()["cached"] is False and "stale" not in response.json()
-        assert set(shared_redis.store) == {"admin:stats:monitoring:external:fp-test:7"}
+        assert set(shared_redis.store) == {"admin:stats:monitoring:beta-metrics-v1:external:fp-test:7"}
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
 
@@ -186,7 +186,7 @@ def test_monitoring_cache_is_separate_per_cohort(api_client):
         assert everyone.json()["cached"] is False  # 不同人群不共用缓存
         assert invalid.status_code == 422
         assert set(shared_redis.store) == {
-            "admin:stats:monitoring:external:fp-test:7", "admin:stats:monitoring:all:-:7",
+            "admin:stats:monitoring:beta-metrics-v1:external:fp-test:7", "admin:stats:monitoring:beta-metrics-v1:all:-:7",
         }
         assert "NOT EXISTS" in fake_db.query_raw.await_args_list[1].args[0]
         assert "NOT EXISTS" not in fake_db.query_raw.await_args_list[8].args[0]

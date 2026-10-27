@@ -330,7 +330,7 @@ async def _fetch_proactive(start: datetime, end: datetime, cohort: Cohort = DEFA
         WITH bubbles AS (
             SELECT conversation_id, created_at,
                    COALESCE(metadata->>'proactive_event_id', 'legacy:' || id) AS event_key,
-                   (metadata ? 'proactive_event_id') AS identified
+                   (metadata->>'proactive_event_id' IS NOT NULL) AS identified
             FROM messages
             WHERE role = 'assistant'
               AND metadata->>'proactive' = 'true'
