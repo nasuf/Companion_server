@@ -159,7 +159,8 @@ def test_dates_are_local_and_tolerate_bad_input():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backlog_mode", [False, True])
-async def test_gift_chat_messages_are_context_not_extraction_targets(backlog_mode):
+async def test_gift_chat_messages_are_context_not_extraction_targets(backlog_mode, monkeypatch):
+    monkeypatch.setattr("app.services.memory.recording.receipts.record_policy_skips", AsyncMock())
     now = datetime.now(UTC)
     gift_card = {
         "id": "gift-card", "role": "user", "content": "我签收了你寄来的「便签本」",

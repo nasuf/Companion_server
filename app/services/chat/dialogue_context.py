@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from app.services.chat import context_policy
 from app.services.chat.message_utils import (
-    is_offering_received_notice, last_user_turns, message_field, previous_assistant_turn,
+    is_offering_received_notice, last_user_turns, message_field, group_dialogue_turns,
 )
 from app.services.memory.retrieval.context_selector import estimate_tokens
 
@@ -43,25 +43,14 @@ def render_dialogue(messages, *, turns=None, line_chars=context_policy.LINE_CHAR
             and message_field(m, 'id') not in excluded
             and not is_offering_received_notice(message_field(m, 'metadata'))
             and str(message_field(m, 'content') or '').strip()]
+    # Preserve CHAT01.09.2's continuous user-fragment policy. Memory uses
+    # the same grouping helper with a finite gap for extraction context.
     merged = []
-    i = len(rows) - 1
-    while i >= 0:
-        row = rows[i]
-        role = message_field(row, 'role')
-        if role == 'assistant':
-            turn = previous_assistant_turn(rows[:i + 1], None)
-            text, at = turn.content, turn.createdAt
-            i -= turn.bubble_count
-        else:
-            pieces = [str(message_field(row, 'content'))]
-            at = message_field(row, 'createdAt')
-            i -= 1
-            while i >= 0 and message_field(rows[i], 'role') == 'user':
-                pieces.append(str(message_field(rows[i], 'content')))
-                i -= 1
-            text = '\n'.join(reversed(pieces))
-        merged.append({'role': role, 'content': ' '.join(text.split()), 'createdAt': at})
-    merged.reverse()
+    for group in group_dialogue_turns(rows):
+        text = "\n".join(str(message_field(row, 'content') or '') for row in group)
+        merged.append({'role': message_field(group[-1], 'role'),
+                       'content': ' '.join(text.split()),
+                       'createdAt': message_field(group[-1], 'createdAt')})
     window = last_user_turns(merged, rounds, lambda row: row['role'])
     truncated = len(window) < len(merged) or len(messages or []) > 200
     lines = []

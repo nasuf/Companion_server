@@ -18,6 +18,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def scoped_window_unit_dependencies(monkeypatch):
+    monkeypatch.setattr('app.services.memory.recording.receipts.record_policy_skips', AsyncMock())
     # This module tests window/backlog selection. Actual conversation ownership
     # and observation collection are covered by the processing integration tests.
     from app.services.chat import post_process

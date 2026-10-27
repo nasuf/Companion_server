@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from hashlib import sha256
 from typing import Literal
 
 from app.services.llm.models import get_utility_model, invoke_text
@@ -67,6 +68,7 @@ def is_user_fact_acknowledgement(message: str) -> bool:
 
 async def should_memorize(
     message: str, side: Side = "user", prev_ai: str = "",
+    *, provenance: dict | None = None,
 ) -> bool:
     """Return True if the message is worth extracting memories from.
 
@@ -92,28 +94,45 @@ async def should_memorize(
     明确列出不记的形态 (向 AI 提问 / 机械确认否认 / 只谈 AI 自己) 才是把误收压
     下来的关键.
     """
+    audit = provenance if provenance is not None else {}
+    audit.clear()
+    audit.update(stage="prefilter", schema_version=1, model_called=False,
+                 actual_model=None)
     if side == "ai":
         if is_user_fact_acknowledgement(message):
+            audit["decision"] = "user_fact_acknowledgement"
             return False
         if _has_stable_ai_self_memory(message):
+            audit["decision"] = "stable_ai_self_memory"
             return True
 
     try:
         template = await get_prompt_text(_PROMPT_KEY_BY_SIDE[side])
+        model = get_utility_model()
+        audit.update(template_key=_PROMPT_KEY_BY_SIDE[side],
+                     template_sha256=sha256(str(template).encode()).hexdigest(),
+                     requested_model=str(getattr(model, "model_name", None) or getattr(model, "model", "unknown"))[:200])
         prompt = template.format_map(SafeDict({
             "message": message, "prev_ai": prev_ai or "(无)",
         }))
-        raw = await invoke_text(get_utility_model(), prompt)
+        route: dict = {}
+        audit["model_called"] = True
+        raw = await invoke_text(model, prompt, invocation_metadata=route)
+        audit["actual_model"] = route.get("actual_model")
         decision = (raw or "").strip()
         # Spec output: plain "记" or "不记". "不记" must come first in check
         # because it contains "记".
         if "不记" in decision:
+            audit["decision"] = "do_not_memorize"
             return False
         if "记" in decision:
+            audit["decision"] = "memorize"
             return True
         # Unrecognized output → fail open
         logger.debug(f"Memory pre-filter unrecognized output ({side}): {decision[:40]!r}")
+        audit["decision"] = "unrecognized_fail_open"
         return True
     except Exception as e:
         logger.warning(f"Memory pre-filter LLM failed ({side}): {e}")
+        audit["decision"] = "error_fail_open"
         return True

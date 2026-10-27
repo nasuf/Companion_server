@@ -2756,6 +2756,10 @@ model MemoryExtractionBatch {
  sources Json
  extraction Json?
  factCount Int? @map("fact_count")
+ pipelineVersion String? @map("pipeline_version")
+ processingOutcome String? @map("processing_outcome")
+ outcomeReason String? @map("outcome_reason")
+ extractionProvenance Json? @map("extraction_provenance")
  preparedAt DateTime @default(now()) @map("prepared_at") @db.Timestamptz(6)
  status String @default("preparing")
  resultIds Json @default("[]") @map("result_ids")
@@ -2887,4 +2891,13 @@ model ChatContextPolicyChange {
   @@ignore
   @@index([createdAt(sort: Desc)])
   @@map("chat_context_policy_changes")
+}
+
+// SQL-only discovery position. It never substitutes for per-source receipts.
+model MemoryMessageAuditCursor {
+  batchId String @id @map("batch_id")
+  afterAt DateTime? @map("after_at") @db.Timestamptz
+  afterId String? @map("after_id")
+  @@ignore
+  @@map("memory_message_audit_cursors")
 }

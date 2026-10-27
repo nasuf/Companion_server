@@ -6,7 +6,7 @@ The extraction/write path still validates the source versions before storing.
 from app.db import db
 from app.services.memory.recording.outcomes import MemoryProgressError
 
-MAX_SOURCES = 206  # 100 user fragments + 100 reply bubbles + six context rows
+MAX_SOURCES = 300  # 100 user fragments + 100 reply bubbles + 100 context rows
 
 
 def _valid_id(value):
@@ -72,7 +72,11 @@ async def load_chat_sources(*, conversation_id: str, user_id: str, workspace_id:
             or any(not _valid_id(i) for i in explicit)
             or (reply_turn_id is not None and not _valid_id(reply_turn_id))):
         raise MemoryProgressError("source_identity_invalid")
-    recent = messages[-6:]
+    from app.services.memory.recording.context_window import history_rows
+    recent = history_rows(messages)
+    # Expanding disambiguation must not admit older rows as fresh facts on a
+    # first run / expired watermark. Preserve the original six-row eligibility.
+    eligible_ids = {m.get("id") for m in messages[-6:]} | set(explicit)
     if not explicit and not reply_turn_id and any(
         m.get("role") in {"user", "assistant"} and not _valid_id(m.get("id")) for m in recent
     ):
@@ -89,7 +93,7 @@ async def load_chat_sources(*, conversation_id: str, user_id: str, workspace_id:
               AND w.status='active' AND m.role IN ('user','assistant')
               AND (m.id=ANY($4::text[]) OR ($5::text IS NOT NULL AND m.role='assistant'
                    AND m.metadata->>'achievement_turn_id'=$5))
-            ORDER BY m.created_at,m.id LIMIT 207""",
+            ORDER BY m.created_at,m.id LIMIT 301""",
             conversation_id, user_id, workspace_id, ids, reply_turn_id)
     except Exception as exc:
         raise MemoryProgressError("source_read_unavailable") from exc
@@ -98,6 +102,11 @@ async def load_chat_sources(*, conversation_id: str, user_id: str, workspace_id:
                 r['role'] == 'assistant' and (r.get('metadata') or {}).get('achievement_turn_id') == reply_turn_id
                 for r in rows))):
         raise MemoryProgressError("source_invalid")
-    if any(sum(r['role'] == role for r in rows) > 100 for role in ('user', 'assistant')):
+    for row in rows:
+        is_reply = (reply_turn_id is not None and row['role'] == 'assistant'
+                    and (row.get('metadata') or {}).get('achievement_turn_id') == reply_turn_id)
+        row['_memory_context_only'] = row['id'] not in eligible_ids and not is_reply
+    if any(sum(r['role'] == role and not r['_memory_context_only'] for r in rows) > 100
+           for role in ('user', 'assistant')):
         raise MemoryProgressError("source_batch_limit")
     return rows

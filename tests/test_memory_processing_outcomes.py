@@ -15,6 +15,7 @@ from tests.test_memory_evidence_postgres import origins
 
 @pytest.fixture
 def unit(monkeypatch):
+    monkeypatch.setattr('app.services.memory.recording.receipts.record_policy_skips', AsyncMock())
     monkeypatch.setattr(d, '_write', AsyncMock())
     from app.services.memory.recording import chat_sources
     # Selection/coordination only; real source resolution is tested on PostgreSQL.

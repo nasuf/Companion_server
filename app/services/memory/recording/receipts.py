@@ -6,6 +6,7 @@ The model never chooses identity, scope, receipt keys, or deletion permissions.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -24,6 +25,7 @@ from app.services.runtime.execution_scope import (
 
 MAX_FACTS = 100
 PLAN_VERSION = 1
+PIPELINE_VERSION = "message-ledger-v1"
 
 
 class MemoryReceiptError(RuntimeError):
@@ -229,6 +231,12 @@ async def freeze(batch, extraction, origins):
     from app.services.memory.taxonomy import SUBCATEGORY_ALIASES
 
     payload = _sanitize(extraction, len(batch["sources"]))
+    # Filled by our extraction boundary, never copied from raw model output.
+    provenance = extraction.get("_provenance")
+    if not isinstance(provenance, dict) or len(_json(provenance).encode()) > 8192:
+        provenance = None
+    reason = extraction.get("_empty_reason")
+    reason = reason if reason in {"heuristic_filtered", "prefilter_rejected"} else None
     for fact in payload["memories"]:
         sub = fact.get("sub_category")
         sub = SUBCATEGORY_ALIASES.get(sub, sub) if isinstance(sub, str) else None
@@ -264,10 +272,15 @@ async def freeze(batch, extraction, origins):
             raise MemoryReceiptError("memory_plan_source_changed")
         rows = await tx.query_raw(
             """UPDATE memory_extraction_batches
-            SET extraction=COALESCE(extraction,$2::jsonb),fact_count=COALESCE(fact_count,jsonb_array_length($2::jsonb->'memories')),status='processing',updated_at=CURRENT_TIMESTAMP
+            SET extraction=COALESCE(extraction,$2::jsonb),fact_count=COALESCE(fact_count,jsonb_array_length($2::jsonb->'memories')),
+                extraction_provenance=CASE WHEN extraction IS NULL THEN $3::jsonb ELSE extraction_provenance END,
+                outcome_reason=CASE WHEN extraction IS NULL THEN $4 ELSE outcome_reason END,
+                status='processing',updated_at=CURRENT_TIMESTAMP
             WHERE id=$1 AND status IN ('preparing','processing') RETURNING extraction""",
             batch["id"],
             _json(payload),
+            _json(provenance) if provenance is not None else None,
+            reason,
         )
         if not rows:
             raise MemoryReceiptError("memory_plan_invalid")
@@ -323,8 +336,8 @@ async def _admit(scope, side, origins):
             bid = str(uuid4())
             await tx.execute_raw(
                 """INSERT INTO memory_extraction_batches
-                (id,user_id,workspace_id,conversation_id,side,scope,sources)
-                VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)""",
+                (id,user_id,workspace_id,conversation_id,side,scope,sources,pipeline_version)
+                VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8)""",
                 bid,
                 scope.owner_user_id,
                 scope.workspace_id,
@@ -332,6 +345,7 @@ async def _admit(scope, side, origins):
                 side,
                 _json(scope.to_record()),
                 _json(_source_records(fresh)),
+                PIPELINE_VERSION,
             )
             for source in fresh:
                 await tx.execute_raw(
@@ -449,6 +463,8 @@ async def _execute_batch(bid, scope, execute, kwargs):
     if batch["status"] == "blocked":
         return []
     if batch["status"] == "completed":
+        # A receipt does not authorize replay of an edited source version.
+        await _inputs(batch)
         table = "memories_user" if side == "user" else "memories_ai"
         rows = await db.query_raw(
             f"SELECT id FROM {table} WHERE user_id=$1 AND workspace_id=$2 AND id=ANY($3::text[]) AND NOT is_archived",
@@ -474,13 +490,13 @@ async def _execute_batch(bid, scope, execute, kwargs):
         # Includes heuristic/no-op outcomes, where no write transaction had a
         # chance to bind the source. Never acknowledge an edited input.
         await _inputs(batch)
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         # Preserve only controlled categories, never provider errors or text.
         permanent = (
             isinstance(exc, MemoryReceiptError)
             and exc.reason == "memory_plan_source_changed"
         )
-        reason = "source_changed" if permanent else "processing_failed"
+        reason = "source_changed" if permanent else safe_failure_reason(exc)
         await db.execute_raw(
             """UPDATE memory_extraction_batches
             SET last_error=$2,status=CASE WHEN $3 THEN 'blocked' ELSE status END,
@@ -505,13 +521,82 @@ async def _execute_batch(bid, scope, execute, kwargs):
             raise MemoryReceiptError("memory_erasure_changed")
         await _inputs(batch, database=tx, lock=True)
         changed = await tx.execute_raw(
-            "UPDATE memory_extraction_batches SET status='completed',extraction=NULL,fact_count=COALESCE(fact_count,0),result_ids=$2::jsonb,last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND status IN ('preparing','processing','completed')",
+            """UPDATE memory_extraction_batches SET status='completed',
+                processing_outcome=CASE WHEN jsonb_array_length($2::jsonb)>0 THEN 'processed'
+                    WHEN outcome_reason IN ('heuristic_filtered','prefilter_rejected') THEN 'policy_skipped'
+                    WHEN fact_count=0 THEN 'no_fact'
+                    WHEN fact_count>0 THEN 'policy_skipped' ELSE NULL END,
+                outcome_reason=COALESCE(outcome_reason,CASE WHEN fact_count=0 THEN 'empty_extraction'
+                    WHEN jsonb_array_length($2::jsonb)=0 AND fact_count>0 THEN 'facts_not_written' ELSE 'processed' END),
+                extraction=NULL,fact_count=COALESCE(fact_count,0),result_ids=$2::jsonb,
+                last_error=NULL,updated_at=CURRENT_TIMESTAMP
+                WHERE id=$1 AND status IN ('preparing','processing','completed')""",
             bid,
             _json(stored),
         )
         if changed != 1:
             raise MemoryReceiptError("memory_plan_source_changed")
     return stored
+
+
+FAILURE_REASONS = frozenset({
+    "processing_failed", "source_changed", "source_deleted", "extraction_failed",
+    "prompt_disabled", "memory_write_failed", "memory_plan_invalid",
+    "memory_plan_version_unsupported", "memory_erasure_changed", "source_invalid",
+})
+
+
+def safe_failure_reason(error):
+    reason = getattr(error, "kind", None) or getattr(error, "reason", None)
+    return reason if reason in FAILURE_REASONS else "processing_failed"
+
+
+async def record_policy_skips(*, user_id, workspace_id, conversation_id, side, message_ids):
+    """Record exclusions, without making them eligible facts or storing text.
+
+    The native row is rechecked under the same owner/scope and admission locks
+    as extraction. Never overwrite an existing claim, including an old failure.
+    """
+    from app.services.memory.evidence import EvidenceSource, content_version
+    from app.services.memory.recording.chat_sources import excluded_from_chat_extraction, extraction_text
+
+    if not message_ids or len(message_ids) > 100 or side not in {"user", "ai"}:
+        raise MemoryReceiptError("memory_plan_invalid")
+    scope = await bind_conversation_scope(actor_user_id=user_id, conversation_id=conversation_id)
+    if scope.workspace_id != workspace_id:
+        raise ExecutionScopeExpired()
+    async with db.tx() as tx:
+        if await _read_scope(tx, user_id, conversation_id, lock=True) != scope:
+            raise ExecutionScopeExpired()
+        await tx.execute_raw("SELECT pg_advisory_xact_lock($1::bigint)",
+                             _key(f"memory-plan:{conversation_id}:{side}"))
+        rows = await tx.query_raw('''SELECT id,role,content,metadata,created_at FROM messages
+            WHERE conversation_id=$1 AND id=ANY($2::text[]) AND role=$3
+            ORDER BY created_at,id FOR SHARE''', conversation_id, message_ids,
+            "user" if side == "user" else "assistant")
+        if len(rows) != len(set(message_ids)) or any(
+            not excluded_from_chat_extraction(r) and extraction_text(r).strip() for r in rows
+        ):
+            raise MemoryReceiptError("memory_plan_source_changed")
+        claimed = await tx.query_raw("SELECT message_id FROM memory_extraction_sources WHERE message_id=ANY($1::text[]) AND side=$2",
+                                     message_ids, side)
+        existing = {r['message_id'] for r in claimed}
+        sources = tuple(EvidenceSource("message", r['id'], relation="recorded_from",
+            expected_version=content_version(r['content']), expected_role=r['role'],
+            expected_conversation_id=conversation_id, expected_statement_time=r['created_at'])
+            for r in rows if r['id'] not in existing)
+        if not sources:
+            return
+        bid = str(uuid4())
+        await tx.execute_raw('''INSERT INTO memory_extraction_batches
+            (id,user_id,workspace_id,conversation_id,side,scope,sources,pipeline_version,
+             status,fact_count,processing_outcome,outcome_reason)
+            VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,'completed',0,'policy_skipped','reserved_messages')''',
+            bid, user_id, workspace_id, conversation_id, side, _json(scope.to_record()),
+            _json(_source_records(sources)), PIPELINE_VERSION)
+        for source in sources:
+            await tx.execute_raw("INSERT INTO memory_extraction_sources(message_id,side,batch_id) VALUES($1,$2,$3)",
+                                 source.ref, side, bid)
 
 
 async def process(
@@ -560,6 +645,7 @@ async def process(
         if bid not in seen:
             result.extend(await _execute_batch(bid, scope, execute, kwargs))
     return result
+
 
 
 def saved_clock(fact):

@@ -93,6 +93,15 @@ async def extract_memories(
             "_extraction_error": True,
             "_extraction_error_kind": "prompt_disabled",
         }
+    from hashlib import sha256
+    provenance = {
+        "stage": "extraction", "schema_version": 1,
+        "requested_model": str(getattr(model, "model_name", None) or getattr(model, "model", "unknown"))[:200],
+        "actual_model": None,
+        "template_key": _PROMPT_KEY_BY_SIDE[side],
+        "template_sha256": sha256(str(tpl).encode()).hexdigest(),
+        "source_contract_sha256": sha256(str(source_contract).encode()).hexdigest() if source_contract else None,
+    }
     if source_contract is not None:
         from app.services.prompting.trace_components import ManagedPromptText
 
@@ -120,8 +129,14 @@ async def extract_memories(
         # 对象 — invoke_json 内部 `_provider_and_profile` 自己会再调 get_profile,
         # 误传对象会变成 get_profile(get_profile("...")) → KeyError(CallProfile(...))
         # → except 吃掉返空 dict → DB 0 条. 生产 trace 019e0004 (2026-05-07).
-        result = await invoke_json(model, prompt, profile="memory_extract")
+        route: dict = {}
+        result = await invoke_json(model, prompt, profile="memory_extract", invocation_metadata=route)
+        provenance["actual_model"] = route.get("actual_model")
         # Validate structure
+        if not isinstance(result, dict) or not isinstance(result.get("memories"), list) or any(
+            not isinstance(item, dict) for item in result["memories"]
+        ):
+            raise ValueError("invalid_extraction_shape")
         result.setdefault("memories", [])
         result.setdefault("entities", [])
         result.setdefault("preferences", [])
@@ -152,6 +167,9 @@ async def extract_memories(
             mem["type"] = taxonomy.legacy_type
             sanitized_memories.append(mem)
         result["memories"] = sanitized_memories
+        result.pop("_empty_reason", None)
+        # Overwrite, rather than trust, any similarly named field from the LLM.
+        result["_provenance"] = provenance
         elapsed_ms = (_time.perf_counter() - t0) * 1000
         logger.info(
             f"[MEM-EXTRACT-{side}] LLM returned {len(sanitized_memories)} memories "

@@ -343,6 +343,11 @@ async def _invoke_with_resilience(
     from app.services.llm.resilience import call_with_resilience
 
     profile_override = kwargs.pop("profile", None)
+    # Optional caller-owned audit output. Never forward it to a provider or
+    # infer a successful route from the requested model after a fallback.
+    invocation_metadata = kwargs.pop("invocation_metadata", None)
+    if invocation_metadata is not None:
+        invocation_metadata.clear()
     provider, profile = _provider_and_profile(model, profile_override)
 
     if isinstance(prompt, str):
@@ -358,12 +363,16 @@ async def _invoke_with_resilience(
         return await _invoke_via_stream(
             model, messages, provider=provider, profile=profile,
             op=op, force_json=force_json, **kwargs,
+            invocation_metadata=invocation_metadata,
         )
 
     primary_model, primary_kwargs = _for_ollama(model, kwargs)
 
     async def _primary():
-        return await primary_model.ainvoke(messages, **primary_kwargs)
+        response = await primary_model.ainvoke(messages, **primary_kwargs)
+        if invocation_metadata is not None:
+            invocation_metadata["actual_model"] = _resolve_usage_model_key(primary_model)
+        return response
 
     fallback_factory = None
     if provider != "ollama":
@@ -374,7 +383,10 @@ async def _invoke_with_resilience(
             fb_kwargs.setdefault("format", "json")
 
         async def _fallback():
-            return await _fb_model.ainvoke(messages, **fb_kwargs)
+            response = await _fb_model.ainvoke(messages, **fb_kwargs)
+            if invocation_metadata is not None:
+                invocation_metadata["actual_model"] = _resolve_usage_model_key(_fb_model)
+            return response
         fallback_factory = _fallback
 
     return await call_with_resilience(
@@ -394,6 +406,7 @@ async def _invoke_via_stream(
     profile: "CallProfile",
     op: str,
     force_json: bool,
+    invocation_metadata: dict | None = None,
     **kwargs: Any,
 ) -> Any:
     """Streaming 适配器: 与 ainvoke 等价的接口, 内部走 astream + 累积 chunks.
@@ -410,8 +423,11 @@ async def _invoke_via_stream(
     from langchain_core.messages import AIMessage
 
     primary_model, primary_kwargs = _for_ollama(model, kwargs)
+    selected_model = None
 
     def _primary_stream():
+        nonlocal selected_model
+        selected_model = primary_model
         return primary_model.astream(messages, **primary_kwargs)
 
     fallback_factory = None
@@ -423,6 +439,8 @@ async def _invoke_via_stream(
             fb_kwargs.setdefault("format", "json")
 
         def _fallback_stream():
+            nonlocal selected_model
+            selected_model = _fb_model
             return _fb_model.astream(messages, **fb_kwargs)
         fallback_factory = _fallback_stream
 
@@ -435,6 +453,8 @@ async def _invoke_via_stream(
         primary_model_name=_resolve_usage_model_key(model),
         fallback_model_name=fb_model_name,
     )
+    if invocation_metadata is not None and selected_model is not None:
+        invocation_metadata["actual_model"] = _resolve_usage_model_key(selected_model)
     return AIMessage(content=text)
 
 

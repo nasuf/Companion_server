@@ -102,6 +102,36 @@ def _same_assistant_turn(earlier: Any, later: Any) -> bool:
     return later_at - earlier_at <= TURN_BUBBLE_MAX_GAP
 
 
+def group_dialogue_turns(messages: list[_T], *, user_max_gap: timedelta | None = None) -> list[list[_T]]:
+    """Group chronological rows without changing their identity or filtering them.
+
+    Callers own eligibility and limits. AI groups share the previous-reply
+    proactive/time boundary. A user gap of None preserves template dialogue's
+    continuous-fragment policy; memory passes a finite gap to avoid treating
+    statements hours apart as one extraction-context turn. Unknown/missing
+    times split finite-gap user groups. Original objects and IDs are retained.
+    """
+    groups: list[list[_T]] = []
+    for row in messages:
+        previous = groups[-1][-1] if groups else None
+        role = message_field(row, "role")
+        merge = previous is not None and role == message_field(previous, "role")
+        if merge and role == "assistant":
+            merge = _same_assistant_turn(previous, row)
+        elif merge and role == "user":
+            if user_max_gap is not None:
+                before = _parse_message_created_at(message_field(previous, "createdAt"))
+                now = _parse_message_created_at(message_field(row, "createdAt"))
+                merge = before is not None and now is not None and timedelta(0) <= now - before <= user_max_gap
+        else:
+            merge = False
+        if merge:
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+    return groups
+
+
 def previous_assistant_turn(recent_messages: list[Any], current_user_message_id: str | None) -> AssistantTurn | None:
     """Merge the AI bubbles of the turn right before this user message, excluding notices.
 

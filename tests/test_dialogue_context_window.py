@@ -8,6 +8,8 @@ AI 的 3 个气泡加当前消息本身, 一句此前的用户发言都没有; �
 
 from __future__ import annotations
 
+import pytest
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Literal
@@ -231,7 +233,9 @@ class TestMemoryPipelineContext:
         kwargs = await self._run_side("user")
         assert kwargs["new_conversation"] == "user: 我喜欢你"
         assert "真的假的" not in kwargs["context_conversation"]
-        assert kwargs["context_conversation"].splitlines()[-1] == "assistant: 你更喜欢那种呀？"
+        assert kwargs["context_conversation"].splitlines()[-1] == (
+            "assistant: 软甜就是说话温温的👌 / 酷甜是带点小拽的那种 / 你更喜欢那种呀？"
+        )
 
     def test_untimestamped_reply_keeps_the_user_turn_it_answers(self):
         """First run (no watermark): old persisted bubbles plus the fresh reply are all
@@ -259,3 +263,43 @@ class TestMemoryPipelineContext:
             row("user", "c", 2), row("assistant", "d", 3)
         kept = _context_before_targets([between, after], [u1, u2], [u1, between, u2, after], "user")
         assert kept == [between]
+
+
+class TestSharedDialogueGrouping:
+    def test_template_and_memory_share_groups_for_normal_bubbles(self):
+        from app.services.chat.message_utils import group_dialogue_turns, TURN_BUBBLE_MAX_GAP
+        from app.services.chat.dialogue_context import render_dialogue
+        from app.services.memory.recording.context_window import history_rows, format_history
+        rows = _trace_dialogue()[:-1]
+        groups = group_dialogue_turns(rows)
+        memory_groups = group_dialogue_turns(rows, user_max_gap=TURN_BUBBLE_MAX_GAP)
+        assert groups == memory_groups
+        assert render_dialogue(rows, turns=3).metrics['injected_rounds'] == 3
+        assert history_rows(rows) == rows
+        assert format_history(rows).count('assistant:') == render_dialogue(rows, turns=3).text.count('AI:') == 3
+        assert all(any(row is original for original in rows) for group in groups for row in group)
+
+    def test_user_silence_boundary_is_explicit_and_predictable(self):
+        from app.services.chat.message_utils import group_dialogue_turns, TURN_BUBBLE_MAX_GAP
+        from app.services.chat.dialogue_context import render_dialogue
+        from app.services.memory.recording.context_window import history_rows
+        rows = [dict(id=str(i), role='user', content=f'独立陈述{i}', createdAt=_T0+timedelta(hours=i)) for i in range(4)]
+        assert len(group_dialogue_turns(rows)) == 1
+        assert len(group_dialogue_turns(rows, user_max_gap=TURN_BUBBLE_MAX_GAP)) == 4
+        assert render_dialogue(rows, turns=3).metrics['injected_rounds'] == 1
+        assert history_rows(rows) == rows[1:]
+
+    @pytest.mark.parametrize('gap,expected', [(0,1),(600,1),(601,2),(-1,2),(None,2)])
+    def test_finite_user_gap_edges(self, gap, expected):
+        from app.services.chat.message_utils import group_dialogue_turns, TURN_BUBBLE_MAX_GAP
+        rows = [dict(role='user',createdAt=_T0),dict(role='user',createdAt=_T0+timedelta(seconds=gap) if gap is not None else None)]
+        assert len(group_dialogue_turns(rows, user_max_gap=TURN_BUBBLE_MAX_GAP)) == expected
+        assert len(group_dialogue_turns(rows)) == 1
+
+    def test_unknown_roles_are_boundaries_and_assistant_identity_stays_last(self):
+        from app.services.chat.message_utils import group_dialogue_turns, previous_assistant_turn
+        rows = _trace_dialogue()[:3]
+        groups = group_dialogue_turns(rows)
+        assert previous_assistant_turn(rows, None).id == groups[-1][-1]['id'] == 'a2'
+        rows.insert(2, dict(role='system',content='boundary'))
+        assert len(group_dialogue_turns(rows)) == 4

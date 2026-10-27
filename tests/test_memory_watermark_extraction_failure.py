@@ -17,7 +17,9 @@ from app.services.memory.recording.pipeline import MemoryExtractionError
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backlog_mode", [False, True])
-async def test_takeover_messages_are_excluded_from_backlog_and_window(backlog_mode):
+async def test_takeover_messages_are_excluded_from_backlog_and_window(backlog_mode, monkeypatch):
+    monkeypatch.setattr('app.services.memory.recording.receipts.record_policy_skips', AsyncMock())
+    monkeypatch.setattr('app.services.memory.recording.message_audit.unrecorded_since_admission', AsyncMock(return_value=[]))
     from types import SimpleNamespace
     from app.services.chat import post_process as mod
     now=datetime.now(timezone.utc)

@@ -342,43 +342,35 @@ async def _process_memory_pipeline(
     if frozen is not None:
         extraction = frozen
     else:
-        # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
-        # 只对 new_conversation 判定, 历史上下文已经抽过了
+        extraction = None
+        prefilter_provenance: dict = {}
+        # A filter decision is also a candidate. The first frozen candidate
+        # wins, even if a concurrent worker reaches a different model verdict.
         if not should_extract_memory(new_conversation):
             logger.debug(f"[MEM-{side}] filtered by heuristic filter")
-            return []
-
-        # Step 1 (spec §2.1.2 / §2.2.2): Small model pre-filter — "记" or "不记"
-        # Uses registered prompt `memory.judgement_{side}` via should_memorize.
+            extraction = {"memories": [], "_empty_reason": "heuristic_filtered",
+                          "_provenance": {"stage": "heuristic", "model_called": False}}
         from app.config import settings
-        if settings.enable_memory_prefilter:
+        if extraction is None and settings.enable_memory_prefilter:
             memorize = True
             try:
                 memorize = await should_memorize(
                     new_conversation, side=side,
-                    prev_ai=(
-                        prev_ai_line
-                        if prev_ai_line is not None
-                        else _last_ai_line(context_conversation)
-                    ),
+                    prev_ai=prev_ai_line if prev_ai_line is not None else _last_ai_line(context_conversation),
+                    provenance=prefilter_provenance,
                 )
             except Exception as e:
                 logger.warning(f"[MEM-{side}] pre-filter failed ({e}), proceeding")
             if not memorize:
-                await validate_sources()
-                logger.debug(f"[MEM-{side}] pre-filter: 不记")
-                return []
-
-        # Step 2 (spec §2.1.3 / §2.2.3): Big model extraction
-        extraction = await extract_memories(
-            new_conversation,
-            context_conversation=context_conversation,
-            side=side,
-            **({"source_messages": source_table(origins)} if strict_clock else {}),
-        )
-        # Hard LLM failure → propagate so the caller keeps the watermark put and a
-        # later batch retries. An empty-but-successful extraction (no error flag)
-        # falls through and legitimately advances the watermark.
+                extraction = {"memories": [], "_empty_reason": "prefilter_rejected",
+                              "_provenance": {**prefilter_provenance, "stage": "prefilter", "extraction_model_called": False}}
+        if extraction is None:
+            extraction = await extract_memories(
+                new_conversation, context_conversation=context_conversation, side=side,
+                **({"source_messages": source_table(origins)} if strict_clock else {}),
+            )
+            if prefilter_provenance:
+                extraction.setdefault("_provenance", {})["prefilter"] = prefilter_provenance
         if extraction.get("_extraction_error"):
             kind = extraction.get("_extraction_error_kind", "llm_failure")
             raise MemoryExtractionError(

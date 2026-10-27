@@ -336,7 +336,7 @@ async def _do_memory_pipeline(
         workspace_id = await _resolve_workspace_id_for_conversation(conversation_id, user_id, workspace_id)
         from app.services.memory.recording.chat_sources import load_chat_sources
         recent = await load_chat_sources(conversation_id=conversation_id, user_id=user_id,
-            workspace_id=workspace_id, messages=recent, source_message_ids=source_message_ids,
+            workspace_id=workspace_id, messages=messages, source_message_ids=source_message_ids,
             reply_turn_id=reply_turn_id)
     tasks = [asyncio.create_task(_run_memory_side(user_id, recent, conversation_id,
         side=side, workspace_id=workspace_id, excluded=side == "ai" and skip_ai_side))
@@ -399,9 +399,13 @@ async def _fetch_new_side_messages(
             order=[{"createdAt": "asc"}, {"id": "asc"}],
             take=_WATERMARK_BACKLOG_LIMIT + 1,
         )
+        from app.services.memory.recording.message_audit import unrecorded_since_admission
+        missing = await unrecorded_since_admission(conversation_id,
+            'user' if target_role == 'user' else 'ai', database=db,
+            limit=_WATERMARK_BACKLOG_LIMIT + 1)
     except Exception as e:
         raise MemoryProgressError("backlog_unavailable") from e
-    return [
+    persisted = [
         {
             "id": r.id,
             "role": r.role,
@@ -411,6 +415,8 @@ async def _fetch_new_side_messages(
         }
         for r in rows
     ]
+    by_id = {row['id']: row for row in persisted + missing}
+    return sorted(by_id.values(), key=lambda row: (_parse_ts(row), row['id']))[:_WATERMARK_BACKLOG_LIMIT + 1]
 
 
 async def _pipeline_with_watermark(
@@ -430,8 +436,8 @@ async def _pipeline_with_watermark(
     """
     # An older AI job can finish after an administrator claims the chat. Its
     # backlog/context must never turn later human messages into AI memories.
-    recent = [m for m in recent if not (m.get("metadata") or {}).get("human_takeover")
-              and not (m.get("metadata") or {}).get("memory_confirmation")]
+    # Exclusions are inspected for an explicit policy receipt; they never enter
+    # extraction or disambiguation text.
     wm = await get_watermark(conversation_id, side) if conversation_id else None
 
     # Cross-role rows provide context only; they never change memory ownership.
@@ -457,6 +463,7 @@ async def _pipeline_with_watermark(
     max_side_ts: datetime | None = None
     max_side_id: str | None = None
     inspected_count = 0
+    skipped_message_ids: list[str] = []
 
     def _add_target(m: dict) -> None:
         nonlocal max_side_ts, max_side_id, inspected_count
@@ -467,6 +474,8 @@ async def _pipeline_with_watermark(
             raise MemoryProgressError("source_identity_missing")
         if not excluded and extraction_text(m).strip():
             new_target_msgs.append(m)
+        elif conversation_id:
+            skipped_message_ids.append(str(m['id']))
         inspected_count += 1
         effective = ts if ts is not None else fallback_now
         mid = str(m.get("id") or "")
@@ -488,7 +497,8 @@ async def _pipeline_with_watermark(
     else:
         for m in recent:
             ts = _parse_ts(m)
-            is_new = ts is None or not includes(wm, ts, str(m.get("id") or ""))
+            is_new = not m.get("_memory_context_only") and (
+                ts is None or not includes(wm, ts, str(m.get("id") or "")))
             if is_new and m.get("role") == target_role:
                 _add_target(m)
             if not (is_new and m.get("role") == target_role) or _memory_written_by_lifecycle(m):
@@ -505,6 +515,10 @@ async def _pipeline_with_watermark(
 
     if max_side_ts is None:
         return outcome("no_new_messages", "no_new_messages", 0)
+    if skipped_message_ids:
+        from app.services.memory.recording.receipts import record_policy_skips
+        await record_policy_skips(user_id=user_id, workspace_id=workspace_id,
+            conversation_id=conversation_id, side=side, message_ids=skipped_message_ids)
     if not new_target_msgs:
         # A bounded page of reserved messages must not starve later messages.
         # These rows were intentionally handled outside generic extraction.
@@ -527,7 +541,7 @@ async def _pipeline_with_watermark(
         stored_ids = await process_memory_pipeline(
             user_id=user_id,
             new_conversation=_fmt_conversation(new_target_msgs),
-            context_conversation=_fmt_conversation(context_msgs),
+            context_conversation=_fmt_memory_context(context_msgs),
             statement_time=max_side_ts,
             side=side,
             workspace_id=workspace_id,
@@ -583,25 +597,19 @@ def _ai_line_before(messages: list[dict], first_new_target: dict | None) -> str:
     """
     if not first_new_target:
         return ""
+    from app.services.chat.message_utils import previous_assistant_turn
     target_id = first_new_target.get("id")
-    reply: list[str] = []
-    in_reply = False
-    for m in messages:
-        if target_id is not None and m.get("id") == target_id:
-            break
-        if m is first_new_target:
-            break
-        content = (m.get("content") or "").strip()
-        if not content:
-            continue
-        if m.get("role") == "assistant":
-            if not in_reply:
-                reply = []
-            reply.append(content)
-            in_reply = True
-        else:
-            in_reply = False
-    return " ".join(reply)
+    position = next((i for i, m in enumerate(messages)
+                     if m is first_new_target or (target_id and m.get("id") == target_id)), None)
+    if position is None:
+        return ""  # A backlog target outside this window has no known predecessor.
+    turn = previous_assistant_turn(messages[:position], None)
+    return turn.content.replace("\n", " ") if turn else ""
+
+
+def _fmt_memory_context(messages: list[dict]) -> str:
+    from app.services.memory.recording.context_window import format_history
+    return format_history(messages)
 
 
 def _context_before_targets(
@@ -626,8 +634,13 @@ def _context_before_targets(
         default=-1,
     )
     earlier = recent[: last_target_pos + 1]
+    target_ids = {m.get('id') for m in new_target_msgs if m.get('id')}
     kept: list[dict] = []
     for m in context_msgs:
+        if m.get('id') in target_ids:
+            continue  # Late-committed targets can lie behind the Redis cursor.
+        if (m.get('metadata') or {}).get('human_takeover') or (m.get('metadata') or {}).get('memory_confirmation'):
+            continue
         ts = _parse_ts(m)
         if ts is not None:
             if latest_target_ts is None or ts <= latest_target_ts:

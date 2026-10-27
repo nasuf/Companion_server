@@ -183,6 +183,19 @@ async def memory_write_receipts(_: dict = Depends(require_admin_jwt)) -> dict:
     return await recent_receipts()
 
 
+@router.get("/memory-message-processing")
+async def memory_message_processing(
+    limit: int = Query(20, ge=1, le=50),
+    hours: int = Query(24, ge=1, le=168),
+    _: dict = Depends(require_admin_jwt),
+) -> dict:
+    from app.services.memory.recording.receipt_read import recent_message_processing
+    try:
+        return await recent_message_processing(limit=limit, hours=hours)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="逐消息记忆处理记录暂时不可用。") from error
+
+
 @router.get("/{job_id}")
 async def get_job(
     job_id: str,

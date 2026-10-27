@@ -18,6 +18,8 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def scoped_window_unit_dependencies(monkeypatch):
+    # SQL receipt-hole detection is exercised with real PG in the ledger tests.
+    monkeypatch.setattr('app.services.memory.recording.message_audit.unrecorded_since_admission', AsyncMock(return_value=[]))
     # This module tests window/backlog selection. Actual conversation ownership
     # and observation collection are covered by the processing integration tests.
     from app.services.chat import post_process
