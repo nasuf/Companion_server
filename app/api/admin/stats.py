@@ -1678,16 +1678,19 @@ async def resources(_: dict = Depends(require_admin_jwt)):
     实时采集, 刻意不缓存 (资源指标需即时反映)。任一维度采集失败都降级为
     null / available=false, 不影响其他维度返回。
     """
-    host, database, redis_metrics = await asyncio.gather(
+    from app.services.ops.service_health import read_status as service_health_status
+    host, database, redis_metrics, service_health = await asyncio.gather(
         collect_host_metrics(),
         _collect_db_metrics(),
         _collect_redis_metrics(),
+        service_health_status(),
     )
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         **host,
         "database": database,
         "redis": redis_metrics,
+        "service_health": service_health,
     }
 
 

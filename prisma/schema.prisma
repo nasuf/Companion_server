@@ -2848,6 +2848,20 @@ model OpsRedisCapacity {
   @@map("ops_redis_capacity")
 }
 
+// SQL-locked singleton for service-level admin alerts (replies, failures, memory, cron).
+model OpsServiceHealth {
+  id String @id
+  sampledAt DateTime? @map("sampled_at") @db.Timestamptz
+  snapshot Json @default("{}")
+  level String @default("normal")
+  notifiedSignature String? @map("notified_signature")
+  generation Int @default(0)
+  notificationIds Json @default("[]") @map("notification_ids")
+  recipientCount Int @default(0) @map("recipient_count")
+  @@ignore
+  @@map("ops_service_health")
+}
+
 // Audited global runtime settings; only filler probability writes opt in for now.
 model RuntimeConfigChange {
   id        String   @id

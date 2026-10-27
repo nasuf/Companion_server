@@ -65,13 +65,38 @@ async def test_health_recheck_runs_sql_alert_even_when_redis_health_probe_fails(
     sample = AsyncMock(side_effect=RuntimeError("SQL unavailable") if monitor_fails else None)
     dispatch = AsyncMock()
     failure = Mock()
+    from app.services.ops import service_health
+    service = AsyncMock()
     monkeypatch.setattr(c, "sample_and_notify", sample)
+    monkeypatch.setattr(service_health, "sample_and_notify", service)
     monkeypatch.setattr(scheduler, "dispatch_due_notifications", dispatch)
     monkeypatch.setattr(scheduler, "_job_failed", failure)
     await scheduler._run_redis_health_recheck()
     sample.assert_awaited_once()
+    # Service alerts ride the same local job and still run when the Redis monitor fails.
+    service.assert_awaited_once()
+    events = [call.kwargs["event_type"] for call in dispatch.await_args_list]
     if monitor_fails:
-        dispatch.assert_not_awaited()
+        assert events == ["admin_service_health"]
         assert [call.args[0] for call in failure.call_args_list] == ["Redis health recheck", "Redis capacity monitor"]
     else:
-        dispatch.assert_awaited_once_with(limit=10, event_type="admin_redis_capacity")
+        assert events == ["admin_redis_capacity", "admin_service_health"]
+
+
+async def test_service_health_failure_is_recorded_without_stopping_the_redis_alert(monkeypatch):
+    from jobs import scheduler
+    from app import redis_client
+    from app.services.ops import service_health
+    from unittest.mock import Mock
+    async def run_local(name, body):
+        await body()
+    monkeypatch.setattr(scheduler, "_run_local_job", run_local)
+    monkeypatch.setattr(redis_client, "recheck_redis_health", AsyncMock())
+    monkeypatch.setattr(c, "sample_and_notify", AsyncMock())
+    monkeypatch.setattr(service_health, "sample_and_notify", AsyncMock(side_effect=RuntimeError("SQL unavailable")))
+    dispatch, failure = AsyncMock(), Mock()
+    monkeypatch.setattr(scheduler, "dispatch_due_notifications", dispatch)
+    monkeypatch.setattr(scheduler, "_job_failed", failure)
+    await scheduler._run_redis_health_recheck()
+    assert [call.kwargs["event_type"] for call in dispatch.await_args_list] == ["admin_redis_capacity"]
+    assert [call.args[0] for call in failure.call_args_list] == ["Service health monitor"]

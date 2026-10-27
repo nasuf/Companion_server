@@ -1363,6 +1363,16 @@ async def _run_redis_health_recheck():
                 await dispatch_due_notifications(limit=10, event_type="admin_redis_capacity")
         except Exception as e:
             _job_failed("Redis capacity monitor", e)
+        # Service alerts (no reply / failed replies / blocked memory / failing cron)
+        # ride this local job for the same reason: they must run while Redis is down.
+        # The SQL row lock and sample interval keep it to one sample per 2 minutes.
+        from app.services.ops.service_health import sample_and_notify as sample_service_health
+        try:
+            await sample_service_health()
+            async with asyncio.timeout(12):
+                await dispatch_due_notifications(limit=10, event_type="admin_service_health")
+        except Exception as e:
+            _job_failed("Service health monitor", e)
 
     await _run_local_job("redis_health_recheck", _body)
 

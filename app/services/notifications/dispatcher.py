@@ -102,7 +102,8 @@ async def _dispatch_one(row: Any) -> None:
 
     # Admin alerts must reach every install. Presence describes the admin's
     # own companion chat, not an acknowledgement of this takeover inbox.
-    admin_alert = _field(row, "type") in {"admin_new_user", "admin_takeover_message", "admin_redis_capacity"}
+    admin_alert = _field(row, "type") in {"admin_new_user", "admin_takeover_message", "admin_redis_capacity",
+                                         "admin_service_health"}
     if admin_alert:
         admin = await db.query_raw("SELECT 1 FROM users WHERE id=$1 AND role='admin' "
             "AND status='active' AND archived_at IS NULL", user_id)
@@ -129,7 +130,7 @@ async def _dispatch_one(row: Any) -> None:
         return
 
     payload = _json_dict(_field(row, "payload"))
-    if _field(row, "type") == "admin_redis_capacity":
+    if _field(row, "type") in {"admin_redis_capacity", "admin_service_health"}:
         payload["notification_id"] = event_id
     collapse_id = event_id if admin_alert else f"{_field(row, 'type')}:{conversation_id or user_id}"
     thread_id = str(workspace_id or conversation_id or user_id)
