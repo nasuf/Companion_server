@@ -25,6 +25,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.services.effect.definitions import (
+    DEFAULT_COHORT,
+    MIN_SAMPLE,
+    Cohort,
+    chat_activity_sql,
+    conversation_population_sql,
+    local_day_bounds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +57,8 @@ SLICE_DIMENSIONS = (
 )
 
 # 一个切片至少要有这么多回合才报比率。低于此只报样本数 —— 3 个回合里 2 个延续
-# 是 67%, 跟 300 个回合里 200 个延续的 67% 完全不是一回事。
-MIN_SLICE_TURNS = 20
+# 是 67%, 跟 300 个回合里 200 个延续的 67% 完全不是一回事。门槛只定义一处。
+MIN_SLICE_TURNS = MIN_SAMPLE
 
 # 跨日界往后多看一段, 供 LEAD 取"下一条用户消息"。要覆盖「回复耗时 + 延续窗口」,
 # 1 小时留足余量 (回复 p90 约 9 秒, 窗口 5 分钟)。
@@ -84,6 +92,7 @@ class EffectMetrics:
     """某一天的效果快照."""
 
     date: str
+    cohort: Cohort = DEFAULT_COHORT
     # 对话延续
     turns: int = 0
     continued: int = 0
@@ -91,14 +100,18 @@ class EffectMetrics:
     # 会话深度
     sessions: int = 0
     median_session_turns: float | None = None
-    # 主动交流
+    # 主动交流: sent 按发送事件计; 其中无事件 ID 的旧消息只能按条计
     proactive_sent: int = 0
     proactive_answered: int = 0
+    proactive_legacy_messages: int = 0
+    proactive_bubbles: int = 0
     # 回访
     active_users: int = 0
     returned_next_day: int | None = None      # 次日数据未到齐时为 None
     # 切片
     slices: list[SliceMetric] = field(default_factory=list)
+    # 查询失败的分组; 失败时对应数值是 0 但不可信, 页面必须显示"失败"而不是 0
+    failed: list[str] = field(default_factory=list)
 
     @property
     def continuation_rate(self) -> float | None:
@@ -119,6 +132,10 @@ class EffectMetrics:
     def as_dict(self) -> dict[str, Any]:
         return {
             "date": self.date,
+            "cohort": self.cohort,
+            "failed": list(self.failed),
+            "proactive_legacy_messages": self.proactive_legacy_messages,
+            "proactive_bubbles": self.proactive_bubbles,
             "turns": self.turns,
             "continued": self.continued,
             "continuation_rate": self.continuation_rate,
@@ -135,19 +152,15 @@ class EffectMetrics:
         }
 
 
-def _day_bounds(day: date_cls) -> tuple[datetime, datetime]:
-    """本地日的 [起, 止)。
+# 本地日界只有一份实现 (definitions.local_day_bounds), 这里保留旧名供调用方使用。
+_day_bounds = local_day_bounds
 
-    naive datetime: 库里的时间戳是 `timestamp without time zone` 且按 UTC 存,
-    直接用带时区的值比较会静默偏 8 小时 —— 作息落库那个 bug 就是这么来的。
-    """
-    tz = ZoneInfo(settings.schedule_timezone)
-    start_local = datetime(day.year, day.month, day.day, tzinfo=tz)
-    end_local = start_local + timedelta(days=1)
-    return (
-        start_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None),
-        end_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None),
-    )
+# 人群条件的占位符; 各查询用 _with_population 换成 definitions 给出的 SQL。
+_POPULATION = "__POPULATION__"
+
+
+def _with_population(sql: str, column: str, cohort: Cohort) -> str:
+    return sql.replace(_POPULATION, conversation_population_sql(column, cohort))
 
 
 # 每个用户回合一行: 何时问的、何时回的、下一次开口在何时、这次回复的生成条件。
@@ -163,6 +176,7 @@ WITH asked AS (
         (m.created_at < $2::timestamp) AS in_window
     FROM messages m
     WHERE m.role = 'user'
+      AND __POPULATION__
       AND m.created_at >= $1::timestamp
       -- 多看一段到次日: LEAD 只在窗口内取值的话, 每天最后一个回合的 next_ask
       -- 必为 NULL, 于是被系统性判成"没接住" —— 哪怕用户过了两分钟就回了, 只是
@@ -209,11 +223,11 @@ scored AS (
 """
 
 
-async def _fetch_core(start: datetime, end: datetime) -> dict[str, Any]:
+async def _fetch_core(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
     from app.db import db
 
     rows = await db.query_raw(
-        _TURNS_CTE + """
+        _with_population(_TURNS_CTE, "m.conversation_id", cohort) + """
         SELECT
             COUNT(*)::int AS turns,
             COUNT(*) FILTER (WHERE continued)::int AS continued,
@@ -227,13 +241,16 @@ async def _fetch_core(start: datetime, end: datetime) -> dict[str, Any]:
     return rows[0] if rows else {}
 
 
-async def _fetch_slices(start: datetime, end: datetime) -> list[SliceMetric]:
+async def _fetch_slices(
+    start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT,
+) -> list[SliceMetric]:
     from app.db import db
 
+    turns_cte = _with_population(_TURNS_CTE, "m.conversation_id", cohort)
     out: list[SliceMetric] = []
     for dim in SLICE_DIMENSIONS:
         rows = await db.query_raw(
-            _TURNS_CTE + f"""
+            turns_cte + f"""
             SELECT
                 diag ->> '{dim}' AS value,
                 COUNT(*)::int AS turns,
@@ -261,12 +278,12 @@ async def _fetch_slices(start: datetime, end: datetime) -> list[SliceMetric]:
     return out
 
 
-async def _fetch_sessions(start: datetime, end: datetime) -> dict[str, Any]:
+async def _fetch_sessions(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
     """会话数与每次会话的轮数中位数。会话边界 = 用户消息间隔超过 SESSION_GAP."""
     from app.db import db
 
     rows = await db.query_raw(
-        """
+        _with_population("""
         WITH u AS (
             SELECT conversation_id, created_at,
                    created_at - LAG(created_at) OVER (
@@ -274,6 +291,7 @@ async def _fetch_sessions(start: datetime, end: datetime) -> dict[str, Any]:
                    ) AS since_prev
             FROM messages
             WHERE role = 'user'
+              AND __POPULATION__
               AND created_at >= $1::timestamp
               AND created_at <  $2::timestamp
         ),
@@ -292,28 +310,43 @@ async def _fetch_sessions(start: datetime, end: datetime) -> dict[str, Any]:
         SELECT COUNT(*)::int AS sessions,
                percentile_disc(0.5) WITHIN GROUP (ORDER BY turns)::float8 AS median_turns
         FROM per_session
-        """,
+        """, "messages.conversation_id", cohort),
         start.isoformat(), end.isoformat(), f"{int(SESSION_GAP.total_seconds())} seconds",
     )
     return rows[0] if rows else {}
 
 
-async def _fetch_proactive(start: datetime, end: datetime) -> dict[str, Any]:
-    """主动消息发出后, 用户在窗口内有没有开口."""
+async def _fetch_proactive(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
+    """主动发送事件发出后, 用户在窗口内有没有开口.
+
+    一次发送算一个事件: 同一 proactive_event_id 的卡片和文字只算一次, 以最早一条
+    的时间为发出时间。早于事件 ID 上线的旧消息没有 ID, 只能按条计 —— 单独报出
+    legacy_messages, 不把它们和事件混成一个看不出口径的数。
+    """
     from app.db import db
 
     rows = await db.query_raw(
-        """
-        WITH sent AS (
-            SELECT conversation_id, created_at
+        _with_population("""
+        WITH bubbles AS (
+            SELECT conversation_id, created_at,
+                   COALESCE(metadata->>'proactive_event_id', 'legacy:' || id) AS event_key,
+                   (metadata ? 'proactive_event_id') AS identified
             FROM messages
             WHERE role = 'assistant'
-              AND metadata ? 'proactive'
+              AND metadata->>'proactive' = 'true'
+              AND __POPULATION__
               AND created_at >= $1::timestamp
               AND created_at <  $2::timestamp
+        ),
+        sent AS (
+            SELECT conversation_id, event_key, bool_or(identified) AS identified,
+                   MIN(created_at) AS created_at, COUNT(*)::int AS bubbles
+            FROM bubbles GROUP BY conversation_id, event_key
         )
         SELECT
             COUNT(*)::int AS sent,
+            COUNT(*) FILTER (WHERE NOT identified)::int AS legacy_messages,
+            COALESCE(SUM(bubbles), 0)::int AS bubbles,
             COUNT(*) FILTER (WHERE EXISTS (
                 SELECT 1 FROM messages u
                 WHERE u.conversation_id = s.conversation_id
@@ -322,35 +355,36 @@ async def _fetch_proactive(start: datetime, end: datetime) -> dict[str, Any]:
                   AND u.created_at <= s.created_at + $3::interval
             ))::int AS answered
         FROM sent s
-        """,
+        """, "messages.conversation_id", cohort),
         start.isoformat(), end.isoformat(),
         f"{int(PROACTIVE_RESPONSE_WINDOW.total_seconds())} seconds",
     )
     return rows[0] if rows else {}
 
 
-async def _fetch_retention(start: datetime, end: datetime) -> dict[str, Any]:
+def active_users_sql(start: str, end: str, cohort: Cohort) -> str:
+    """聊天活跃用户的唯一 SQL: [start, end) 内发过用户消息的用户 (一列 user_id).
+
+    次日回访和数据监控的活跃人数都读这里, 不另写一份。
+    """
+    return (
+        f"SELECT DISTINCT c.user_id FROM {chat_activity_sql(cohort)}"
+        f" AND m.created_at >= {start} AND m.created_at < {end}"
+    )
+
+
+async def _fetch_retention(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
     """当日活跃用户, 以及其中次日还回来的.
 
     次日窗口尚未走完时 returned 会偏低 —— 调用方据此判断要不要展示 (见 collect)。
     """
     from app.db import db
 
+    active = active_users_sql("$1::timestamp", "$2::timestamp", cohort)
+    nextday = active_users_sql("$2::timestamp", "$2::timestamp + INTERVAL '1 day'", cohort)
     rows = await db.query_raw(
-        """
-        WITH active AS (
-            SELECT DISTINCT c.user_id
-            FROM messages m JOIN conversations c ON c.id = m.conversation_id
-            WHERE m.role = 'user'
-              AND m.created_at >= $1::timestamp AND m.created_at < $2::timestamp
-        ),
-        nextday AS (
-            SELECT DISTINCT c.user_id
-            FROM messages m JOIN conversations c ON c.id = m.conversation_id
-            WHERE m.role = 'user'
-              AND m.created_at >= $2::timestamp
-              AND m.created_at <  $2::timestamp + INTERVAL '1 day'
-        )
+        f"""
+        WITH active AS ({active}), nextday AS ({nextday})
         SELECT (SELECT COUNT(*) FROM active)::int AS active_users,
                (SELECT COUNT(*) FROM active a JOIN nextday n ON n.user_id = a.user_id)::int
                    AS returned
@@ -360,40 +394,48 @@ async def _fetch_retention(start: datetime, end: datetime) -> dict[str, Any]:
     return rows[0] if rows else {}
 
 
-async def collect(day: date_cls, *, now: datetime | None = None) -> EffectMetrics:
+async def collect(
+    day: date_cls, *, now: datetime | None = None, cohort: Cohort = DEFAULT_COHORT,
+) -> EffectMetrics:
     """算出某一天的效果快照。单项失败不影响其余 —— 半份数据也比没有强."""
     start, end = _day_bounds(day)
-    metrics = EffectMetrics(date=day.isoformat())
+    metrics = EffectMetrics(date=day.isoformat(), cohort=cohort)
 
     try:
-        core = await _fetch_core(start, end)
+        core = await _fetch_core(start, end, cohort)
         metrics.turns = int(core.get("turns") or 0)
         metrics.continued = int(core.get("continued") or 0)
         metrics.median_gap_s = core.get("median_gap_s")
     except Exception as exc:
         logger.warning(f"effect: core metrics failed for {day}: {exc}")
+        metrics.failed.append("core")
 
     try:
-        metrics.slices = await _fetch_slices(start, end)
+        metrics.slices = await _fetch_slices(start, end, cohort)
     except Exception as exc:
         logger.warning(f"effect: slice metrics failed for {day}: {exc}")
+        metrics.failed.append("slices")
 
     try:
-        sess = await _fetch_sessions(start, end)
+        sess = await _fetch_sessions(start, end, cohort)
         metrics.sessions = int(sess.get("sessions") or 0)
         metrics.median_session_turns = sess.get("median_turns")
     except Exception as exc:
         logger.warning(f"effect: session metrics failed for {day}: {exc}")
+        metrics.failed.append("sessions")
 
     try:
-        pro = await _fetch_proactive(start, end)
+        pro = await _fetch_proactive(start, end, cohort)
         metrics.proactive_sent = int(pro.get("sent") or 0)
         metrics.proactive_answered = int(pro.get("answered") or 0)
+        metrics.proactive_legacy_messages = int(pro.get("legacy_messages") or 0)
+        metrics.proactive_bubbles = int(pro.get("bubbles") or 0)
     except Exception as exc:
         logger.warning(f"effect: proactive metrics failed for {day}: {exc}")
+        metrics.failed.append("proactive")
 
     try:
-        ret = await _fetch_retention(start, end)
+        ret = await _fetch_retention(start, end, cohort)
         metrics.active_users = int(ret.get("active_users") or 0)
         # 次日还没过完就报回访率, 会得到一个必然偏低且每小时都在变的数。
         reference = now or datetime.now(ZoneInfo(settings.schedule_timezone))
@@ -403,5 +445,6 @@ async def collect(day: date_cls, *, now: datetime | None = None) -> EffectMetric
         metrics.returned_next_day = int(ret.get("returned") or 0) if next_day_over else None
     except Exception as exc:
         logger.warning(f"effect: retention metrics failed for {day}: {exc}")
+        metrics.failed.append("retention")
 
     return metrics

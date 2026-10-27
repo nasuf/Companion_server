@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,8 +17,18 @@ from app.redis_client import get_redis
 from app.services.llm.pricing import estimate_cost_cny
 from app.services.notifications.presence import count_online_users, list_online_user_ids
 from app.services.operations.metrics import summarize_crisis_events, summarize_visible_use
+from app.services.effect.definitions import (
+    chat_activity_sql,
+    describe,
+    local_day_bounds,
+    local_today,
+    population_fingerprint,
+    population_sql,
+    user_row_population_sql,
+)
 from app.services.proactive import triggers as proactive_triggers
 from app.services.runtime import job_queue as runtime_job_queue
+from app.services.schedule_domain.sql_time import local_date_sql, local_hour_sql
 from app.services.system_metrics import collect_host_metrics
 
 logger = logging.getLogger(__name__)
@@ -60,17 +70,16 @@ async def link_storage_execute(policy_version: str = Query(...), confirmed: bool
 # 业务时区固定 UTC+8 (与 settings.schedule_timezone 一致). created_at 列以 naive
 # UTC 落库, 统计按"本地自然日/小时"分桶时必须先转成 UTC+8 墙钟, 否则每日走势会
 # 按 UTC 午夜切分 (整体偏 8 小时), 例如凌晨 0-8 点的用量会被算进"前一天".
-_LOCAL_TZ_SQL = "Asia/Shanghai"
 
 
 def _local_day(col: str) -> str:
-    """SQL: naive-UTC timestamp 列 → 本地(UTC+8)自然日 date."""
-    return f"DATE_TRUNC('day', {col} AT TIME ZONE 'UTC' AT TIME ZONE '{_LOCAL_TZ_SQL}')::date"
+    """SQL: naive-UTC timestamp 列 → 本地(UTC+8)自然日 date. 唯一写法见 sql_time."""
+    return local_date_sql(col)
 
 
 def _local_hour(col: str) -> str:
-    """SQL: naive-UTC timestamp 列 → 本地(UTC+8)小时 0-23."""
-    return f"EXTRACT(HOUR FROM ({col} AT TIME ZONE 'UTC' AT TIME ZONE '{_LOCAL_TZ_SQL}'))::int"
+    """SQL: naive-UTC timestamp 列 → 本地(UTC+8)小时 0-23. 唯一写法见 sql_time."""
+    return local_hour_sql(col)
 
 
 def _window_start(days: int | None) -> datetime | None:
@@ -1207,8 +1216,9 @@ _MESSAGE_BUCKETS: list[tuple[str, int, int | None]] = [
 _MONITORING_CACHE_TTL = 25
 
 
-def _monitoring_cache_key(days: int) -> str:
-    return f"admin:stats:monitoring:{days}"
+def _monitoring_cache_key(days: int, cohort: str = "external", fingerprint: str = "-") -> str:
+    # 内部账号集合变化 (fingerprint) 时旧缓存自然失效, 不必在每个改动入口清缓存。
+    return f"admin:stats:monitoring:{cohort}:{fingerprint}:{days}"
 
 
 @router.get("/online")
@@ -1324,14 +1334,21 @@ async def online_users(
 async def monitoring(
     days: int = Query(30, ge=0, le=3650),
     refresh: bool = Query(False),
+    cohort: Literal["external", "all"] = Query("external"),
     _: dict = Depends(require_admin_jwt),
 ):
     """上线前运维监控 — 用户 + 聊天多维度数据 (服务端短缓存).
 
     refresh=true 绕过缓存强制重算 (前端"刷新"按钮用). days=0 表示"全部历史".
+    默认只统计外部用户 (排除内部账号), cohort=all 时包含; 实时在线不分人群.
     """
-    cache_key = _monitoring_cache_key(days)
-    if not refresh:
+    try:
+        fingerprint = "-" if cohort == "all" else await population_fingerprint()
+    except Exception as e:
+        logger.warning("monitoring population fingerprint failed: %s", e)
+        fingerprint = None  # 人群未知时不读写缓存
+    cache_key = _monitoring_cache_key(days, cohort, fingerprint) if fingerprint else None
+    if not refresh and cache_key:
         try:
             redis = await get_redis()
             cached = await redis.get(cache_key)
@@ -1342,27 +1359,35 @@ async def monitoring(
         except Exception as e:
             logger.debug("monitoring cache read skipped: %s", e)
 
-    payload = await _compute_monitoring(days)
+    payload = await _compute_monitoring(days, cohort)
 
-    try:
-        redis = await get_redis()
-        await redis.set(cache_key, json.dumps(payload), ex=_MONITORING_CACHE_TTL)
-    except Exception as e:
-        logger.debug("monitoring cache write skipped: %s", e)
+    if cache_key:
+        try:
+            redis = await get_redis()
+            await redis.set(cache_key, json.dumps(payload), ex=_MONITORING_CACHE_TTL)
+        except Exception as e:
+            logger.debug("monitoring cache write skipped: %s", e)
 
     payload["cached"] = False
     return payload
 
 
-async def _compute_monitoring(days: int) -> dict:
+async def _compute_monitoring(days: int, cohort: Literal["external", "all"] = "external") -> dict:
     """执行 /monitoring 的全部聚合查询 (无缓存). 见 /monitoring 文档.
 
-    DAU/WAU/MAU 与"实时在线"是固定口径, 不随 days 变化. 所有按自然日/小时分桶的
-    统计都以 UTC+8 墙钟为准 (见 _local_day/_local_hour).
+    DAU/WAU/MAU 与"实时在线"是固定口径, 不随 days 变化: DAU = 本地今天, WAU/MAU =
+    含今天的最近 7/30 个本地日. 时间窗同样按本地日对齐 ("今日" 就是本地今天).
+    所有按自然日/小时分桶的统计都以 UTC+8 墙钟为准 (见 _local_day/_local_hour).
     """
-    start = _window_start(days)
     end = datetime.now(timezone.utc)
-    start_iso = start.replace(tzinfo=None).isoformat() if start else None
+    today = local_today(end)
+
+    def _day_start(back: int) -> str:
+        return local_day_bounds(today - timedelta(days=back))[0].isoformat()
+
+    start_iso = _day_start(days - 1) if days and days > 0 else None
+    start = datetime.fromisoformat(start_iso).replace(tzinfo=timezone.utc) if start_iso else None
+    activity = chat_activity_sql(cohort)
 
     def _clause(col: str) -> tuple[str, list]:
         """窗口过滤: 有 start 时 `col >= $1::timestamp`, 否则全量."""
@@ -1374,12 +1399,12 @@ async def _compute_monitoring(days: int) -> dict:
     msg_where, msg_params = _clause("m.created_at")
     usage_where, usage_params = _clause("l.created_at")
 
-    # DAU/WAU/MAU/近5分钟活跃 — 固定滚动窗口, 与 days 无关.
+    # DAU/WAU/MAU 按本地日对齐; 近 5 分钟活跃仍是滚动窗口. 均与 days 无关.
     now_naive = end.replace(tzinfo=None)
     activity_params = [
-        (now_naive - timedelta(days=1)).isoformat(),
-        (now_naive - timedelta(days=7)).isoformat(),
-        (now_naive - timedelta(days=30)).isoformat(),
+        _day_start(0),
+        _day_start(6),
+        _day_start(29),
         (now_naive - timedelta(minutes=5)).isoformat(),
     ]
 
@@ -1395,9 +1420,9 @@ async def _compute_monitoring(days: int) -> dict:
     ) = await asyncio.gather(
         db.query_raw(
             f"""
-            SELECT {_local_day("created_at")} AS bucket, COUNT(*)::int AS count
-            FROM users
-            WHERE {user_where}
+            SELECT {_local_day("u.created_at")} AS bucket, COUNT(*)::int AS count
+            FROM users u
+            WHERE {user_where} AND {user_row_population_sql("u", cohort)}
             GROUP BY bucket
             ORDER BY bucket ASC
             """,
@@ -1409,9 +1434,7 @@ async def _compute_monitoring(days: int) -> dict:
                 {_local_day("m.created_at")} AS bucket,
                 COUNT(DISTINCT c.user_id)::int AS active_users,
                 COUNT(*)::int AS user_messages
-            FROM messages m
-            JOIN conversations c ON c.id = m.conversation_id
-            WHERE m.role = 'user' AND {msg_where}
+            FROM {activity} AND {msg_where}
             GROUP BY bucket
             ORDER BY bucket ASC
             """,
@@ -1423,9 +1446,7 @@ async def _compute_monitoring(days: int) -> dict:
                 {_local_hour("m.created_at")} AS hour,
                 COUNT(DISTINCT c.user_id)::int AS users,
                 COUNT(*)::int AS user_messages
-            FROM messages m
-            JOIN conversations c ON c.id = m.conversation_id
-            WHERE m.role = 'user' AND {msg_where}
+            FROM {activity} AND {msg_where}
             GROUP BY hour
             ORDER BY hour ASC
             """,
@@ -1435,9 +1456,7 @@ async def _compute_monitoring(days: int) -> dict:
             f"""
             WITH per_user AS (
                 SELECT c.user_id, COUNT(*)::int AS cnt
-                FROM messages m
-                JOIN conversations c ON c.id = m.conversation_id
-                WHERE m.role = 'user' AND {msg_where}
+                FROM {activity} AND {msg_where}
                 GROUP BY c.user_id
             )
             SELECT
@@ -1463,6 +1482,7 @@ async def _compute_monitoring(days: int) -> dict:
             FROM llm_usage l
             LEFT JOIN users u ON u.id = l.user_id
             WHERE l.user_id IS NOT NULL AND {usage_where}
+              AND {population_sql("l.user_id", cohort)}
             GROUP BY l.user_id, u.username
             ORDER BY cost_cny DESC
             LIMIT 10
@@ -1470,23 +1490,24 @@ async def _compute_monitoring(days: int) -> dict:
             *usage_params,
         ),
         db.query_raw(
-            """
+            f"""
             SELECT
-                (SELECT COUNT(*) FROM users)::int AS total_users,
-                (SELECT COUNT(*) FROM conversations)::int AS total_conversations,
-                (SELECT COUNT(*) FROM ai_agents)::int AS total_agents
+                (SELECT COUNT(*) FROM users u
+                  WHERE {user_row_population_sql("u", cohort)})::int AS total_users,
+                (SELECT COUNT(*) FROM conversations c
+                  WHERE {population_sql("c.user_id", cohort)})::int AS total_conversations,
+                (SELECT COUNT(*) FROM ai_agents a
+                  WHERE {population_sql("a.user_id", cohort)})::int AS total_agents
             """,
         ),
         db.query_raw(
-            """
+            f"""
             SELECT
                 COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $1::timestamp)::int AS dau,
                 COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $2::timestamp)::int AS wau,
                 COUNT(DISTINCT c.user_id)::int AS mau,
                 COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $4::timestamp)::int AS active_5min
-            FROM messages m
-            JOIN conversations c ON c.id = m.conversation_id
-            WHERE m.role = 'user' AND m.created_at >= $3::timestamp
+            FROM {activity} AND m.created_at >= $3::timestamp
             """,
             *activity_params,
         ),
@@ -1598,6 +1619,8 @@ async def _compute_monitoring(days: int) -> dict:
             "buckets": message_buckets,
         },
         "cost_top_users": cost_top_users,
+        "cohort": cohort,
+        "definitions": describe(("chat_active_users",)),
     }
 
 
@@ -1756,21 +1779,26 @@ async def cron_health(_: dict = Depends(require_admin_jwt)):
 @router.get("/reply-effect")
 async def reply_effect(
     days: int = 14,
+    cohort: Literal["external", "all"] = Query("external"),
     _: dict = Depends(require_admin_jwt),
 ):
     """回复效果: 用真实用户行为衡量回复质量.
 
     在线信号回答离线评测集答不了的问题 —— 评测集认可的"好"是我们定义的好, 这里看
     的是用户有没有接着聊。切片按整段累计而非逐日, 单日样本切完每格只有个位数。
+    默认只看外部用户 (排除内部账号), cohort=all 时包含。
     """
+    from app.services.effect.definitions import describe
     from app.services.effect.signals import CONTINUATION_WINDOW, MIN_SLICE_TURNS
     from app.services.effect.store import get_range, merge_slices
 
     window = max(1, min(90, int(days or 14)))
-    result = await get_range(window)
+    result = await get_range(window, cohort=cohort)
     return {
         **result.as_dict(),
         "slices": merge_slices(result.days),
+        "cohort": cohort,
+        "definitions": describe(("continuation", "proactive_response", "next_day_return")),
         "config": {
             "continuation_window_s": int(CONTINUATION_WINDOW.total_seconds()),
             "min_slice_turns": MIN_SLICE_TURNS,

@@ -36,6 +36,9 @@ model User {
   username                 String                          @unique
   hashedPassword           String?                         @map("hashed_password")
   role                     String                          @default("user") @map("role")
+  // Beta metrics exclude internal accounts by default. Admins count as internal
+  // without this flag (app/services/effect/definitions.py is the only rule).
+  isInternal               Boolean                         @default(false) @map("is_internal")
   email                    String?                         @unique
   status                   String                          @default("active")
   archivedAt               DateTime?                       @map("archived_at")

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from urllib.parse import urlsplit, urlunsplit
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -46,7 +47,12 @@ async def test_payment_gate_upgrade_defaults_closed_and_preserves_wallet(tmp_pat
             assert result.returncode == 0, result.stdout + result.stderr
         await deploy()
         await client.execute_raw('INSERT INTO system_config (id,offline_activity_enabled,offline_gift_enabled,updated_at) VALUES (1,TRUE,TRUE,CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET offline_activity_enabled=TRUE,offline_gift_enabled=TRUE')
-        user = await client.user.create(data={'username': 'synthetic-payment-' + uuid4().hex})
+        # 历史 schema 没有之后新增的 users 列 (如 is_internal); 只写当时存在的列。
+        user = SimpleNamespace(id=str(uuid4()))
+        await client.execute_raw(
+            "INSERT INTO users (id, username, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP)",
+            user.id, 'synthetic-payment-' + uuid4().hex,
+        )
         await client.execute_raw("INSERT INTO user_wallets (id,user_id,ticket_balance,point_balance,vip_until,updated_at) VALUES ($1,$2,123,456,'2030-01-01',CURRENT_TIMESTAMP)", str(uuid4()), user.id)
         before = await client.query_raw('SELECT * FROM user_wallets WHERE user_id=$1', user.id)
         shutil.copytree(candidate, migrations / candidate.name)

@@ -90,8 +90,11 @@ async def test_prisma_receipt_history_upgrade_is_additive_and_redeployable(
             assert result.returncode == 0, result.stdout + result.stderr
 
         await deploy()
-        user = await client.user.create(
-            data={"username": "evidence-migration-" + uuid4().hex}
+        # 历史 schema 没有之后新增的 users 列 (如 is_internal); 只写当时存在的列。
+        user = SimpleNamespace(id=str(uuid4()))
+        await client.execute_raw(
+            "INSERT INTO users (id, username, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP)",
+            user.id, "evidence-migration-" + uuid4().hex,
         )
         # 历史版本的库只有当时的列; 用当前生成客户端的 aiagent.create 会去读写之后
         # 新增的列 (如 nickname) 而失败。基线数据只写历史 schema 里存在的列。

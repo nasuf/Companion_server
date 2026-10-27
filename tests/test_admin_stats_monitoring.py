@@ -1,5 +1,15 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _known_population():
+    # 缓存键带内部账号集合指纹; 这里的 db 是假的, 指纹固定为已知值。
+    with patch("app.api.admin.stats.population_fingerprint", new_callable=AsyncMock,
+               return_value="fp-test"):
+        yield
+
 
 def _admin_override():
     from app.api.jwt_auth import require_admin_jwt
@@ -132,6 +142,54 @@ def test_monitoring_returns_cached_payload_on_second_call(api_client):
         assert second.json()["cached"] is True
         # DB aggregation ran exactly once (7 queries), second call served from cache.
         assert fake_db.query_raw.await_count == 7
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_monitoring_skips_cache_when_internal_population_is_unknown(api_client):
+    """内部账号集合查不出来时, 不能读写任何人群的缓存 (会把错人群的数固化下来)."""
+    app, require_admin_jwt = _admin_override()
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=_monitoring_side_effect())
+    shared_redis = _FakeRedis({"admin:stats:monitoring:external:fp-test:7": '{"stale": true}'})
+    try:
+        with (
+            patch("app.api.admin.stats.db", fake_db),
+            patch("app.api.admin.stats.population_fingerprint", new_callable=AsyncMock,
+                  side_effect=RuntimeError("db down")),
+            patch("app.api.admin.stats.get_redis", new_callable=AsyncMock, return_value=shared_redis),
+            patch("app.api.admin.stats.count_online_users", new_callable=AsyncMock, return_value=(7, True)),
+        ):
+            response = api_client.get("/admin-api/stats/monitoring", params={"days": 7})
+        assert response.status_code == 200
+        assert response.json()["cached"] is False and "stale" not in response.json()
+        assert set(shared_redis.store) == {"admin:stats:monitoring:external:fp-test:7"}
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_monitoring_cache_is_separate_per_cohort(api_client):
+    app, require_admin_jwt = _admin_override()
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=_monitoring_side_effect() + _monitoring_side_effect())
+    shared_redis = _FakeRedis()
+    try:
+        with (
+            patch("app.api.admin.stats.db", fake_db),
+            patch("app.api.admin.stats.get_redis", new_callable=AsyncMock, return_value=shared_redis),
+            patch("app.api.admin.stats.count_online_users", new_callable=AsyncMock, return_value=(7, True)),
+        ):
+            external = api_client.get("/admin-api/stats/monitoring", params={"days": 7})
+            everyone = api_client.get("/admin-api/stats/monitoring", params={"days": 7, "cohort": "all"})
+            invalid = api_client.get("/admin-api/stats/monitoring", params={"cohort": "staff"})
+        assert external.json()["cohort"] == "external" and everyone.json()["cohort"] == "all"
+        assert everyone.json()["cached"] is False  # 不同人群不共用缓存
+        assert invalid.status_code == 422
+        assert set(shared_redis.store) == {
+            "admin:stats:monitoring:external:fp-test:7", "admin:stats:monitoring:all:-:7",
+        }
+        assert "NOT EXISTS" in fake_db.query_raw.await_args_list[1].args[0]
+        assert "NOT EXISTS" not in fake_db.query_raw.await_args_list[8].args[0]
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
 

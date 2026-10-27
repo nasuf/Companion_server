@@ -214,6 +214,9 @@ def _serialize_admin_user(
         "display_name": getattr(user, "displayName", None),
         "email": getattr(user, "email", None),
         "role": user.role,
+        # 统计人群: 后台勾选的内部账号; admin 不论勾选与否都算内部 (见 effect.definitions)。
+        "is_internal": bool(getattr(user, "isInternal", False)),
+        "counts_as_internal": bool(getattr(user, "isInternal", False)) or user.role == "admin",
         "created_at": str(user.createdAt),
         "status": getattr(user, "status", "active"),
         "archived_at": str(user.archivedAt)
@@ -565,6 +568,39 @@ async def update_user_role(
         data={"role": payload.role},
     )
     return {"ok": True, "id": updated.id, "role": updated.role, "changed": True}
+
+
+class UpdateUserInternalRequest(BaseModel):
+    is_internal: bool
+
+
+@router.patch("/{user_id}/internal")
+async def update_user_internal(
+    user_id: str,
+    payload: UpdateUserInternalRequest,
+    _: dict = Depends(require_admin_jwt),
+):
+    """标记 / 取消内部账号. 只影响统计人群, 不改权限或登录.
+
+    统计缓存键带内部账号集合的指纹, 这里改完之后各统计页下次读取自动重算。
+    """
+    user = await db.user.find_unique(where={"id": user_id})
+    if not user or user.username == TEMPLATE_SYSTEM_USERNAME:
+        raise HTTPException(status_code=404, detail="User not found")
+    if bool(getattr(user, "isInternal", False)) == payload.is_internal:
+        updated, changed = user, False
+    else:
+        updated = await db.user.update(
+            where={"id": user_id}, data={"isInternal": payload.is_internal},
+        )
+        changed = True
+    return {
+        "ok": True,
+        "id": updated.id,
+        "is_internal": bool(updated.isInternal),
+        "counts_as_internal": bool(updated.isInternal) or updated.role == "admin",
+        "changed": changed,
+    }
 
 
 @router.delete("/{user_id}/agents/{agent_id}")

@@ -18,6 +18,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.services.effect.definitions import (
+    COHORTS,
+    DEFAULT_COHORT,
+    DEFINITION_VERSION,
+    Cohort,
+    population_fingerprint,
+    ratio,
+)
 from app.services.effect.signals import EffectMetrics, collect
 
 logger = logging.getLogger(__name__)
@@ -28,8 +36,9 @@ _TTL_SETTLED_S = 400 * 24 * 3600
 _TTL_PENDING_S = 600
 
 
-def _key(day: date_cls) -> str:
-    return f"{_KEY_PREFIX}{day.isoformat()}"
+def _key(day: date_cls, cohort: Cohort = DEFAULT_COHORT, fingerprint: str = "-") -> str:
+    """口径版本 + 人群 + 内部账号集合指纹: 任何一项变了, 旧缓存都不会被读到."""
+    return f"{_KEY_PREFIX}{DEFINITION_VERSION}:{cohort}:{fingerprint}:{day.isoformat()}"
 
 
 def _is_settled(day: date_cls, now: datetime) -> bool:
@@ -48,41 +57,69 @@ class EffectRange:
         return {"days": self.days, "summary": summarise(self.days)}
 
 
-async def get_day(day: date_cls, *, force: bool = False) -> dict[str, Any]:
+_UNKNOWN = object()
+
+
+async def _fingerprint(cohort: Cohort) -> str | None:
+    """None = 内部账号集合未知; 这时不读也不写缓存, 免得把错人群的数固化下来."""
+    if cohort == "all":
+        return "-"
+    try:
+        return await population_fingerprint()
+    except Exception as exc:
+        logger.warning(f"effect: population fingerprint failed: {exc}")
+        return None
+
+
+async def get_day(
+    day: date_cls, *, force: bool = False, cohort: Cohort = DEFAULT_COHORT,
+    fingerprint: Any = _UNKNOWN,
+) -> dict[str, Any]:
     """取一天的指标, 优先读缓存."""
     from app.redis_client import get_redis
 
     now = datetime.now(ZoneInfo(settings.schedule_timezone))
+    if fingerprint is _UNKNOWN:
+        fingerprint = await _fingerprint(cohort)
+    key = _key(day, cohort, fingerprint) if fingerprint is not None else None
     redis = None
     try:
-        redis = await get_redis()
-        if not force:
-            cached = await redis.get(_key(day))
+        if key is not None:
+            redis = await get_redis()
+        if redis is not None and not force:
+            cached = await redis.get(key)
             if cached:
                 return json.loads(cached)
     except Exception as exc:  # Redis 挂了也要能出数, 只是每次都重算
         logger.warning(f"effect: cache read failed for {day}: {exc}")
 
-    payload = (await collect(day, now=now)).as_dict()
+    payload = (await collect(day, now=now, cohort=cohort)).as_dict()
 
     if redis is not None:
         try:
+            # 查询失败的那一天不能长期固化成 0, 下次读取时要重算。
+            settled = _is_settled(day, now) and not payload.get("failed")
             await redis.set(
-                _key(day), json.dumps(payload, ensure_ascii=False),
-                ex=_TTL_SETTLED_S if _is_settled(day, now) else _TTL_PENDING_S,
+                key, json.dumps(payload, ensure_ascii=False),
+                ex=_TTL_SETTLED_S if settled else _TTL_PENDING_S,
             )
         except Exception as exc:
             logger.warning(f"effect: cache write failed for {day}: {exc}")
     return payload
 
 
-async def get_range(days: int = 14, *, force: bool = False) -> EffectRange:
+async def get_range(
+    days: int = 14, *, force: bool = False, cohort: Cohort = DEFAULT_COHORT,
+) -> EffectRange:
     """最近 N 天 (含今天), 按日期升序."""
     now = datetime.now(ZoneInfo(settings.schedule_timezone))
     today = now.date()
+    fingerprint = await _fingerprint(cohort)
     out: list[dict[str, Any]] = []
     for back in range(days - 1, -1, -1):
-        out.append(await get_day(today - timedelta(days=back), force=force))
+        out.append(await get_day(
+            today - timedelta(days=back), force=force, cohort=cohort, fingerprint=fingerprint,
+        ))
     return EffectRange(days=out)
 
 
@@ -107,6 +144,8 @@ def summarise(days: list[dict[str, Any]]) -> dict[str, Any]:
     # 是看趋势, 口径一致比绝对精确更重要。若哪天要拿它做绝对判断, 得改成真中位数。
     gaps = [d["median_gap_s"] for d in days if d.get("median_gap_s") is not None]
     gaps.sort()
+    failed = sorted({group for d in days for group in (d.get("failed") or [])})
+    legacy = sum(int(d.get("proactive_legacy_messages") or 0) for d in days)
 
     return {
         "turns": turns,
@@ -116,7 +155,22 @@ def summarise(days: list[dict[str, Any]]) -> dict[str, Any]:
         "proactive_response_rate": round(pro_ans / pro_sent, 4) if pro_sent else None,
         "next_day_return_rate": round(ret_back / ret_active, 4) if ret_active else None,
         "settled_days": len(ret_days),
+        # 带状态的比率: 页面按 state 渲染 (样本不足只给分子/分母, 未定型/失败不画数)。
+        "ratios": {
+            "continuation": _with_failure(ratio(continued, turns), "core", failed),
+            "proactive_response": _with_failure(ratio(pro_ans, pro_sent), "proactive", failed),
+            "next_day_return": _with_failure(
+                ratio(ret_back, ret_active, settled=bool(ret_days)), "retention", failed,
+            ),
+        },
+        "proactive_legacy_messages": legacy,
+        "failed": failed,
     }
+
+
+def _with_failure(value: dict[str, Any], group: str, failed: list[str]) -> dict[str, Any]:
+    """区间内任何一天该组查询失败, 整段的比率都不可信."""
+    return {**value, "value": None, "state": "failed"} if group in failed else value
 
 
 def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
@@ -177,5 +231,10 @@ async def refresh_recent(days: int = 3) -> None:
     的中间值一直缓存下去。
     """
     now = datetime.now(ZoneInfo(settings.schedule_timezone))
-    for back in range(days):
-        await get_day(now.date() - timedelta(days=back), force=True)
+    for cohort in COHORTS:
+        fingerprint = await _fingerprint(cohort)
+        for back in range(days):
+            await get_day(
+                now.date() - timedelta(days=back), force=True, cohort=cohort,
+                fingerprint=fingerprint,
+            )
