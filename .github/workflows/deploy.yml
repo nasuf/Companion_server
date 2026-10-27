@@ -483,3 +483,40 @@ jobs:
               --timeout 120 --stable-seconds 15
 
             source scripts/deploy_host_maintenance.sh
+
+  cleanup-artifacts:
+    # Artifacts are diagnostics. Once a release is deployed, runs that succeeded
+    # no longer need theirs; failed or cancelled runs keep them until retention ends.
+    needs: deploy
+    if: success()
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Delete artifacts of successful runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # The regression artifacts belong to the CI run that triggered this
+          # deploy (empty for a manual dispatch, which then cleans the rest).
+          RELEASE_RUN: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          since=$(date -u -d '8 days ago' +%Y-%m-%d)
+          gh api --paginate "repos/$REPO/actions/runs?status=success&created=>=$since&per_page=100" \
+            --jq '.workflow_runs[].id' > ok-runs.txt
+          echo "$RELEASE_RUN" >> ok-runs.txt
+          gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired | not) | "\(.id) \(.workflow_run.id) \(.size_in_bytes)"' > artifacts.txt
+          deleted=0; freed=0; failed=0
+          while read -r artifact run size; do
+            grep -qx "$run" ok-runs.txt || continue
+            if gh api -X DELETE "repos/$REPO/actions/artifacts/$artifact" > /dev/null; then
+              deleted=$((deleted + 1)); freed=$((freed + size))
+            else
+              failed=$((failed + 1))
+            fi
+          done < artifacts.txt
+          echo "Deleted $deleted artifacts of successful runs ($((freed / 1048576)) MB); $failed failed; failed/cancelled runs keep theirs." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$failed" -ne 0 ]; then echo "::warning::$failed artifacts could not be deleted"; fi
