@@ -1038,7 +1038,9 @@ async def prepare_reply(ctx):
                     "data": services.json.dumps({"duration": conceptual_delay}),
                 }
         if actual_sleep > 0:
-            await services.asyncio.sleep(actual_sleep)
+            # Intentional pacing; reply timing reports it apart from processing.
+            with ctx.owner.timing.deliberate_wait():
+                await services.asyncio.sleep(actual_sleep)
     if ctx.relational_context:
         # 用户正低落/抱怨: 先接情绪, 不提旧话题
         topic_continuation = None

@@ -142,6 +142,49 @@ async def test_all_reply_paths_persist_turn_timing(monkeypatch, path):
         intent_handlers.current_state_reply.assert_awaited_once()
 
 
+def test_deliberate_wait_is_reported_apart_and_frozen_at_first_bubble(monkeypatch):
+    clock = iter([10.0, 10.25, 11.0, 30.0, 31.0])
+    monkeypatch.setattr(telemetry.time, 'perf_counter', lambda: next(clock))
+    turn = telemetry.TurnTiming(started_at=NOW, started_clock=10.0)
+    assert turn.first_bubble_at is None and turn.in_graph_delay_ms == 0.0
+    with turn.deliberate_wait():
+        pass
+    d = turn.first_bubble({})
+    assert d['in_graph_delay_ms'] == 250 and d['generation_ms'] == 1000
+    with turn.deliberate_wait():  # a later bubble's pause is not first-bubble latency
+        pass
+    assert turn.first_bubble({})['in_graph_delay_ms'] == 250
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('path', ['main', 'short_circuit'])
+async def test_enabled_pacing_sleep_is_measured_not_hidden_in_processing(monkeypatch, path):
+    from tests.g02_harness_support import configure_pair
+    from app.services.chat import orchestrator as chat, intent_handlers
+    from app.services.chat.intent_dispatcher import IntentType
+    from app.services.interaction import chat_management
+    from app.services import persona_grounding
+    io = configure_pair(monkeypatch)
+    monkeypatch.setattr(persona_grounding, 'verify_generated_locations', AsyncMock(return_value=[]))
+    monkeypatch.setattr(chat_management, 'reply_delay_enabled', lambda: True)
+    monkeypatch.setattr(chat_management, 'reply_delay_max_seconds', lambda: 30)
+    monkeypatch.setattr(chat, 'calculate_reply_delay', lambda *_, **__: 0.05)
+    kwargs, text = {}, '今天有点累了'
+    if path == 'short_circuit':
+        kwargs['forced_intent'] = IntentType.CURRENT_STATE
+        text = '你在干嘛'
+        monkeypatch.setattr(intent_handlers, 'current_state_reply', AsyncMock(return_value='正在整理工作台呀'))
+    ctx = {**context(), 'delay_seconds': 0.0}
+    events = [e async for e in chat.stream_chat_response('c-1', text, io.agent, 'u-1',
+              reply_context=ctx, **kwargs)]
+    assert sum(e['event'] == 'done' for e in events) == 1
+    d = chat._save_replies.await_args.args[1][0]['response_diagnostics']
+    if path == 'main':
+        assert 40 <= d['in_graph_delay_ms'] <= d['generation_ms']
+    else:  # short circuits answer before the pacing step
+        assert d['in_graph_delay_ms'] == 0.0
+
+
 def test_first_streamed_bubble_not_delayed_by_later_bubbles_or_persistence(monkeypatch):
     import json
     from app.services.chat.graph_runtime import ChatGraphContext

@@ -6,8 +6,11 @@ not elapsed time and must not be added to actual waits. Generation covers the
 whole graph (reads, models and formatting) up to the first bubble ready to emit
 or save. Streaming paths emit before persistence; short circuits save first.
 `first_bubble_at` is server readiness, NOT a commit or client delivery receipt.
+Deliberate in-graph pacing sleeps are inside `generation_ms` and are reported
+separately as `in_graph_delay_ms`; processing = generation_ms - in_graph_delay_ms.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import math
@@ -74,6 +77,19 @@ class TurnTiming:
     started_clock: float = field(default_factory=time.perf_counter)
     first_bubble_at: datetime | None = None
     generation_ms: float | None = None
+    # Observed, so 0 is real: no pacing sleep ran before the first bubble.
+    in_graph_delay_ms: float = 0.0
+
+    @contextmanager
+    def deliberate_wait(self):
+        """Pacing sleeps are intentional delay; never count them as processing."""
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            if self.first_bubble_at is None:
+                elapsed = max(0.0, time.perf_counter() - started) * 1000
+                self.in_graph_delay_ms = round(self.in_graph_delay_ms + elapsed, 3)
 
     def first_bubble(self, context: dict | None) -> dict:
         if self.first_bubble_at is None:
@@ -93,6 +109,7 @@ class TurnTiming:
             "delay_reason": reason if isinstance(reason, str) and reason else None,
             "generation_started_at": self.started_at.isoformat(),
             "generation_ms": self.generation_ms,
+            "in_graph_delay_ms": self.in_graph_delay_ms,
             "first_bubble_at": self.first_bubble_at.isoformat(),
             "first_bubble_clock": "server_bubble_ready",
             "pre_generation_wait_ms": _elapsed(timing.get("received_at"), self.started_at),
