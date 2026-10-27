@@ -10,6 +10,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services.interaction.reply_telemetry import TurnTiming
+
 
 class ParentTraceView:
     """Handlers may close a segment; only the driver closes the trace root."""
@@ -203,12 +205,15 @@ class ChatFrame:
         from copy import deepcopy
         from app.services.chat.context_policy import observation
 
+        timing = self.owner.timing.first_bubble(self.reply_context)
+        self.response_diagnostics.update(timing)
         payloads = []
         for reply in replies:
             payload = dict(reply) if isinstance(reply, dict) else {"text": reply}
             diagnostics = dict(
                 payload.get("response_diagnostics") or self.response_diagnostics or {}
             )
+            diagnostics.update(timing)
             diagnostics.update(
                 executor="langgraph",
                 graph_version=GRAPH_VERSION,
@@ -274,9 +279,11 @@ class ChatGraphContext:
     finished: bool = False
     background_submitted: bool = False
     allow_ai_memory: bool = False
+    timing: TurnTiming = field(default_factory=TurnTiming)
 
     def note_event(self, event):
         if event["event"] == "reply":
+            self.frame.response_diagnostics.update(self.timing.first_bubble(self.frame.reply_context))
             payload = json.loads(event["data"])
             if payload.get("index") != self.next_reply_index:
                 raise ValueError("Chat fragment reply indices are discontinuous")

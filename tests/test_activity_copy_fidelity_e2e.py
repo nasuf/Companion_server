@@ -33,6 +33,7 @@ async def test_sparse_flower_store_is_enriched_without_flower_tea_analogy_and_al
     # and emit the actual component card, with only external WS transport mocked.
     from app.services.offline import chat_emit, activity_service
     monkeypatch.setattr(activity_service, "emit_activity_card", chat_emit.emit_activity_card)
+    monkeypatch.setattr(activity_service, "emit_assistant", chat_emit.emit_assistant)
     monkeypatch.setattr(chat_emit, "_notify_takeover_transcript", AsyncMock())
     j.raw.update(name="春树·花艺(常发广场店)", address="黄山西路常发广场5号楼102", types="购物服务|花鸟鱼虫市场")
     monkeypatch.setattr(discovery, "discover", AsyncMock(return_value=[native_place(j.raw, "镇江市")]))
@@ -96,6 +97,9 @@ async def test_sparse_flower_store_is_enriched_without_flower_tea_analogy_and_al
     messages = await j.db.query_raw("SELECT content,metadata FROM messages WHERE conversation_id=$1 ORDER BY created_at DESC LIMIT 8", j.conversation)
     cards = [r["metadata"]["component_card"] for r in messages if (r.get("metadata") or {}).get("component_card")]
     assert next(c for c in cards if c["payload"].get("activity_id") == public["id"])["body"] == SUMMARY
+    sent = [r["metadata"] for r in messages if r["metadata"].get("source_id") == public["id"]]
+    assert len(sent) == 2
+    assert len({r["proactive_event_id"] for r in sent}) == 1
     fetched = await j.client.get("/offline/activities/" + public["id"])
     assert fetched.status_code == 200 and fetched.json()["description"] == DETAIL
     output = os.getenv("ACTIVITY_FIDELITY_E2E_PAYLOAD")

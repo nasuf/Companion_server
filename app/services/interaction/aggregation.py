@@ -24,6 +24,7 @@ from app.redis_client import get_redis
 from app.services.runtime import user_erasure
 from app.services.emoji import is_emoji_only_message
 from app.services.interaction.reply_context import merge_reply_contexts
+from app.services.interaction.reply_telemetry import mark_queue
 from app.services.interaction.turn_coalescing import coalesce_turn_messages
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,7 @@ async def push_pending(
     ctx_key = _PENDING_CTX_KEY.format(aid=agent_id, uid=user_id)
     token = _scope_token(agent_id, user_id)
 
+    reply_context = mark_queue(reply_context, "aggregation")
     pipe = r.pipeline()
     payload: dict[str, Any] = {"text": text}
     if message_id:
@@ -229,7 +231,7 @@ async def flush_pending(
                 ))
             except Exception as e:
                 logger.debug(f"[ACH] aggregation hook skipped: {e}")
-    return combined, conv_id, ctx, latest_message_id
+    return combined, conv_id, mark_queue(ctx, "aggregation", leaving=True), latest_message_id
 
 
 async def scan_expired() -> list[tuple[str, str, str, str, dict | None, str | None]]:
@@ -292,6 +294,7 @@ async def push_turn_pending(
         first_at = now
 
     due_at = min(now + _TURN_QUIET_WINDOW, first_at + _TURN_MAX_WAIT)
+    reply_context = mark_queue(reply_context, "aggregation")
     payload: dict[str, Any] = {"text": text}
     if message_id:
         payload["message_id"] = message_id
@@ -407,7 +410,7 @@ async def flush_turn_pending(
                 "combined_len": len(combined),
             },
         )
-    return combined, _coerce(conv_id), reply_context, latest_message_id
+    return combined, _coerce(conv_id), mark_queue(reply_context, "aggregation", leaving=True), latest_message_id
 
 
 async def scan_turn_expired() -> list[tuple[str, str, str, str, dict | None, str | None]]:

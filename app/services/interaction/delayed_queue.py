@@ -17,6 +17,7 @@ from typing import Any
 from app.redis_client import get_redis
 from app.services.runtime import user_erasure
 from app.services.interaction.reply_context import merge_reply_contexts
+from app.services.interaction.reply_telemetry import mark_queue
 from app.services.interaction.turn_coalescing import coalesce_turn_messages
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,7 @@ async def enqueue_or_append_delayed(
     due_at = time.time() + max(0.0, delay_seconds)
     stored = dict(payload)
     stored["due_at"] = due_at
+    stored["reply_context"] = mark_queue(payload.get("reply_context"), "delayed")
 
     try:
         async with user_erasure.conversation_write_scope(conversation_id):

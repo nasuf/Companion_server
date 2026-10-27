@@ -175,7 +175,9 @@ if os.environ.get("CHAT_GRAPH_E2E") == "1":
     ws.ensure_vision_summaries = AsyncMock(return_value=[])
     ws.get_cached_schedule = AsyncMock(return_value=[{"activity": "free"}])
     ws.get_current_status = lambda _: {"activity": "free", "status": "idle"}
-    ws.build_reply_timing_context = AsyncMock(return_value={"delay_seconds": 0})
+    from app.services.interaction import reply_context as timing_context
+    timing_context.get_redis = get_redis
+    ws.build_reply_timing_context = timing_context.build_reply_timing_context
     ws.mark_user_replied_for_conversation = AsyncMock()
     from app.services.offline import activity_companion
     activity_companion.note_user_interaction = AsyncMock()
@@ -211,7 +213,11 @@ if os.environ.get("CHAT_GRAPH_E2E") == "1":
             graph_chat._background_post_process.reset_mock()
             graph_io.achievement.reset_mock()
             graph_chat._save_replies.return_value = "assistant-1"
-        return {"generating": graph_generating, "saves": graph_chat._save_replies.await_count,
+        timing_keys = ("turn_received_at", "aggregation_wait_ms", "planned_delay_ms", "delay_reason",
+                       "generation_ms", "first_bubble_at", "timing_definition_version", "first_bubble_clock")
+        timing_rows = [{key: payload.get("response_diagnostics", {}).get(key) for key in timing_keys}
+                       for call in graph_chat._save_replies.await_args_list for payload in call.args[1]]
+        return {"reply_timings": timing_rows, "generating": graph_generating, "saves": graph_chat._save_replies.await_count,
                 "all_conversations": True,
                 "allowlist": "",
                 "finish": graph_chat.finish_assistant_turn.await_count,

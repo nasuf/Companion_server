@@ -44,6 +44,9 @@ async def stream_graph_response(
     # Children are explicit graph fragment transitions, never recursive turns.
     if sub_intent_mode:
         raise ValueError("Graph executor cannot start a recursive child turn")
+    from app.services.interaction.reply_telemetry import TurnTiming
+
+    timing = TurnTiming()
     agent_id = getattr(agent, "id", None)
     conversation = await services.db.conversation.find_unique(
         where={"id": conversation_id}
@@ -97,6 +100,7 @@ async def stream_graph_response(
             original_message=user_message,
             achievement_turn_final=achievement_turn_final,
             next_reply_index=reply_index_offset,
+            timing=timing,
         )
         frame.owner = context
         events = stream_main(context)

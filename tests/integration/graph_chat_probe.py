@@ -143,6 +143,15 @@ async def main():
             states = await control_workers({})
             assert total_effects(states) == {
                 "saves": 1, "finish": 1, "background": 1, "turn_achievement": 1, "user_messages": 1}, states
+            timings = [row for state in states for row in state["reply_timings"]]
+            assert len(timings) == 1, timings
+            observed = timings[0]
+            assert observed["timing_definition_version"] == "server-turn-timing-v1", observed
+            assert observed["first_bubble_clock"] == "server_bubble_ready", observed
+            assert observed["turn_received_at"] and observed["first_bubble_at"], observed
+            assert observed["generation_ms"] >= 0 and observed["aggregation_wait_ms"] == 0, observed
+            assert observed["planned_delay_ms"] == 0 and observed["delay_reason"] == "delay_disabled", observed
+            completed.append("Actual WS ingress clock survives the graph to persisted reply diagnostics")
             completed.append("Actual authenticated WS message ingress persists user once and runs the graph to done")
 
         for base in worker_bases:

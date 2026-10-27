@@ -107,6 +107,9 @@ async def websocket_ticket(conversation_id: str, response: Response, user: dict 
 
 @router.post("/{conversation_id}", dependencies=[Depends(require_redis)])
 async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(require_user)):
+    from app.services.interaction.reply_telemetry import utc_now
+
+    received_at = utc_now()
     conv = await db.conversation.find_unique(
         where={"id": conversation_id},
         include={"agent": True},
@@ -208,6 +211,7 @@ async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(req
         user_id=user_id,
         received_status=received_status,
         user_emotion=quick_emotion_estimate(data.message),
+        telemetry_received_at=received_at,
     )
 
     plan = await plan_user_message_aggregation(

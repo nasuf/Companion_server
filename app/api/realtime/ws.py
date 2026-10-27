@@ -1366,6 +1366,9 @@ async def _handle_message(
     paid_confirmed: bool = False,
 ) -> None:
     """处理用户消息：额度闸门 → 聚合检查 → 生成回复 → 推送。"""
+    from app.services.interaction.reply_telemetry import utc_now
+
+    received_at = utc_now()
     from app.services.admin_takeover.service import is_conversation_taken_over
 
     try:
@@ -1557,6 +1560,7 @@ async def _handle_message(
         user_id=user_id,
         received_status=received_status,
         user_emotion=quick_emotion_estimate(prompt_text),
+        telemetry_received_at=received_at,
     )
     current_context["client_supports_voice"] = client_supports_voice
 

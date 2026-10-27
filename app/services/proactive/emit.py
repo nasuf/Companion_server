@@ -83,6 +83,14 @@ async def emit_proactive_message(
     if extra_metadata:
         metadata.update(extra_metadata)
 
+    from app.services.proactive.event_identity import proactive_event_id
+
+    metadata["proactive_event_id"] = metadata.get("proactive_event_id") or proactive_event_id(
+        conversation_id=conversation_id, kind=trigger_type,
+        source_id=guard_delivery_key,
+    )
+    metadata["proactive_event_definition_version"] = 1
+
     existing_arrival = None
     if arrival_delivery:
         from app.services.offline.arrival_followups import load_delivery
@@ -327,6 +335,8 @@ async def emit_proactive_message(
         ws_payload["attachments"] = [prepared_voice.metadata]
     if ws_payload_extra:
         ws_payload.update(ws_payload_extra)
+    # Preserve the persisted identity on replay; old deliveries stay unknown.
+    ws_payload["proactive_event_id"] = metadata.get("proactive_event_id")
     # workspace 维度路由: 同一 user 多 agent 时不会跨 agent 广播 proactive.
     # workspace_id 为 None (历史 conv) 时 send_to_workspace 内部 fallback 到 send_to_user.
     await manager.send_to_workspace(workspace_id, "proactive", ws_payload)

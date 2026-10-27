@@ -13,6 +13,7 @@ from typing import Any
 
 from app.redis_client import get_redis
 from app.services.relationship.emotion import is_high_emotion
+from app.services.interaction.reply_telemetry import CONTEXT_KEY, initial_timing
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,7 @@ async def build_reply_timing_context(
     received_status: dict[str, Any] | None,
     user_emotion: dict[str, Any] | None = None,
     received_at: datetime | None = None,
+    telemetry_received_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Build structured timing context at message receipt time."""
     received_ts = _normalize_received_at(received_at)
@@ -146,6 +148,8 @@ async def build_reply_timing_context(
     )
     return {
         "received_at": received_ts.isoformat(),
+        CONTEXT_KEY: initial_timing(_normalize_received_at(telemetry_received_at))
+        if telemetry_received_at is not None else {"received_at": None, "aggregation_wait_ms": 0.0},
         "received_status": received_status or {},
         "user_emotion": user_emotion or {},
         **profile,
@@ -168,6 +172,13 @@ def merge_reply_contexts(
     merged = dict(base_context)
     merged["latest_received_at"] = latest_context.get("received_at", base_context.get("received_at"))
     merged["latest_user_emotion"] = latest_context.get("user_emotion", {})
+    # Timing belongs to the last message, while product delay/status stays with
+    # the first. Missing observations must not inherit an older message clock.
+    latest_timing = latest_context.get(CONTEXT_KEY)
+    if isinstance(latest_timing, dict):
+        merged[CONTEXT_KEY] = dict(latest_timing)
+    else:
+        merged.pop(CONTEXT_KEY, None)
     return merged
 
 

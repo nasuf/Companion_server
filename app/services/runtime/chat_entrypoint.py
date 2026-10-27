@@ -177,6 +177,7 @@ async def prepare_sql_chat_message(
         context = await build_reply_timing_context(
             agent_id=scope.agent_id, user_id=scope.owner_user_id, received_status=status,
             user_emotion=quick_emotion_estimate(prompt_text),
+            telemetry_received_at=received_at,
         )
         context.update(received_at=received_at.isoformat(), client_supports_voice=client_supports_voice)
         if offering:

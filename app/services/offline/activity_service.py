@@ -280,6 +280,12 @@ async def create_recommendation_for_user(
                 logger.warning("[offline] invite outcome not recorded (%s)", type(exc).__name__)
         if publication_guard is not None:
             await publication_guard(ctx)
+        from app.services.proactive.event_identity import proactive_event_id
+
+        event_metadata = {**(message_metadata or {}), "proactive_event_id": proactive_event_id(
+            conversation_id=ctx["conversation_id"], kind="offline_activity_recommendation",
+            source_id=activity["id"],
+        )}
         await emit_assistant(
             conversation_id=ctx["conversation_id"],
             user_id=user_id,
@@ -291,7 +297,7 @@ async def create_recommendation_for_user(
             trigger_type="offline_activity_recommendation",
             trace_id=tracer.safe_trace_id,
             extra_metadata={
-                **(message_metadata or {}),
+                **event_metadata,
                 "recommendation_message_status": (activity.get("discovery_metadata") or {}).get("recommendation_message_status", "not_generated"),
                 "user_relevance_count": (activity.get("discovery_metadata") or {}).get("user_relevance_count", 0),
                 "recommendation_evidence_status": (activity.get("discovery_metadata") or {}).get("recommendation_evidence_status", {}),
@@ -309,7 +315,7 @@ async def create_recommendation_for_user(
             activity=activity,
             trigger_type="offline_activity_recommendation_card",
             status_label="待确定",
-            **({'extra_metadata': message_metadata} if message_metadata else {}),
+            extra_metadata=event_metadata,
         )
         await repo.update_next_activity_due(
             user_id,
@@ -678,6 +684,12 @@ async def auto_archive_due_activities() -> dict[str, int]:
                 activity["user_id"], activity.get("workspace_id")
             )
             if ctx:
+                from app.services.proactive.event_identity import proactive_event_id
+
+                event_metadata = {"proactive_event_id": proactive_event_id(
+                    conversation_id=ctx.get("conversation_id") or "",
+                    kind="offline_activity_auto_archived", source_id=activity["id"],
+                )}
                 await emit_activity_card(
                     conversation_id=ctx.get("conversation_id"),
                     user_id=activity["user_id"],
@@ -685,6 +697,7 @@ async def auto_archive_due_activities() -> dict[str, int]:
                     workspace_id=ctx["workspace_id"],
                     activity=updated,
                     trigger_type="offline_activity_auto_archived_card",
+                    extra_metadata=event_metadata,
                     status_label="已收好",
                 )
                 await emit_assistant(
@@ -696,6 +709,7 @@ async def auto_archive_due_activities() -> dict[str, int]:
                     real_world_type="activity",
                     source_id=activity["id"],
                     trigger_type="offline_activity_auto_archived",
+                    extra_metadata=event_metadata,
                 )
             archived += 1
         except Exception as exc:
