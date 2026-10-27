@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def loaded_runtime_configuration(monkeypatch):
+    # These endpoint tests bypass lifespan and mock the model itself. Production
+    # startup loads the DB configuration before accepting replay requests.
+    monkeypatch.setattr("app.services.runtime_config.ensure_loaded", AsyncMock())
+
 def test_admin_prompt_replay_invokes_llm_only(api_client, monkeypatch):
     from app.api.jwt_auth import require_admin_jwt
     from app.main import app

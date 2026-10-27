@@ -667,7 +667,7 @@ async def test_run_main_llm_skips_web_search_when_gate_says_no(monkeypatch):
     monkeypatch.setattr(reply_generate, "_try_web_search_reply", should_not_run)
     fake_model = SimpleNamespace(astream=lambda msgs: None)
     monkeypatch.setattr(reply_generate, "get_chat_model", lambda: fake_model)
-    monkeypatch.setattr(reply_generate, "get_fallback_chat_model", lambda: fake_model)
+    monkeypatch.setattr(reply_generate, "get_fallback_for", lambda primary: fake_model)
     monkeypatch.setattr(reply_generate, "provider_name", lambda m: "ark")
     monkeypatch.setattr(
         "app.services.llm.models._resolve_usage_model_key", lambda m: "ark/x",
@@ -690,7 +690,7 @@ async def test_run_main_llm_falls_back_to_stream_when_search_empty(monkeypatch):
     )
     fake_model = SimpleNamespace(astream=lambda msgs: None)
     monkeypatch.setattr(reply_generate, "get_chat_model", lambda: fake_model)
-    monkeypatch.setattr(reply_generate, "get_fallback_chat_model", lambda: fake_model)
+    monkeypatch.setattr(reply_generate, "get_fallback_for", lambda primary: fake_model)
     monkeypatch.setattr(reply_generate, "provider_name", lambda m: "ark")
     monkeypatch.setattr(
         "app.services.llm.models._resolve_usage_model_key", lambda m: "ark/x",

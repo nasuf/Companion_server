@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # Semantic subject/location verification needs the calibrated reasoning
     # model, independently of the conversational small-model choice.
     persona_grounding_model: str = "qwen3.5-plus"
+    # Independent of the primary route and the local embedding service.
+    fallback_chat_provider: str = "dashscope"
+    fallback_chat_model: str = "qwen3.5-plus"
     # Short voice messages in chat use the native DashScope multimodal HTTP
     # endpoint.  Keep this separate from the OpenAI-compatible LLM base URL.
     dashscope_asr_endpoint: str = (

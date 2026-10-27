@@ -61,6 +61,7 @@ class CallProfile:
     # primary 失败后是否回退到 ollama. 大输出场景 (character.generation 6-8K
     # tokens) 主云超时往往是"输出量大", 此时 ollama 14B 必然更慢, fallback 反
     # 而拖慢用户 6+ 分钟. 设 False 则 fail-fast.
+    # Historical public name retained for profile callers; applies to any backup.
     allow_ollama_fallback: bool = True
     # 流式相邻 chunk 间最大允许停顿. None → 沿用 first_chunk_timeout_s.
     # 解决 dashscope qwen-plus 偶尔 30-40s 静默(GPU 排队/限流)导致总 timeout
@@ -472,7 +473,7 @@ async def _run_with_retry(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Entry: call_with_resilience (unary + auto Ollama fallback)
+# Entry: call_with_resilience (unary + provider-aware fallback)
 # ═══════════════════════════════════════════════════════════════════
 
 async def call_with_resilience(
@@ -482,12 +483,13 @@ async def call_with_resilience(
     profile: CallProfile,
     op: str,
     fallback_factory: Callable[[], Awaitable[Any]] | None = None,
+    fallback_provider: str = "ollama",
 ) -> Any:
-    """Unary LLM call with timeout + retry + CB + 可选 Ollama fallback.
+    """Unary LLM call with timeout + retry + CB + 可选备选供应商 fallback.
 
     primary_provider 决定使用哪个 CB (各 provider 独立计数).
     fallback_factory 非 None 时, primary 最终失败 (retry 耗尽 / CB open) 会
-    再走一次 Ollama, Ollama 也有独立 CB + retry.
+    再走备选供应商，复用该供应商独立的 CB、并发限额和 retry.
     primary 本就是 Ollama 时, 调用方应传 fallback_factory=None (本地重试意义不大).
 
     同一级别 fallback 也可能失败; 最终抛 LLMFailedError, 调用方自己静态兜底.
@@ -502,22 +504,22 @@ async def call_with_resilience(
         _record_runtime_event(result="fallback")
         logger.warning(
             f"[LLM-FALLBACK] op={op} primary={primary_provider} failed: "
-            f"{type(primary_exc).__name__}: {primary_exc}; trying ollama",
+            f"{type(primary_exc).__name__}: {primary_exc}; trying {fallback_provider}",
         )
 
     try:
         return await _run_with_retry(
-            fallback_factory, provider="ollama", profile=profile, op=f"{op}:fallback",
+            fallback_factory, provider=fallback_provider, profile=profile, op=f"{op}:fallback",
         )
     except LLMFailedError as fallback_exc:
         raise LLMFailedError(
-            f"{op}: both primary={primary_provider} and Ollama fallback failed; "
+            f"{op}: both primary={primary_provider} and {fallback_provider} fallback failed; "
             f"last error: {fallback_exc}"
         ) from fallback_exc
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Entry: astream_with_resilience (stream + auto Ollama fallback)
+# Entry: astream_with_resilience (stream + provider-aware fallback)
 # ═══════════════════════════════════════════════════════════════════
 
 async def astream_with_resilience(
@@ -527,6 +529,7 @@ async def astream_with_resilience(
     profile: CallProfile,
     op: str,
     fallback_factory: Callable[[], AsyncIterator[Any]] | None = None,
+    fallback_provider: str = "ollama",
     primary_model_name: str = "",
     fallback_model_name: str = "",
 ) -> AsyncIterator[str]:
@@ -551,29 +554,29 @@ async def astream_with_resilience(
             op=op,
             model_name=primary_model_name,
         ):
-            got_first_chunk = True
+            got_first_chunk = got_first_chunk or bool(token)
             yield token
         return
     except LLMFailedError as primary_exc:
         # 已经推过 token 或无 fallback → 直接让异常穿出, 调用方自己兜底
-        if got_first_chunk or fallback_factory is None:
+        if got_first_chunk or fallback_factory is None or not profile.allow_ollama_fallback:
             raise
         _record_runtime_event(result="fallback")
         logger.warning(
             f"[LLM-FALLBACK] op={op} primary={primary_provider} stream failed "
-            f"pre-first-chunk: {type(primary_exc).__name__}: {primary_exc}; trying ollama",
+            f"pre-first-chunk: {type(primary_exc).__name__}: {primary_exc}; trying {fallback_provider}",
         )
 
-    # Fallback to Ollama
+    # The backup has its own provider budget and circuit breaker.
     try:
         async for token in _stream_provider(
-            fallback_factory, provider="ollama", profile=profile, op=f"{op}:fallback",
+            fallback_factory, provider=fallback_provider, profile=profile, op=f"{op}:fallback",
             model_name=fallback_model_name,
         ):
             yield token
     except LLMFailedError as fallback_exc:
         raise LLMFailedError(
-            f"{op}: primary={primary_provider} and Ollama fallback both failed: "
+            f"{op}: primary={primary_provider} and {fallback_provider} fallback both failed: "
             f"{fallback_exc}"
         ) from fallback_exc
 
@@ -585,6 +588,7 @@ async def collect_stream(
     profile: CallProfile,
     op: str,
     fallback_factory: Callable[[], AsyncIterator[Any]] | None = None,
+    fallback_provider: str = "ollama",
     primary_model_name: str = "",
     fallback_model_name: str = "",
 ) -> str:
@@ -601,6 +605,7 @@ async def collect_stream(
         profile=profile,
         op=op,
         fallback_factory=fallback_factory,
+        fallback_provider=fallback_provider,
         primary_model_name=primary_model_name,
         fallback_model_name=fallback_model_name,
     ):
@@ -696,6 +701,9 @@ async def _stream_provider(
             first = await asyncio.wait_for(
                 aiter.__anext__(), timeout=profile.first_chunk_timeout_s,
             )
+    except asyncio.CancelledError:
+        await _safe_close()
+        raise
     except Exception as e:
         breaker.record_failure()
         _log_attempt(provider=provider, op=op, result="first_chunk_fail",
@@ -703,8 +711,6 @@ async def _stream_provider(
         await _safe_close()
         raise LLMFailedError(f"stream no first chunk on {provider}: {e}") from e
 
-    _capture_chunk_usage(first, last_usage)
-    yield _chunk_text(first)
     deadline = started + profile.timeout_s
     # idle 超时: chunk 间最大允许停顿. None → 沿用 first_chunk_timeout_s
     # (与改动前等价 — 老 chat_stream profile 行为不变).
@@ -713,6 +719,8 @@ async def _stream_provider(
     # Remaining chunks with idle + overall budget. mid-stream 失败必须 aclose
     # 释放底层 SSE 连接 (dashscope 抽风时 CB open + fd 堆积可能打爆).
     try:
+        _capture_chunk_usage(first, last_usage)
+        yield _chunk_text(first)
         while True:
             try:
                 chunk = await asyncio.wait_for(aiter.__anext__(), timeout=idle)
@@ -746,6 +754,7 @@ async def _stream_provider(
         raise LLMFailedError(f"stream mid error on {provider}: {e}") from e
     finally:
         _flush_stream_usage(last_usage, model_name)
+        await _safe_close()
 
 
 def _chunk_text(chunk: Any) -> str:

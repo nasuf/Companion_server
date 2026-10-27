@@ -876,7 +876,7 @@ async def test_main_reply_fallback_on_llm_failure():
         "app.services.chat.reply_generate.get_chat_model",
         return_value=primary_model,
     ), patch(
-        "app.services.chat.reply_generate.get_fallback_chat_model",
+        "app.services.chat.reply_generate.get_fallback_for",
         return_value=fallback_model,
     ), patch(
         "app.services.chat.reply_generate.convert_messages",

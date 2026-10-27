@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable
 from app.observability.events import EVT_REPLY_LLM, EVT_REPLY_SPLIT, EVT_REPLY_TIER
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.chat.prompt_builder import fold_trailing_system
-from app.services.llm.models import convert_messages, get_chat_model, get_fallback_chat_model
+from app.services.llm.models import convert_messages, get_chat_model, get_fallback_for
 from app.services.llm.resilience import (
     LLMFailedError,
     collect_stream,
@@ -153,8 +153,8 @@ async def _run_main_llm(
     三级降级策略 (resilience.astream_with_resilience):
     1. primary (Dashscope / Claude / 或配置指定的其他) 流式, 首 chunk 在
        first_chunk_timeout_s 内到达 → commit 到 primary
-    2. 首 chunk 未到 → 无副作用切本地 Ollama LOCAL_CHAT_MODEL 流
-    3. Ollama 也挂 → 抛 LLMFailedError, 我们落到静态兜底文本
+    2. 首 chunk 未到 → 无副作用切配置的云端备选模型 流
+    3. 备选模型也挂 → 抛 LLMFailedError, 我们落到静态兜底文本
 
     返回 (text, is_fallback). is_fallback=True 表示走了静态兜底 (两级 LLM 全挂),
     调用方可据此给 reply metadata 打 `{reply_failed: true}` 让前端显示重试按钮等.
@@ -177,8 +177,8 @@ async def _run_main_llm(
         chat_messages = fold_trailing_system(chat_messages)
     lc_messages = convert_messages(chat_messages)
 
-    # primary 若本就是 Ollama, 不配 fallback (避免本地 → 本地二次重试无意义)
-    fallback = get_fallback_chat_model() if primary_prov != "ollama" else None
+    # 离线模式不访问云端；同一供应商同一模型不重复作为备选。
+    fallback = get_fallback_for(primary)
 
     def _primary_stream():
         return primary.astream(lc_messages)
@@ -195,10 +195,11 @@ async def _run_main_llm(
             fallback_factory=(_fallback_stream if fallback is not None else None),
             primary_model_name=_resolve_usage_model_key(primary),
             fallback_model_name=_resolve_usage_model_key(fallback) if fallback else "",
+            fallback_provider=provider_name(fallback) if fallback is not None else "",
         )
         return text, False
     except LLMFailedError as e:
-        logger.warning(f"[LLM-FALLBACK] reply_stream total failure (primary + ollama both down): {e}")
+        logger.warning(f"[LLM-FALLBACK] reply_stream total failure (primary + backup both failed): {e}")
         return _MAIN_REPLY_ULTIMATE_FALLBACK, True
 
 

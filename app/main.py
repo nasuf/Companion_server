@@ -128,15 +128,9 @@ async def lifespan(app: FastAPI):
                 f"Holiday cache preload failed ({e!r}); lunardate fallback active."
             )
 
-        # Phase 2c: Runtime config preload (system + agent overrides). 失败时全部
-        # fallback 到 env 默认, 不阻断启动.
-        try:
-            from app.services.runtime_config import load_caches
-            await _timed("Runtime config", load_caches())
-        except Exception as e:
-            logger.warning(
-                f"Runtime config load failed ({e!r}); env defaults active."
-            )
+        # Runtime config is a readiness prerequisite; never serve stale env routes.
+        from app.services.runtime_config import load_caches
+        await _timed("Runtime config", load_caches())
 
         from app.services.runtime_config import refresh_worker_config
         config_refresh_task = asyncio.create_task(refresh_worker_config(), name="configuration-refresh")

@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.services.llm.resilience import CallProfile  # type: ignore[import-not-found]
@@ -92,8 +92,8 @@ def _build_utility_model(provider: str, model: str) -> BaseChatModel:
 
 
 @lru_cache(maxsize=256)
-def _build_fallback_chat_model(model: str) -> ChatOllama:
-    return cast(ChatOllama, build_chat_model("ollama", model))
+def _build_fallback_chat_model(provider: str, model: str) -> BaseChatModel:
+    return build_chat_model(provider, model)
 
 
 # 调用方按 OpenAI 习惯传的采样参数 → ChatOllama 上的同义字段。
@@ -142,8 +142,28 @@ def get_grounding_model() -> BaseChatModel:
     return _build_utility_model(provider, model)
 
 
-def get_fallback_chat_model() -> ChatOllama:
-    return _build_fallback_chat_model(_resolved().local_chat_model)
+def get_fallback_chat_model() -> BaseChatModel:
+    return _build_fallback_chat_model(
+        settings.fallback_chat_provider, settings.fallback_chat_model,
+    )
+
+
+def get_fallback_for(primary: BaseChatModel) -> BaseChatModel | None:
+    """Keep offline mode offline and never retry the identical model as a fallback.
+
+    A missing fallback credential must not prevent a healthy primary request.
+    Do not include the constructor exception (which may contain config) in logs.
+    """
+    from app.services.llm.resilience import provider_name
+
+    if provider_name(primary) == "ollama":
+        return None
+    try:
+        fallback = get_fallback_chat_model()
+    except ValueError:
+        logger.error("[LLM-FALLBACK] backup model configuration unavailable")
+        return None
+    return None if _resolve_usage_model_key(primary) == _resolve_usage_model_key(fallback) else fallback
 
 
 # 公开 cache_clear hook 给 runtime_config 调用 (PUT 配置后清缓存)
@@ -328,9 +348,8 @@ async def _invoke_with_resilience(
 ) -> Any:
     """invoke_text / invoke_json_with_usage 的共享骨架.
 
-    force_json=True 时强制设 format='json' (ChatOllama JSON 模式),
-    也会给 Ollama fallback 同步设上. 非 Ollama 的 primary (Dashscope/Claude)
-    忽略 format, 回 OpenAI / Anthropic 的 JSON 约束要 prompt 层保证.
+    force_json=True 仅对 ChatOllama 添加 format='json'。云端备选沿用原
+    JSON 提示词约束，不把 Ollama 专属参数发送给云端 API。
 
     返回原始 LangChain response 对象 (未解析), 让调用方自行处理
     .content / _extract_json / usage_metadata 等.
@@ -340,7 +359,7 @@ async def _invoke_with_resilience(
     (相邻 chunk 间最大停顿), 不受总 timeout 误杀. 用于 character.generation
     这类 6-8K tokens 长输出场景.
     """
-    from app.services.llm.resilience import call_with_resilience
+    from app.services.llm.resilience import call_with_resilience, provider_name
 
     profile_override = kwargs.pop("profile", None)
     # Optional caller-owned audit output. Never forward it to a provider or
@@ -375,11 +394,10 @@ async def _invoke_with_resilience(
         return response
 
     fallback_factory = None
-    if provider != "ollama":
-        # Fallback 是 Ollama, 需要 format='json' 走 JSON 模式.
-        # 用 setdefault 与 primary 路径对称 — 尊重调用方显式传入的 format.
-        _fb_model, fb_kwargs = _for_ollama(get_fallback_chat_model(), kwargs)
-        if force_json:
+    fallback = get_fallback_for(model) if profile.allow_ollama_fallback else None
+    if fallback is not None:
+        _fb_model, fb_kwargs = _for_ollama(fallback, kwargs)
+        if force_json and isinstance(_fb_model, ChatOllama):
             fb_kwargs.setdefault("format", "json")
 
         async def _fallback():
@@ -395,6 +413,7 @@ async def _invoke_with_resilience(
         profile=profile,
         op=op,
         fallback_factory=fallback_factory,
+        fallback_provider=provider_name(fallback) if fallback is not None else "",
     )
 
 
@@ -414,12 +433,10 @@ async def _invoke_via_stream(
     返回 AIMessage(content=joined), 上层 `_extract_json(response.content)` /
     `response.content` 路径无感.
 
-    TODO(usage_metadata): LangChain stream chunk 的 usage_metadata 暴露不一致
-    (dashscope 在末 chunk; ollama 不暴露). 当前所有 background profile 调用
-    走 `invoke_json` 直接丢 usage, 无外部 caller 受影响. 若日后需要计费/观测,
-    可在 collect_stream 内 fold 末 chunk 的 usage_metadata 到 AIMessage 上.
+    用量在 collect_stream 内按实际供应商/模型记录，返回对象不重复携带 usage，
+    防止外层再次计费；invocation_metadata 只在整个调用成功后写入。
     """
-    from app.services.llm.resilience import collect_stream
+    from app.services.llm.resilience import collect_stream, provider_name
     from langchain_core.messages import AIMessage
 
     primary_model, primary_kwargs = _for_ollama(model, kwargs)
@@ -432,10 +449,11 @@ async def _invoke_via_stream(
 
     fallback_factory = None
     fb_model_name = ""
-    if provider != "ollama" and profile.allow_ollama_fallback:
-        _fb_model, fb_kwargs = _for_ollama(get_fallback_chat_model(), kwargs)
+    fallback = get_fallback_for(model) if profile.allow_ollama_fallback else None
+    if fallback is not None:
+        _fb_model, fb_kwargs = _for_ollama(fallback, kwargs)
         fb_model_name = _resolve_usage_model_key(_fb_model)
-        if force_json:
+        if force_json and isinstance(_fb_model, ChatOllama):
             fb_kwargs.setdefault("format", "json")
 
         def _fallback_stream():
@@ -452,6 +470,7 @@ async def _invoke_via_stream(
         fallback_factory=fallback_factory,
         primary_model_name=_resolve_usage_model_key(model),
         fallback_model_name=fb_model_name,
+        fallback_provider=provider_name(fallback) if fallback is not None else "",
     )
     if invocation_metadata is not None and selected_model is not None:
         invocation_metadata["actual_model"] = _resolve_usage_model_key(selected_model)
@@ -506,7 +525,7 @@ def _extract_cached_input_tokens(meta: dict) -> int:
     return 0
 
 
-def _record_usage_from_response(model: BaseChatModel, response: Any) -> dict:
+def _record_usage_from_response(model: BaseChatModel, response: Any, *, actual_model: str | None = None) -> dict:
     """提取 response.usage_metadata 并 record 到当前 chat session, 返回 usage dict."""
     from app.services.llm import usage_tracker
 
@@ -517,7 +536,7 @@ def _record_usage_from_response(model: BaseChatModel, response: Any) -> dict:
     output_tok = int(meta.get("output_tokens", 0) or 0)
     cached_tok = _extract_cached_input_tokens(meta)
     usage_tracker.record(
-        _resolve_usage_model_key(model), input_tok, output_tok,
+        actual_model or _resolve_usage_model_key(model), input_tok, output_tok,
         cached_input_tokens=cached_tok,
     )
     return {"input_tokens": input_tok, "output_tokens": output_tok}
@@ -531,13 +550,16 @@ async def invoke_json_with_usage(
     """Same as invoke_json but also returns `{input_tokens, output_tokens}` when
     available from the model. Empty dict if the provider doesn't expose usage.
 
-    Resilience: primary 经 timeout+retry+CB, 失败后切本地 Ollama. 两级都挂抛
+    Resilience: primary 经 timeout+retry+CB, 失败后切配置的备选模型. 两级都挂抛
     LLMFailedError (调用方自己兜底, 多数已有 try/except 返 None/空 dict).
     """
+    metadata = kwargs.get("invocation_metadata")
+    if metadata is None:
+        metadata = kwargs["invocation_metadata"] = {}
     response = await _invoke_with_resilience(
         model, prompt, op="invoke_json", force_json=True, **kwargs,
     )
-    usage = _record_usage_from_response(model, response)
+    usage = _record_usage_from_response(model, response, actual_model=metadata.get("actual_model"))
     return _extract_json(response.content), usage
 
 
@@ -548,11 +570,14 @@ async def invoke_text(
 ) -> str:
     """Invoke the model and return the response as plain text.
 
-    Resilience: primary 经 timeout+retry+CB, 失败后切本地 Ollama. 两级都挂抛
+    Resilience: primary 经 timeout+retry+CB, 失败后切配置的备选模型. 两级都挂抛
     LLMFailedError.
     """
+    metadata = kwargs.get("invocation_metadata")
+    if metadata is None:
+        metadata = kwargs["invocation_metadata"] = {}
     response = await _invoke_with_resilience(
         model, prompt, op="invoke_text", force_json=False, **kwargs,
     )
-    _record_usage_from_response(model, response)
+    _record_usage_from_response(model, response, actual_model=metadata.get("actual_model"))
     return response.content

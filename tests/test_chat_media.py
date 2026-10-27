@@ -355,6 +355,7 @@ def test_audio_attachment_metadata_keeps_transcript():
 @pytest.mark.asyncio
 async def test_doubao_vision_uses_openai_compatible_image_url_payload(monkeypatch):
     captured = {}
+    monkeypatch.setattr(vision, "get_effective_vision_model", AsyncMock(return_value="doubao-1-5-vision-pro-32k-250115"))
 
     class FakeResponse:
         def raise_for_status(self):
@@ -408,6 +409,7 @@ async def test_doubao_vision_uses_openai_compatible_image_url_payload(monkeypatc
 
 @pytest.mark.asyncio
 async def test_doubao_vision_404_mentions_model_config(monkeypatch):
+    monkeypatch.setattr(vision, "get_effective_vision_model", AsyncMock(return_value="bad-model"))
     class FakeResponse:
         status_code = 404
         text = '{"error":"model not found"}'

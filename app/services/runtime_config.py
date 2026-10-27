@@ -135,6 +135,10 @@ async def bind_agent_context(agent_id: str | None, *, reuse_snapshot: bool = Fal
                         bind_prompt_snapshot(prompts))
 
 
+class RuntimeConfigurationUnavailable(RuntimeError):
+    """No complete database configuration exists; model routing must not start."""
+
+
 async def load_caches() -> None:
     async with _LOAD_LOCK:
         await _load_caches_unlocked()
@@ -187,10 +191,12 @@ async def _load_caches_unlocked() -> None:
             new_pricing[f"{r.provider}/{r.identifier}"] = pricing
             if identifier_counts.get(r.identifier, 0) == 1:
                 new_pricing[r.identifier] = pricing
-    except Exception:
-        # Retain the last complete configuration; a transient error never resets it to env.
-        # Initial failure stays retryable, and callers may use environment defaults.
-        logger.warning("[RUNTIME-CONFIG] refresh failed; retaining last complete snapshot", exc_info=True)
+    except Exception as exc:
+        # Never include SQL/provider configuration in a startup traceback.
+        if not _CACHE_LOADED:
+            logger.error("[RUNTIME-CONFIG] initial load failed (%s); startup blocked", type(exc).__name__)
+            raise RuntimeConfigurationUnavailable("Initial database configuration unavailable") from None
+        logger.warning("[RUNTIME-CONFIG] refresh failed (%s); retaining last complete snapshot", type(exc).__name__)
         return
     _GLOBAL_CACHE = new_global
     _AGENT_CACHE = new_agent
@@ -357,12 +363,14 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
     """同步取配置, 解析链 agent override → system (DB 真源) → env (兜底).
 
     正常情况 system_config 行总是存在 (migration seed + load_caches auto-seed),
-    首次加载失败时使用 env；之后刷新失败保留最近一份完整配置。
+    首次加载失败阻止启动；之后刷新失败保留最近一份完整配置。
 
     agent_id 为 None 时跳过 override (用于无会话上下文场景: admin 建 agent /
     cron / global memory pipeline). 显式传 agent_id 时按该 agent 的 override 取.
     """
     snapshot = _current_snapshot.get()
+    if snapshot is None and not _CACHE_LOADED and settings.is_production():
+        raise RuntimeConfigurationUnavailable("Database configuration must load before serving")
     agents = snapshot.agent_configs if snapshot else _AGENT_CACHE
     ag_override = agents.get(agent_id) if agent_id else None
     glob = (snapshot.global_config if snapshot else _GLOBAL_CACHE) or {}
