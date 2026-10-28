@@ -368,6 +368,75 @@ async def _check_no_oversized_memories() -> InvariantResult:
     )
 
 
+async def _check_daily_metrics_settled() -> InvariantResult:
+    """内测统计派生表: 昨天和前天的指标都已生成, 窗口走完的指标都已定型.
+
+    04:40 的任务报了成功, 不代表派生表里真有昨天的数 —— 锁被别的实例拿走、某一天
+    计算失败被吞, 页面都只会显示"未运行"。06:00 时昨天的次日回访还没走完 (要到今天
+    结束), 所以只要求"窗口已过的指标"定型, 前天则必须全部定型。
+    """
+    from datetime import timedelta
+
+    from zoneinfo import ZoneInfo
+
+    from app.config import settings
+    from app.db import db
+    from app.services.effect.daily_facts import NIGHTLY_HOUR, NIGHTLY_MINUTE, is_settled
+    from app.services.effect.definitions import (
+        COHORTS, DEFINITION_VERSION, METRICS, local_today, population_fingerprint,
+    )
+
+    now = datetime.now(timezone.utc)
+    today = local_today(now)
+    days = [today - timedelta(days=2), today - timedelta(days=1)]
+    # 只要求"最近一次夜间重算开始时窗口已走完"的指标定型。昨天的主动消息回应窗口
+    # 到今天 06:00 才走完, 而夜间那一轮在 04:40 —— 06:00 巡检时它当然还没定型。
+    local_now = now.astimezone(ZoneInfo(settings.schedule_timezone))
+    last_nightly = local_now.replace(hour=NIGHTLY_HOUR, minute=NIGHTLY_MINUTE, second=0, microsecond=0)
+    if last_nightly > local_now:
+        last_nightly -= timedelta(days=1)
+    rows = await db.query_raw(
+        """
+        SELECT local_date::text AS day, metric, cohort, settled, definition_version,
+               population_fingerprint
+        FROM metrics_daily WHERE local_date::text = ANY($1::text[]) AND dimension = ''
+        """,
+        [d.isoformat() for d in days],
+    )
+    fingerprint = await population_fingerprint()
+    by_key = {(r["day"], r["cohort"], r["metric"]): r for r in rows}
+    missing, outdated, unsettled = [], [], []
+    for day in days:
+        for cohort in COHORTS:
+            for metric in METRICS:
+                row = by_key.get((day.isoformat(), cohort, metric))
+                label = f"{day.isoformat()}/{cohort}/{metric}"
+                if row is None:
+                    missing.append(label)
+                elif row["definition_version"] != DEFINITION_VERSION or (
+                    cohort == "external" and row["population_fingerprint"] != fingerprint
+                ):
+                    outdated.append(label)
+                elif is_settled(metric, day, last_nightly) and not row["settled"]:
+                    unsettled.append(label)
+    observed = {"days": [d.isoformat() for d in days], "missing": len(missing),
+                "outdated": len(outdated), "unsettled": len(unsettled),
+                "samples": (missing + unsettled + outdated)[:5]}
+    title = "内测统计定型"
+    if missing:
+        return InvariantResult("daily_metrics_settled", title, "violated",
+                               f"{len(missing)} 项昨日/前日统计没有生成 (04:40 任务未产出)", observed)
+    if unsettled:
+        return InvariantResult("daily_metrics_settled", title, "violated",
+                               f"{len(unsettled)} 项统计窗口已走完仍未定型, 夜间重算没有覆盖到", observed)
+    if outdated:
+        # 夜间之后有人改了内部账号或口径版本; 页面读取时会在后台重算, 不算故障。
+        return InvariantResult("daily_metrics_settled", title, "warn",
+                               f"{len(outdated)} 项统计来自旧口径或旧的内部账号集合, 等待重算", observed)
+    return InvariantResult("daily_metrics_settled", title, "ok",
+                           "昨日与前日统计均已生成, 到期指标均已定型", observed)
+
+
 _CHECKS: tuple[tuple[str, str, Callable[[], Awaitable[InvariantResult]]], ...] = (
     ("schedule_today", "今日作息覆盖", _check_schedule_today),
     ("no_oversized_memories", "记忆长度上限", _check_no_oversized_memories),
@@ -376,6 +445,7 @@ _CHECKS: tuple[tuple[str, str, Callable[[], Awaitable[InvariantResult]]], ...] =
     ("embeddings_complete", "向量覆盖率", _check_embeddings_complete),
     ("consolidation_active", "记忆整合", _check_consolidation_active),
     ("capacity_headroom", "容量水位", _check_capacity_headroom),
+    ("daily_metrics_settled", "内测统计定型", _check_daily_metrics_settled),
 )
 
 

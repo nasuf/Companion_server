@@ -1809,6 +1809,56 @@ async def reply_effect(
     }
 
 
+_DAILY_DIMENSIONS = {"": None, "trigger_type": ("proactive_events", "proactive_response", "proactive_response_3h"),
+                     "reply_path": ("reply_first_bubble_ms_p50", "reply_first_bubble_ms_p90",
+                                    "reply_processing_ms_p50", "reply_processing_ms_p90")}
+_DAILY_MAX_DAYS = 92
+# 产品上线前没有任何数据; 下界也避免极早日期在日期运算里溢出。
+_DAILY_EARLIEST = datetime(2026, 1, 1).date()
+
+
+@router.get("/daily-metrics")
+async def daily_metrics(
+    days: int = Query(14, ge=1, le=_DAILY_MAX_DAYS),
+    end: str | None = Query(None, description="本地日 YYYY-MM-DD, 默认今天"),
+    cohort: Literal["external", "all"] = Query("external"),
+    metrics: str | None = Query(None, description="逗号分隔; 默认全部"),
+    dimension: Literal["", "trigger_type", "reply_path"] = Query(""),
+    _: dict = Depends(require_admin_jwt),
+):
+    """内测统计派生表 (UXM01.02) 的逐日指标, 只含人群聚合, 不含用户 ID 或消息原文.
+
+    每个数据点带 state (未采集/未运行/口径过期/无样本/样本不足/未定型/正常), 页面只按
+    state 渲染。今天和昨天按需刷新 (10 分钟内只算一次), 过期日子交给后台重算。
+    """
+    from datetime import date as date_cls
+
+    from app.services.effect.daily_facts import read_series
+    from app.services.effect.definitions import METRICS
+
+    today = local_today()
+    try:
+        last = date_cls.fromisoformat(end) if end else today
+    except ValueError:
+        raise HTTPException(status_code=422, detail="end must be YYYY-MM-DD")
+    if last > today:
+        raise HTTPException(status_code=422, detail="end cannot be in the future")
+    if last < _DAILY_EARLIEST:
+        raise HTTPException(status_code=422, detail=f"end must be on or after {_DAILY_EARLIEST.isoformat()}")
+    allowed = _DAILY_DIMENSIONS[dimension]
+    wanted = ([m.strip() for m in metrics.split(",") if m.strip()] if metrics
+              else list(allowed or METRICS))
+    unknown = sorted(set(wanted) - set(METRICS))
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown metrics: {', '.join(unknown)}")
+    if allowed is not None and set(wanted) - set(allowed):
+        raise HTTPException(status_code=422, detail=f"dimension {dimension} supports: {', '.join(allowed)}")
+    result = await read_series(
+        last - timedelta(days=days - 1), last, cohort=cohort, metrics=wanted, dimension=dimension,
+    )
+    return {**result, "definitions": describe(tuple(wanted))}
+
+
 @router.get("/activity-copy-quality")
 async def activity_copy_quality(
     days: int = 7,

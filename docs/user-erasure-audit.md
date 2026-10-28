@@ -106,6 +106,7 @@
 | `tts_usage` | `user_id` |
 | `user_consumable_batch` | `user_id` |
 | `user_daily_activity` | `user_id` |
+| `user_daily_facts` | `user_id` |
 | `user_feedback` | `user_id` |
 | `user_game_wallets` | `user_id` |
 | `user_message_quota` | `user_id` |

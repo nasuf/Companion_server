@@ -32,6 +32,7 @@ from app.services.effect.definitions import (
     chat_activity_sql,
     conversation_population_sql,
     local_day_bounds,
+    proactive_events_sql,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,10 +224,13 @@ scored AS (
 """
 
 
-async def _fetch_core(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
-    from app.db import db
+async def _fetch_core(
+    start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT, *, client: Any = None,
+) -> dict[str, Any]:
+    if client is None:
+        from app.db import db as client
 
-    rows = await db.query_raw(
+    rows = await client.query_raw(
         _with_population(_TURNS_CTE, "m.conversation_id", cohort) + """
         SELECT
             COUNT(*)::int AS turns,
@@ -319,43 +323,22 @@ async def _fetch_sessions(start: datetime, end: datetime, cohort: Cohort = DEFAU
 async def _fetch_proactive(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
     """主动发送事件发出后, 用户在窗口内有没有开口.
 
-    一次发送算一个事件: 同一 proactive_event_id 的卡片和文字只算一次, 以最早一条
-    的时间为发出时间。早于事件 ID 上线的旧消息没有 ID, 只能按条计 —— 单独报出
-    legacy_messages, 不把它们和事件混成一个看不出口径的数。
+    事件口径 (按 proactive_event_id 去重、旧消息按条计) 只定义在
+    definitions.proactive_events_sql, 这里与每日派生表读同一份。
     """
     from app.db import db
 
+    events = proactive_events_sql("$1::timestamp", "$2::timestamp", "$3::interval", cohort)
     rows = await db.query_raw(
-        _with_population("""
-        WITH bubbles AS (
-            SELECT conversation_id, created_at,
-                   COALESCE(metadata->>'proactive_event_id', 'legacy:' || id) AS event_key,
-                   (metadata->>'proactive_event_id' IS NOT NULL) AS identified
-            FROM messages
-            WHERE role = 'assistant'
-              AND metadata->>'proactive' = 'true'
-              AND __POPULATION__
-              AND created_at >= $1::timestamp
-              AND created_at <  $2::timestamp
-        ),
-        sent AS (
-            SELECT conversation_id, event_key, bool_or(identified) AS identified,
-                   MIN(created_at) AS created_at, COUNT(*)::int AS bubbles
-            FROM bubbles GROUP BY conversation_id, event_key
-        )
+        f"""
+        WITH e AS ({events})
         SELECT
             COUNT(*)::int AS sent,
             COUNT(*) FILTER (WHERE NOT identified)::int AS legacy_messages,
             COALESCE(SUM(bubbles), 0)::int AS bubbles,
-            COUNT(*) FILTER (WHERE EXISTS (
-                SELECT 1 FROM messages u
-                WHERE u.conversation_id = s.conversation_id
-                  AND u.role = 'user'
-                  AND u.created_at > s.created_at
-                  AND u.created_at <= s.created_at + $3::interval
-            ))::int AS answered
-        FROM sent s
-        """, "messages.conversation_id", cohort),
+            COUNT(first_reply_at)::int AS answered
+        FROM e
+        """,
         start.isoformat(), end.isoformat(),
         f"{int(PROACTIVE_RESPONSE_WINDOW.total_seconds())} seconds",
     )
@@ -373,16 +356,19 @@ def active_users_sql(start: str, end: str, cohort: Cohort) -> str:
     )
 
 
-async def _fetch_retention(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
+async def _fetch_retention(
+    start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT, *, client: Any = None,
+) -> dict[str, Any]:
     """当日活跃用户, 以及其中次日还回来的.
 
     次日窗口尚未走完时 returned 会偏低 —— 调用方据此判断要不要展示 (见 collect)。
     """
-    from app.db import db
+    if client is None:
+        from app.db import db as client
 
     active = active_users_sql("$1::timestamp", "$2::timestamp", cohort)
     nextday = active_users_sql("$2::timestamp", "$2::timestamp + INTERVAL '1 day'", cohort)
-    rows = await db.query_raw(
+    rows = await client.query_raw(
         f"""
         WITH active AS ({active}), nextday AS ({nextday})
         SELECT (SELECT COUNT(*) FROM active)::int AS active_users,

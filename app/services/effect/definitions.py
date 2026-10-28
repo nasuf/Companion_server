@@ -107,15 +107,16 @@ def local_today(now: datetime | None = None) -> date_cls:
     return (now.astimezone(tz) if now else datetime.now(tz)).date()
 
 
-async def population_fingerprint() -> str:
+async def population_fingerprint(client: Any = None) -> str:
     """当前内部账号集合的指纹, 用作长期缓存键的一部分.
 
     有人被勾选为内部 (或改了 admin 角色) 后指纹变化, 已定型日子的旧缓存自然失效,
-    不需要在每个改动入口记得清缓存。
+    不需要在每个改动入口记得清缓存。`client` 可传事务, 在同一快照里读。
     """
-    from app.db import db
+    if client is None:
+        from app.db import db as client
 
-    rows = await db.query_raw(
+    rows = await client.query_raw(
         f"""
         SELECT md5(COALESCE(string_agg(id, ',' ORDER BY id), '')) AS fingerprint
         FROM users u WHERE {internal_user_sql('u')}
@@ -141,25 +142,126 @@ def ratio(numerator: int, denominator: int | None, *, settled: bool = True) -> d
     return {**base, "value": round(numerator / denominator, 4), "state": "ok"}
 
 
+def proactive_events_sql(start: str, end: str, reply_window: str, cohort: Cohort) -> str:
+    """主动发送事件的唯一 SQL: [start, end) 内发出的事件, 每行一个.
+
+    一次发送算一个事件: 同一 proactive_event_id 的卡片和文字只算一次, 以最早一条
+    的时间为发出时间, 并按这一条归日 (卡片和文字跨过午夜时不会两天各算一次)。同一
+    ID 在前一天内已发过的 (重试) 不再算新事件。早于事件 ID 上线的旧消息没有 ID,
+    只能按条计 (identified=false)。first_reply_at 是发出后 reply_window 内的第一条
+    用户消息, 没有则为 NULL; 更短的回应窗口由调用方在它上面再判。
+
+    列: user_id, conversation_id, event_key, trigger_type, identified, bubbles,
+    sent_at, first_reply_at。回复效果页与每日派生表都从这里取数。
+    """
+    return f"""
+        SELECT e.*, (
+            SELECT MIN(r.created_at) FROM messages r
+            WHERE r.conversation_id = e.conversation_id AND r.role = 'user'
+              AND r.created_at > e.sent_at AND r.created_at <= e.sent_at + {reply_window}
+        ) AS first_reply_at
+        FROM (
+            SELECT c.user_id, b.conversation_id,
+                   COALESCE(b.metadata->>'proactive_event_id', 'legacy:' || b.id) AS event_key,
+                   -- 卡片的 trigger_type 带 _card 后缀, MIN 取到文字那条的类型
+                   MIN(COALESCE(b.metadata->>'trigger_type', 'unknown')) AS trigger_type,
+                   bool_or(b.metadata->>'proactive_event_id' IS NOT NULL) AS identified,
+                   COUNT(*)::int AS bubbles, MIN(b.created_at) AS sent_at
+            FROM messages b JOIN conversations c ON c.id = b.conversation_id
+            WHERE b.role = 'assistant' AND b.metadata->>'proactive' = 'true'
+              AND {population_sql('c.user_id', cohort)}
+              AND b.created_at >= {start} - INTERVAL '1 hour' AND b.created_at < {end} + INTERVAL '1 hour'
+            GROUP BY c.user_id, b.conversation_id,
+                     COALESCE(b.metadata->>'proactive_event_id', 'legacy:' || b.id)
+        ) e
+        WHERE e.sent_at >= {start} AND e.sent_at < {end}
+          AND (NOT e.identified OR NOT EXISTS (
+              SELECT 1 FROM messages p
+              WHERE p.conversation_id = e.conversation_id AND p.role = 'assistant'
+                AND p.created_at >= {start} - INTERVAL '1 day' AND p.created_at < {start} - INTERVAL '1 hour'
+                AND p.metadata->>'proactive_event_id' = e.event_key))
+    """
+
+
+# 每日派生指标的类型, 决定页面怎么画、样本门槛怎么用:
+#   count     计数, value 即人数/条数; 0 是真实为零
+#   rate      比率 numerator/denominator (0..1); 分母少于 MIN_SAMPLE 或未定型时不给值,
+#             只给分子分母 —— 小样本的百分比会被读成差异
+#   mean      人均值 numerator/denominator; 分母为 0 时不给值, 其余照给并附分母
+#   quantile  分位数 (毫秒), sample_size 为样本数; 少于 MIN_SAMPLE 不给值
+# settle_after_s: 本地日结束后再过多久这个数不再变化 (定型)。
+_H = 3600
+
+# 无回复判定窗口: 用户一串消息的最后一条之后多久没有 AI 回复算"没回"。
+NO_REPLY_WINDOW_S = 600
+
+# 主动消息短回应窗口 (秒); 长窗口沿用 effect.signals.PROACTIVE_RESPONSE_WINDOW (6 小时)。
+PROACTIVE_SHORT_WINDOW_S = 3 * _H
+
 # 指标字典: 页面悬停说明、日报和派生表都引用这里, 不各写一份。
-METRICS: dict[str, dict[str, str]] = {
+METRICS: dict[str, dict[str, Any]] = {
     "chat_active_users": {
         "label": "聊天活跃用户",
         "definition": "本地日 (UTC+8) 内至少发过 1 条用户消息的用户数",
         "denominator": "人",
         "source": "messages ⋈ conversations",
+        "kind": "count", "unit": "人", "settle_after_s": 0,
+    },
+    "opened_users": {
+        "label": "打开 App 的用户",
+        "definition": "本地日内有过一次登录/心跳记录的用户数 (user_daily_activity)",
+        "denominator": "人",
+        "source": "user_daily_activity",
+        "kind": "count", "unit": "人", "settle_after_s": 0, "collected_since": "2026-05-29",
+    },
+    "new_users": {
+        "label": "新注册用户",
+        "definition": "注册时间落在该本地日的用户数",
+        "denominator": "人",
+        "source": "users.created_at",
+        "kind": "count", "unit": "人", "settle_after_s": 0,
+    },
+    "user_messages": {
+        "label": "用户消息数",
+        "definition": "本地日内用户发出的消息条数",
+        "denominator": "条",
+        "source": "messages",
+        "kind": "count", "unit": "条", "settle_after_s": 0,
+    },
+    "turns": {
+        "label": "回合数",
+        "definition": "用户一串连续消息在 10 分钟内得到 AI 的非主动回复, 算 1 个回合; 不含人工接管与游戏中",
+        "denominator": "回合",
+        "source": "messages",
+        "kind": "count", "unit": "回合", "settle_after_s": NO_REPLY_WINDOW_S,
+    },
+    "turns_per_active_user": {
+        "label": "人均日回合",
+        "definition": "回合数 / 聊天活跃用户数",
+        "denominator": "聊天活跃用户数",
+        "source": "user_daily_facts",
+        "kind": "mean", "unit": "回合/人", "settle_after_s": NO_REPLY_WINDOW_S,
     },
     "next_day_return": {
         "label": "次日回访率",
         "definition": "D 日活跃的用户中, D+1 本地日仍发过用户消息的比例; D+1 过完才定型",
         "denominator": "D 日活跃用户数",
         "source": "messages ⋈ conversations",
+        "kind": "rate", "unit": "%", "settle_after_s": 24 * _H,
     },
     "continuation": {
         "label": "对话延续率",
-        "definition": "AI 回复后 5 分钟内用户再次开口的回合占比",
-        "denominator": "有回复的用户回合数",
+        "definition": "AI 回复后 5 分钟内用户再次开口的占比; 按每条得到回复的用户消息计 (与回合口径不同)",
+        "denominator": "得到 AI 回复的用户消息数",
         "source": "messages",
+        "kind": "rate", "unit": "%", "settle_after_s": _H,
+    },
+    "proactive_events": {
+        "label": "主动发送事件",
+        "definition": "一次主动发送算一个事件 (卡片和文字只算一次); 无事件 ID 的旧消息按条计",
+        "denominator": "事件",
+        "source": "messages.metadata.proactive_event_id",
+        "kind": "count", "unit": "事件", "settle_after_s": 0,
     },
     "proactive_response": {
         "label": "主动消息回应率",
@@ -169,6 +271,62 @@ METRICS: dict[str, dict[str, str]] = {
         ),
         "denominator": "主动发送事件数",
         "source": "messages.metadata.proactive_event_id",
+        "kind": "rate", "unit": "%", "settle_after_s": 6 * _H,
+    },
+    "proactive_response_3h": {
+        "label": "主动消息 3 小时回应率",
+        "definition": "同主动消息回应率, 回应窗口为发出后 3 小时",
+        "denominator": "主动发送事件数",
+        "source": "messages.metadata.proactive_event_id",
+        "kind": "rate", "unit": "%", "settle_after_s": PROACTIVE_SHORT_WINDOW_S,
+    },
+    "no_reply_10m": {
+        "label": "无回复率",
+        "definition": (
+            "用户一串消息的最后一条之后 10 分钟内没有 AI 的非主动回复;"
+            " 排除人工接管期间和游戏中的消息"
+        ),
+        "denominator": "用户消息串",
+        "source": "messages",
+        "kind": "rate", "unit": "%", "settle_after_s": NO_REPLY_WINDOW_S,
+    },
+    "reply_first_bubble_ms_p50": {
+        "label": "首气泡耗时 p50",
+        "definition": (
+            "服务端收到一串用户消息的最后一条 → 首个回复气泡就绪 (server-turn-timing-v1),"
+            " 含排队与刻意延迟; 不是客户端收到时间"
+        ),
+        "denominator": "带计时的回合",
+        "source": "messages.metadata.response_diagnostics",
+        "kind": "quantile", "unit": "ms", "settle_after_s": 0, "collected_since": "2026-10-27",
+    },
+    "reply_first_bubble_ms_p90": {
+        "label": "首气泡耗时 p90",
+        "definition": "同首气泡耗时 p50, 取第 90 百分位",
+        "denominator": "带计时的回合",
+        "source": "messages.metadata.response_diagnostics",
+        "kind": "quantile", "unit": "ms", "settle_after_s": 0, "collected_since": "2026-10-27",
+    },
+    "reply_processing_ms_p50": {
+        "label": "回复处理耗时 p50",
+        "definition": "生成至首气泡减去回复前拟人停顿 (generation_ms − in_graph_delay_ms), 不含排队与刻意延迟",
+        "denominator": "带计时的回合",
+        "source": "messages.metadata.response_diagnostics",
+        "kind": "quantile", "unit": "ms", "settle_after_s": 0, "collected_since": "2026-10-28",
+    },
+    "reply_processing_ms_p90": {
+        "label": "回复处理耗时 p90",
+        "definition": "同回复处理耗时 p50, 取第 90 百分位",
+        "denominator": "带计时的回合",
+        "source": "messages.metadata.response_diagnostics",
+        "kind": "quantile", "unit": "ms", "settle_after_s": 0, "collected_since": "2026-10-28",
+    },
+    "cost_per_active_user": {
+        "label": "每活跃用户日成本",
+        "definition": "该人群用户当日模型费用 (llm_usage.cost_cny) / 聊天活跃用户数",
+        "denominator": "聊天活跃用户数",
+        "source": "llm_usage",
+        "kind": "mean", "unit": "CNY/人", "settle_after_s": 0, "collected_since": "2026-04-29",
     },
 }
 

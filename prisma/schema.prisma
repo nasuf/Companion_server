@@ -85,6 +85,7 @@ model User {
   timeCapsules             TimeCapsule[]
   lastWills                LastWill[]
   dailyActivities          UserDailyActivity[]
+  dailyFacts               UserDailyFact[]
   gameSessions             GameSession[]
   nativeGameSkillStates    NativeGameSkillState[]
   musicFavorites           MusicFavorite[]
@@ -808,6 +809,56 @@ model UserDailyActivity {
   @@unique([userId, localDate], map: "user_daily_activity_user_date_key")
   @@index([userId, localDate], map: "user_daily_activity_user_date_idx")
   @@map("user_daily_activity")
+}
+
+// UXM01.02 derived cache: one row per user x local day, counts only (no text).
+// Fully recomputable from raw tables; owned by app/services/effect/daily_facts.py.
+model UserDailyFact {
+  userId            String    @map("user_id")
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  localDate         DateTime  @map("local_date") @db.Date
+  opened            Boolean   @default(false)
+  chatted           Boolean   @default(false)
+  userMessages      Int       @default(0) @map("user_messages")
+  turns             Int       @default(0)
+  sessions          Int       @default(0)
+  bursts            Int       @default(0)
+  unrepliedBursts   Int       @default(0) @map("unreplied_bursts")
+  firstMessageAt    DateTime? @map("first_message_at")
+  spontaneous       Boolean?
+  proactiveReceived Int       @default(0) @map("proactive_received")
+  proactiveAnswered Int       @default(0) @map("proactive_answered")
+  feedbackCount     Int       @default(0) @map("feedback_count")
+  costCny           Float     @default(0) @map("cost_cny")
+  settled           Boolean   @default(false)
+  definitionVersion String    @map("definition_version")
+  computedAt        DateTime  @map("computed_at") @db.Timestamptz(6)
+
+  @@id([userId, localDate])
+  @@index([localDate], map: "user_daily_facts_local_date_idx")
+  @@map("user_daily_facts")
+}
+
+// UXM01.02 derived cache: day x metric x cohort x dimension aggregates. Never
+// holds a user identifier. Rows carry the definition version and the internal-
+// account fingerprint they were computed under.
+model MetricsDaily {
+  localDate             DateTime @map("local_date") @db.Date
+  metric                String
+  cohort                String
+  dimension             String   @default("")
+  dimensionValue        String   @default("") @map("dimension_value")
+  numerator             Float?
+  denominator           Float?
+  value                 Float?
+  sampleSize            Int?     @map("sample_size")
+  settled               Boolean
+  definitionVersion     String   @map("definition_version")
+  populationFingerprint String   @map("population_fingerprint")
+  computedAt            DateTime @map("computed_at") @db.Timestamptz(6)
+
+  @@id([localDate, metric, cohort, dimension, dimensionValue])
+  @@map("metrics_daily")
 }
 
 model AchievementUnlock {
