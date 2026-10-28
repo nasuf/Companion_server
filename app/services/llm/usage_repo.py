@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from prisma import Json
@@ -11,6 +12,43 @@ from app.services.llm.pricing import estimate_cost_cny
 from app.services.llm.usage_tracker import UsageScope, UsageSummary
 
 logger = logging.getLogger(__name__)
+_pending_writes: set[asyncio.Task] = set()
+WRITE_TIMEOUT_SECONDS = 5.0
+
+
+async def persist_usage(**kwargs) -> None:
+    """Bounded, cancellation-independent write shared by all session owners.
+
+    Shield preserves the caller's cancellation while retaining the actual task
+    until its five-second deadline. No retries: an ambiguous commit must not
+    double-count a charged call. Neither provider nor SQL error text is logged.
+    """
+    async def write() -> None:
+        try:
+            async with asyncio.timeout(WRITE_TIMEOUT_SECONDS):
+                await write_usage_row(**kwargs)
+        except Exception as exc:
+            logger.warning("[llm-usage] write failed scope=%s trace=%s type=%s",
+                           kwargs.get("scope", "chat"), (kwargs.get("trace_id") or "")[:8],
+                           type(exc).__name__)
+
+    task = asyncio.create_task(write(), name="persist-llm-usage")
+    _pending_writes.add(task)
+    task.add_done_callback(_pending_writes.discard)
+    await asyncio.shield(task)
+
+
+async def drain_usage_writes() -> None:
+    """Finish already-owned metering writes before the DB pool closes."""
+    pending = set(_pending_writes)
+    if not pending:
+        return
+    done, remaining = await asyncio.wait(pending, timeout=WRITE_TIMEOUT_SECONDS + .1)
+    for task in remaining:
+        task.cancel()
+    if remaining:
+        await asyncio.gather(*remaining, return_exceptions=True)
+        logger.warning("[llm-usage] shutdown writes timed out count=%d", len(remaining))
 
 
 def _total_cost_cny(tokens_by_model: dict) -> float:
@@ -48,12 +86,16 @@ async def aggregate_usage_by_trace_ids(trace_ids: list[str]) -> dict[str, dict]:
             "cached_input_tokens": 0,
             "cost_cny": 0.0,
             "call_count": 0,
+            "unmetered_calls": 0,
         })
         entry["input_tokens"] += int(row.inputTokens or 0)
         entry["output_tokens"] += int(row.outputTokens or 0)
         entry["cost_cny"] += float(row.costCny or 0.0)
         entry["call_count"] += int(row.callCount or 0)
         tokens_by_model = row.tokensByModel if isinstance(row.tokensByModel, dict) else {}
+        entry["unmetered_calls"] += sum(
+            int(bucket.get("unmetered_calls", 0) or 0) for bucket in tokens_by_model.values()
+            if isinstance(bucket, dict))
         entry["cached_input_tokens"] += sum(
             int(bucket.get("cached_input", 0) or 0)
             for bucket in tokens_by_model.values()
@@ -96,8 +138,7 @@ async def write_usage_row(
             }
         )
     except Exception as e:
-        conv_label = (conversation_id or scope)[:16]
         logger.warning(
-            f"[llm-usage] write failed scope={scope} conv={conv_label} "
-            f"agent={(agent_id or '?')[:8]} cost=¥{cost:.6f}: {e}"
+            "[llm-usage] write failed scope=%s trace=%s type=%s",
+            scope, (trace_id or "")[:8], type(e).__name__,
         )

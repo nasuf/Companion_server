@@ -297,7 +297,11 @@ async def test_forced_utility_billing_failure_replies_via_backup_and_queues_one_
             finally:
                 usage = usage_tracker.flush_session(token)
             assert result == {'reply': '合成回复'} and metadata['actual_model'] == 'deepseek/backup'
-            assert list(usage['tokens_by_model']) == ['deepseek/backup']
+            expected = {'deepseek/backup': {'input': 12, 'output': 5, 'cached_input': 4}}
+            if stream:
+                expected['dashscope/primary'] = {'input': 0, 'output': 0, 'cached_input': 0, 'unmetered_calls': 1}
+            assert usage['tokens_by_model'] == expected
+            assert usage['input_tokens'] == 12 and usage['output_tokens'] == 5
             assert ('dashscope', 'primary') in b._active
             await asyncio.gather(h.sample_and_notify(), h.sample_and_notify())
             events = await database.query_raw('SELECT type,body FROM notification_events WHERE user_id=$1', admin)

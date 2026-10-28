@@ -76,7 +76,7 @@ class TestSettlement:
 
     def test_every_metric_declares_kind_unit_and_window(self):
         for key, spec in METRICS.items():
-            assert spec["kind"] in {"count", "rate", "mean", "quantile"}, key
+            assert spec["kind"] in {"count", "rate", "mean", "quantile", "max"}, key
             assert spec["unit"] and spec["settle_after_s"] >= 0, key
         assert set(definitions.describe(("turns",))["metrics"]) == {"turns"}
 
@@ -249,13 +249,15 @@ def test_daily_metrics_endpoint_bounds_window_and_returns_definitions(api_client
         assert args == (date(2026, 10, 14), date(2026, 10, 20))
         assert kwargs == {"cohort": "all", "metrics": ["proactive_events"], "dimension": "trigger_type"}
         assert set(ok.json()["definitions"]["metrics"]) == {"proactive_events"}
-        assert read.await_args_list[1].kwargs["metrics"] == list(METRICS)
+        assert read.await_args_list[1].kwargs["metrics"] == [
+            k for k, spec in METRICS.items() if "external" in spec.get("cohorts", ("external", "all"))
+        ]  # Reconciliation is all-cohort only, never attributed to external users.
         with patch("app.services.effect.daily_facts.read_series", AsyncMock(return_value={"series": {}})) as read:
             by_path = api_client.get("/admin-api/stats/daily-metrics", params={"dimension": "reply_path"})
         assert by_path.status_code == 200  # 只给维度时默认取该维度支持的指标
         assert read.await_args.kwargs["metrics"] == [
             "reply_first_bubble_ms_p50", "reply_first_bubble_ms_p90",
-            "reply_processing_ms_p50", "reply_processing_ms_p90"]
+            "reply_processing_ms_p50", "reply_processing_ms_p90", "continuation"]
     finally:
         app.dependency_overrides.pop(dep, None)
 

@@ -94,7 +94,7 @@ def _interval(delta: timedelta | float) -> str:
 # definitions.METRICS), 页面与日报都读派生表, 不另写。消息串 (burst): 同一会话里连续的用户消息, 中间没有 AI 消息且相邻
 # 两条间隔不超过无回复窗口; 串的最后一条之后无回复窗口内有 AI 非主动回复即算回合。
 # 人工接管中、游戏进行中的消息串不计入回合和无回复。
-_FACTS_SQL = """
+_BURSTS_CTE = """
 WITH
 msgs AS (
     SELECT m.id, m.conversation_id, c.user_id, m.role, m.created_at, m.metadata,
@@ -128,7 +128,7 @@ bursts AS (
     FROM numbered GROUP BY conversation_id, user_id, burst_no
 ),
 day_bursts AS (
-    SELECT b.user_id, EXISTS (
+    SELECT b.*, EXISTS (
         SELECT 1 FROM messages r
         WHERE r.conversation_id = b.conversation_id AND r.role = 'assistant'
           AND COALESCE(r.metadata->>'proactive', 'false') <> 'true'
@@ -142,7 +142,10 @@ day_bursts AS (
             AND b.last_at >= g.started_at
             AND b.last_at <= COALESCE(g.ended_at, g.started_at + $10::interval)
       )
-),
+)
+"""
+
+_FACTS_SQL = _BURSTS_CTE + """,
 burst_stats AS (
     SELECT user_id, COUNT(*)::int AS bursts, COUNT(*) FILTER (WHERE NOT replied)::int AS unreplied
     FROM day_bursts GROUP BY user_id
@@ -166,7 +169,7 @@ fb AS (
 ),
 spend AS (
     SELECT user_id, SUM(cost_cny)::float8 AS cny FROM llm_usage
-    WHERE user_id IS NOT NULL AND created_at >= $1::timestamp AND created_at < $2::timestamp
+    WHERE user_id IS NOT NULL AND scope <> 'quality_eval' AND created_at >= $1::timestamp AND created_at < $2::timestamp
     GROUP BY user_id
 ),
 ids AS (
@@ -207,17 +210,34 @@ LEFT JOIN spend sp ON sp.user_id = i.user_id
 """
 
 
+def burst_query_params(day: date_cls, now: datetime) -> tuple:
+    start, end = local_day_bounds(day)
+    return (start.isoformat(), end.isoformat(), day.isoformat(), DEFINITION_VERSION,
+            now.isoformat(), facts_settled(day, now), _interval(NO_REPLY_WINDOW_S),
+            _interval(SESSION_GAP), _interval(PROACTIVE_RESPONSE_WINDOW), _interval(_OPEN_GAME_SPAN),
+            _interval(_BOUNDARY_LOOKAHEAD))
+
+
+def burst_details_cte() -> str:
+    """Same eligible bursts as facts; explicit casts keep all numbered binds typed."""
+    return _BURSTS_CTE + """, bind_types AS (
+      SELECT $3::date AS day,$4::text AS version,$5::timestamptz AS computed_at,
+             $6::boolean AS settled,$8::interval AS session_gap,$9::interval AS reply_window
+    )"""
+
+
 def _facts_sql() -> str:
     events = proactive_events_sql("$1::timestamp", "$2::timestamp", "$9::interval", "all")
     return _FACTS_SQL.replace("__PROACTIVE_EVENTS__", events)
 
 
-def _timing_sql(cohort: Cohort) -> str:
+def timing_cte(cohort: Cohort) -> str:
     """带 server-turn-timing-v1 的回合; 同一回合的多个气泡按首气泡时刻去重."""
     return f"""
         WITH t AS (
             SELECT DISTINCT ON (m.conversation_id, d->>'first_bubble_at')
-                m.created_at AS anchor_at,
+                m.created_at AS anchor_at, m.id AS message_id, m.conversation_id,
+                m.metadata->>'trace_id' AS trace_id, d,
                 COALESCE(d->>'reply_path', 'unknown') AS reply_path,
                 CASE WHEN pg_input_is_valid(d->>'turn_received_at', 'timestamptz')
                        AND pg_input_is_valid(d->>'first_bubble_at', 'timestamptz')
@@ -227,7 +247,10 @@ def _timing_sql(cohort: Cohort) -> str:
                 CASE WHEN jsonb_typeof(d->'generation_ms') = 'number'
                        AND jsonb_typeof(d->'in_graph_delay_ms') = 'number'
                      THEN (d->>'generation_ms')::float8 - (d->>'in_graph_delay_ms')::float8
-                END AS processing_ms
+                END AS processing_ms,
+                CASE WHEN jsonb_typeof(d->'aggregation_wait_ms')='number' THEN (d->>'aggregation_wait_ms')::float8 END AS aggregation_ms,
+                CASE WHEN jsonb_typeof(d->'planned_delay_ms')='number' AND jsonb_typeof(d->'in_graph_delay_ms')='number'
+                     THEN (d->>'planned_delay_ms')::float8 + (d->>'in_graph_delay_ms')::float8 END AS delay_ms
             FROM messages m CROSS JOIN LATERAL (SELECT m.metadata->'response_diagnostics' AS d) x
             WHERE m.role = 'assistant'
               -- 多看一段: 跨午夜的多气泡回合按它最早的气泡归日, 只算一次
@@ -237,6 +260,11 @@ def _timing_sql(cohort: Cohort) -> str:
               AND {conversation_population_sql('m.conversation_id', cohort)}
             ORDER BY m.conversation_id, d->>'first_bubble_at', m.created_at
         )
+    """
+
+
+def _timing_sql(cohort: Cohort) -> str:
+    return timing_cte(cohort) + """
         SELECT COALESCE(reply_path, '') AS dimension_value, GROUPING(reply_path) = 1 AS overall,
             percentile_cont(0.5) WITHIN GROUP (ORDER BY first_ms) FILTER (WHERE first_ms >= 0) AS first_p50,
             percentile_cont(0.9) WITHIN GROUP (ORDER BY first_ms) FILTER (WHERE first_ms >= 0) AS first_p90,
@@ -264,14 +292,14 @@ def _row(metric: str, cohort: Cohort, *, settled: bool, numerator: float | None 
          sample_size: int | None = None, dimension: str = "", dimension_value: str = "") -> dict:
     kind = METRICS[metric]["kind"]
     if kind in ("rate", "mean") and value is None and denominator:
-        value = round(float(numerator or 0) / float(denominator), 6)
+        value = round(float(numerator or 0) / float(denominator) * METRICS[metric].get("scale", 1), 6)
     return {"metric": metric, "cohort": cohort, "dimension": dimension,
             "dimension_value": dimension_value, "numerator": numerator,
             "denominator": denominator, "value": value, "sample_size": sample_size,
             "settled": settled}
 
 
-async def _cohort_rows(tx: Any, day: date_cls, cohort: Cohort, now: datetime) -> list[dict]:
+async def _cohort_rows(tx: Any, day: date_cls, cohort: Cohort, now: datetime, fingerprint: str = "-") -> list[dict]:
     start, end = local_day_bounds(day)
     s, e = start.isoformat(), end.isoformat()
     settled = {key: is_settled(key, day, now) for key in METRICS}
@@ -283,7 +311,8 @@ async def _cohort_rows(tx: Any, day: date_cls, cohort: Cohort, now: datetime) ->
                COALESCE(SUM(turns), 0)::int AS turns,
                COALESCE(SUM(bursts), 0)::int AS bursts,
                COALESCE(SUM(unreplied_bursts), 0)::int AS unreplied,
-               COALESCE(SUM(cost_cny), 0)::float8 AS cost
+               COALESCE(SUM(cost_cny), 0)::float8 AS cost,
+               COALESCE(SUM(feedback_count), 0)::int AS feedback
         FROM user_daily_facts f
         WHERE f.local_date = $1::date AND {population_sql('f.user_id', cohort)}
         """,
@@ -297,6 +326,8 @@ async def _cohort_rows(tx: Any, day: date_cls, cohort: Cohort, now: datetime) ->
     ))[0]["n"]
     core = await _fetch_core(start, end, cohort, client=tx)
     retention = await _fetch_retention(start, end, cohort, client=tx)
+    from app.services.effect.details import reply_details
+    await reply_details(tx, day, cohort, now, core, retention, fingerprint)
     chatted = int(facts["chatted"] or 0)
     rows = [
         _row("chat_active_users", cohort, value=chatted, settled=settled["chat_active_users"]),
@@ -314,6 +345,10 @@ async def _cohort_rows(tx: Any, day: date_cls, cohort: Cohort, now: datetime) ->
              denominator=int(facts["bursts"] or 0), settled=settled["no_reply_10m"]),
         _row("cost_per_active_user", cohort, numerator=round(float(facts["cost"] or 0), 6),
              denominator=chatted, settled=settled["cost_per_active_user"]),
+        _row("feedback_per_100_turns", cohort, numerator=int(facts["feedback"] or 0),
+             denominator=int(facts["turns"] or 0), settled=settled["feedback_per_100_turns"]),
+        _row("cost_per_turn", cohort, numerator=round(float(facts["cost"] or 0), 6),
+             denominator=int(facts["turns"] or 0), settled=settled["cost_per_turn"]),
     ]
     for r in await tx.query_raw(
         _proactive_sql(cohort), s, e, _interval(PROACTIVE_RESPONSE_WINDOW),
@@ -397,11 +432,25 @@ async def compute_day(
             _interval(SESSION_GAP), _interval(PROACTIVE_RESPONSE_WINDOW), _interval(_OPEN_GAME_SPAN),
             _interval(_BOUNDARY_LOOKAHEAD),
         )
+        from app.services.effect.experience import compute as compute_experience
+        extra_rows = await compute_experience(tx, day, current)
+        from app.services.effect.session_stats import compute as compute_sessions
+        extra_rows.extend(await compute_sessions(tx, day, current))
+        from app.services.effect.costs import compute as compute_costs
+        await compute_costs(tx, day, current)
+        from app.services.effect.reconciliation import compute as compute_reconciliation
+        extra_rows.extend(await compute_reconciliation(tx, day, current))
+        from app.services.effect.proactive_stats import compute as compute_proactive
+        extra_rows.extend(await compute_proactive(tx, day, current))
+        from app.services.effect.details import compute as compute_details
+        await tx.execute_raw("DELETE FROM stats_detail_daily WHERE local_date=$1::date", day.isoformat())
+        await compute_details(tx, day, current)
         fingerprints = {"external": fingerprint, "all": _ALL_FINGERPRINT}
         rows: list[dict] = []
         for cohort in COHORTS:
-            for row in await _cohort_rows(tx, day, cohort, current):
+            for row in await _cohort_rows(tx, day, cohort, current, fingerprints[cohort]):
                 rows.append({**row, "population_fingerprint": fingerprints[cohort]})
+        rows.extend({**row, "population_fingerprint": fingerprints[row["cohort"]]} for row in extra_rows)
         # 计算期间有人改了内部账号: 外部口径的数不属于开头读到的指纹, 整天回滚, 下次重算。
         if await population_fingerprint(tx) != fingerprint:
             raise PopulationChanged(day.isoformat())
@@ -429,7 +478,7 @@ async def compute_day(
             "window_utc": [start.isoformat(), end.isoformat()], "ms": round(elapsed_ms)}
 
 
-def point_state(metric: str, day: date_cls, row: dict | None, *, expected_fingerprint: str) -> tuple[str, float | None]:
+def point_state(metric: str, day: date_cls, row: dict | None, *, expected_fingerprint: str, now: datetime | None = None) -> tuple[str, float | None]:
     """一个数据点的展示状态和可展示的值. 页面只按 state 渲染, 不自己推断.
 
     not_collected  该日早于这类原始数据开始采集的日期 (未采集)
@@ -441,6 +490,8 @@ def point_state(metric: str, day: date_cls, row: dict | None, *, expected_finger
     ok             可直接展示; 计数为 0 时是真实为零
     """
     spec = METRICS[metric]
+    if spec.get("retention_days") and day < local_today(now) - timedelta(days=spec["retention_days"] - 1):
+        return "expired", None
     since = spec.get("collected_since")
     if since and day < date_cls.fromisoformat(since):
         return "not_collected", None
@@ -479,6 +530,24 @@ async def _heal_in_background(days: list[date_cls]) -> None:
         logger.warning("daily facts background heal failed type=%s", type(exc).__name__)
 
 
+async def _refresh_recent(days: list[date_cls], now: datetime | None) -> None:
+    # Share the heal lease before opening any SQL transaction. A dashboard has
+    # several concurrent requests; each must not reserve a pooled connection.
+    from app.services.runtime.distributed_lock import DistributedLockNotAcquired, distributed_lock
+
+    try:
+        async with distributed_lock("beta-daily-facts-heal", ttl_s=900):
+            for day in days:
+                try:
+                    await compute_day(day, now=now, skip_if_fresher_than=TODAY_REFRESH_S, wait_for_lock=False)
+                except Exception as exc:
+                    logger.warning("daily facts on-demand refresh failed day=%s type=%s", day, type(exc).__name__)
+    except DistributedLockNotAcquired:
+        return
+    except Exception as exc:
+        logger.warning("daily facts refresh lease failed type=%s", type(exc).__name__)
+
+
 async def read_series(
     start: date_cls, end: date_cls, *, cohort: Cohort, metrics: list[str], dimension: str = "",
     now: datetime | None = None,
@@ -488,13 +557,11 @@ async def read_series(
     from app.services.runtime.tasks import fire_background
 
     today = local_today(now)
-    for day in (today - timedelta(days=1), today):
-        if start <= day <= end:
-            try:
-                await compute_day(day, now=now, skip_if_fresher_than=TODAY_REFRESH_S, wait_for_lock=False)
-            except Exception as exc:
-                # 刷新失败不挡读取: 已有的结果照常返回, 缺的那天显示"未运行", 后台再补。
-                logger.warning("daily facts on-demand refresh failed day=%s type=%s", day, type(exc).__name__)
+    # Reads never block on raw-table recomputation. Shared distributed locking
+    # serializes refreshes; the response keeps its real not_computed/stale state.
+    recent = [day for day in (today - timedelta(days=1), today) if start <= day <= end]
+    if recent:
+        fire_background(_refresh_recent(recent, now))
     expected = await population_fingerprint() if cohort == "external" else _ALL_FINGERPRINT
     rows = await db.query_raw(
         """
@@ -532,13 +599,14 @@ async def read_series(
                            "settled": bool(total and total["settled"]),
                            "definition_version": computed["definition_version"],
                            "population_fingerprint": computed["population_fingerprint"]}
-                state, value = point_state(metric, day, row, expected_fingerprint=expected)
+                state, value = point_state(metric, day, row, expected_fingerprint=expected, now=now)
                 points.append({
                     "date": day.isoformat(), "dimension_value": dimension_value, "state": state,
                     "value": value,
                     "numerator": row["numerator"] if row and state != "stale" else None,
                     "denominator": row["denominator"] if row and state != "stale" else None,
                     "sample_size": row["sample_size"] if row and state != "stale" else None,
+                    "settled": bool(row and row["settled"]),
                 })
         series[metric] = points
     # 缺失、口径过期或该定型未定型的日子交给后台重算; 判定只有 days_needing_compute 一处。
@@ -549,7 +617,7 @@ async def read_series(
     return {
         "start": start.isoformat(), "end": end.isoformat(), "cohort": cohort, "dimension": dimension,
         "series": series, "recomputing": [d.isoformat() for d in stale],
-        "computed_at": (datetime.fromtimestamp(max(computed), tz=timezone.utc).isoformat()
+        "computed_at": (datetime.fromtimestamp(min(computed), tz=timezone.utc).isoformat()
                         if computed else None),
     }
 

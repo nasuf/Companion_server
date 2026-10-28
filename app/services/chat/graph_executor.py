@@ -120,31 +120,33 @@ async def stream_graph_response(
             if context is not None:
                 await context.frame.cleanup()
         finally:
-            if usage_token is not None:
-                from app.services.llm.usage_repo import write_usage_row
-                from app.services.chat.local_tracer import LocalTracer
+            try:
+                if usage_token is not None:
+                    from app.services.llm.usage_repo import persist_usage
+                    from app.services.chat.local_tracer import LocalTracer
 
-                if isinstance(tracer, LocalTracer):
-                    tracer.note_usage_expected(usage_tracker.session_has_usage_signal())
-                summary = usage_tracker.flush_session(usage_token)
-                if summary:
-                    try:
-                        await write_usage_row(
-                            summary=summary,
-                            conversation_id=conversation_id,
-                            agent_id=agent_id,
-                            user_id=user_id,
-                            trace_id=getattr(tracer, "trace_id", None),
-                        )
-                    except Exception:
-                        services.logger.warning(
-                            "[llm-usage] graph usage write failed", exc_info=True
-                        )
-            if retrieval_token is not None:
-                reset_retrieval_trace(retrieval_token)
-            if prompt_token is not None:
-                reset_prompt_render_trace(prompt_token)
-            context_policy.reset_observation(context_policy_token)
-            reset_current_agent(agent_token)
-            if tracer is not None:
-                tracer.close()
+                    if isinstance(tracer, LocalTracer):
+                        tracer.note_usage_expected(usage_tracker.session_has_usage_signal())
+                    summary = usage_tracker.flush_session(usage_token)
+                    if summary:
+                        try:
+                            await persist_usage(
+                                summary=summary,
+                                conversation_id=conversation_id,
+                                agent_id=agent_id,
+                                user_id=user_id,
+                                trace_id=getattr(tracer, "trace_id", None),
+                            )
+                        except Exception:
+                            services.logger.warning(
+                                "[llm-usage] graph usage write failed", exc_info=True
+                            )
+            finally:
+                if retrieval_token is not None:
+                    reset_retrieval_trace(retrieval_token)
+                if prompt_token is not None:
+                    reset_prompt_render_trace(prompt_token)
+                context_policy.reset_observation(context_policy_token)
+                reset_current_agent(agent_token)
+                if tracer is not None:
+                    tracer.close()

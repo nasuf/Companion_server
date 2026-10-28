@@ -748,6 +748,7 @@ async def run_post_process(
     workspace_id: str | None = None,
     source_message_ids: list[str] | None = None,
     reply_turn_id: str | None = None,
+    trace_id: str | None = None,
 ) -> None:
     """后台任务并发：写用户情绪 / 记忆抽取 / 性格反馈 / 耐心恢复。
 
@@ -761,6 +762,7 @@ async def run_post_process(
     async with usage_session(
         scope="post_process", conversation_id=conversation_id,
         agent_id=agent_id, user_id=user_id,
+        trace_id_provider=lambda: trace_id,
     ):
         # The response string is for other post-processing only. Extraction
         # resolves actual persisted bubbles from this completed parent turn.

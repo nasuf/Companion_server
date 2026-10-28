@@ -195,6 +195,8 @@ async def lifespan(app: FastAPI):
             await close_tts_client()
         except Exception as e:
             logger.warning(f"TTS client shutdown failed: {e!r}")
+        from app.services.llm.usage_repo import drain_usage_writes
+        await drain_usage_writes()
         try:
             await disconnect_db()
         except Exception as e:

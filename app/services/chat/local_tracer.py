@@ -354,6 +354,12 @@ async def _write_run_start(handler: LocalTraceHandler, run: Any) -> None:
         logger.debug(f"[local-trace] run start write skipped {run.id}: {type(e).__name__}: {e}")
 
 
+def _terminal_status(error: str | None) -> str:
+    if error and (error.startswith("CancelledError") or error.startswith("GeneratorExit")):
+        return "cancelled"
+    return "error" if error else "success"
+
+
 async def _write_run_end(handler: LocalTraceHandler, run: Any) -> None:
     try:
         root_task = getattr(handler, "root_start_task", None)
@@ -373,7 +379,7 @@ async def _write_run_end(handler: LocalTraceHandler, run: Any) -> None:
         extra = _json_safe(getattr(run, "extra", None))
 
         update_data: dict[str, Any] = {
-            "status": "error" if error_text else "success",
+            "status": _terminal_status(str(error_text) if error_text else None),
             "error": str(error_text) if error_text else None,
             "endedAt": ended_at,
             "eventsJson": Json(trimmed_events),
@@ -645,7 +651,7 @@ async def _write_root_end(
             await asyncio.shield(start_task)
         from app.db import db
 
-        data = {"status": "error" if error else "success", "endedAt": ended_at,
+        data = {"status": _terminal_status(error), "endedAt": ended_at,
                 **({"error": error} if error else {})}
         if execution_metadata:
             data["extraJson"] = Json({"metadata": execution_metadata})
@@ -666,7 +672,7 @@ class LocalTracer:
     ) -> None:
         self._user_message = user_message
         self._conversation_id = conversation_id
-        self._execution_metadata = dict(execution_metadata or {})
+        self._execution_metadata = {**(execution_metadata or {}), "usage_accounting_version": "trace-linked-v2"}
         self._closed = False
         self._error: str | None = None
         self._attached = False

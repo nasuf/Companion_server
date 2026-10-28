@@ -246,14 +246,15 @@ async def _fetch_core(
 
 
 async def _fetch_slices(
-    start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT,
+    start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT, *, client: Any = None,
 ) -> list[SliceMetric]:
-    from app.db import db
+    if client is None:
+        from app.db import db as client
 
     turns_cte = _with_population(_TURNS_CTE, "m.conversation_id", cohort)
     out: list[SliceMetric] = []
     for dim in SLICE_DIMENSIONS:
-        rows = await db.query_raw(
+        rows = await client.query_raw(
             turns_cte + f"""
             SELECT
                 diag ->> '{dim}' AS value,
@@ -282,11 +283,12 @@ async def _fetch_slices(
     return out
 
 
-async def _fetch_sessions(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
+async def _fetch_sessions(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT, *, client: Any = None) -> dict[str, Any]:
     """会话数与每次会话的轮数中位数。会话边界 = 用户消息间隔超过 SESSION_GAP."""
-    from app.db import db
+    if client is None:
+        from app.db import db as client
 
-    rows = await db.query_raw(
+    rows = await client.query_raw(
         _with_population("""
         WITH u AS (
             SELECT conversation_id, created_at,
@@ -320,16 +322,17 @@ async def _fetch_sessions(start: datetime, end: datetime, cohort: Cohort = DEFAU
     return rows[0] if rows else {}
 
 
-async def _fetch_proactive(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT) -> dict[str, Any]:
+async def _fetch_proactive(start: datetime, end: datetime, cohort: Cohort = DEFAULT_COHORT, *, client: Any = None) -> dict[str, Any]:
     """主动发送事件发出后, 用户在窗口内有没有开口.
 
     事件口径 (按 proactive_event_id 去重、旧消息按条计) 只定义在
     definitions.proactive_events_sql, 这里与每日派生表读同一份。
     """
-    from app.db import db
+    if client is None:
+        from app.db import db as client
 
     events = proactive_events_sql("$1::timestamp", "$2::timestamp", "$3::interval", cohort)
-    rows = await db.query_raw(
+    rows = await client.query_raw(
         f"""
         WITH e AS ({events})
         SELECT

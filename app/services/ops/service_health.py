@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from app.config import settings
 from app.db import db
 from app.services.notifications.service import enqueue_notification
-from app.services.ops import provider_budget
+from app.services.ops import provider_budget, provider_failing
 
 SAMPLE_SECONDS = 120
 STALE_SECONDS = 600
@@ -43,6 +43,7 @@ LABELS = {
     "reply_failed": "回复生成失败",
     "memory_blocked": "记忆写入受阻",
     "cron_failing": "定时任务失败",
+    "provider_failing": "模型供应商持续失败",
     "provider_budget": "模型供应商欠费或额度耗尽",
 }
 
@@ -152,7 +153,7 @@ async def _cron_failing(now: datetime, carry: dict) -> dict:
 
 CHECKS = {"unanswered": _unanswered, "reply_failed": _reply_failed,
           "memory_blocked": _memory_blocked, "cron_failing": _cron_failing,
-          "provider_budget": provider_budget.measure}
+          "provider_budget": provider_budget.measure, "provider_failing": provider_failing.measure}
 
 
 async def collect_metrics(now: datetime | None = None, carry: dict | None = None) -> dict:
@@ -201,6 +202,10 @@ def decide(level: str, sample: dict, notified: dict, unknown_streak: int) -> tup
         # is already blocked. Recovery/reoccurrence is a distinct incident too.
         for incident in sample["checks"].get("provider_budget", {}).get("incidents", []):
             failing.add(f"provider_budget:{incident['provider']}/{incident['model']}:{incident['first_failure_at']}")
+        for incident in sample["checks"].get("provider_failing", {}).get("incidents", []):
+            failing.add(f"provider_failing:{incident['provider']}/{incident['model']}/{incident['role']}:{incident['first_failure_at']}")
+            if incident.get("fallback") == "failed":
+                failing.add(f"provider_failing:{incident['provider']}/{incident['model']}/{incident['role']}:{incident['first_failure_at']}:backup_failed")
         known = set(notified.get("checks", [])) if previous == "warning" else set()
         return previous != "warning" or bool(failing - known), {"level": "warning", "checks": sorted(known | failing)}
     if level == "unknown":
@@ -230,6 +235,12 @@ def message_for(level: str, sample: dict) -> tuple[str, str]:
                 parts.append("模型调用出现欠费或额度耗尽：" + "、".join(
                     f"{i['provider']}/{i['model']}（{'欠费' if i['reason'] == 'overdue' else '额度耗尽'}）"
                     for i in incidents[:3]) if incidents else "模型费用故障记录不完整，请检查监控")
+            elif name == "provider_failing":
+                for incident in c.get("incidents", [])[:3]:
+                    outcome = {"succeeded": "最近故障请求已由备用模型接住", "failed": "备用也失败",
+                               "not_attempted": "未尝试备用", "cancelled": "备用调用被取消"}.get(incident.get("fallback"), "备用结果尚未确认")
+                    parts.append(f"{incident['role']} {incident['provider']}/{incident['model']} "
+                                 f"{c['window_seconds'] / 60:g}分钟内失败{incident['failures']}次/{incident['calls']}次调用；{outcome}")
         return "服务告警", "；".join(parts) + "。详情见Web后台资源监控。"
     if level == "unknown":
         missing = [LABELS[n] for n, c in checks.items() if c["status"] != "measured"]
@@ -257,6 +268,10 @@ async def sample_and_notify() -> None:
         await provider_budget.refresh_active()
     except Exception:
         pass
+    try:
+        await provider_failing.flush()
+    except Exception:
+        pass  # pending batch retained; measurement exposes missing/stale collection
     now = datetime.now(UTC)
     rows = await db.query_raw("SELECT sampled_at, snapshot FROM ops_service_health WHERE id='primary'")
     if rows and rows[0].get("sampled_at") and (now - _timestamp(rows[0]["sampled_at"])).total_seconds() < SAMPLE_SECONDS - 10:

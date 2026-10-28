@@ -48,7 +48,7 @@ async def test_scoped_operation_records_identity_before_usage_flush(storage, sco
         assert usage_tracker.current_scope() == scope
         usage_tracker.record("synthetic", 10, 2)
     await settle(fake)
-    assert metadata(fake) == {"usage_scope": scope, "usage_expected": True, "owner_user_id":"u-1"}
+    assert metadata(fake) == {"usage_scope": scope, "usage_expected": True, "owner_user_id":"u-1", "usage_accounting_version":"trace-linked-v2"}
     write_usage.assert_awaited_once()
     assert write_usage.await_args.kwargs["trace_id"] == tracer.trace_id
     assert write_usage.await_args.kwargs["scope"] == scope
@@ -65,7 +65,7 @@ async def test_zero_model_operation_is_explicit(storage):
     ):
         pass
     await settle(fake)
-    assert metadata(fake) == {"usage_scope": "proactive", "usage_expected": False, "owner_user_id":"u-1"}
+    assert metadata(fake) == {"usage_scope": "proactive", "usage_expected": False, "owner_user_id":"u-1", "usage_accounting_version":"trace-linked-v2"}
     write_usage.assert_not_awaited()
 
 
@@ -85,7 +85,7 @@ async def test_real_langchain_callback_stays_under_the_scoped_root(storage):
     roots = [row for row in rows if row["name"] == "chat_request"]
     models = [row for row in rows if row["runType"] == "llm"]
     assert len(roots) == len(models) == 1
-    assert roots[0]["extraJson"].data["metadata"] == {"usage_scope": "proactive", "owner_user_id":"u-1"}
+    assert roots[0]["extraJson"].data["metadata"] == {"usage_scope": "proactive", "owner_user_id":"u-1", "usage_accounting_version":"trace-linked-v2"}
     assert models[0]["traceId"] == models[0]["parentId"] == tracer.trace_id
 
 
@@ -101,7 +101,7 @@ async def test_failure_and_cancellation_do_not_become_successful_roots(storage, 
             raise error
     await settle(fake)
     data = fake.tracerun.update.await_args.kwargs["data"]
-    assert data["status"] == "error"
+    assert data["status"] == ("cancelled" if isinstance(error, asyncio.CancelledError) else "error")
     assert data["error"] == type(error).__name__
     assert "PRIVATE_SECRET" not in str(data)
     assert metadata(fake)["usage_expected"] is True
@@ -142,3 +142,45 @@ def test_scope_metadata_is_identical_for_langsmith_backend(monkeypatch):
     assert tracer._execution_metadata == {"usage_scope": "proactive"}
     main = tracing.create_tracer("chat", "c-1", executor="legacy")
     assert main._execution_metadata == {"usage_scope": "chat", "executor": "legacy", "checkpoint_enabled": False}
+
+
+@pytest.mark.parametrize('has_usage', [True, False])
+async def test_raw_vision_call_is_metered_and_traced_once_without_image_secrets(storage, monkeypatch, has_usage):
+    from app.services.chat_media import vision
+    fake, write_usage = storage
+    monkeypatch.setattr(vision.settings, 'ark_api_key', 'synthetic-only')
+    monkeypatch.setattr(vision, 'get_effective_vision_model', AsyncMock(return_value='vision-test'))
+    payload = {'choices': [{'message': {'content': '合成图片摘要'}}]}
+    if has_usage:
+        payload['usage'] = {'prompt_tokens': 50, 'completion_tokens': 4,
+                            'prompt_tokens_details': {'cached_tokens': 20}}
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, *args, **kwargs): return Response()
+
+    monkeypatch.setattr(vision.httpx, 'AsyncClient', Client)
+    async with usage_tracker.traced_usage_session(name='offline-vision', scope='offline',
+        conversation_id='c', agent_id='a', user_id='u') as tracer:
+        assert await vision._call_doubao_vision(data_url='data:image/jpeg;base64,PRIVATE_IMAGE', user_text='合成') == '合成图片摘要'
+    await settle(fake)
+    rows = [call.kwargs['data'] for call in fake.tracerun.create.await_args_list]
+    models = [row for row in rows if row.get('runType') == 'llm']
+    assert len(models) == 1
+    assert models[0]['traceId'] == models[0]['parentId'] == tracer.trace_id
+    assert 'PRIVATE_IMAGE' not in str(models)
+    summary = write_usage.await_args.kwargs['summary']
+    assert summary['tokens_by_model']['ark/vision-test'] == (
+        {'input': 50, 'output': 4, 'cached_input': 20} if has_usage else
+        {'input': 0, 'output': 0, 'cached_input': 0, 'unmetered_calls': 1})
+    if has_usage:
+        assert models[0]['promptTokens'] == summary['input_tokens'] == 50
+        assert models[0]['completionTokens'] == summary['output_tokens'] == 4
+    else:
+        assert models[0].get('promptTokens') is None

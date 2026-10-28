@@ -1811,7 +1811,15 @@ async def reply_effect(
 
 _DAILY_DIMENSIONS = {"": None, "trigger_type": ("proactive_events", "proactive_response", "proactive_response_3h"),
                      "reply_path": ("reply_first_bubble_ms_p50", "reply_first_bubble_ms_p90",
-                                    "reply_processing_ms_p50", "reply_processing_ms_p90")}
+                                    "reply_processing_ms_p50", "reply_processing_ms_p90", "continuation"),
+                     "hour": ("hourly_messages",), "bucket": ("session_depth", "session_ending"),
+                     "label": ("admin_bug_labels",),
+                     "scope": ("token_exact_match", "token_missing_usage", "token_unmetered_calls",
+                               "token_unpriced_models", "token_unlinked_rows", "token_max_input"),
+                     "model": ("token_max_input",),
+                     "reason": ("proactive_logs", "proactive_skip_reasons",)}
+from app.services.effect.proactive_stats import FIELDS as _PROACTIVE_FIELDS
+_DAILY_DIMENSIONS["trigger_type"] += tuple("proactive_"+field for field in _PROACTIVE_FIELDS)
 _DAILY_MAX_DAYS = 92
 # 产品上线前没有任何数据; 下界也避免极早日期在日期运算里溢出。
 _DAILY_EARLIEST = datetime(2026, 1, 1).date()
@@ -1819,11 +1827,13 @@ _DAILY_EARLIEST = datetime(2026, 1, 1).date()
 
 @router.get("/daily-metrics")
 async def daily_metrics(
-    days: int = Query(14, ge=1, le=_DAILY_MAX_DAYS),
+    days: int = Query(7, ge=1, le=_DAILY_MAX_DAYS),
     end: str | None = Query(None, description="本地日 YYYY-MM-DD, 默认今天"),
     cohort: Literal["external", "all"] = Query("external"),
     metrics: str | None = Query(None, description="逗号分隔; 默认全部"),
-    dimension: Literal["", "trigger_type", "reply_path"] = Query(""),
+    dimension: Literal["", "trigger_type", "reply_path", "hour", "bucket", "label", "scope", "model", "reason"] = Query(""),
+    summary: bool = Query(False),
+    compare: bool = Query(False),
     _: dict = Depends(require_admin_jwt),
 ):
     """内测统计派生表 (UXM01.02) 的逐日指标, 只含人群聚合, 不含用户 ID 或消息原文.
@@ -1845,17 +1855,31 @@ async def daily_metrics(
         raise HTTPException(status_code=422, detail="end cannot be in the future")
     if last < _DAILY_EARLIEST:
         raise HTTPException(status_code=422, detail=f"end must be on or after {_DAILY_EARLIEST.isoformat()}")
+    if dimension not in _DAILY_DIMENSIONS or (dimension and (summary or compare)):
+        raise HTTPException(status_code=422, detail="unsupported metric dimension or summary")
     allowed = _DAILY_DIMENSIONS[dimension]
     wanted = ([m.strip() for m in metrics.split(",") if m.strip()] if metrics
-              else list(allowed or METRICS))
+              else [m for m in (allowed or METRICS) if cohort in METRICS[m].get("cohorts", ("external", "all"))])
     unknown = sorted(set(wanted) - set(METRICS))
     if unknown:
         raise HTTPException(status_code=422, detail=f"unknown metrics: {', '.join(unknown)}")
+    if any(cohort not in METRICS[m].get("cohorts", ("external", "all")) for m in wanted):
+        raise HTTPException(status_code=422, detail="token reconciliation supports cohort=all only")
     if allowed is not None and set(wanted) - set(allowed):
         raise HTTPException(status_code=422, detail=f"dimension {dimension} supports: {', '.join(allowed)}")
     result = await read_series(
         last - timedelta(days=days - 1), last, cohort=cohort, metrics=wanted, dimension=dimension,
     )
+    if summary or compare:
+        from app.services.effect.dashboard import summarize
+        if dimension:
+            raise HTTPException(status_code=422, detail="window summary requires overall dimension")
+        result["summary"] = await summarize(last - timedelta(days=days - 1), last, cohort, result["series"])
+        if compare:
+            previous_end = last - timedelta(days=days)
+            previous_start = previous_end - timedelta(days=days - 1)
+            previous = await read_series(previous_start, previous_end, cohort=cohort, metrics=wanted)
+            result["previous"] = {**previous, "summary": await summarize(previous_start, previous_end, cohort, previous["series"])}
     return {**result, "definitions": describe(tuple(wanted))}
 
 
@@ -1885,3 +1909,220 @@ async def rerun_invariants(_: dict = Depends(require_admin_jwt)):
 
     await run_and_store()
     return {"invariants": await load_last_report()}
+
+
+@router.get("/users")
+async def stats_users(
+    days: int = Query(7, ge=1, le=92), end: str | None = None,
+    cohort: Literal["external", "all"] = "external", signup_week: str = "", platform: str = "",
+    status: str = "", q: str = Query("", max_length=100), sort: str = "user_messages",
+    order: Literal["asc", "desc"] = "desc", page: int = Query(1, ge=1, le=100000),
+    page_size: int = Query(25, ge=1, le=100), format: Literal["json", "csv"] = "json",
+    _: dict = Depends(require_admin_jwt),
+):
+    from fastapi.responses import Response
+    from app.services.effect import dashboard
+    try:
+        start, stop = dashboard.window(days, end)
+        result = await dashboard.users(start, stop, cohort=cohort, signup_week=signup_week,
+            platform=platform, status=status, q=q, sort=sort, order=order, page=page,
+            page_size=page_size, export=format == "csv")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    if format == "csv":
+        return Response(dashboard.users_csv(result["items"]), media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="companion-user-counts.csv"',
+                     "X-Export-Truncated": str(result["truncated"]).lower(), "Cache-Control": "no-store"})
+    return result
+
+
+@router.get("/users/{user_id}/journey")
+async def stats_user_journey(user_id: str, days: int = Query(7, ge=1, le=92), end: str | None = None,
+                             _: dict = Depends(require_admin_jwt)):
+    from app.services.effect import dashboard
+    try:
+        start, stop = dashboard.window(days, end)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    result = await dashboard.journey(user_id, start, stop)
+    if result is None:
+        raise HTTPException(status_code=404, detail="用户不存在或已注销")
+    return result
+
+
+@router.get("/retention")
+async def stats_retention(days: int = Query(7, ge=1, le=92), end: str | None = None,
+                          cohort: Literal["external", "all"] = "external", signup_week: str = "",
+                          platform: str = "", _: dict = Depends(require_admin_jwt)):
+    from app.services.effect.dashboard import window
+    from app.services.effect.retention import read_retention
+    try:
+        start, stop = window(days, end)
+        return await read_retention(start, stop, cohort=cohort, signup_week=signup_week, platform=platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@router.get("/review-items")
+async def stats_review_items(days: int = Query(7, ge=1, le=92), end: str | None = None,
+        cohort: Literal["external", "all"] = "external", kind: str = "no_reply",
+        page: int = Query(1,ge=1,le=100000), page_size: int = Query(25,ge=1,le=100),
+        _: dict = Depends(require_admin_jwt)):
+    from app.services.effect import dashboard
+    try:
+        start, stop = dashboard.window(days,end)
+        return await dashboard.review_items(start,stop,cohort=cohort,kind=kind,page=page,page_size=page_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None
+
+
+@router.get("/reply-timing")
+async def stats_reply_timing(days: int = Query(7,ge=1,le=92),end: str | None = None,
+        cohort: Literal["external", "all"] = "external", _: dict = Depends(require_admin_jwt)):
+    from app.services.effect import dashboard
+    try:
+        start,stop = dashboard.window(days,end)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None
+    try:
+        return await dashboard.reply_timing(start,stop,cohort)
+    except Exception:
+        raise HTTPException(status_code=503,detail="耗时统计暂不可用，请稍后刷新") from None
+
+
+@router.get("/costs")
+async def stats_costs(days: int = Query(7,ge=1,le=92), end: str | None = None,
+        cohort: Literal["external", "all"] = "external", agent: str = "",
+        page: int = Query(1, ge=1, le=100000), page_size: int = Query(10, ge=1, le=100),
+        _: dict = Depends(require_admin_jwt)):
+    from app.services.effect.dashboard import window
+    from app.services.effect.costs import read_costs
+    try:
+        start,stop=window(days,end)
+        return await read_costs(start,stop,cohort=cohort,agent=agent,page=page,page_size=page_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None
+
+
+@router.get("/token-reconciliation")
+async def stats_token_reconciliation(days: int = Query(7,ge=1,le=92), end: str | None = None,
+        cohort: Literal["all"] = "all", status: str = "", agent: str = "",
+        page: int = Query(1,ge=1,le=100000), page_size: int = Query(50,ge=1,le=100),
+        _: dict = Depends(require_admin_jwt)):
+    from app.services.effect.dashboard import window
+    from app.services.effect.reconciliation import read
+    try:
+        start,stop=window(days,end)
+        return await read(start,stop,status=status,agent=agent,page=page,page_size=page_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None
+
+
+@router.get("/proactive-funnel")
+async def stats_proactive_funnel(days: int = Query(7,ge=1,le=92), end: str | None = None,
+        cohort: Literal["external", "all"] = "external", _: dict = Depends(require_admin_jwt)):
+    from app.services.effect.dashboard import window
+    from app.services.effect.proactive_stats import read
+    try:
+        start,stop=window(days,end)
+        return await read(start,stop,cohort)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None
+
+
+@router.get("/release-markers")
+async def stats_release_markers(days: int = Query(92,ge=1,le=92),end: str | None=None,
+        _: dict=Depends(require_admin_jwt)):
+    from app.services.effect.dashboard import window
+    from app.services.effect.weekly import markers
+    try:
+        start,stop=window(days,end)
+        return {"items":markers(start,stop),"start":str(start),"end":str(stop)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None
+
+
+@router.get("/weekly-review")
+async def stats_weekly_review(end: str | None=None,cohort: Literal["external","all"]="external",
+        format: Literal["json","markdown"]="json",_: dict=Depends(require_admin_jwt)):
+    from fastapi.responses import Response
+    from app.services.effect.dashboard import window
+    from app.services.effect.weekly import report
+    try:
+        _,stop=window(7,end)
+        data=await report(stop,cohort)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None
+    if format=='markdown':
+        return Response(data['markdown'],media_type='text/markdown; charset=utf-8',
+          headers={'Cache-Control':'no-store','Content-Disposition':f'attachment; filename="weekly-{stop}.md"'})
+    return data
+
+
+@router.post("/weekly-review/queue")
+async def stats_weekly_review_queue(end: str | None=None,cohort: Literal["external","all"]="external",
+        admin: dict=Depends(require_admin_jwt)):
+    from app.services.effect.dashboard import window
+    from app.services.effect.weekly import enqueue
+    try:
+        start,stop=window(7,end)
+        return await enqueue(start,stop,cohort,admin['sub'])
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None
+
+
+@router.get('/users/{user_id}/chat-target')
+async def stats_chat_target(user_id: str, date: str = '', trace: str = '', conversation: str = '',
+                            _: dict = Depends(require_admin_jwt)):
+    from app.services.effect.dashboard import chat_target
+    try:
+        result = await chat_target(user_id, day=date, trace_id=trace, conversation_id=conversation)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    if result is None:
+        raise HTTPException(status_code=404, detail='该用户下未找到对应消息，记录可能已过期或删除')
+    return result
+
+
+@router.get('/detail-metrics/{kind}')
+async def stats_detail_metrics(
+    kind: Literal['reply_effect', 'copy_quality', 'context', 'hourly'],
+    days: int = Query(7, ge=1, le=92), end: str | None = None,
+    cohort: Literal['external', 'all'] = 'external', agent: str = '',
+    _: dict = Depends(require_admin_jwt),
+):
+    from app.services.effect.dashboard import window
+    from app.services.effect.details import read
+    if agent and kind != 'context':
+        raise HTTPException(status_code=422, detail='该栏目不支持 Agent 筛选')
+    try:
+        start, stop = window(days, end)
+        return await read(start, stop, kind, cohort=cohort, agent=agent)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@router.get('/system-health-summary')
+async def stats_system_health_summary(_: dict = Depends(require_admin_jwt)):
+    """Historical counters read derived facts; live queues remain Redis-only."""
+    from app.services.effect.dashboard import window
+    from app.services.effect.details import read
+    from app.services.effect.costs import read_costs
+    start, end = window(7)
+    history, costs, queues = await asyncio.gather(
+        read(start, end, 'health', cohort='all'),
+        read_costs(start, end, cohort='all'), _redis_ops_counts())
+    return {'start':str(start), 'end':str(end), 'history':history,
+            'llm':costs['categories']['model'], 'queues':queues,
+            'sampled_at':datetime.now(timezone.utc).isoformat()}
+
+
+@router.get('/message-distribution')
+async def stats_message_distribution(days:int=Query(7,ge=1,le=92),end:str|None=None,
+        cohort:Literal['external','all']='external',_:dict=Depends(require_admin_jwt)):
+    from app.services.effect.dashboard import window,message_distribution
+    try:
+        start,stop=window(days,end)
+        return await message_distribution(start,stop,cohort)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from None

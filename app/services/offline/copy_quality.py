@@ -94,8 +94,12 @@ def _visit_status(value: Any) -> dict | None:
 async def collect_copy_quality(days: int) -> dict[str, Any]:
     window = max(1, min(MAX_WINDOW_DAYS, int(days or 7)))
     rows = list(await db.query_raw(_QUERY, window, ROW_LIMIT + 1) or [])
-    truncated = len(rows) > ROW_LIMIT
-    rows = rows[:ROW_LIMIT]
+    return summarize_copy_rows(rows, window=window, now=datetime.now(UTC))
+
+
+def summarize_copy_rows(rows, *, window, now, row_limit=ROW_LIMIT):
+    truncated = len(rows) > row_limit
+    rows = rows[:row_limit]
     counts = {field: Counter() for field in FIELDS}
     for row in rows:
         for field, (status_column, _) in FIELDS.items():
@@ -116,9 +120,9 @@ async def collect_copy_quality(days: int) -> dict[str, Any]:
         for row in rows[:RECENT_LIMIT]
     ]
     return {
-        "sampled_at": datetime.now(UTC).isoformat(),
+        "sampled_at": now.isoformat(),
         "window_days": window,
-        "row_limit": ROW_LIMIT,
+        "row_limit": row_limit,
         "truncated": truncated,
         "total": len(rows),
         "fields": {field: dict(counter) for field, counter in counts.items()},

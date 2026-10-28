@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME
 
-DEFINITION_VERSION = "beta-metrics-v1"
+DEFINITION_VERSION = "beta-metrics-v2"
 
 Cohort = Literal["external", "all"]
 COHORTS: tuple[Cohort, ...] = ("external", "all")
@@ -322,13 +322,68 @@ METRICS: dict[str, dict[str, Any]] = {
         "kind": "quantile", "unit": "ms", "settle_after_s": 0, "collected_since": "2026-10-28",
     },
     "cost_per_active_user": {
-        "label": "每活跃用户日成本",
-        "definition": "该人群用户当日模型费用 (llm_usage.cost_cny) / 聊天活跃用户数",
+        "label": "每活跃用户日模型费用",
+        "definition": "该人群用户模型费用 / 聊天活跃人日；不含评测、TTS、联网搜索和 ASR",
         "denominator": "聊天活跃用户数",
         "source": "llm_usage",
         "kind": "mean", "unit": "CNY/人", "settle_after_s": 0, "collected_since": "2026-04-29",
     },
+
+    "feedback_per_100_turns": {
+        "label": "每百回合意见反馈", "definition": "App 意见反馈条数 / 已回复回合数 × 100；不是逐句负反馈",
+        "denominator": "已回复回合数", "source": "user_feedback → user_daily_facts",
+        "kind": "rate", "unit": "条/百回合", "scale": 100, "settle_after_s": NO_REPLY_WINDOW_S,
+    },
+    "cost_per_turn": {
+        "label": "每回合模型费用", "definition": "该人群模型费用 / 已回复回合数；不含评测、TTS、联网搜索和 ASR",
+        "denominator": "已回复回合数", "source": "user_daily_facts",
+        "kind": "mean", "unit": "CNY/回合", "settle_after_s": NO_REPLY_WINDOW_S, "collected_since": "2026-04-29",
+    },
+
 }
+
+
+# Versioned implicit signals: these are review cues, not negative feedback labels.
+META_COMMENT_PHRASES = ("答非所问", "你没听懂", "你是机器人", "怎么又", "你记错了", "又来了", "你刚说过")
+METRICS.update({
+    "resend_60s": {"label":"60 秒内重发", "definition":"AI 回复后 60 秒内用户重发同一句文本；去空白标点，排除空消息、图片、表情、接管和游戏", "denominator":"已回复回合数", "source":"messages → user_daily_facts", "kind":"rate", "unit":"%", "settle_after_s":NO_REPLY_WINDOW_S+60},
+    "meta_comment": {"label":"对回复的元评论", "definition":"用户消息命中版本化元评论词表的条数占比；只是疑似不满意信号", "denominator":"用户消息数", "source":"messages → user_daily_facts", "kind":"rate", "unit":"%", "settle_after_s":0},
+    "opened_not_chatted": {"label":"打开未聊天", "definition":"当天打开 App 但没有聊天的用户人日占打开人日的比例", "denominator":"打开 App 的人日", "source":"user_daily_facts", "kind":"rate", "unit":"%", "settle_after_s":0, "collected_since":"2026-05-29"},
+    "hourly_messages": {"label":"分时聊天消息", "definition":"按北京时间小时分桶的用户消息数", "denominator":"条", "source":"messages → metrics_daily", "kind":"count", "unit":"条", "settle_after_s":0},
+    "short_session": {"label":"短会话", "definition":"结束 3 小时、完整观察且不含游戏/接管的会话中，已回复回合不超过 3 的比例；不是用户负反馈", "denominator":"已结束的完整会话", "source":"messages → user_daily_facts", "kind":"rate", "unit":"%", "settle_after_s":3*_H},
+    "session_depth": {"label":"会话深度", "definition":"用户间隔超过 3 小时分开会话；按结束日统计已回复消息串数；气泡不重复计数", "denominator":"完整会话", "source":"messages → metrics_daily", "kind":"count", "unit":"次", "settle_after_s":3*_H},
+    "session_ending": {"label":"会话收尾方", "definition":"完整会话最后一条非主动消息的角色；AI 提问由问号或版本化疑问词判定", "denominator":"完整会话", "source":"messages → metrics_daily", "kind":"count", "unit":"次", "settle_after_s":3*_H},
+    "session_unknown": {"label":"会话左边界不完整", "definition":"连续 92 天无 3 小时中断、无法在有界回看中确认开始的会话，排除深度与收尾统计", "denominator":"会话", "source":"messages → metrics_daily", "kind":"count", "unit":"次", "settle_after_s":3*_H},
+    "feedback_count": {"label":"意见反馈条数", "definition":"App 意见反馈，不是逐句反馈，也不是管理员标注", "denominator":"条", "source":"user_feedback → metrics_daily", "kind":"count", "unit":"条", "settle_after_s":0},
+    "admin_bug_labels": {"label":"管理员问题标注", "definition":"管理员多选错误类型按标签计数；同一报告可有多个标签，不等于用户负反馈人数", "denominator":"标签", "source":"bug_reports.error_types → metrics_daily", "kind":"count", "unit":"个", "settle_after_s":0},
+})
+
+
+# Reconciliation is a system-wide ledger; it deliberately has no external cohort.
+RECONCILIATION_METRICS = {
+    'token_exact_match': ('用量与 Trace 完全一致', 'rate', '%'),
+    'token_missing_usage': ('有已计量 LLM 节点但缺用量记录', 'count', '回合'),
+    'token_unmetered_calls': ('供应商未返回用量的调用', 'count', '次'),
+    'token_unpriced_models': ('未定价模型', 'count', '种'),
+    'token_unlinked_rows': ('未关联 Trace 的用量记录', 'count', '行'),
+    'token_max_input': ('单次最大输入', 'max', 'token'),
+}
+METRICS.update({key: dict(label=label, definition="按 Trace 精确对账；仅全部用户，供应商未返回用量单列",
+    denominator="可核对 Trace", source="trace_runs + llm_usage → metrics_daily", kind=kind, unit=unit,
+    settle_after_s=3600, cohorts=("all",), retention_days=30 if key in
+    ("token_exact_match", "token_missing_usage", "token_max_input") else None)
+    for key,(label,kind,unit) in RECONCILIATION_METRICS.items()})
+
+
+for _name,_label in {
+    'sent':'已发出（有事件 ID）','legacy':'历史未识别事件','push_accepted':'推送供应商已接受',
+    'answered_3h':'3 小时内回应','answered_6h':'6 小时内回应','three_turns':'回应后聊满 3 回合',
+    'silent_2d':'已走完 24 小时窗口的沉默用户发送事件','awakened_24h':'24 小时内唤醒',
+    'pending_24h':'24 小时观察未结束','logs':'主动状态日志','skip_reasons':'主动跳过原因'
+}.items():
+    METRICS['proactive_'+_name]=dict(label=_label,definition='按主动事件 ID 去重；状态日志独立计数，不构造虚假转化率',
+        denominator='事件',source='proactive_event_logs + messages + notification_events → metrics_daily',
+        kind='count',unit='次',settle_after_s=27*_H)
 
 
 def describe(keys: tuple[str, ...] | None = None) -> dict[str, Any]:

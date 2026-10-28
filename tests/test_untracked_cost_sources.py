@@ -168,7 +168,10 @@ def test_vision_usage_tolerates_missing_usage_block():
         vision._record_vision_usage("m", {"choices": []})
         vision._record_vision_usage("m", None)
     finally:
-        assert usage_tracker.flush_session(token) is None
+        summary = usage_tracker.flush_session(token)
+    assert summary["call_count"] == 2
+    assert summary["input_tokens"] == 0 and summary["output_tokens"] == 0
+    assert summary["tokens_by_model"] == {"ark/m": {"input": 0, "output": 0, "cached_input": 0, "unmetered_calls": 2}}
 
 
 # --------------------------------------------------------------------------

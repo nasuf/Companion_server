@@ -67,7 +67,7 @@ def test_estimate_cost_clamps_cached_to_input():
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _usage_row(trace_id: str, input_t: int, output_t: int, cached: int, cost: float, calls: int):
+def _usage_row(trace_id: str, input_t: int, output_t: int, cached: int, cost: float, calls: int, unmetered: int = 0):
     return SimpleNamespace(
         traceId=trace_id,
         inputTokens=input_t,
@@ -75,7 +75,7 @@ def _usage_row(trace_id: str, input_t: int, output_t: int, cached: int, cost: fl
         costCny=cost,
         callCount=calls,
         tokensByModel={
-            "deepseek/deepseek-v4-pro": {"input": input_t, "output": output_t, "cached_input": cached},
+            "deepseek/deepseek-v4-pro": {"input": input_t, "output": output_t, "cached_input": cached, "unmetered_calls": unmetered},
         },
     )
 
@@ -86,7 +86,7 @@ async def test_aggregate_usage_sums_rows_per_trace(monkeypatch):
 
     rows = [
         _usage_row("t1", 2455, 223, 1920, 0.008, 6),   # chat 热路径
-        _usage_row("t1", 900, 120, 0, 0.003, 3),       # post_process 后台
+        _usage_row("t1", 900, 120, 0, 0.003, 3, unmetered=2),       # post_process 后台
         _usage_row("t2", 100, 10, 50, 0.001, 1),
     ]
     fake_db = SimpleNamespace(
@@ -100,9 +100,10 @@ async def test_aggregate_usage_sums_rows_per_trace(monkeypatch):
         "output_tokens": 343,
         "cached_input_tokens": 1920,
         "cost_cny": 0.011,
-        "call_count": 9,
+        "call_count": 9, "unmetered_calls": 2,
     }
     assert agg["t2"]["cached_input_tokens"] == 50
+    assert agg["t2"]["unmetered_calls"] == 0
 
 
 @pytest.mark.asyncio

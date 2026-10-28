@@ -97,8 +97,12 @@ async def test_actual_route_usage_and_metadata_in_four_combinations(monkeypatch,
         actual='ark/primary' if behavior=='ok' else 'dashscope/backup'
         assert result=={'reply':'合成回复'}
         assert metadata=={'actual_model':actual}
-        assert summary['tokens_by_model']=={actual:{'input':12,'output':5,'cached_input':4}}
-        assert summary['call_count']==1
+        expected = {actual: {'input': 12, 'output': 5, 'cached_input': 4}}
+        if stream and behavior == 'fail':
+            expected['ark/primary'] = {'input': 0, 'output': 0, 'cached_input': 0, 'unmetered_calls': 1}
+        assert summary['tokens_by_model'] == expected
+        assert summary['input_tokens'] == 12 and summary['output_tokens'] == 5
+        assert summary['call_count'] == 1 + int(stream and behavior == 'fail')
         assert summary['fallback_count']==(behavior=='fail')
         assert all('invocation_metadata' not in call and 'format' not in call for call in calls)
         assert all(stream.closed for stream in streams)
@@ -155,7 +159,11 @@ async def test_main_reply_collect_stream_uses_cloud_provider_and_usage(monkeypat
         try: text,failed=await reply_generate._run_main_llm([{'role':'user','content':'synthetic'}])
         finally: summary=usage_tracker.flush_session(token)
         assert text and failed is False
-        assert set(summary['tokens_by_model'])=={'dashscope/backup'}
+        assert summary['tokens_by_model'] == {
+            'dashscope/backup': {'input': 12, 'output': 5, 'cached_input': 4},
+            'ark/primary': {'input': 0, 'output': 0, 'cached_input': 0, 'unmetered_calls': 1},
+        }
+        assert summary['input_tokens'] == 12 and summary['output_tokens'] == 5
         assert 'ollama' not in resilience._breakers
 
 
@@ -273,7 +281,11 @@ async def test_utility_cloud_backup_is_independent_and_records_actual_route(monk
         actual = 'dashscope/primary' if behavior == 'ok' else 'deepseek/backup'
         assert result == {'reply': '合成回复'}
         assert metadata == {'actual_model': actual}
-        assert summary['tokens_by_model'] == {actual: {'input': 12, 'output': 5, 'cached_input': 4}}
+        expected = {actual: {'input': 12, 'output': 5, 'cached_input': 4}}
+        if stream and behavior == 'fail':
+            expected['dashscope/primary'] = {'input': 0, 'output': 0, 'cached_input': 0, 'unmetered_calls': 1}
+        assert summary['tokens_by_model'] == expected
+        assert summary['input_tokens'] == 12 and summary['output_tokens'] == 5
         assert summary['fallback_count'] == (behavior == 'fail')
         assert all(s.closed for s in streams)
 

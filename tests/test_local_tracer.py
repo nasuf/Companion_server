@@ -142,7 +142,7 @@ class TestLocalTracerLifecycle:
         metadata = _unjson(fake.tracerun.update.await_args.kwargs["data"]["extraJson"])
         assert metadata == {"metadata": {
             "executor": "legacy", "checkpoint_enabled": False, "usage_expected": used,
-            "usage_scope": "chat",
+            "usage_scope": "chat", "usage_accounting_version": "trace-linked-v2",
         }}
 
     @pytest.mark.parametrize("executor", ["legacy", "langgraph"])

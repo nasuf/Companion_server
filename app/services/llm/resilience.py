@@ -428,27 +428,42 @@ async def _run_with_retry(
     provider: str,
     profile: CallProfile,
     op: str,
+    observation=None,
 ) -> Any:
     if not settings.llm_resilience_enabled:
         # Kill switch: 只保留 timeout, 跳过 CB + retry。并发上限仍然生效 ——
         # 这个开关是为了排查时少一层重试/熔断的干扰, 而故障期恰恰最需要防止请求
         # 洪峰, 把限流一起关掉会让情况更糟。
         async with _llm_slot(provider):
-            return await asyncio.wait_for(factory(), timeout=profile.timeout_s)
+            began = time.time()
+            try:
+                result = await asyncio.wait_for(factory(), timeout=profile.timeout_s)
+            except Exception as exc:
+                if observation:
+                    observation.record("failure", began, error=exc)
+                raise
+            if observation:
+                observation.record("success", began)
+            return result
 
     breaker = _get_breaker(provider)
     if not breaker.try_acquire():
         _record_runtime_event(result="circuit_open")
+        if observation:
+            observation.record("circuit", time.time(), circuit_open=True)
         raise LLMCircuitOpenError(f"circuit open for {provider} on {op}")
 
     last_exc: Exception | None = None
     for attempt in range(profile.max_retries + 1):
         started = time.monotonic()
+        began = time.time()
         try:
             # 槽位只包住这一次请求, 不包外层的 backoff sleep。
             async with _llm_slot(provider):
                 result = await asyncio.wait_for(factory(), timeout=profile.timeout_s)
             breaker.record_success()
+            if observation:
+                observation.record("success", began)
             _log_attempt(provider=provider, op=op, result="ok",
                          started=started, attempt=attempt)
             return result
@@ -462,6 +477,8 @@ async def _run_with_retry(
                          started=started, attempt=attempt, exc=e)
 
         breaker.record_failure()
+        if observation:
+            observation.record("failure", began, error=last_exc, circuit_open=breaker.state() == "open")
         if attempt >= profile.max_retries:
             break
         await asyncio.sleep(profile.retry_backoff_s[attempt])
@@ -486,6 +503,7 @@ async def call_with_resilience(
     fallback_provider: str = "ollama",
     primary_model_name: str = "",
     fallback_model_name: str = "",
+    role: str = "chat",
 ) -> Any:
     """Unary LLM call with timeout + retry + CB + 可选备选供应商 fallback.
 
@@ -497,6 +515,9 @@ async def call_with_resilience(
     同一级别 fallback 也可能失败; 最终抛 LLMFailedError, 调用方自己静态兜底.
     """
     from app.services.ops.provider_budget import observed_call
+    from app.services.ops.provider_failing import Call
+    primary_observation = Call(primary_provider, primary_model_name, role)
+    fallback_observation = Call(fallback_provider, fallback_model_name, role)
 
     async def primary_observed():
         return await observed_call(primary_factory, primary_provider, primary_model_name)
@@ -506,10 +527,11 @@ async def call_with_resilience(
 
     try:
         return await _run_with_retry(
-            primary_observed, provider=primary_provider, profile=profile, op=op,
+            primary_observed, provider=primary_provider, profile=profile, op=op, observation=primary_observation,
         )
     except LLMFailedError as primary_exc:
         if fallback_factory is None or not profile.allow_ollama_fallback:
+            primary_observation.fallback("not_attempted")
             raise
         _record_runtime_event(result="fallback")
         logger.warning(
@@ -518,10 +540,17 @@ async def call_with_resilience(
         )
 
     try:
-        return await _run_with_retry(
-            fallback_observed, provider=fallback_provider, profile=profile, op=f"{op}:fallback",
+        result = await _run_with_retry(
+            fallback_observed, provider=fallback_provider, profile=profile, op=f"{op}:fallback", observation=fallback_observation,
         )
+        primary_observation.fallback("succeeded")
+        return result
+    except asyncio.CancelledError:
+        primary_observation.fallback("cancelled")
+        raise
     except LLMFailedError as fallback_exc:
+        primary_observation.fallback("failed")
+        fallback_observation.fallback("not_attempted")
         raise LLMFailedError(
             f"{op}: both primary={primary_provider} and {fallback_provider} fallback failed; "
             f"last error: {fallback_exc}"
@@ -542,6 +571,7 @@ async def astream_with_resilience(
     fallback_provider: str = "ollama",
     primary_model_name: str = "",
     fallback_model_name: str = "",
+    role: str = "chat",
 ) -> AsyncIterator[str]:
     """Stream LLM output, yield text tokens.
 
@@ -554,6 +584,9 @@ async def astream_with_resilience(
     - Circuit breaker: pre-first-chunk 失败计入 CB; first chunk 到达即视为成功
     - Kill switch (llm_resilience_enabled=False): 纯原始 stream + 首 chunk 超时
     """
+    from app.services.ops.provider_failing import Call
+    primary_observation = Call(primary_provider, primary_model_name, role)
+    fallback_observation = Call(fallback_provider, fallback_model_name, role)
     got_first_chunk = False
 
     try:
@@ -562,7 +595,7 @@ async def astream_with_resilience(
             provider=primary_provider,
             profile=profile,
             op=op,
-            model_name=primary_model_name,
+            model_name=primary_model_name, observation=primary_observation,
         ):
             got_first_chunk = got_first_chunk or bool(token)
             yield token
@@ -570,6 +603,7 @@ async def astream_with_resilience(
     except LLMFailedError as primary_exc:
         # 已经推过 token 或无 fallback → 直接让异常穿出, 调用方自己兜底
         if got_first_chunk or fallback_factory is None or not profile.allow_ollama_fallback:
+            primary_observation.fallback("not_attempted")
             raise
         _record_runtime_event(result="fallback")
         logger.warning(
@@ -581,10 +615,16 @@ async def astream_with_resilience(
     try:
         async for token in _stream_provider(
             fallback_factory, provider=fallback_provider, profile=profile, op=f"{op}:fallback",
-            model_name=fallback_model_name,
+            model_name=fallback_model_name, observation=fallback_observation,
         ):
             yield token
+        primary_observation.fallback("succeeded")
+    except (asyncio.CancelledError, GeneratorExit):
+        primary_observation.fallback("cancelled")
+        raise
     except LLMFailedError as fallback_exc:
+        primary_observation.fallback("failed")
+        fallback_observation.fallback("not_attempted")
         raise LLMFailedError(
             f"{op}: primary={primary_provider} and {fallback_provider} fallback both failed: "
             f"{fallback_exc}"
@@ -601,6 +641,7 @@ async def collect_stream(
     fallback_provider: str = "ollama",
     primary_model_name: str = "",
     fallback_model_name: str = "",
+    role: str = "chat",
 ) -> str:
     """累积 astream_with_resilience 的全部 token 成单一字符串.
 
@@ -618,6 +659,7 @@ async def collect_stream(
         fallback_provider=fallback_provider,
         primary_model_name=primary_model_name,
         fallback_model_name=fallback_model_name,
+        role=role,
     ):
         if token:
             chunks.append(token)
@@ -639,10 +681,13 @@ def _capture_chunk_usage(chunk: Any, last_usage: dict) -> None:
 
 
 def _flush_stream_usage(last_usage: dict, model_name: str) -> None:
-    """流结束/异常时记一次 usage_tracker. 没拿到 usage 或没 model_name 则跳过."""
-    if not last_usage or not model_name:
+    """Record provider usage, or an explicitly unmetered attempted stream."""
+    if not model_name:
         return
     from app.services.llm import usage_tracker
+    if not last_usage:
+        usage_tracker.record_unmetered(model_name)
+        return
     usage_tracker.record(
         model_name,
         last_usage.get("input_tokens", 0),
@@ -658,10 +703,12 @@ async def _stream_provider(
     profile: CallProfile,
     op: str,
     model_name: str = "",
+    observation=None,
 ) -> AsyncIterator[str]:
     """在单一 provider 上跑 stream; 管理 first_chunk_timeout 和总 timeout + CB."""
     last_usage: dict = {}
     from app.services.ops.provider_budget import observed_stream
+    began = time.time()
     source_factory = factory
     factory = lambda: observed_stream(source_factory, provider, model_name)
 
@@ -674,6 +721,12 @@ async def _stream_provider(
                     raise LLMFailedError(f"{op} on {provider}: exceeded overall timeout (killswitch mode)")
                 _capture_chunk_usage(chunk, last_usage)
                 yield _chunk_text(chunk)
+            if observation:
+                observation.record("success", began)
+        except Exception as exc:
+            if observation:
+                observation.record("failure", began, error=exc)
+            raise
         finally:
             _flush_stream_usage(last_usage, model_name)
         return
@@ -681,6 +734,8 @@ async def _stream_provider(
     breaker = _get_breaker(provider)
     if not breaker.try_acquire():
         _record_runtime_event(result="circuit_open")
+        if observation:
+            observation.record("circuit", began, circuit_open=True)
         raise LLMCircuitOpenError(f"circuit open for {provider} on {op}")
 
     started = time.monotonic()
@@ -715,13 +770,21 @@ async def _stream_provider(
                 aiter.__anext__(), timeout=profile.first_chunk_timeout_s,
             )
     except asyncio.CancelledError:
-        await _safe_close()
+        try:
+            await _safe_close()
+        finally:
+            _flush_stream_usage(last_usage, model_name)
         raise
     except Exception as e:
         breaker.record_failure()
+        if observation:
+            observation.record("failure", began, error=e, circuit_open=breaker.state() == "open")
         _log_attempt(provider=provider, op=op, result="first_chunk_fail",
                      started=started, exc=e)
-        await _safe_close()
+        try:
+            await _safe_close()
+        finally:
+            _flush_stream_usage(last_usage, model_name)
         raise LLMFailedError(f"stream no first chunk on {provider}: {e}") from e
 
     deadline = started + profile.timeout_s
@@ -741,6 +804,8 @@ async def _stream_provider(
                 break
             except asyncio.TimeoutError:
                 breaker.record_failure()
+                if observation:
+                    observation.record("failure", began, circuit_open=breaker.state() == "open")
                 _log_attempt(provider=provider, op=op, result="idle_timeout",
                              started=started)
                 await _safe_close()
@@ -749,6 +814,8 @@ async def _stream_provider(
                 )
             if time.monotonic() > deadline:
                 breaker.record_failure()
+                if observation:
+                    observation.record("failure", began, circuit_open=breaker.state() == "open")
                 _log_attempt(provider=provider, op=op, result="mid_timeout",
                              started=started)
                 await _safe_close()
@@ -756,11 +823,15 @@ async def _stream_provider(
             _capture_chunk_usage(chunk, last_usage)
             yield _chunk_text(chunk)
         breaker.record_success()
+        if observation:
+            observation.record("success", began)
         _log_attempt(provider=provider, op=op, result="ok", started=started)
     except LLMFailedError:
         raise
     except Exception as e:
         breaker.record_failure()
+        if observation:
+            observation.record("failure", began, error=e, circuit_open=breaker.state() == "open")
         _log_attempt(provider=provider, op=op, result="mid_error",
                      started=started, exc=e)
         await _safe_close()

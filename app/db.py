@@ -170,6 +170,12 @@ logger.info(
 
 class ThrottledPrisma(Prisma):
     async def _execute(self, *args: Any, **kwargs: Any) -> Any:
+        # An interactive transaction already owns its engine connection. Waiting
+        # for the pool-admission semaphore here can deadlock: ordinary queries
+        # hold every permit while waiting for the connection owned by this tx.
+        # Transaction operations stay serialized by Prisma on that connection.
+        if self._tx_id is not None:
+            return await super()._execute(*args, **kwargs)
         async with _query_semaphore:
             for attempt in range(_DB_QUERY_MAX_RETRIES + 1):
                 try:

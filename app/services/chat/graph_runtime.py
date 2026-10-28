@@ -418,6 +418,7 @@ class ChatGraphContext:
                     workspace_id=parent.workspace_id,
                     source_message_ids=sorted(parent.current_turn_ids),
                     reply_turn_id=parent.current_achievement_turn_id,
+                    trace_id=parent.tracer.safe_trace_id,
                 )
             )
             self.background_submitted = True

@@ -96,7 +96,9 @@ def _build_utility_model(provider: str, model: str) -> BaseChatModel:
 @lru_cache(maxsize=256)
 def _build_grounding_model(provider: str, model: str) -> BaseChatModel:
     # The calibrated verifier is not a small-model task, even on DashScope.
-    return build_chat_model(provider, model)
+    value = build_chat_model(provider, model)
+    object.__setattr__(value, "_companion_role", "grounding")
+    return value
 
 
 @lru_cache(maxsize=256)
@@ -436,6 +438,7 @@ async def _invoke_with_resilience(
         fallback_factory=fallback_factory,
         fallback_provider=provider_name(fallback) if fallback is not None else "",
         primary_model_name=_resolve_usage_model_key(model),
+        role=getattr(model, "_companion_role", "chat"),
         fallback_model_name=_resolve_usage_model_key(fallback) if fallback is not None else "",
     )
 
@@ -492,6 +495,7 @@ async def _invoke_via_stream(
         op=op,
         fallback_factory=fallback_factory,
         primary_model_name=_resolve_usage_model_key(model),
+        role=getattr(model, "_companion_role", "chat"),
         fallback_model_name=fb_model_name,
         fallback_provider=provider_name(fallback) if fallback is not None else "",
     )

@@ -348,6 +348,7 @@ async def test_real_graph_traces_link_nodes_and_manual_provider(chat_io, monkeyp
     assert {k:v for k,v in metadata.items() if k != 'chat_context_policy'} == {
         "executor": "langgraph", "graph_version": "chat-g01-v1",
         "checkpoint_enabled": False, "usage_scope": "chat",
+        "usage_accounting_version": "trace-linked-v2",
     }
     assert metadata['chat_context_policy']['effective_rounds'] == 5
     assert metadata['chat_context_policy']['format_version'] == 'dialogue-turns-v1'

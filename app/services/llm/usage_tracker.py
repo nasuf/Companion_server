@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
-from typing import Callable, Literal, TypedDict
+from typing import Callable, Literal, NotRequired, TypedDict
 
 UsageScope = Literal[
     "chat", "post_process", "proactive", "agent_creation", "schedule_cron",
@@ -36,6 +36,7 @@ class _ModelUsage(TypedDict):
     # 命中 provider prefix cache 的 input tokens (计费 ~0.1x-0.4x 原价).
     # input 字段是总量, cached_input 是其中命中的部分 (cached_input <= input).
     cached_input: int
+    unmetered_calls: NotRequired[int]
 
 
 class UsageSummary(TypedDict):
@@ -132,6 +133,22 @@ def record_web_search(calls: int) -> None:
     summary["web_search_calls"] = summary.get("web_search_calls", 0) + int(calls)
 
 
+def record_unmetered(model: str) -> None:
+    """An attempted call without provider usage is unknown, never free tokens.
+
+    Keep this in the existing per-model JSON; neither estimates nor zero token
+    values are added to the metered totals. call_count includes the attempt.
+    """
+    summary = _current.get()
+    if summary is None:
+        return
+    bucket = summary["tokens_by_model"].setdefault(
+        model or "unknown", {"input": 0, "output": 0, "cached_input": 0},
+    )
+    bucket["unmetered_calls"] = bucket.get("unmetered_calls", 0) + 1
+    summary["call_count"] += 1
+
+
 def record_runtime_event(
     *,
     result: str,
@@ -201,7 +218,7 @@ async def usage_session(
     才有值, 而调用方常常 `enter()` 在外面 / 业务在里面, callable 形式让
     flush 时再取最新值.
     """
-    from app.services.llm.usage_repo import write_usage_row
+    from app.services.llm.usage_repo import persist_usage
     token = start_session()
     scope_token = _current_scope.set(scope)
     try:
@@ -210,7 +227,7 @@ async def usage_session(
         _current_scope.reset(scope_token)
         summary = flush_session(token)
         if summary:
-            await write_usage_row(
+            await persist_usage(
                 summary=summary,
                 conversation_id=conversation_id,
                 agent_id=agent_id,

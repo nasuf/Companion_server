@@ -15,6 +15,12 @@ generator client {
 }
 
 model User {
+  statsReviews StatsReviewQueue[] @relation("StatsReviewOwner") @ignore
+  statsReviewsCreated StatsReviewQueue[] @relation("StatsReviewCreator") @ignore
+  statsProactiveDaily StatsProactiveDaily[] @ignore
+  statsCostDaily StatsCostDaily[] @ignore
+  statsTokenReconciliation StatsTokenReconciliation[] @ignore
+  statsReviewItems StatsReviewItem[] @ignore
   erasureSpeechUsage SpeechUsage[] @relation("ErasureSpeechUsage") @ignore
   erasureTtsUsage TtsUsage[] @relation("ErasureTtsUsage") @ignore
   erasureUserMemory UserMemory[] @relation("ErasureUserMemory") @ignore
@@ -120,6 +126,42 @@ model User {
   // admin 监控"新增注册走势"按 created_at 分桶.
   @@index([createdAt])
   @@map("users")
+}
+
+model StatsCostDaily {
+  id String @id
+  localDate DateTime @db.Date @map("local_date")
+  userId String? @map("user_id")
+  agentId String? @map("agent_id")
+  category String
+  scope String
+  data Json
+  definitionVersion String @map("definition_version")
+  computedAt DateTime @db.Timestamptz(6) @map("computed_at")
+  user User? @relation(fields:[userId],references:[id],onDelete:Cascade,onUpdate:Cascade)
+  @@index([localDate,category],map:"stats_cost_daily_day_idx")
+  @@index([userId,localDate],map:"stats_cost_daily_user_idx")
+  @@map("stats_cost_daily")
+  @@ignore
+}
+
+model StatsTokenReconciliation {
+  traceId String @id @map("trace_id")
+  localDate DateTime @db.Date @map("local_date")
+  userId String? @map("user_id")
+  conversationId String? @map("conversation_id")
+  agentId String? @map("agent_id")
+  scope String
+  status String
+  releaseQualified Boolean @map("release_qualified")
+  data Json
+  definitionVersion String @map("definition_version")
+  computedAt DateTime @db.Timestamptz(6) @map("computed_at")
+  user User? @relation(fields:[userId],references:[id],onDelete:Cascade,onUpdate:Cascade)
+  @@index([localDate,status],map:"stats_token_reconciliation_day_idx")
+  @@index([userId,localDate],map:"stats_token_reconciliation_user_idx")
+  @@map("stats_token_reconciliation")
+  @@ignore
 }
 
 model AuthIdentity {
@@ -288,6 +330,7 @@ model WorkspaceInteractionDay {
 }
 
 model Conversation {
+  statsReviews StatsReviewQueue[] @ignore
   erasureTraces MessageTrace[] @relation("ErasureMessageTrace") @ignore
 
   // Server-only execution identity. Lifecycle/rebinding changes rotate it in DB.
@@ -840,6 +883,11 @@ model UserDailyFact {
   // Written and read only by raw SQL (effect/daily_facts.py). Keep the migration
   // model without generated client types: the worker import budget is tight.
   @@ignore
+  resend60s          Int @default(0) @map("resend_60s")
+  metaComments       Int @default(0) @map("meta_comments")
+  shortSessions      Int @default(0) @map("short_sessions")
+  completedSessions  Int @default(0) @map("completed_sessions")
+
 }
 
 // UXM01.02 derived cache: day x metric x cohort x dimension aggregates. Never
@@ -2972,4 +3020,77 @@ model LlmProviderIncident {
   @@id([provider, model])
   @@ignore
   @@map("llm_provider_incidents")
+}
+
+
+model StatsReviewItem {
+  kind String
+  sourceId String @map("source_id")
+  localDate DateTime @map("local_date") @db.Date
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String? @map("conversation_id")
+  traceId String? @map("trace_id")
+  occurredAt DateTime @map("occurred_at")
+  definitionVersion String @map("definition_version")
+  computedAt DateTime @map("computed_at") @db.Timestamptz(6)
+  @@id([kind, sourceId])
+  @@index([localDate, kind, occurredAt(sort: Desc)], map: "stats_review_items_day_kind_idx")
+  @@index([userId, localDate], map: "stats_review_items_user_idx")
+  @@map("stats_review_items")
+  @@ignore
+}
+
+/// Derived proactive event counts; read/write through bounded native SQL only.
+model StatsProactiveDaily {
+  userId String @map("user_id")
+  localDate DateTime @db.Date @map("local_date")
+  triggerType String @map("trigger_type")
+  data Json
+  definitionVersion String @map("definition_version")
+  computedAt DateTime @db.Timestamptz(6) @map("computed_at")
+  user User @relation(fields:[userId], references:[id], onDelete:Cascade, onUpdate:Cascade) @ignore
+  @@id([userId,localDate,triggerType])
+  @@map("stats_proactive_daily")
+  @@ignore
+}
+
+/// Count/ID-only queue consumed by the B1 human review workflow.
+model StatsReviewQueue {
+  id String @id
+  userId String @map("user_id")
+  conversationId String @map("conversation_id")
+  startDate DateTime @db.Date @map("start_date")
+  endDate DateTime @db.Date @map("end_date")
+  source String
+  counts Json
+  definitionVersion String @map("definition_version")
+  createdBy String? @map("created_by")
+  createdAt DateTime @db.Timestamptz(6) @map("created_at")
+  status String @default("pending")
+  user User @relation("StatsReviewOwner", fields:[userId], references:[id], onDelete:Cascade, onUpdate:Cascade) @ignore
+  creator User? @relation("StatsReviewCreator", fields:[createdBy], references:[id], onDelete:SetNull, onUpdate:Cascade) @ignore
+  conversation Conversation @relation(fields:[conversationId], references:[id], onDelete:Cascade, onUpdate:Cascade) @ignore
+  @@map("stats_review_queue")
+  @@ignore
+}
+
+// Versioned diagnostic materializations; queried with bounded native SQL.
+model StatsDetailDaily {
+  localDate DateTime @map("local_date") @db.Date
+  kind String
+  ownerKey String @map("owner_key")
+  data Json
+  @@id([localDate, kind, ownerKey])
+  @@map("stats_detail_daily")
+  @@ignore
+}
+
+// Native SQL only: preserve generated Prisma type budget.
+model OpsProviderHealth {
+  id String @id
+  snapshot Json @default("{}")
+  sampledAt DateTime? @map("sampled_at") @db.Timestamptz
+  @@map("ops_provider_health")
+  @@ignore
 }

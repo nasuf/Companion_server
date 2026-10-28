@@ -349,7 +349,22 @@ async def test_events_and_turns_crossing_midnight_count_once_on_their_first_bubb
     assert [(r["d"], r["proactive_received"]) for r in received] == [(DAY.isoformat(), 1)]
 
 
-async def test_read_series_states_dimensions_and_background_heal(pg, monkeypatch):
+@pytest.fixture
+async def facts_refresh_redis(monkeypatch):
+    # This refresh now owns a real cross-worker lease. Use a fresh client tied
+    # to this test's event loop, never the global pool left by other fixtures.
+    from redis.asyncio import Redis
+    url = os.environ["PROACTIVE_E2E_REDIS_URL"]
+    assert urlsplit(url).hostname in {"127.0.0.1", "localhost"}
+    client = Redis.from_url(url, decode_responses=True)
+    monkeypatch.setattr("app.services.runtime.distributed_lock.get_redis", AsyncMock(return_value=client))
+    try:
+        yield client
+    finally:
+        await client.aclose()
+
+
+async def test_read_series_states_dimensions_and_background_heal(pg, monkeypatch, facts_refresh_redis):
     ids = await _seed(pg)
     now = _now(DAY + timedelta(days=5), 12)
     await daily_facts.compute_day(DAY, now=now)
@@ -371,13 +386,14 @@ async def test_read_series_states_dimensions_and_background_heal(pg, monkeypatch
     nr = point["no_reply_10m"][d]
     assert (nr["state"], nr["value"], nr["numerator"], nr["denominator"]) == ("insufficient_sample", None, 1, 2)
     assert point["reply_first_bubble_ms_p50"][d]["state"] == "insufficient_sample"
-    # 中间几天还没算: 未运行, 交给后台; 今天和昨天按需算了
+    # 中间几天与尚未刷新的今天都未运行；请求不等待原始表计算。
     gap = (DAY + timedelta(days=2)).isoformat()
     assert point["chat_active_users"][gap]["state"] == "not_computed"
     assert gap in out["recomputing"] and healed
     today = (DAY + timedelta(days=5)).isoformat()
-    assert point["user_messages"][today]["state"] == "unsettled" and point["user_messages"][today]["value"] == 0
-    assert point["proactive_response"][today]["state"] == "no_sample"
+    assert point["user_messages"][today]["state"] == "not_computed" and point["user_messages"][today]["value"] is None
+    assert point["proactive_response"][today]["state"] == "not_computed"
+    await daily_facts._refresh_recent([DAY + timedelta(days=4), DAY + timedelta(days=5)], now)
     assert out["computed_at"] is not None
 
     # 维度: 有事件的日子按触发类型拆; 算过但没事件的日子是真实为零

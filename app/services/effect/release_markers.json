@@ -1,0 +1,1471 @@
+[
+  {
+    "id": "N01",
+    "date": "2026-10-03",
+    "title": "APNs 日志脱敏、发布自检与工作流保护",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "36b75d987e78a60bcdbf3b8d60fb0c79b37ff492"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "05b763465a6b3dfa337ec7491a2d280831643f1a"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "46e269d2e2f580c08c0fbbfaa6fdcb35c55ace60"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "N02",
+    "date": "2026-10-03",
+    "title": "HTTP 权限与 WebSocket 重连竞态修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "388e7af293a14e0a6d9fc35826489098cc649cd4"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "9feaee556b33ffd18e81b8fe2ea914cc257b7988"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "N03",
+    "date": "2026-10-03",
+    "title": "强制 WS 票据鉴权与 Web/H5、Flutter、小程序适配",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "367b0a7c76f24059938c41e9d4173b9d9228935c"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "faf8340eaf76a07790fe4f8f8e178a99ed2b59b8"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "N04",
+    "date": "2026-10-03",
+    "title": "Redis 终态、陈旧提交与管理员恢复保护",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "51a1501006b795d4daf1ec584fea4a588a571d47"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "23b7d83bf16cd7f7754d07c16505ec7f1b5df137"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "F01-release",
+    "date": "2026-10-04",
+    "title": "生产镜像与静态制品归档、回退验证",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "56e4b225321e8d5928f753f6f35909391d7e507d"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "49b8f0fde8d3b7f8997d935030b0291a52ea7384"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "G01-release",
+    "date": "2026-10-04",
+    "title": "LangGraph 首批等价编排与父回合收尾（默认关闭）",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "6771504ac5ab9d4593abfd13e173e72a748c07fb"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "G02-release",
+    "date": "2026-10-04",
+    "title": "LangGraph聊天等价/质量资格与tier身份及事实规则修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "ee26ace6fd5bacf36981c2c2d8055f9fac6c84c9"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "G03-support-release",
+    "date": "2026-10-04",
+    "title": "Trace生命周期/计量预期修复与只读上线验收工具",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "891bd1c63d66dea9ab398e57c7b35e486cf36bb0"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "G03-activation-release",
+    "date": "2026-10-04",
+    "title": "nasuf微信单会话LangGraph内部启用与持久化白名单",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "548318004e8de6e61d36e5aca98b1f1b3d460f5d"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "G03-trace-display-release",
+    "date": "2026-10-04",
+    "title": "大屏Trace瀑布图滚动完整性及运行语义修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "56ace6e4ef2e5694baaacf3223f81da4db90e0e6"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "b7a7ce4b3f1ca4e371b167927456cc88ea68a9d8"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "G03-full-rollout-release",
+    "date": "2026-10-04",
+    "title": "明确全量LangGraph及持久化回退配置",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "2495bb9e11d0e32c627dff6ca6a4947256e6ce79"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "G03-observation-contract-release",
+    "date": "2026-10-05",
+    "title": "聊天与辅助任务Trace观察契约",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "4703cfce5044d53cd6ec785649a6bce846fec50e"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "N05-runtime-atomic-release",
+    "date": "2026-10-05",
+    "title": "Redis原子入队、租约与崩溃恢复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "4d80ef1e2cf839c1ac1243b6ca10bd40e66f05a5"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "75ea85e993cfbf24a0aa89155795d8e3cc9f358b"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "C01-config-consistency-release",
+    "date": "2026-10-06",
+    "title": "提示词与配置存储一致性",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "77b56a2caf26e0a2de998af13b39f3389a2eb68b"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "8d61a2f296b8e9771128e36201250985fd5e7e4a"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "C01-prompt-publication-ui-release",
+    "date": "2026-10-06",
+    "title": "提示词真实Web版本与启停显示",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "baba523"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "7dc7c67"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "b872d76"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "303d814"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "b79577d"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "5670de0"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-scope-foundation-release",
+    "date": "2026-10-06",
+    "title": "持久化执行的归属与生命周期校验基础",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "dada5a3b0c9e834ece15058067f921b533ec2319"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-sql-foundation-release",
+    "date": "2026-10-07",
+    "title": "SQL Run/Job/Action/Outbox持久化基础",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "06dccf670e8329913900ac330d282966768a3f85"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "151127e5ab1fe195946fe405a56c1f52d5b66210"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "a8204e02191a2dcd4b2b109eecdb4a2eb439b212"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-sql-ingress-foundation-candidate",
+    "date": "2026-10-07",
+    "title": "SQL消息原子入口与持久化聚合基础（已生产，实际接入未启用）",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "6abd8b3eff9af33d7f916f810ef9aa65599bbd77"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-sql-primary-consumer-foundation",
+    "date": "2026-10-07",
+    "title": "SQL任务领取、租约和崩溃保护（已生产，消费者未启用）",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "dbceb5a92ca318e95224f33507c8be4375e1bc21"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-reply-outbox-foundation",
+    "date": "2026-10-07",
+    "title": "回复原子提交、认证确认与Web断线补齐（已生产，SQL消费者未启用）",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "ac2f89b4c00dc004a42fc21942b98d77481311b4"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "8f25aa621f5df97b53de7c53d16923d4197d3fa6"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-runtime-roles-foundation",
+    "date": "2026-10-08",
+    "title": "显式API、Scheduler和后台Worker角色基础（生产保留integrated双worker）",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "f201af8a3ec7add99e8584935ae2a1afdc332fe2"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-chat-business-ingress-atomic",
+    "date": "2026-10-08",
+    "title": "聊天额度、附件、红包/礼物绑定与接收同事务（入口切换仍待后续）",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "20a059f3397e3340cdcd37023bb0d1af142e792e"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-chat-endpoint-ingress-staged",
+    "date": "2026-10-08",
+    "title": "认证HTTP/WS接收适配、可信输入快照、提交后ACK与SQL启用闸门",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "20465393416aa3c51d1aa9eccb8e59bcaa86155a"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "a3bacbc39185b365e5a461fb34e25d0e5f4748d9"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-api-worker-diagnostics",
+    "date": "2026-10-08",
+    "title": "API worker失败诊断与资源安全验收",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "17227e54babae5e7caaeb116c709017e067396e6"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-link-fetch-safety",
+    "date": "2026-10-08",
+    "title": "链接可信准备：公网目标和有界下载",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "c4713b78a1983f5e4a18b19c6c7ca0d81a37cac0"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "F02-worker-stacks",
+    "date": "2026-10-09",
+    "title": "Worker故障前有界诊断及日程缓存缺失API修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "9b76c352ba0a20190b2ae25bd8d65be5a2377eb6"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "d0c6c682e0c4f1f97555631a92d736b3b8f371ff"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "F02-prisma-memory",
+    "date": "2026-10-09",
+    "title": "Prisma生成客户端内存开销修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "d599834c9bdd49075ba9a26df4b2f6b2472f75db"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "F02-archive-cache",
+    "date": "2026-10-09",
+    "title": "归档读取缓存与生产换页补充修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "7b29ed991fd07119532ede02f5c119872d23d580"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01-link-fetch-requalification",
+    "date": "2026-10-09",
+    "title": "链接可信抓取：公网TCP固定与有界资源",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "1cfa7958009eb62547ec992a3ff40fdceb3b8697"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "MEMFIX-20261009",
+    "date": "2026-10-09",
+    "title": "三层记忆六项修复及生产资格",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "6ed93e3901ce3d2a6f78a8f6493f9fe521fb828a"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "MEMLOC-20261009",
+    "date": "2026-10-10",
+    "title": "角色地点及记忆主体归属修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "b11e9fa7d919282795d0fc55c69ac569640c9685"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "275c0c384d38445b1df658915cb9cd168b94bda1"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "539037edd912b5abdea6e487ac568eb5c40a76bf"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "4a0d50cb4f2da76568fef8c236d661703e4817c8"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.01-20261010",
+    "date": "2026-10-10",
+    "title": "中文记忆评测与冻结基线",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "954e75bc7f981f176a2ae2d9222c3afb4d38c124"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "V01.03.GATE01-20261010",
+    "date": "2026-10-10",
+    "title": "持续回归与发布验证门槛",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "a3c6bf96dadb4307b52615f28c4a113db7ac74df"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "371b9a9895c7b2a732f189f0e9eadec579f2da31"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.SOURCE01-20261010",
+    "date": "2026-10-10",
+    "title": "记忆来源底座、聊天记录绑定及后台只读详情（M02.02首单元）",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "29d7b78586cbc5a73aacc3ecc0a5c0d13e30e702"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "5fc973c3fa813e18595c8b4af2a7b9e6512bcc9c"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.SOURCE02-20261010",
+    "date": "2026-10-10",
+    "title": "旧版来源只读核验及Agent成就滚动修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "1359d404c5cf63146d3d0a7d237676c493eb9128"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "926f6abc1ac02949811e8645d554564464d762f4"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.PROFILE01-20261010",
+    "date": "2026-10-10",
+    "title": "人设初始化来源快照与原子替换",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "44a5e92df66bec2bb4ff0a168467a84e9b7a49f1"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "f9cdae7d9c25ea08712061e042db04829500adcc"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.CLONE01-20261010",
+    "date": "2026-10-10",
+    "title": "模板克隆来源链与原子创建",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "f873e42e903d79c4d9ff80cbef59c30a4456e450"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "b8d1dfa520329f20586abb6160ca800e62ec1c05"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.KNOWLEDGE01-20261011",
+    "date": "2026-10-11",
+    "title": "已有Agent知识发布来源与原子复制",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "cc5ca1d343f9f495dc571cfb96670708f561d9c8"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "3476ea3a3f6df22f6eb5df8f73436d574d37411e"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "G01.USAGE01-20261011",
+    "date": "2026-10-11",
+    "title": "收拢聊天记忆使用提交与根回合身份",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "91705b4462020b93ea456ce286bcbe37d6b7e471"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "52b7632561c86a1cfc207f5f5818a408c58d3605"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.INPUT01-20261012",
+    "date": "2026-10-12",
+    "title": "知识文档输入快照与人工编辑来源",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "c39098bbe2075f8d874421933da74cb5f5ee6ad2"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "5e9926176b28895b0d9586151e6a453c301d511c"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "D01.BACKUP01-20261012.DEPLOY-REPAIR",
+    "date": "2026-10-12",
+    "title": "备份收拢部署修复与人工接管一致性",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "706331066b6012a4cfa880267a78fa3a12ba2f33"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "73afc6a8fb9447c2afe4a1adfacdf4d12c9340ae"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "O01.04.HUMAN02-20261012",
+    "date": "2026-10-12",
+    "title": "人工接管通知、未读与纯文字聊天闭环",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "dfc93fa1dd1d884e006a24f1bcc1a4dc1edd26ed"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.REPAIR01-20261013",
+    "date": "2026-10-13",
+    "title": "记忆修复原子提交与来源闭环",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "3e646580d93cb90014ec1e321246b4feeca96de9"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "d302f6d77ad7fbfc63ff1ae847696690e482c063"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.CONFIRM01-20261013",
+    "date": "2026-10-13",
+    "title": "矛盾确认更新原子提交与来源闭环",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "801e220f0c9e85d41a04fe01b50cc12f8a4423f9"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "ff13d9348d7910fe85a296b3e6ef1174933a6c9a"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.DAILY01-20261013",
+    "date": "2026-10-13",
+    "title": "日常总结可信输入快照与原子来源闭环",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "5f2c0a2915236751801bac0aa3d52a290048c003"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "91c46a1afabb8e688961b12e31bbe06715faf8f8"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.02.COMPRESS01-20261014",
+    "date": "2026-10-14",
+    "title": "L3压缩摘要原子提交与父来源闭环",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "dbdde666288854dea0ebce5e643428454625a061"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "9cc524a33838f4fc150fdba7c6b22c11795acf3a"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.LINK01-20261014",
+    "date": "2026-10-14",
+    "title": "不可变链接快照与逐条分享历史",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "cc493352a7d9374092955ac26af5520e5f77bdd3"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "ff0d3f4137c30779687ac99d181548926f3c2524"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.LINK02-20261015",
+    "date": "2026-10-15",
+    "title": "SQL链接可信准备与原子受理",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "56db17876099152bf7e3105adb7e44285b7afc04"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "ae4c21968731261fd1898229fee9983deec684d9"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.LINK03-20261015",
+    "date": "2026-10-15",
+    "title": "链接资源容量治理、引用保护与旧入口兼容闭环",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "f746e936389910465277cfb982ff14f03aefb0e6"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "ab9d842496e12e1f9438537a2b925d39f8b53d7a"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.LINK04-20261015",
+    "date": "2026-10-15",
+    "title": "当前Redis链路的H5/Flutter链接卡片、版本及接管状态完整性",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "e29f9c6cbe0e84be8b90c5125ce8f71c9aeb3b1f"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "c152e470e771110506e34e10d6b4753fc580d2cc"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.LOCATION01-20261015",
+    "date": "2026-10-15",
+    "title": "位置分享的临时事实、来源证据与双侧记忆恢复闭环",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "7476ecc8e65f3a065e908a14d7f9263dbf803b74"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "47a65f54aa6691a9f10d9a5fd2b09a359148d8de"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.ACH01-20261016",
+    "date": "2026-10-16",
+    "title": "成就与交互统计绑定稳定消息来源",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "e3e5b6c580fa830a6017236bb49df101cffd9619"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "dad2d2537e60508a4f555ec93f8bd291ec894b07"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.BG01-20261017",
+    "date": "2026-10-17",
+    "title": "消息成就与交互统计的持久登记、恢复和后台诊断",
+    "commits": [
+      {
+        "repo": "Companion_web",
+        "sha": "9ac3f762edad0624b8078189d2e2e8526ae497b7"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "f4dc36344458262d1b635cab5856ef77f6c4daa5"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.BG02-20261017",
+    "date": "2026-10-18",
+    "title": "整轮助手完成统计的持久登记、恢复和后台诊断",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "d4dd1d1cdd3b2affbafc23616573bd6f84ab42ab"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "0add9f5e16afbd95aef7c7e05f0d462ed44274a7"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.BG03-20261018",
+    "date": "2026-10-18",
+    "title": "记忆录入双侧结果、进度安全和后台诊断",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "6dd4ed9195e8d78c0650ec024672d103c75f5699"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "551e670adc1b3a04055a7d0343653cb0077fac42"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "R01.03.BG04-20261018",
+    "date": "2026-10-18",
+    "title": "聊天记忆真实消息来源、逐条排除和后台来源诊断",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "9110105b6c99abbf3e46a473e5f8ee96df31c21f"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "91ffd5ca128266ec6cdefde974598c54b8f9f7f5"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "commit_date"
+  },
+  {
+    "id": "M02.TIME01-20261019",
+    "date": "2026-10-19",
+    "title": "时间感知与重复追问修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "c89ba3c7d70207e88c9a3bc0d38b28557b0420d1"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "19eb386b9acfd4a6a2e408c9244ee8921c7a8775"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME02A-20261020",
+    "date": "2026-10-20",
+    "title": "时间语义基础：原消息锚点、明确事件证据与有界诊断",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "3323eb159b0299514281bbaaad035ef0a3215395"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "1a3830731b5150a1d6f15bc37ae1323b36b17dd4"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME02B-20261020",
+    "date": "2026-10-20",
+    "title": "TIME02B 时间查询证据合同及日期边界修复",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "42c224da87c241f47b6f5d215cf86fbac5b48e0f"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "2858ac1d25858403837e9707ef4d2900a4018150"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME02C-20261020",
+    "date": "2026-10-20",
+    "title": "多轮时间评测与提及时间/事件时间绑定",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "6f1af01bf90331a9f33014c09d7820b57c82c836"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "4c402d53179dccfa92a568f97f653feac9a23dfa"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME02D-20261020",
+    "date": "2026-10-20",
+    "title": "日期表达位置及跨事件安全绑定",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "e506ef628dd8e89f0e8cdc83afc6606b9afd7ea7"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "d4b6639e86a2df5d8e49ee47a96725e1a2869fe6"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME02E-20261021",
+    "date": "2026-10-21",
+    "title": "有界回忆问答与发生/提及时间保护",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "43bdd663540c843ede653edb2fead902b87a0803"
+      },
+      {
+        "repo": "web",
+        "sha": "6e4a98b011be4a3110bc2aca2efff1f1d4239cd2"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME02F-20261021",
+    "date": "2026-10-21",
+    "title": "时间范围边界、分钟精度和时区一致性",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "74be85a0b31f5bbc56b26ba63dcb43f54d9a434e"
+      },
+      {
+        "repo": "web",
+        "sha": "7b023302e19e0b824ff725bb86671d79eef10ffa"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME02G-20261021",
+    "date": "2026-10-21",
+    "title": "原消息时间证据完整性与聚合时刻保护",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "eab8bc46a5b6d2fc5e719fbb910196ef18d87a12"
+      },
+      {
+        "repo": "web",
+        "sha": "4d07bdacf36e968b373cb0418475c19b68d1df04"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME03A-20261022",
+    "date": "2026-10-22",
+    "title": "逐事实原消息时间归因及后台来源时间展示",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "c2b04528980302a45e4376397572dcee723690f1"
+      },
+      {
+        "repo": "web",
+        "sha": "cc1c3f76055e1b8354afb72834aac7a706c65574"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME03B-20261022",
+    "date": "2026-10-22",
+    "title": "时间事实录入的稳定分页与并发进度保护",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "e291a3bb5bddd138424f1adda6a6276f6f2c6b29"
+      },
+      {
+        "repo": "web",
+        "sha": "d8d71a88318e49d12a3360427485f38e5c2be87b"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME03C-20261023",
+    "date": "2026-10-22",
+    "title": "时间事实写入的原子提交、并发保护及失败诊断",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "890b160b1d8218053a6424472825951ea4834589"
+      },
+      {
+        "repo": "web",
+        "sha": "9506c3f6ca7c9b05c3e9bdd3341893c327b2da10"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.TIME03D-E-20261023",
+    "date": "2026-10-23",
+    "title": "逐条记忆回执、失败恢复、删除保护及时间版本证据",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "784eff41567ad0971c4b247dd6fbb377f4d9c479"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "2773dd591cc0e9ed13a790970f8a0ea7397273d7"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.08-NOGUESS-20261023",
+    "date": "2026-10-23",
+    "title": "不猜次数/日期规则发布、稳定性只读核查与决策日志精简",
+    "commits": [],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.08-REPAIR-20261023",
+    "date": "2026-10-23",
+    "title": "提示词去重、周日期解析与评测环境返修",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "f353d34b94dd98c692f98edf0d689094ed32d755"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "5a26a62fe89750be058970d3c7092a59dadfb704"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.03-U8-20261024",
+    "date": "2026-10-24",
+    "title": "Redis容量告警、延迟可靠性快修与自然聊天体验",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "330307f9630dc65b7c3b69edf7336d8ca8010b8b"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "efd394120bff9d149d2cc6f0926353e877dc3906"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "0e6fbf16830da658908ec15fe6e79ab80cd0eb9c"
+      },
+      {
+        "repo": "Companion_server",
+        "sha": "718b40db1572e0251bfef5f7abd5deefc18b84fe"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.08-DELAYFIX-20261025",
+    "date": "2026-10-25",
+    "title": "延迟回复有界并发和入队失败零延迟回退",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "db8f60f963e960d688d277915e139139a95d2a25"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "G03.05-20261025",
+    "date": "2026-10-25",
+    "title": "延迟安全镜像回退资格与跨部署自然证据",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "3d8f620a76c104ce71cc9079c32c10072a001d0e"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.07.1-20261025",
+    "date": "2026-10-25",
+    "title": "语气词整轮护栏、概率暂停与后台诊断",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "b408ee6ec72c2b0e8e80a587825dd74cf9c850ff"
+      },
+      {
+        "repo": "Companion_web",
+        "sha": "794c8e87c48b76ba30c3d26ee6ee17409fbad647"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CONV01.01-20261025",
+    "date": "2026-10-25",
+    "title": "移除旧执行器，聊天入口统一状态图",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "eca7ec2dc839752712cfc8e8ffbef89672b7af8b"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.09.1-20261026",
+    "date": "2026-10-26",
+    "title": "上下文评测底座、缓存零值与路由计费证据",
+    "commits": [
+      {
+        "repo": "Companion_server",
+        "sha": "03d71d2bbfb9acc15597a271e2d10685608cac8b"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.09.2-20261027",
+    "date": "2026-10-27",
+    "title": "对话上下文策略、本轮消息置后布局、当前状态降级修复与意图作息承接",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "fcec53eb"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "ENV01.04-ALERTS-20261027",
+    "date": "2026-10-27",
+    "title": "最小服务级告警",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "22d0fddc"
+      },
+      {
+        "repo": "web",
+        "sha": "86fec76"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "M02.03-LEDGER-20261027",
+    "date": "2026-10-27",
+    "title": "逐消息记忆处理账本、版本凭据与覆盖审计",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "1bca720324a2495ec27648353fd35ab075e2c91a"
+      },
+      {
+        "repo": "web",
+        "sha": "2712966dd0786ac627438611f1dcedb74cd7fb9d"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.03-CLOUD-FALLBACK-20261027",
+    "date": "2026-10-27",
+    "title": "主聊天云端兜底与首次运行配置加载保护",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "e825fde81cc55ee0d8704e313626c00928ff872f"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "UXM01.03-LAT01.01-20261027",
+    "date": "2026-10-27",
+    "title": "冻结前回复耗时与主动事件埋点及Trace展示",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "08f5e8a6d0d4b33eefb94308d159b34af0f90525"
+      },
+      {
+        "repo": "web",
+        "sha": "28b6c8dafa5b14bf67ab222bac0564b8af52a526"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "UXM01.03-CLAUDE-REVIEW-20261028",
+    "date": "2026-10-28",
+    "title": "埋点扣除首气泡前拟人停顿",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "ad86b58d"
+      },
+      {
+        "repo": "web",
+        "sha": "678c731"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "UXM01.01-CLAUDE-20261028",
+    "date": "2026-10-28",
+    "title": "统计人群与单一指标口径",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "58a3e6b0"
+      },
+      {
+        "repo": "server",
+        "sha": "67f3e85e"
+      },
+      {
+        "repo": "web",
+        "sha": "905a179"
+      },
+      {
+        "repo": "web",
+        "sha": "7d5b33c"
+      }
+    ],
+    "changes_chat_behavior": false,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.09.4-MAINLEN-20261028",
+    "date": "2026-10-28",
+    "title": "主回复历史长度后台可调（默认不变）",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "0dbdbcf5"
+      },
+      {
+        "repo": "web",
+        "sha": "bba73e7"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  },
+  {
+    "id": "CHAT01.09.4-TURNLAYOUT-20261028",
+    "date": "2026-10-28",
+    "title": "主回复本轮段拆分到本轮用户消息前后",
+    "commits": [
+      {
+        "repo": "server",
+        "sha": "643e9003"
+      },
+      {
+        "repo": "web",
+        "sha": "e177810"
+      }
+    ],
+    "changes_chat_behavior": true,
+    "behavior_basis": "scope_classification",
+    "time_basis": "ledger_recorded_at"
+  }
+]

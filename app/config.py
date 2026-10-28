@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -33,6 +33,16 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
+
+    # Availability alerts: config-only thresholds; observations flush off the hot path.
+    provider_failing_window_seconds: int = Field(600, ge=30, le=3600)
+    provider_failing_count: int = Field(5, ge=1, le=10000)
+    provider_failing_ratio: float = Field(0.5, gt=0, le=1)
+    provider_failing_route_limit: int = Field(64, ge=1, le=128)
+    provider_failing_buffer_limit: int = Field(4096, ge=1, le=20000)
+    provider_failing_stale_seconds: int = Field(120, ge=60, le=600)
+    provider_failing_receipt_limit: int = Field(128, ge=16, le=1024)
+    provider_failing_receipt_seconds: int = Field(86400, ge=7200, le=86400)
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"

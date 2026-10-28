@@ -409,6 +409,8 @@ async def _check_daily_metrics_settled() -> InvariantResult:
     for day in days:
         for cohort in COHORTS:
             for metric in METRICS:
+                if cohort not in METRICS[metric].get("cohorts", COHORTS):
+                    continue
                 row = by_key.get((day.isoformat(), cohort, metric))
                 label = f"{day.isoformat()}/{cohort}/{metric}"
                 if row is None:
@@ -437,6 +439,34 @@ async def _check_daily_metrics_settled() -> InvariantResult:
                            "昨日与前日统计均已生成, 到期指标均已定型", observed)
 
 
+async def _check_token_usage_reconciled() -> InvariantResult:
+    """06:00 invariant runner: yesterday, release-marked turns only."""
+    from datetime import timedelta
+    from app.services.effect.definitions import local_today
+    from app.services.effect.reconciliation import read
+    day = local_today() - timedelta(days=1)
+    report = await read(day, day, qualified_only=True)
+    counts = report["counts"]
+    observed = {"day": str(day), "release_qualified_only": True, "state": report["state"],
+                "counts": counts, "comparable_traces": report["comparable_traces"],
+                "unmetered_calls": report["unmetered_calls"]}
+    if report["state"] != "ok":
+        return InvariantResult("token_usage_reconciled", "用量与 Trace 对账", "warn",
+                               "昨日派生数据尚不完整，不能判断一致", observed)
+    denominator = report["comparable_traces"]
+    mismatch_rate = counts["mismatch"] / denominator if denominator else 0
+    if counts["unpriced"] or mismatch_rate > .05:
+        status = "violated"
+    elif counts["missing_usage"] or counts["band_exceeded"] or mismatch_rate > .01:
+        status = "warn"
+    else:
+        status = "ok"
+    observed["mismatch_rate"] = mismatch_rate if denominator else None
+    detail = ("暂无发布后可对账样本" if not denominator else
+              f"{denominator} 个可对账回合，不一致 {counts['mismatch']}，缺用量 {counts['missing_usage']}")
+    return InvariantResult("token_usage_reconciled", "用量与 Trace 对账", status, detail, observed)
+
+
 _CHECKS: tuple[tuple[str, str, Callable[[], Awaitable[InvariantResult]]], ...] = (
     ("schedule_today", "今日作息覆盖", _check_schedule_today),
     ("no_oversized_memories", "记忆长度上限", _check_no_oversized_memories),
@@ -445,6 +475,7 @@ _CHECKS: tuple[tuple[str, str, Callable[[], Awaitable[InvariantResult]]], ...] =
     ("embeddings_complete", "向量覆盖率", _check_embeddings_complete),
     ("consolidation_active", "记忆整合", _check_consolidation_active),
     ("capacity_headroom", "容量水位", _check_capacity_headroom),
+    ("token_usage_reconciled", "用量与 Trace 对账", _check_token_usage_reconciled),
     ("daily_metrics_settled", "内测统计定型", _check_daily_metrics_settled),
 )
 
