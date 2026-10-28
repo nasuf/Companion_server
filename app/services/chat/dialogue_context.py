@@ -37,7 +37,7 @@ def render_dialogue(messages, *, turns=None, line_chars=context_policy.LINE_CHAR
     policy = context_policy.current()
     rounds = policy.rounds if turns is None else max(0, min(20, turns))
     limit = policy.max_chars if max_chars is None else max(0, max_chars)
-    # Bound processing to the same 200-row database history ceiling.
+    # Templates read at most the latest 200 rows; the main reply may fetch more for its budget.
     excluded = set(exclude_ids or ())
     rows = [m for m in (messages or [])[-200:] if message_field(m, 'role') in {'user', 'assistant'}
             and message_field(m, 'id') not in excluded

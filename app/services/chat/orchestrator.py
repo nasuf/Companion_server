@@ -29,6 +29,7 @@ from app.observability.events import (
     EVT_REPLY_EMITTED,
     EVT_REPLY_EMOTION,
 )
+from app.services.chat import context_policy as _context_policy
 from app.services.llm.models import get_chat_model, convert_messages, invoke_text
 from app.services.llm.web_search_gate import extract_discussed_titles
 from app.services.chat.prompt_builder import (
@@ -339,10 +340,11 @@ async def _record_memory_retrieval_feedback(
         logger.exception("[MEM-FEEDBACK] failed to record memory retrieval feedback")
 
 
-# 模板上下文轮数由 chat.context_policy 控制，取数上限与主回复共用。
+# 模板上下文轮数和主回复历史长度都由 chat.context_policy 控制 (后台可调).
 
-# 历史消息的取数上限. 真正决定注入多少的是 build_chat_messages 的 token 预算
-# (CHAT_HISTORY_TOKEN_BUDGET=4000); 这里只是给 DB 查询一个安全上界.
+# 历史消息取数上限的下限. 真正决定注入多少的是 build_chat_messages 的 token 预算
+# (默认 4000, 后台可调); 这里只是给 DB 查询一个安全上界, 预算调大时主回复按
+# context_policy.history_fetch_limit 放大取数.
 #
 # 曾经是 30, 于是预算从未生效过: 生产实测 30 行 ≈ 679 token, 只用掉预算的 17%.
 # 而 30 是**消息行数**不是对话轮数 —— AI 一次回复拆成多个气泡各占一行, 全库
@@ -351,7 +353,7 @@ async def _record_memory_retrieval_feedback(
 # 继而反问用户"会不会是你记错啦" —— 那段讨论正好落在 30 行窗口之外.
 #
 # 200 行按实测均值 ≈ 4400 token, 略高于预算, 保证是预算而不是行数在收口.
-_HISTORY_FETCH_LIMIT = 200
+_HISTORY_FETCH_LIMIT = _context_policy.HISTORY_FETCH_FLOOR
 
 
 async def _fetch_intent_context(

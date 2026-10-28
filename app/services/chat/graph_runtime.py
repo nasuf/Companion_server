@@ -83,6 +83,7 @@ class ChatFrame:
     full_response: str = ""
     get_latest_portrait: Any = None
     gift_context: dict | None = None
+    history_fetch_limit: int = 200
     intimacy_stage: str = None
     l3_memories: list[str] = None
     l3_task: asyncio.Task | None = None

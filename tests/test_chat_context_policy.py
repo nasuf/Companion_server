@@ -151,3 +151,101 @@ async def test_crisis_classifier_context_excludes_all_current_fragments(monkeypa
     context = classifier.await_args.kwargs['context']
     assert '昨天去过公园' in context and '听起来很放松' in context
     assert '片段一' not in context and '片段二' not in context
+
+
+@pytest.mark.parametrize('bad', [499, 8001, 0, True, 4000.0, '4000'])
+def test_main_history_length_rejects_out_of_range_values(bad):
+    with pytest.raises(ValueError, match='主回复历史长度'):
+        policy.apply_patch({}, {'main_history_tokens': bad})
+
+
+def test_main_history_length_saves_restores_and_falls_back():
+    saved = policy.apply_patch({'rounds': 8}, {'main_history_tokens': 6000})
+    assert saved == {'rounds': 8, 'main_history_tokens': 6000}
+    assert policy.resolve(saved).public()['main_history_token_budget'] == 6000
+    assert policy.apply_patch(saved, {'main_history_tokens': None}) == {'rounds': 8}
+    assert policy.apply_patch(saved, {'main_history_tokens': 4000}) == {'rounds': 8}
+    assert policy.apply_patch({}, {'rounds': 3, 'main_history_tokens': 500}) == {'rounds': 3, 'main_history_tokens': 500}
+    broken = policy.resolve({'rounds': 8, 'main_history_tokens': 99999})
+    assert (broken.rounds, broken.main_history_tokens, broken.valid) == (8, 4000, False)
+    assert policy.resolve({}).main_history_tokens == policy.DEFAULT_MAIN_HISTORY_TOKENS == 4000
+
+
+def test_search_turns_never_exceed_the_default_history_length():
+    longer, shorter = policy.resolve({'main_history_tokens': 8000}), policy.resolve({'main_history_tokens': 1000})
+    assert policy.main_history_budget(longer, web_search=False) == 8000
+    assert policy.main_history_budget(longer, web_search=True) == 4000
+    assert policy.main_history_budget(shorter, web_search=True) == 1000
+
+
+@pytest.mark.parametrize('tokens', range(policy.MIN_MAIN_HISTORY_TOKENS, policy.MAX_MAIN_HISTORY_TOKENS + 1, 500))
+def test_fetch_limit_always_holds_the_configured_history(tokens):
+    # Production averaged ~22 estimated tokens per stored row.
+    assert policy.history_fetch_limit(tokens) * 22 >= tokens
+    assert policy.history_fetch_limit(tokens) >= policy.HISTORY_FETCH_FLOOR
+    if tokens > policy.DEFAULT_MAIN_HISTORY_TOKENS:
+        # A raised budget keeps a 2x margin over the measured average.
+        assert policy.history_fetch_limit(tokens) * 10 >= tokens
+    else:
+        assert policy.history_fetch_limit(tokens) == policy.HISTORY_FETCH_FLOOR  # default unchanged
+
+
+@pytest.mark.parametrize('search', [False, True])
+async def test_main_history_length_reaches_fetch_window_and_trace(monkeypatch, search):
+    from unittest.mock import AsyncMock
+    from tests.graph_harness_support import configure_chat
+    from app.services.chat import orchestrator as chat
+    from app.services.chat.data_fetch_phase import FetchedContext
+    configure_chat(monkeypatch)
+    monkeypatch.setattr(runtime_config, '_GLOBAL_CACHE', {'chatContextPolicy': {'main_history_tokens': 8000}})
+    monkeypatch.setattr(chat, 'fetch_parallel_context', AsyncMock(
+        return_value=FetchedContext(memory_relevance='weak', needs_web_search=search)))
+    monkeypatch.setattr(chat, 'build_system_prompt', AsyncMock(return_value='SYS'))
+    monkeypatch.setattr(chat, 'load_ai_mood', AsyncMock(return_value=None))
+    budgets = []
+    build = chat.build_chat_messages
+
+    def capture(*args, **kwargs):
+        budgets.append(kwargs['token_budget'])
+        return build(*args, **kwargs)
+    monkeypatch.setattr(chat, 'build_chat_messages', capture)
+
+    async def reply(**kwargs):
+        assert kwargs['needs_web_search'] is search
+        messages = await kwargs['chat_messages_factory']()
+        assert messages[0] == {'role': 'system', 'content': 'SYS'}
+        return ['synthetic reply'], 'synthetic reply', False, {'emotion': '中性'}
+    monkeypatch.setattr(chat, '_generate_reply', reply)
+    events = [e async for e in chat.stream_chat_response('c-1', '合成消息', None, 'u-1')]
+    assert events[-1]['event'] == 'done'
+    assert [c.kwargs['take'] for c in chat.db.message.find_many.await_args_list] == [800]
+    assert budgets == [4000 if search else 8000]
+    saved = chat._save_replies.await_args.args[1][0]['response_diagnostics']['chat_context_policy']
+    assert saved['main_history_token_budget'] == 8000
+    window = saved['windows']['main']
+    assert window['token_budget'] == budgets[0]
+    # The harness's earlier pair is weeks old, so the 3h boundary drops it.
+    assert (window['injected_rounds'], window['injected_lines'], window['truncated']) == (0, 0, False)
+    assert window['dropped_by_gap'] == 2 and window['fetch_limited'] is False
+
+
+@pytest.mark.parametrize('rows,truncated,dropped,expected', [
+    (200, False, 0, True),    # every fetched row fit: older rows were never read
+    (200, True, 0, False),    # the token budget cut the window
+    (200, False, 3, False),   # the 3h boundary cut the window
+    (150, False, 0, False),   # the whole conversation was fetched
+])
+def test_fetch_limited_only_when_the_row_limit_bounded_the_window(monkeypatch, rows, truncated, dropped, expected):
+    from types import SimpleNamespace
+    from app.services.chat import graph_phases
+    window = {}
+
+    def build(*_, metrics, **__):
+        metrics.update(truncated=truncated, dropped_by_gap=dropped)
+        return []
+    services = SimpleNamespace(build_chat_messages=build, RECAP_GAP_SECONDS=10800)
+    ctx = SimpleNamespace(recent_messages=[object()] * rows, history_fetch_limit=200, needs_web_search=False,
+                          reengagement_gap_seconds=None)
+    monkeypatch.setattr(policy, 'note_window', lambda name, metrics: window.update(metrics))
+    graph_phases._finish_main_messages(ctx, services, 'SYS', [])
+    assert window['fetch_limited'] is expected

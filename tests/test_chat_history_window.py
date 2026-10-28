@@ -227,3 +227,31 @@ class TestDropPreGapHistory:
         assert "😊" in joined
         assert "记得" in joined
         assert "很久以前" not in joined
+
+
+def test_window_metrics_count_history_around_the_current_turn():
+    rows = []
+    for n in range(30):
+        rows += [_msg("user", f"第{n}个问题" * 20), _msg("assistant", f"第{n}个回答" * 20)]
+    rows.append(_msg("user", "当前问题"))
+    small, large = {}, {}
+    got_small = build_chat_messages("SYS", rows, token_budget=500, metrics=small)
+    got_large = build_chat_messages("SYS", rows, token_budget=8000, metrics=large)
+    assert len(got_large) > len(got_small)
+    assert small["truncated"] and not large["truncated"]
+    assert large["injected_rounds"] == 30 and large["injected_lines"] == 60
+    assert small["token_budget"] == 500 and small["injected_tokens_estimate"] <= 500
+    assert small["injected_rounds"] < 30 and small["dropped_by_gap"] == 0
+    # The current message is never counted as history.
+    assert got_large[-1]["content"].endswith("当前问题")
+
+
+def test_window_metrics_report_rows_dropped_by_a_long_gap():
+    from datetime import datetime, timedelta, timezone
+    start = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    rows = [_msg("user", "很久以前"), _msg("assistant", "嗯"), _msg("user", "现在")]
+    for row, offset in zip(rows, (0, 1, 600)):
+        row["createdAt"] = (start + timedelta(minutes=offset)).isoformat()
+    metrics = {}
+    build_chat_messages("SYS", rows, drop_older_than_seconds=3 * 3600, metrics=metrics)
+    assert metrics["dropped_by_gap"] == 2 and metrics["injected_rounds"] == 0

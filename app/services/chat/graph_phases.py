@@ -16,10 +16,15 @@ from app.services.chat.followup_policy import guard_optional_questions
 
 async def load_turn(ctx):
     services = ctx.services
+    from app.services.chat import context_policy
+
+    ctx.history_fetch_limit = context_policy.history_fetch_limit(
+        context_policy.current().main_history_tokens
+    )
     ctx.recent_messages = await services.db.message.find_many(
         where={"conversationId": ctx.conversation_id},
         order={"createdAt": "desc"},
-        take=services._HISTORY_FETCH_LIMIT,
+        take=ctx.history_fetch_limit,
     )
     ctx.recent_messages.reverse()
     ctx.messages_dicts = [
@@ -803,6 +808,35 @@ async def special_route(ctx):
     yield ctx.completed("special_route")
 
 
+def _finish_main_messages(ctx, services, system_prompt, reply_messages):
+    """Main reply history at the configured length; the window goes to the Trace."""
+    from app.services.chat import context_policy
+
+    drop_older = (
+        services.RECAP_GAP_SECONDS
+        if ctx.reengagement_gap_seconds is not None
+        and ctx.reengagement_gap_seconds >= services.RECAP_GAP_SECONDS
+        else None
+    )
+    window: dict = {}
+    chat_messages = services.build_chat_messages(
+        system_prompt, reply_messages, drop_older_than_seconds=drop_older,
+        token_budget=context_policy.main_history_budget(
+            context_policy.current(), web_search=bool(ctx.needs_web_search)
+        ),
+        metrics=window,
+    )
+    # The row limit was the bound only when every fetched row fit, none were
+    # dropped by the gap boundary and older rows may still exist.
+    window["fetch_limited"] = (
+        len(ctx.recent_messages) >= ctx.history_fetch_limit
+        and not window["truncated"]
+        and window["dropped_by_gap"] == 0
+    )
+    context_policy.note_window("main", window)
+    return chat_messages
+
+
 async def prepare_reply(ctx):
     services = ctx.services
     patience_instruction = await services.get_patience_prompt_instruction(
@@ -990,15 +1024,7 @@ async def prepare_reply(ctx):
             combined_text=ctx.aggregated_turn_text,
             combined_id=ctx.user_message_id,
         )
-        drop_older = (
-            services.RECAP_GAP_SECONDS
-            if ctx.reengagement_gap_seconds is not None
-            and ctx.reengagement_gap_seconds >= services.RECAP_GAP_SECONDS
-            else None
-        )
-        return services.build_chat_messages(
-            system_prompt, reply_messages, drop_older_than_seconds=drop_older
-        )
+        return _finish_main_messages(ctx, services, system_prompt, reply_messages)
 
     ctx._build_main_chat_messages = _build_main_chat_messages
     selected_ids = [getattr(m, "id", "") for m in ctx.classified_memories or []]

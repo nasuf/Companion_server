@@ -1434,6 +1434,7 @@ def build_chat_messages(
     token_budget: int = CHAT_HISTORY_TOKEN_BUDGET,
     *,
     drop_older_than_seconds: float | None = None,
+    metrics: dict | None = None,
 ) -> list[dict]:
     """Return a list of role/content dicts ready for LLM consumption.
 
@@ -1473,6 +1474,9 @@ def build_chat_messages(
     session_recap 段 (chat/session_recap) 仍在 system_prompt 里, 给模型"上次聊到
     什么"的语义抓手, 只是不再把原文塞回历史里. 3h 阈值跟 topic 栈重置 / recap
     触发对齐 (topic.TOPIC_RESET_GAP_SECONDS / session_recap.RECAP_GAP_SECONDS).
+
+    metrics: 传入 dict 时就地写入本次实际放入的历史 (不含最后一条当前消息) 的
+    轮数、条数、估算 token, 以及是否因预算或 3h 间隔少放了更早的内容.
     """
     from app.services.memory.retrieval.context_selector import estimate_tokens
 
@@ -1503,9 +1507,20 @@ def build_chat_messages(
         f"{format_message_timestamp(msg.get('createdAt'))}{msg.get('content', '')}"
         for msg in coalesced
     ]
-    start = _select_history_window(
-        coalesced, token_budget, [estimate_tokens(text) for text in rendered],
-    )
+    token_counts = [estimate_tokens(text) for text in rendered]
+    start = _select_history_window(coalesced, token_budget, token_counts)
+    if metrics is not None:
+        # The last row is the current turn: report only the history around it.
+        history = slice(start, len(coalesced) - 1 if coalesced else 0)
+        metrics.update({
+            "token_budget": token_budget,
+            "injected_rounds": sum(m["role"] == "user" for m in coalesced[history]),
+            "injected_lines": len(coalesced[history]),
+            "injected_tokens_estimate": sum(token_counts[history]),
+            "truncated": start > 0,
+            "dropped_by_gap": len(messages) - len(window),
+            "token_basis": "context_selector heuristic; not provider billable tokens",
+        })
 
     lead, turn = split_system_prompt(system_prompt)
     result: list[dict] = [{"role": "system", "content": lead}]

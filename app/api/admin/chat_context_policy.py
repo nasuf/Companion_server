@@ -36,7 +36,8 @@ async def _payload(raw):
                                'max_context_chars': effective.max_chars,
                                'line_chars': policy.LINE_CHARS,
                                'window_caps': policy.window_caps(),
-                               'note': '实际 token 与对话长度及模型有关；主回复历史预算不变。请结合 Trace 和逐轮评测判断。'},
+                               'search_main_history_tokens': policy.SEARCH_MAIN_HISTORY_TOKENS,
+                               'note': '实际 token 与对话长度及模型有关。请结合 Trace 和逐轮评测判断。'},
             'sampled_at': datetime.now(UTC).isoformat(),
             'changes_limit': 30,
             'changes': [{**row, 'created_at': _utc_iso(row['created_at']),
@@ -71,9 +72,14 @@ async def put_policy(payload: PolicyPatch, admin: dict = Depends(require_admin_j
         if changed:
             await tx.execute_raw('UPDATE system_config SET chat_context_policy=$1::jsonb, '
                                  'updated_at=CURRENT_TIMESTAMP WHERE id=1', json.dumps(updated) if updated else None)
-            changes = [{'key': 'rounds', 'before': policy.resolve(raw).rounds,
-                        'after': policy.resolve(updated).rounds,
-                        'restored_default': payload.values.get('rounds') is None}]
+            before, after = policy.resolve(raw), policy.resolve(updated)
+            # Resolved values are what turns used; stored values keep a reset
+            # invalid value visible (resolved 4000 → 4000 would hide it).
+            changes = [{'key': key, 'before': getattr(before, key), 'after': getattr(after, key),
+                        'stored_before': raw.get(key), 'stored_after': updated.get(key),
+                        'restored_default': payload.values[key] is None}
+                       for key in ('rounds', 'main_history_tokens')
+                       if key in payload.values and raw.get(key) != updated.get(key)]
             await tx.execute_raw('INSERT INTO chat_context_policy_changes (id,admin_id,changes) '
                                  'VALUES ($1,$2,$3::jsonb)', str(uuid.uuid4()),
                                  str(admin.get('sub') or '') or None, json.dumps(changes))
@@ -100,21 +106,28 @@ async def context_usage(days: int = Query(7, ge=1, le=30)):
             AND created_at < $2::timestamp ORDER BY created_at DESC, id DESC LIMIT 10001
         )
         SELECT u.id, u.tokens_by_model, u.cost_cny, u.web_search_calls,
-               t.extra_json->'metadata'->'chat_context_policy'->>'effective_rounds' AS rounds
+               t.extra_json->'metadata'->'chat_context_policy'->>'effective_rounds' AS rounds,
+               t.extra_json->'metadata'->'chat_context_policy'->>'main_history_token_budget' AS main_tokens
         FROM bounded u LEFT JOIN trace_runs t ON t.run_id=u.trace_id''',
         start.replace(tzinfo=None).isoformat(), now.replace(tzinfo=None).isoformat())
     if len(rows) > 10000:
         raise HTTPException(422, '该时间窗超过 10000 个回合，请缩短时间窗；未返回截断统计')
+
+    def setting(row):
+        n, tokens = str(row.get('rounds') or ''), str(row.get('main_tokens') or '')
+        return (int(n) if n.isdigit() and policy.MIN_ROUNDS <= int(n) <= policy.MAX_ROUNDS else None,
+                int(tokens) if tokens.isdigit() else None)
+
     groups = {}
     for row in rows:
-        n = str(row.get('rounds') or '')
-        n = int(n) if n.isdigit() and 1 <= int(n) <= 20 else None
+        n, main_tokens = setting(row)
         buckets = policy.stored(row.get('tokens_by_model'))
         for model, tokens in buckets.items():
             if not isinstance(tokens, dict):
                 continue
-            key = (n, model)
-            group = groups.setdefault(key, {'rounds': n, 'model': model, 'turns': 0,
+            key = (n, main_tokens, model)
+            group = groups.setdefault(key, {'rounds': n, 'main_history_tokens': main_tokens,
+                'model': model, 'turns': 0,
                 'input_tokens': 0, 'cached_input_tokens': 0, 'output_tokens': 0,
                 'cache_known_input_tokens': 0, 'cache_unknown_turns': 0})
             group['turns'] += 1
@@ -129,14 +142,14 @@ async def context_usage(days: int = Query(7, ge=1, le=30)):
                 group['cache_known_input_tokens'] += int(tokens.get('input') or 0)
             else:
                 group['cache_unknown_turns'] += 1
-    # Persisted turn cost is a sum across models. Group it by N separately rather
-    # than attributing the whole turn's cost to each model (double counting).
+    # Persisted turn cost is a sum across models. Group it by setting separately
+    # rather than attributing the whole turn's cost to each model (double counting).
     costs = {}
     for row in rows:
-        n = str(row.get('rounds') or '')
-        n = int(n) if n.isdigit() and 1 <= int(n) <= 20 else None
-        item = costs.setdefault(n, {'rounds': n, 'turns': 0, 'recorded_token_cost_cny': 0,
-                                     'web_search_calls': 0})
+        n, main_tokens = setting(row)
+        item = costs.setdefault((n, main_tokens), {'rounds': n, 'main_history_tokens': main_tokens,
+                                                    'turns': 0, 'recorded_token_cost_cny': 0,
+                                                    'web_search_calls': 0})
         item['turns'] += 1
         item['recorded_token_cost_cny'] += float(row.get('cost_cny') or 0)
         item['web_search_calls'] += int(row.get('web_search_calls') or 0)
@@ -152,4 +165,4 @@ async def context_usage(days: int = Query(7, ge=1, le=30)):
             'notes': ['轮数未知：历史未采集、Trace关闭或已过保留期；不回填当前值。',
                       '缓存只对已核实"0=未命中"的供应商（方舟）计入；其他供应商记录的0视为未知，不当作未命中。',
                       '费用按回合已记录token费用；搜索按0.004元/次标准化，非免费额度账单。',
-                      '该轮数仅控制模板上下文，主回复继续4000token历史预算。']}
+                      '轮数控制模板上下文；主回复历史长度单独分组，联网搜索回合最多 4000 token。']}
