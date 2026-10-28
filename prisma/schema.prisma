@@ -85,7 +85,7 @@ model User {
   timeCapsules             TimeCapsule[]
   lastWills                LastWill[]
   dailyActivities          UserDailyActivity[]
-  dailyFacts               UserDailyFact[]
+  dailyFacts               UserDailyFact[] @ignore
   gameSessions             GameSession[]
   nativeGameSkillStates    NativeGameSkillState[]
   musicFavorites           MusicFavorite[]
@@ -837,6 +837,9 @@ model UserDailyFact {
   @@id([userId, localDate])
   @@index([localDate], map: "user_daily_facts_local_date_idx")
   @@map("user_daily_facts")
+  // Written and read only by raw SQL (effect/daily_facts.py). Keep the migration
+  // model without generated client types: the worker import budget is tight.
+  @@ignore
 }
 
 // UXM01.02 derived cache: day x metric x cohort x dimension aggregates. Never
@@ -859,6 +862,8 @@ model MetricsDaily {
 
   @@id([localDate, metric, cohort, dimension, dimensionValue])
   @@map("metrics_daily")
+  // Raw SQL only, like user_daily_facts above.
+  @@ignore
 }
 
 model AchievementUnlock {
