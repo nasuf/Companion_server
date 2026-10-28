@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1449,8 +1450,9 @@ def build_chat_messages(
 
     同一次回复被拆成的多个气泡先合并成一条再计预算（见 `_coalesce_bubbles`）。
 
-    布局为 [稳定 system] + 历史 + [本轮 system]: system 提示词里每轮都变的段落
-    (状态/时间/记忆/条数…) 放到历史之后 (见 SystemPromptText). 放在历史之前时
+    布局为 [稳定 system] + 历史 + [本轮参考 system] + 当前用户消息 + [输出格式 system]
+    (见 _place_turn_system): system 提示词里每轮都变的段落 (状态/时间/记忆/条数…)
+    放到历史之后 (见 SystemPromptText). 放在历史之前时
     它们每轮都变, 后面约 4000 token 的历史永远命中不了 provider 前缀缓存
     (2026-10-15 trace: 8075 输入只命中 3896). 窗口起点对齐到稳定切点
     (`_select_history_window`), 否则预算一满起点每轮都挪, 缓存同样落空.
@@ -1529,5 +1531,46 @@ def build_chat_messages(
         for msg, text in zip(coalesced[start:], rendered[start:])
     )
     if turn:
-        result.append({"role": "system", "content": turn})
+        _place_turn_system(result, turn)
     return result
+
+
+# 本轮段里紧贴生成位置的输出格式要求; 其余本轮参考信息放在当前用户消息之前.
+_TURN_TAIL_TITLES = ("条数变化", "避免重复", "联网结果使用", "刚聊过的作品", "情绪标记")
+
+
+def _place_turn_system(result: list[dict], turn: str) -> None:
+    """Put the per-turn system part around the current user message.
+
+    Reference sections (state / time / memories / …) go just before the current
+    user message, so the message being answered is the last thing the model
+    reads; the short output-format tail (条数变化 / 避免重复 / 联网结果使用 /
+    刚聊过的作品 / 情绪标记) stays after it, next to generation. Joining every
+    system message in order still reproduces the full system prompt, so
+    fold_trailing_system and the trace's component spans see the same text.
+
+    Evidence (paired replay 2026-10-28, roadmap CHAT01.09.4 turn_layout_eval; 44 main
+    cases x 2 turns x 3, light and memory-heavy per-turn parts): judged passes 260→262 and 258→263,
+    [EMO:] marker presence 84.8%→96.6% and 74.2%→88.3%; turn-2+ cache hit rate
+    −1.6 points (the previous user message no longer shares the prefix), p90
+    first token +2–6%.
+    """
+    if len(result) < 2 or result[-1]["role"] != "user":
+        result.append({"role": "system", "content": turn})
+        return
+    # A tail section starts the turn part or follows the join separator; cutting
+    # exactly at the separator keeps every byte (section bodies may end in "\n").
+    cuts = [m.start() for title in _TURN_TAIL_TITLES
+            for m in re.finditer(rf"(?m)^## {re.escape(title)}\n", turn)
+            if m.start() == 0 or turn[m.start() - 2:m.start()] == "\n\n"]
+    cut = min(cuts) if cuts else None
+    if cut is None:
+        head, tail = turn, ""
+    else:
+        head, tail = (turn[:cut - 2], turn[cut:]) if cut else ("", turn)
+    current = result.pop()
+    if head:
+        result.append({"role": "system", "content": head})
+    result.append(current)
+    if tail:
+        result.append({"role": "system", "content": tail})

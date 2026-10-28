@@ -716,23 +716,32 @@ def _extract_first_user_message(inputs: Any) -> str | None:
 
 
 def _extract_trailing_system_message(inputs: Any) -> str | None:
-    """Content of the last input message when it is a system message after others."""
+    """Per-turn system parts after the first message, joined in order.
+
+    The main reply sends its per-turn sections as system messages after the
+    history: reference sections just before the current user message and the
+    output-format tail after it (older traces: one system message at the end).
+    Joined with blank lines they are the turn part of the rendered prompt.
+    """
     if not isinstance(inputs, dict):
         return None
     messages = inputs.get("messages")
     if not isinstance(messages, list) or not messages:
         return None
     flat = [m for group in messages for m in (group if isinstance(group, list) else [group])]
-    if len(flat) < 2 or not isinstance(flat[-1], dict):
-        return None
-    last = flat[-1]
-    kwargs = last.get("kwargs") or {}
-    ids = last.get("id")
-    is_system = kwargs.get("type") == "system" or last.get("type") == "system" or (
-        isinstance(ids, list) and "SystemMessage" in ids
-    )
-    content = kwargs.get("content") if kwargs else last.get("content")
-    return content if is_system and isinstance(content, str) else None
+    parts = []
+    for message in flat[1:]:
+        if not isinstance(message, dict):
+            continue
+        kwargs = message.get("kwargs") or {}
+        ids = message.get("id")
+        is_system = kwargs.get("type") == "system" or message.get("type") == "system" or (
+            isinstance(ids, list) and "SystemMessage" in ids
+        )
+        content = kwargs.get("content") if kwargs else message.get("content")
+        if is_system and isinstance(content, str):
+            parts.append(content)
+    return "\n\n".join(parts) or None
 
 
 def _extract_output_text(outputs: Any) -> str:
@@ -906,8 +915,8 @@ def apply_prompt_render_traces(
             continue
         matched = by_hash.get(prompt_hash(rendered_prompt))
         if not matched:
-            # Main reply: per-turn sections travel as a trailing system message
-            # after the history; spans were recorded over lead + "\n\n" + turn.
+            # Main reply: per-turn sections travel as system messages after the
+            # history; spans were recorded over lead + "\n\n" + turn.
             trailing = _extract_trailing_system_message(step.get("inputs"))
             if trailing:
                 matched = by_hash.get(prompt_hash(f"{rendered_prompt}\n\n{trailing}"))

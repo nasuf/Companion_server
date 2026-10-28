@@ -1,5 +1,8 @@
 """Main reply prompt layout: stable system + history + per-turn system.
 
+Since 2026-10-28 the per-turn part is split around the current user message:
+reference sections before it, the output-format tail after it.
+
 2026-10-15 trace: of 8075 input tokens only 3896 hit the provider prefix cache.
 The per-turn sections (state, time, reply timing with a microsecond timestamp,
 topic turn count, …) sat at the end of the leading system prompt, so the ~4000
@@ -57,13 +60,32 @@ class TestSplitLayout:
 
         messages = pb.build_chat_messages(prompt, history)
 
-        assert [m["role"] for m in messages] == ["system", "user", "assistant", "user", "system"]
-        lead, turn = messages[0]["content"], messages[-1]["content"]
+        assert [m["role"] for m in messages] == ["system", "user", "assistant", "system", "user", "system"]
+        lead, head, current, tail = (messages[i]["content"] for i in (0, 3, 4, 5))
         assert "## 回复要求" in lead and "## 对话一致性" in lead
         assert "## 时间" not in lead and "## 条数变化" not in lead
-        assert turn.startswith("## 时间") and "## 条数变化" in turn
+        # Reference sections precede the message being answered; only the
+        # output-format tail follows it.
+        assert head.startswith("## 时间") and "## 条数变化" not in head and "## 情绪标记" not in head
+        assert current.endswith("在干嘛")
+        assert tail.startswith("## 条数变化") and "## 情绪标记" in tail and "## 时间" not in tail
         # Trace spans were recorded over the joined text; it must stay byte-identical.
-        assert f"{lead}\n\n{turn}" == str(prompt)
+        assert f"{lead}\n\n{head}\n\n{tail}" == str(prompt)
+        assert pb.fold_trailing_system(messages)[0]["content"] == str(prompt)
+        assert pb.fold_trailing_system(messages)[-1]["role"] == "user"
+
+    @pytest.mark.parametrize("turn,roles", [
+        ("## 时间\n下午三点", ["system", "user", "assistant", "system", "user"]),       # no tail sections
+        ("## 情绪标记\n末尾输出标记", ["system", "user", "assistant", "user", "system"]),  # tail only
+    ])
+    def test_turn_part_with_only_one_side(self, turn, roles):
+        prompt = pb.SystemPromptText(f"稳定段\n\n{turn}", turn_offset=len("稳定段") + 2)
+        rows = [{"role": "user", "content": "嗨"}, {"role": "assistant", "content": "在呢"},
+                {"role": "user", "content": "在干嘛"}]
+        messages = pb.build_chat_messages(prompt, rows)
+        assert [m["role"] for m in messages] == roles
+        assert [m["content"] for m in messages if m["role"] == "system"][1:] == [turn]
+        assert pb.fold_trailing_system(messages)[0]["content"] == str(prompt)
 
     async def test_lead_is_identical_across_turns(self):
         first = await _system_prompt(time_context="当前时间：15时", last_reply_count=3)
@@ -73,6 +95,30 @@ class TestSplitLayout:
     def test_plain_string_prompt_keeps_single_system(self):
         messages = pb.build_chat_messages("系统", [{"role": "user", "content": "嗨"}])
         assert [m["role"] for m in messages] == ["system", "user"]
+
+    def test_split_keeps_every_byte_of_the_prompt(self):
+        # A reference section body ending in a newline (as 事件日期证据 does) must
+        # survive the cut, or trace spans and the folded prompt would drift.
+        turn = "## 时间\n下午三点\n\n## 事件日期证据\n证据\n\n\n## 条数变化\n别等于3\n"
+        prompt = pb.SystemPromptText(f"稳定段\n\n{turn}", turn_offset=len("稳定段") + 2)
+        messages = pb.build_chat_messages(prompt, [{"role": "user", "content": "在干嘛"}])
+        assert [m["role"] for m in messages] == ["system", "system", "user", "system"]
+        assert messages[1]["content"] == "## 时间\n下午三点\n\n## 事件日期证据\n证据\n"
+        assert messages[3]["content"] == "## 条数变化\n别等于3\n"
+        assert "\n\n".join(m["content"] for m in messages if m["role"] == "system") == str(prompt)
+        assert pb.fold_trailing_system(messages)[0]["content"] == str(prompt)
+
+    def test_title_inside_a_body_is_not_a_section_start(self):
+        turn = "## 时间\n下午三点\n## 情绪标记\n写在正文里\n\n## 情绪标记\n真正的尾段"
+        prompt = pb.SystemPromptText(f"稳定段\n\n{turn}", turn_offset=len("稳定段") + 2)
+        messages = pb.build_chat_messages(prompt, [{"role": "user", "content": "在干嘛"}])
+        assert messages[-1]["content"] == "## 情绪标记\n真正的尾段"
+        assert "写在正文里" in messages[1]["content"]
+
+    def test_turn_part_stays_last_without_a_current_user_message(self):
+        prompt = pb.SystemPromptText("稳定段\n\n## 情绪标记\n标记", turn_offset=len("稳定段") + 2)
+        messages = pb.build_chat_messages(prompt, [{"role": "assistant", "content": "早"}])
+        assert [m["role"] for m in messages] == ["system", "assistant", "system"]
 
     def test_fold_restores_the_single_system_layout(self):
         prompt = pb.SystemPromptText("稳定段\n\n本轮段", turn_offset=len("稳定段") + 2)
@@ -222,3 +268,24 @@ async def test_temporal_sections_have_separate_editable_spans_after_stable_prefi
                             "chat.temporal_evidence": "今天没有该事件的来源证据"}
     finally:
         reset_prompt_render_trace(token)
+
+
+@pytest.mark.parametrize("split", [True, False])
+def test_trace_matches_main_prompt_split_around_the_current_message(split):
+    """Spans are recorded over lead + turn; the trace must find them whether the
+    turn part is one trailing system message (older traces) or two around the
+    current user message."""
+    from app.services.chat.trace_enrich import apply_prompt_render_traces
+    from app.services.prompting.trace_components import prompt_hash
+
+    lead, head, tail = "## 回复要求\n短", "## 时间\n下午三点", "## 情绪标记\n输出标记"
+    full = f"{lead}\n\n{head}\n\n{tail}"
+    sys_msg = lambda text: {"kwargs": {"content": text, "type": "system"}}  # noqa: E731
+    user = {"kwargs": {"content": "在干嘛", "type": "human"}}
+    messages = ([sys_msg(lead), sys_msg(head), user, sys_msg(tail)] if split
+                else [sys_msg(lead), user, sys_msg(f"{head}\n\n{tail}")])
+    trace = {"prompt_hash": prompt_hash(full), "prompt_key": "chat.system_base", "source": "chat.system_prompt",
+             "components": [{"prompt_key": "chat.response_instruction", "start": 9, "end": 10, "editable": True}]}
+    step = apply_prompt_render_traces([{"run_type": "llm", "inputs": {"messages": [messages]}}], [trace])[0]
+    assert step["prompt_key"] == "chat.system_base"
+    assert [c["prompt_key"] for c in step["prompt_components"]] == ["chat.response_instruction"]
