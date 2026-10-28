@@ -53,12 +53,14 @@ class Stream(httpx.AsyncByteStream):
 
 
 @asynccontextmanager
-async def clients(monkeypatch, behavior='ok', backup_behavior='ok'):
+async def clients(monkeypatch, behavior='ok', backup_behavior='ok', billing_code=None):
     calls, streams = [], []
     async def handler(request):
         body=json.loads(request.content); name=body['model']; calls.append(body)
         mode=behavior if name=='primary' else backup_behavior
         if mode=='fail':
+            if billing_code:
+                return httpx.Response(403, json={'error': {'code': billing_code, 'message': 'synthetic billing'}})
             return httpx.Response(503,json={'error':{'message':'synthetic outage','type':'unavailable'}})
         if body.get('stream'):
             stream=Stream(name,mode); streams.append(stream)
@@ -250,3 +252,41 @@ async def test_unary_failure_keeps_no_success_metadata(monkeypatch):
         assert metadata=={}
         assert [c['model'] for c in calls]==['primary','backup']
         assert 'dashscope' in resilience._breakers and 'ollama' not in resilience._breakers
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('behavior', ['ok', 'fail'])
+async def test_utility_cloud_backup_is_independent_and_records_actual_route(monkeypatch, stream, behavior):
+    async with clients(monkeypatch, behavior) as (primary, backup, calls, streams):
+        object.__setattr__(primary, '_companion_provider', 'dashscope')
+        object.__setattr__(primary, '_companion_role', 'utility')
+        object.__setattr__(backup, '_companion_provider', 'deepseek')
+        monkeypatch.setattr(models, 'get_fallback_utility_model', lambda: backup)
+        def wrong_backup(): raise AssertionError('utility must not use chat backup')
+        monkeypatch.setattr(models, 'get_fallback_chat_model', wrong_backup)
+        token = usage_tracker.start_session(); metadata = {}
+        try:
+            result, _ = await models.invoke_json_with_usage(primary, 'synthetic', profile=profile(stream),
+                                                            invocation_metadata=metadata)
+        finally:
+            summary = usage_tracker.flush_session(token)
+        actual = 'dashscope/primary' if behavior == 'ok' else 'deepseek/backup'
+        assert result == {'reply': '合成回复'}
+        assert metadata == {'actual_model': actual}
+        assert summary['tokens_by_model'] == {actual: {'input': 12, 'output': 5, 'cached_input': 4}}
+        assert summary['fallback_count'] == (behavior == 'fail')
+        assert all(s.closed for s in streams)
+
+
+def test_utility_and_grounding_factories_keep_separate_roles(monkeypatch):
+    monkeypatch.setattr(settings, 'deepseek_api_key', 'synthetic')
+    monkeypatch.setattr(settings, 'dashscope_api_key', 'synthetic')
+    monkeypatch.setattr(models, '_provider_for', lambda role: 'dashscope')
+    monkeypatch.setattr(models, '_utility_model_name', lambda: 'qwen3.5-flash')
+    utility = models.get_utility_model()
+    assert getattr(utility, '_companion_role') == 'utility'
+    assert models._resolve_usage_model_key(models.get_fallback_for(utility)) == 'deepseek/deepseek-v4-flash'
+    assert getattr(models.get_grounding_model(), '_companion_role', None) != 'utility'
+    assert getattr(models._build_chat_model('dashscope', 'qwen3.5-flash'), '_companion_role', None) != 'utility'
+    models._build_utility_model.cache_clear()
+    models._build_grounding_model.cache_clear()

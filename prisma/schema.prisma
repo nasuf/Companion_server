@@ -2960,3 +2960,16 @@ model MemoryMessageAuditCursor {
   @@ignore
   @@map("memory_message_audit_cursors")
 }
+
+// Billing incidents contain only route identifiers, allowlisted codes and times.
+model LlmProviderIncident {
+  provider String
+  model String
+  code String
+  firstFailureAt DateTime @map("first_failure_at") @db.Timestamptz
+  lastFailureAt DateTime @map("last_failure_at") @db.Timestamptz
+  lastSuccessStartedAt DateTime? @map("last_success_started_at") @db.Timestamptz
+  @@id([provider, model])
+  @@ignore
+  @@map("llm_provider_incidents")
+}

@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # Independent of the primary route and the local embedding service.
     fallback_chat_provider: str = "dashscope"
     fallback_chat_model: str = "qwen3.5-plus"
+    # Utility requests normally use DashScope; their backup must be independent.
+    fallback_utility_provider: str = "deepseek"
+    fallback_utility_model: str = "deepseek-v4-flash"
     # Short voice messages in chat use the native DashScope multimodal HTTP
     # endpoint.  Keep this separate from the OpenAI-compatible LLM base URL.
     dashscope_asr_endpoint: str = (

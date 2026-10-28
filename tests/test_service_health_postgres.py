@@ -194,3 +194,115 @@ async def test_a_quiet_first_sample_sends_nothing(world, monkeypatch):
     await h.sample_and_notify()
     assert await database.query_raw("SELECT id FROM notification_events WHERE user_id=$1", admin) == []
     assert (await h.read_status())["level"] == "normal"
+
+
+@pytest.fixture
+async def budget_world(world, monkeypatch):
+    from app.services.ops import provider_budget as b
+    database, *rest = world
+    monkeypatch.setattr(b, 'db', database)
+    monkeypatch.setattr(b, '_active', set())
+    monkeypatch.setattr(b, '_pending', {})
+    monkeypatch.setattr(b, '_overflow', False)
+    model = 'budget-test-' + uuid4().hex
+    try:
+        yield b, database, model
+    finally:
+        await database.execute_raw('DELETE FROM llm_provider_incidents WHERE model=$1', model)
+
+
+def budget_error(code):
+    import httpx
+    from openai import APIStatusError
+    return APIStatusError('private billing detail', response=httpx.Response(403, request=httpx.Request('POST', 'https://example.invalid')),
+                          body={'error': {'code': code}})
+
+
+async def test_billing_incident_durable_across_workers_and_only_later_same_route_success_recovers(budget_world):
+    b, database, model = budget_world
+    before = datetime.now(UTC) - timedelta(seconds=1)
+    await asyncio.gather(*(b.record_failure('ark', model, budget_error('AccountOverdueError')) for _ in range(4)))
+    rows = await database.query_raw('SELECT provider,model,code,last_failure_at FROM llm_provider_incidents WHERE model=$1', model)
+    assert len(rows) == 1 and rows[0]['code'] == 'AccountOverdueError'
+    # Fresh worker/restart loads durable active failures, without relying on Redis.
+    b._active.clear()
+    await b.refresh_active()
+    assert ('ark', model) in b._active
+    await b.record_success('dashscope', model, datetime.now(UTC))
+    await b.record_success('ark', model, before)  # overlap: request started before failure
+    assert any(i['model'] == model for i in (await b.measure(datetime.now(UTC), {}))['incidents'])
+    await b.record_success('ark', model, datetime.now(UTC))
+    await b.refresh_active()
+    assert ('ark', model) not in b._active
+    assert not any(i['model'] == model for i in (await b.measure(datetime.now(UTC), {}))['incidents'])
+    # A delayed failure observation cannot replace newer successful recovery.
+    await b._persist(('ark', model), ('SetLimitExceeded', before, before))
+    await b.refresh_active()
+    assert ('ark', model) not in b._active
+
+
+async def test_billing_notice_outbox_deduplicates_workers_and_new_episode_notifies(budget_world, world, monkeypatch):
+    b, database, model = budget_world
+    admin = world[-1]
+    monkeypatch.setattr(h, 'CHECKS', {'provider_budget': b.measure})
+    await b.record_failure('ark', model, budget_error('SetLimitExceeded'))
+    await asyncio.gather(h.sample_and_notify(), h.sample_and_notify())
+    events = await database.query_raw('SELECT type,title,body FROM notification_events WHERE user_id=$1', admin)
+    assert len(events) == 1 and events[0]['type'] == 'admin_service_health'
+    assert '额度耗尽' in events[0]['body'] and model in events[0]['body']
+    assert 'private' not in events[0]['body']
+    await age(database); await h.sample_and_notify()
+    assert await database.notificationevent.count(where={'userId': admin}) == 1
+    await b.record_success('ark', model, datetime.now(UTC))
+    await age(database); await h.sample_and_notify()
+    assert await database.notificationevent.count(where={'userId': admin}) == 2
+    await b.record_failure('ark', model, budget_error('AccountOverdueError'))
+    await age(database); await h.sample_and_notify()
+    assert await database.notificationevent.count(where={'userId': admin}) == 3
+    status = await h.read_status()
+    assert status['level'] == 'warning' and status['sample']['checks']['provider_budget']['balance_status'] == 'not_collected'
+
+
+async def test_database_observation_failure_never_claims_balance_healthy(budget_world, monkeypatch):
+    b, database, model = budget_world
+    original = b._persist
+    monkeypatch.setattr(b, '_persist', AsyncMock(side_effect=RuntimeError('synthetic outage')))
+    await b.record_failure('ark', model, budget_error('AccountOverdueError'))
+    assert (await b.measure(datetime.now(UTC), {}))['status'] == 'unknown'
+    monkeypatch.setattr(b, '_persist', original)
+    await b.refresh_active()
+    assert not b._pending
+    sample = await b.measure(datetime.now(UTC), {})
+    assert sample['status'] == 'measured' and any(i['model'] == model for i in sample['incidents'])
+
+
+@pytest.mark.parametrize('stream', [False, True])
+async def test_forced_utility_billing_failure_replies_via_backup_and_queues_one_admin_alert(budget_world, world, monkeypatch, stream):
+    from tests.test_cloud_fallback import clients, profile
+    from app.services.llm import models, resilience, usage_tracker
+    b, database, _ = budget_world
+    admin = world[-1]
+    monkeypatch.setattr(h, 'CHECKS', {'provider_budget': b.measure})
+    resilience.reset_breakers_for_testing(); resilience.reset_slots_for_testing()
+    try:
+        async with clients(monkeypatch, 'fail', billing_code='Arrearage') as (primary, backup, calls, streams):
+            object.__setattr__(primary, '_companion_provider', 'dashscope')
+            object.__setattr__(primary, '_companion_role', 'utility')
+            object.__setattr__(backup, '_companion_provider', 'deepseek')
+            monkeypatch.setattr(models, 'get_fallback_utility_model', lambda: backup)
+            metadata = {}; token = usage_tracker.start_session()
+            try:
+                result, _ = await models.invoke_json_with_usage(primary, 'synthetic',
+                    profile=profile(stream), invocation_metadata=metadata)
+            finally:
+                usage = usage_tracker.flush_session(token)
+            assert result == {'reply': '合成回复'} and metadata['actual_model'] == 'deepseek/backup'
+            assert list(usage['tokens_by_model']) == ['deepseek/backup']
+            assert ('dashscope', 'primary') in b._active
+            await asyncio.gather(h.sample_and_notify(), h.sample_and_notify())
+            events = await database.query_raw('SELECT type,body FROM notification_events WHERE user_id=$1', admin)
+            assert len(events) == 1 and 'dashscope/primary（欠费）' in events[0]['body']
+            assert events[0]['type'] == 'admin_service_health'
+    finally:
+        await database.execute_raw("DELETE FROM llm_provider_incidents WHERE model IN ('primary','backup')")
+        resilience.reset_breakers_for_testing(); resilience.reset_slots_for_testing()

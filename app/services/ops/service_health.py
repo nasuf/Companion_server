@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from app.config import settings
 from app.db import db
 from app.services.notifications.service import enqueue_notification
+from app.services.ops import provider_budget
 
 SAMPLE_SECONDS = 120
 STALE_SECONDS = 600
@@ -42,6 +43,7 @@ LABELS = {
     "reply_failed": "回复生成失败",
     "memory_blocked": "记忆写入受阻",
     "cron_failing": "定时任务失败",
+    "provider_budget": "模型供应商欠费或额度耗尽",
 }
 
 
@@ -149,7 +151,8 @@ async def _cron_failing(now: datetime, carry: dict) -> dict:
 
 
 CHECKS = {"unanswered": _unanswered, "reply_failed": _reply_failed,
-          "memory_blocked": _memory_blocked, "cron_failing": _cron_failing}
+          "memory_blocked": _memory_blocked, "cron_failing": _cron_failing,
+          "provider_budget": provider_budget.measure}
 
 
 async def collect_metrics(now: datetime | None = None, carry: dict | None = None) -> dict:
@@ -194,6 +197,10 @@ def decide(level: str, sample: dict, notified: dict, unknown_streak: int) -> tup
     previous = notified.get("level", "normal")
     if level == "warning":
         failing = set(alerting_checks(sample))
+        # A second provider/model incident must notify even while another route
+        # is already blocked. Recovery/reoccurrence is a distinct incident too.
+        for incident in sample["checks"].get("provider_budget", {}).get("incidents", []):
+            failing.add(f"provider_budget:{incident['provider']}/{incident['model']}:{incident['first_failure_at']}")
         known = set(notified.get("checks", [])) if previous == "warning" else set()
         return previous != "warning" or bool(failing - known), {"level": "warning", "checks": sorted(known | failing)}
     if level == "unknown":
@@ -218,6 +225,11 @@ def message_for(level: str, sample: dict) -> tuple[str, str]:
                 parts.append(f"{c['count']}个会话的记忆写入失败超过{c['after_minutes']}分钟，用户仍在聊天")
             elif name == "cron_failing":
                 parts.append(f"{c['count']}个定时任务失败：{'、'.join(c['jobs'][:3])}")
+            elif name == "provider_budget":
+                incidents = c.get("incidents", [])
+                parts.append("模型调用出现欠费或额度耗尽：" + "、".join(
+                    f"{i['provider']}/{i['model']}（{'欠费' if i['reason'] == 'overdue' else '额度耗尽'}）"
+                    for i in incidents[:3]) if incidents else "模型费用故障记录不完整，请检查监控")
         return "服务告警", "；".join(parts) + "。详情见Web后台资源监控。"
     if level == "unknown":
         missing = [LABELS[n] for n, c in checks.items() if c["status"] != "measured"]
@@ -239,6 +251,12 @@ async def sample_and_notify() -> None:
 
     It rides the local Redis-health job, so it keeps running while Redis is down.
     """
+    # Each worker needs recovery candidates even when a peer owns the sample.
+    # A failed refresh must not prevent the other service checks from running.
+    try:
+        await provider_budget.refresh_active()
+    except Exception:
+        pass
     now = datetime.now(UTC)
     rows = await db.query_raw("SELECT sampled_at, snapshot FROM ops_service_health WHERE id='primary'")
     if rows and rows[0].get("sampled_at") and (now - _timestamp(rows[0]["sampled_at"])).total_seconds() < SAMPLE_SECONDS - 10:

@@ -484,6 +484,8 @@ async def call_with_resilience(
     op: str,
     fallback_factory: Callable[[], Awaitable[Any]] | None = None,
     fallback_provider: str = "ollama",
+    primary_model_name: str = "",
+    fallback_model_name: str = "",
 ) -> Any:
     """Unary LLM call with timeout + retry + CB + 可选备选供应商 fallback.
 
@@ -494,9 +496,17 @@ async def call_with_resilience(
 
     同一级别 fallback 也可能失败; 最终抛 LLMFailedError, 调用方自己静态兜底.
     """
+    from app.services.ops.provider_budget import observed_call
+
+    async def primary_observed():
+        return await observed_call(primary_factory, primary_provider, primary_model_name)
+
+    async def fallback_observed():
+        return await observed_call(fallback_factory, fallback_provider, fallback_model_name)
+
     try:
         return await _run_with_retry(
-            primary_factory, provider=primary_provider, profile=profile, op=op,
+            primary_observed, provider=primary_provider, profile=profile, op=op,
         )
     except LLMFailedError as primary_exc:
         if fallback_factory is None or not profile.allow_ollama_fallback:
@@ -509,7 +519,7 @@ async def call_with_resilience(
 
     try:
         return await _run_with_retry(
-            fallback_factory, provider=fallback_provider, profile=profile, op=f"{op}:fallback",
+            fallback_observed, provider=fallback_provider, profile=profile, op=f"{op}:fallback",
         )
     except LLMFailedError as fallback_exc:
         raise LLMFailedError(
@@ -651,6 +661,9 @@ async def _stream_provider(
 ) -> AsyncIterator[str]:
     """在单一 provider 上跑 stream; 管理 first_chunk_timeout 和总 timeout + CB."""
     last_usage: dict = {}
+    from app.services.ops.provider_budget import observed_stream
+    source_factory = factory
+    factory = lambda: observed_stream(source_factory, provider, model_name)
 
     if not settings.llm_resilience_enabled:
         started = time.monotonic()

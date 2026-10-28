@@ -124,8 +124,26 @@ jobs:
           psql -h 127.0.0.1 -p 5433 -U postgres -d companion_erasure_e2e -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS extensions; CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;'
           prisma migrate deploy
 
-      - name: Install pinned browser for real API regression
-        run: python -m playwright install --with-deps chromium
+      - name: Resolve pinned Playwright browser cache key
+        id: playwright-version
+        run: python -c 'import importlib.metadata,os; open(os.environ["GITHUB_OUTPUT"], "a").write("version=" + importlib.metadata.version("playwright") + "\n")'
+
+      - name: Cache pinned Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-ubuntu24-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install browser system dependencies
+        timeout-minutes: 5
+        run: python -m playwright install-deps chromium
+
+      - name: Ensure pinned browser for real API regression
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT: '60000'
+        # Idempotent on cache hits; still repairs missing binaries in a partial cache.
+        run: python -m playwright install chromium
 
       - name: Run ALL backend tests with real disposable dependencies
         run: python scripts/run_regression_gate.py --output reports/regression

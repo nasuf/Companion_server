@@ -88,11 +88,24 @@ def _build_chat_model(provider: str, model: str) -> BaseChatModel:
 
 @lru_cache(maxsize=256)
 def _build_utility_model(provider: str, model: str) -> BaseChatModel:
+    value = build_chat_model(provider, model)
+    object.__setattr__(value, "_companion_role", "utility")
+    return value
+
+
+@lru_cache(maxsize=256)
+def _build_grounding_model(provider: str, model: str) -> BaseChatModel:
+    # The calibrated verifier is not a small-model task, even on DashScope.
     return build_chat_model(provider, model)
 
 
 @lru_cache(maxsize=256)
 def _build_fallback_chat_model(provider: str, model: str) -> BaseChatModel:
+    return build_chat_model(provider, model)
+
+
+@lru_cache(maxsize=256)
+def _build_fallback_utility_model(provider: str, model: str) -> BaseChatModel:
     return build_chat_model(provider, model)
 
 
@@ -139,12 +152,18 @@ def get_grounding_model() -> BaseChatModel:
     """Use the calibrated verifier on DashScope; keep offline/provider routing."""
     provider = _provider_for("utility")
     model = settings.persona_grounding_model if provider == "dashscope" else _utility_model_name()
-    return _build_utility_model(provider, model)
+    return _build_grounding_model(provider, model)
 
 
 def get_fallback_chat_model() -> BaseChatModel:
     return _build_fallback_chat_model(
         settings.fallback_chat_provider, settings.fallback_chat_model,
+    )
+
+
+def get_fallback_utility_model() -> BaseChatModel:
+    return _build_fallback_utility_model(
+        settings.fallback_utility_provider, settings.fallback_utility_model,
     )
 
 
@@ -159,7 +178,9 @@ def get_fallback_for(primary: BaseChatModel) -> BaseChatModel | None:
     if provider_name(primary) == "ollama":
         return None
     try:
-        fallback = get_fallback_chat_model()
+        fallback = (get_fallback_utility_model()
+                    if getattr(primary, "_companion_role", None) == "utility"
+                    else get_fallback_chat_model())
     except ValueError:
         logger.error("[LLM-FALLBACK] backup model configuration unavailable")
         return None
@@ -414,6 +435,8 @@ async def _invoke_with_resilience(
         op=op,
         fallback_factory=fallback_factory,
         fallback_provider=provider_name(fallback) if fallback is not None else "",
+        primary_model_name=_resolve_usage_model_key(model),
+        fallback_model_name=_resolve_usage_model_key(fallback) if fallback is not None else "",
     )
 
 
