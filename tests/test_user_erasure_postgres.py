@@ -534,6 +534,72 @@ async def test_peer_notification_still_blocks_erasure(erased_pair):
 
 
 @pytest.mark.asyncio
+async def test_derived_trace_rows_and_vip_author_do_not_block_erasure(erased_pair):
+    database, _, _, records = erased_pair
+    target, survivor = records
+    code = "erase-" + uuid4().hex
+    await database.execute_raw(
+        """
+        INSERT INTO vip_activation_codes (code, duration_days, created_by)
+        VALUES ($1, 30, $2)
+        """,
+        code,
+        target[0].id,
+    )
+    await database.execute_raw(
+        """
+        INSERT INTO stats_token_reconciliation (
+            trace_id, local_date, scope, status, release_qualified, data,
+            definition_version, computed_at
+        )
+        VALUES ($1, CURRENT_DATE, 'chat', 'missing_usage', false, '{}'::jsonb,
+                'test', CURRENT_TIMESTAMP)
+        """,
+        target[6],
+    )
+    await database.execute_raw(
+        """
+        INSERT INTO stats_token_reconciliation (
+            trace_id, local_date, user_id, conversation_id, scope, status,
+            release_qualified, data, definition_version, computed_at
+        )
+        VALUES ($1, CURRENT_DATE, $2, $3, 'chat', 'matched', true, '{}'::jsonb,
+                'test', CURRENT_TIMESTAMP)
+        """,
+        survivor[6],
+        survivor[0].id,
+        survivor[3].id,
+    )
+    try:
+        assert (await data_reset.hard_delete_user_data(target[0].id))["user"] == 1
+        created = await database.query_raw(
+            "SELECT created_by FROM vip_activation_codes WHERE code=$1", code
+        )
+        assert created[0]["created_by"] is None
+        assert await database.query_raw(
+            "SELECT trace_id FROM stats_token_reconciliation WHERE trace_id=$1",
+            target[6],
+        ) == []
+        kept = await database.query_raw(
+            "SELECT user_id FROM stats_token_reconciliation WHERE trace_id=$1",
+            survivor[6],
+        )
+        assert kept[0]["user_id"] == survivor[0].id
+    finally:
+        await database.execute_raw(
+            "UPDATE users SET status='active' WHERE id=$1 AND status='deleting'",
+            target[0].id,
+        )
+        await database.execute_raw(
+            "DELETE FROM vip_activation_codes WHERE code=$1", code
+        )
+        await database.execute_raw(
+            "DELETE FROM stats_token_reconciliation WHERE trace_id=ANY($1::text[])",
+            [target[6], survivor[6]],
+        )
+
+
+@pytest.mark.asyncio
 async def test_media_write_fence_serializes_delete_and_refuses_late_upload(erased_pair):
     import asyncio
     from fastapi import HTTPException

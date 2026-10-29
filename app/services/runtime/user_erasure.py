@@ -404,6 +404,22 @@ async def delete_unlinked_rows(tx: Any, uid: str, scope: dict) -> None:
         "DELETE FROM trace_runs WHERE trace_id=ANY($1::text[])",
         sorted(scope["trace_id"]),
     )
+    # Derived per-trace rows can outlive the owner: missing-usage samples keep
+    # the trace id with a null user. The user foreign key only removes rows
+    # that still name the account.
+    await tx.execute_raw(
+        """
+        DELETE FROM stats_token_reconciliation
+        WHERE user_id=$1
+           OR trace_id=ANY($2::text[])
+           OR conversation_id=ANY($3::text[])
+           OR agent_id=ANY($4::text[])
+        """,
+        uid,
+        sorted(scope["trace_id"]),
+        sorted(scope["conversation_id"]),
+        sorted(scope["agent_id"]),
+    )
     # These have no user FK in the old schema. Keep the explicit list reviewed;
     # the catalog-based postcondition detects new tables rather than skipping them.
     for table in ("speech_usage", "tts_usage"):
@@ -413,12 +429,21 @@ async def delete_unlinked_rows(tx: Any, uid: str, scope: dict) -> None:
         uid,
     )
     # Shared tuning/config history belongs to the system; redact its actor only.
+    # created_by is a real user foreign key, so a sentinel string is rejected.
     await tx.execute_raw(
         "UPDATE proactive_tuning_changes SET admin_id='[deleted]' WHERE admin_id=$1",
         uid,
     )
     await tx.execute_raw(
-        "UPDATE vip_activation_codes SET created_by='[deleted]' WHERE created_by=$1",
+        "UPDATE runtime_config_changes SET admin_id='[deleted]' WHERE admin_id=$1",
+        uid,
+    )
+    await tx.execute_raw(
+        "UPDATE chat_context_policy_changes SET admin_id='[deleted]' WHERE admin_id=$1",
+        uid,
+    )
+    await tx.execute_raw(
+        "UPDATE vip_activation_codes SET created_by=NULL WHERE created_by=$1",
         uid,
     )
     await tx.execute_raw(
