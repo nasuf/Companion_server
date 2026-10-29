@@ -176,6 +176,41 @@ async def assert_isolated_owner(tx: Any, uid: str) -> None:
         raise RuntimeError("Cross-owner cover requires repair before deletion")
 
 
+async def _delete_admin_subject_alerts(tx: Any, uid: str, scope: dict) -> None:
+    """Drop operator alerts whose only subject is the account being erased.
+
+    Takeover and new-user notifications are stored on the admin, with the
+    subject's conversation, message, or user id attached. The preview is a copy
+    of that account. Unrelated admin alerts, and any non-admin row that points
+    at the same resource, stay in place so a real cross-owner link still fails.
+    """
+    await tx.execute_raw(
+        """
+        DELETE FROM notification_events AS alert
+        USING users AS admin
+        WHERE alert.user_id = admin.id
+          AND admin.role = 'admin'
+          AND alert.user_id <> $1
+          AND (
+            alert.conversation_id = ANY($2::text[])
+            OR alert.message_id = ANY($3::text[])
+            OR alert.agent_id = ANY($4::text[])
+            OR alert.workspace_id = ANY($5::text[])
+            OR alert.payload->>'user_id' = $1
+            OR alert.payload->>'conversation_id' = ANY($2::text[])
+            OR alert.payload->>'message_id' = ANY($3::text[])
+            OR alert.payload->>'agent_id' = ANY($4::text[])
+            OR alert.payload->>'workspace_id' = ANY($5::text[])
+          )
+        """,
+        uid,
+        sorted(scope.get("conversation_id") or ()),
+        sorted(scope.get("message_id") or ()),
+        sorted(scope.get("agent_id") or ()),
+        sorted(scope.get("workspace_id") or ()),
+    )
+
+
 async def capture_erasure_scope(tx: Any, uid: str) -> dict[str, Any]:
     scope: dict[str, Any] = {"user_id": {uid}}
     for name, table in [
@@ -270,6 +305,10 @@ async def capture_erasure_scope(tx: Any, uid: str) -> dict[str, Any]:
     }
     scope["openid"] = {row["openid"] for row in identities if row.get("openid")}
     scope["unionid"] = {row["unionid"] for row in identities if row.get("unionid")}
+    # Admin inbox copies name the subject but are addressed to an operator.
+    # They are removed here, before the cross-owner check, because their
+    # conversation/message columns would otherwise look like a peer's records.
+    await _delete_admin_subject_alerts(tx, uid, scope)
     # A bad legacy owner edge must be repaired rather than cascade into a peer.
     columns = await tx.query_raw("""SELECT table_name,array_agg(column_name::text) AS columns
         FROM information_schema.columns WHERE table_schema='public'
@@ -290,7 +329,8 @@ async def capture_erasure_scope(tx: Any, uid: str) -> dict[str, Any]:
             )
             if conflict[0]["conflict"]:
                 raise RuntimeError(
-                    "Cross-owner resource link requires repair before deletion"
+                    "Cross-owner resource link requires repair before deletion: "
+                    f"{row['table_name']}.{column}"
                 )
     provenance = await tx.query_raw(
         "SELECT EXISTS(SELECT 1 FROM memory_evidence_links WHERE source_user_id=$1 AND user_id<>$1) AS conflict",

@@ -428,6 +428,111 @@ async def test_conversation_set_null_does_not_stick_deleting_account(erased_pair
         )
 
 
+async def _insert_alert(
+    database,
+    *,
+    user_id: str,
+    type_: str,
+    dedupe: str,
+    conversation_id: str | None = None,
+    message_id: str | None = None,
+    payload: dict | None = None,
+) -> str:
+    rows = await database.query_raw(
+        """
+        INSERT INTO notification_events (
+            user_id, conversation_id, message_id, type, title, body, payload, dedupe_key
+        )
+        VALUES ($1, $2, $3, $4, 'subject', 'preview', $5::jsonb, $6)
+        RETURNING id
+        """,
+        user_id,
+        conversation_id,
+        message_id,
+        type_,
+        json.dumps(payload or {}),
+        dedupe,
+    )
+    return rows[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_admin_subject_alerts_do_not_block_erasure(erased_pair):
+    database, _, _, records = erased_pair
+    target, survivor = records
+    admin = await database.user.create(
+        data={"username": "erase-admin-" + uuid4().hex, "role": "admin"}
+    )
+    takeover = await _insert_alert(
+        database,
+        user_id=admin.id,
+        type_="admin_takeover_message",
+        dedupe="takeover-" + target[4].id,
+        conversation_id=target[3].id,
+        message_id=target[4].id,
+        payload={"conversation_id": target[3].id, "message_id": target[4].id},
+    )
+    signup = await _insert_alert(
+        database,
+        user_id=admin.id,
+        type_="admin_new_user",
+        dedupe="signup-" + target[0].id,
+        payload={"user_id": target[0].id},
+    )
+    unrelated = await _insert_alert(
+        database,
+        user_id=admin.id,
+        type_="admin_redis_capacity",
+        dedupe="redis-" + uuid4().hex,
+        payload={"route": "system"},
+    )
+    try:
+        assert (await data_reset.hard_delete_user_data(target[0].id))["user"] == 1
+        assert await database.user.find_unique(where={"id": target[0].id}) is None
+        assert await database.user.find_unique(where={"id": admin.id})
+        assert await database.user.find_unique(where={"id": survivor[0].id})
+        remaining = await database.query_raw(
+            "SELECT id FROM notification_events WHERE user_id=$1 ORDER BY id",
+            admin.id,
+        )
+        assert [row["id"] for row in remaining] == [unrelated]
+        assert takeover not in {row["id"] for row in remaining}
+        assert signup not in {row["id"] for row in remaining}
+    finally:
+        await database.execute_raw(
+            "UPDATE users SET status='active' WHERE id=$1 AND status='deleting'",
+            target[0].id,
+        )
+        await database.user.delete_many(where={"id": admin.id})
+
+
+@pytest.mark.asyncio
+async def test_peer_notification_still_blocks_erasure(erased_pair):
+    database, _, _, records = erased_pair
+    target, survivor = records
+    alert = await _insert_alert(
+        database,
+        user_id=survivor[0].id,
+        type_="agent_message",
+        dedupe="peer-" + target[4].id,
+        conversation_id=target[3].id,
+        message_id=target[4].id,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="notification_events.conversation_id"):
+            await data_reset.hard_delete_user_data(target[0].id)
+        assert await database.user.find_unique(where={"id": target[0].id})
+        assert await database.query_raw(
+            "SELECT id FROM notification_events WHERE id=$1", alert
+        )
+    finally:
+        await database.execute_raw(
+            "UPDATE users SET status='active' WHERE id=$1 AND status='deleting'",
+            target[0].id,
+        )
+        await database.execute_raw("DELETE FROM notification_events WHERE id=$1", alert)
+
+
 @pytest.mark.asyncio
 async def test_media_write_fence_serializes_delete_and_refuses_late_upload(erased_pair):
     import asyncio
