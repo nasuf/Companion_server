@@ -14,6 +14,12 @@ import json
 import re
 from typing import Any
 
+# Transaction-local GUC. hard_delete_user_data sets it so foreign-key
+# ON DELETE SET NULL can clear resource pointers while the owner is already
+# 'deleting'. Other sessions never see it, so late writes stay rejected.
+# The SQL guard reads this exact name.
+ERASURE_USER_SETTING = "app.account_erasure_user"
+
 _SCOPE_COLUMNS = (
     "user_id",
     "owner_user_id",

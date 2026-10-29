@@ -1256,10 +1256,10 @@ async def _hard_delete_user_data(user_id: str) -> dict[str, int]:
 
 async def hard_delete_user_data(user_id: str) -> dict[str, int]:
     from app.services.runtime.user_erasure import (
-        assert_isolated_owner, capture_erasure_scope, delete_unlinked_rows,
-        clear_private_redis, verify_erasure, delete_cover_ledger,
+        ERASURE_USER_SETTING, assert_isolated_owner, begin_erasure,
+        capture_erasure_scope, clear_private_redis, delete_cover_ledger,
+        delete_unlinked_rows, verify_erasure,
     )
-    from app.services.runtime.user_erasure import begin_erasure
     await begin_erasure(db, user_id)
     from app.services.runtime.ws_manager import manager
     await manager.revoke_user(user_id, redis=await get_redis())
@@ -1267,6 +1267,13 @@ async def hard_delete_user_data(user_id: str) -> dict[str, int]:
         token = _transaction_db.set(tx)
         try:
             await tx.execute_raw("SET LOCAL lock_timeout='5s'")
+            # Lets this transaction's own FK maintenance pass guard_erasure_owner_active.
+            # is_local=true clears the setting on commit or rollback.
+            await tx.execute_raw(
+                "SELECT set_config($1, $2, true)",
+                ERASURE_USER_SETTING,
+                user_id,
+            )
             await tx.query_raw("SELECT id FROM users WHERE id=$1 FOR UPDATE", user_id)
             for table in ("ai_agents", "chat_workspaces", "conversations"):
                 await tx.query_raw(f'SELECT id FROM "{table}" WHERE user_id=$1 FOR UPDATE',user_id)

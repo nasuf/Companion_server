@@ -353,6 +353,81 @@ async def test_media_disk_failure_retains_retry_handles_and_other_files(
     assert not blocked.exists()
 
 
+def _offering_id() -> str:
+    return uuid4().hex
+
+
+async def _insert_offering(database, user_id: str, agent_id: str, conversation_id: str) -> str:
+    offering_id = _offering_id()
+    await database.execute_raw(
+        """
+        INSERT INTO user_offerings (
+            id, user_id, agent_id, conversation_id, kind,
+            ticket_amount, agent_value_yuan, status
+        )
+        VALUES ($1, $2, $3, $4, 'gift', 1, 1, 'sent')
+        """,
+        offering_id,
+        user_id,
+        agent_id,
+        conversation_id,
+    )
+    return offering_id
+
+
+@pytest.mark.asyncio
+async def test_conversation_set_null_does_not_stick_deleting_account(erased_pair):
+    """ON DELETE SET NULL must not abort erasure once the owner is deleting.
+
+    user_offerings.conversation_id uses SET NULL, and the owner guard fires on
+    that column. Without a transaction-local erasure marker the delete rolls
+    back and the WeChat identity stays attached to a deleting account.
+    """
+    database, _, _, records = erased_pair
+    target, survivor = records
+    uid = target[0].id
+    other = survivor[0].id
+    owned = await _insert_offering(database, uid, target[1].id, target[3].id)
+    peer = await _insert_offering(database, other, survivor[1].id, survivor[3].id)
+    try:
+        await database.execute_raw("UPDATE users SET status='deleting' WHERE id=$1", uid)
+        with pytest.raises(RawQueryError, match="Account unavailable"):
+            await database.execute_raw(
+                "UPDATE user_offerings SET conversation_id=NULL WHERE id=$1",
+                owned,
+            )
+        # Rebinding the row to someone else stays refused even inside erasure.
+        with pytest.raises(RawQueryError, match="Account unavailable"):
+            async with database.tx() as tx:
+                await tx.execute_raw(
+                    "SELECT set_config($1, $2, true)",
+                    user_erasure.ERASURE_USER_SETTING,
+                    uid,
+                )
+                await tx.execute_raw(
+                    "UPDATE user_offerings SET user_id=$2 WHERE id=$1",
+                    owned,
+                    other,
+                )
+        await database.execute_raw("UPDATE users SET status='active' WHERE id=$1", uid)
+        assert (await data_reset.hard_delete_user_data(uid))["user"] == 1
+        assert await database.user.find_unique(where={"id": uid}) is None
+        assert await database.query_raw(
+            "SELECT id FROM user_offerings WHERE id=$1", owned
+        ) == []
+        peer_row = await database.query_raw(
+            "SELECT user_id, conversation_id FROM user_offerings WHERE id=$1",
+            peer,
+        )
+        assert peer_row[0]["user_id"] == other
+        assert peer_row[0]["conversation_id"] == survivor[3].id
+    finally:
+        await database.execute_raw(
+            "UPDATE users SET status='active' WHERE id=$1 AND status='deleting'",
+            uid,
+        )
+
+
 @pytest.mark.asyncio
 async def test_media_write_fence_serializes_delete_and_refuses_late_upload(erased_pair):
     import asyncio
