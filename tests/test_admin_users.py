@@ -158,6 +158,7 @@ def test_list_users_excludes_template_system_user(api_client):
     fake_db.user.count = AsyncMock(return_value=1)
     fake_db.user.find_many = AsyncMock(return_value=[_fake_user_row()])
     fake_db.authidentity.find_many = AsyncMock(return_value=[])
+    fake_db.query_raw = AsyncMock(return_value=[])
 
     try:
         with patch("app.api.admin.users.db", fake_db):
@@ -176,7 +177,7 @@ def test_list_users_excludes_template_system_user(api_client):
 def test_list_users_searches_all_fields_with_pagination(api_client, query):
     app, require_admin_jwt = _admin_override()
     fake_db = MagicMock()
-    fake_db.query_raw = AsyncMock(side_effect=[[{"total": 41}], [{"id": "user-1"}]])
+    fake_db.query_raw = AsyncMock(side_effect=[[{"total": 41}], [{"id": "user-1"}], []])
     fake_db.user.find_many = AsyncMock(return_value=[_fake_user_row()])
     fake_db.authidentity.find_many = AsyncMock(return_value=[])
     try:
@@ -185,7 +186,7 @@ def test_list_users_searches_all_fields_with_pagination(api_client, query):
         assert response.status_code == 200
         assert response.json()["total"] == 41
         assert response.json()["users"][0]["id"] == "user-1"
-        count_call, page_call = fake_db.query_raw.await_args_list
+        count_call, page_call, _last_chat = fake_db.query_raw.await_args_list
         count_sql, page_sql = count_call.args[0], page_call.args[0]
         assert count_call.args[1:] == (f"%{query}%", TEMPLATE_SYSTEM_USERNAME)
         assert page_call.args[1:] == (f"%{query}%", TEMPLATE_SYSTEM_USERNAME, 30, 30)
@@ -210,7 +211,7 @@ def test_list_users_searches_all_fields_with_pagination(api_client, query):
 def test_list_users_empty_search_page_preserves_total(api_client):
     app, require_admin_jwt = _admin_override()
     fake_db = MagicMock()
-    fake_db.query_raw = AsyncMock(side_effect=[[{"total": 1}], []])
+    fake_db.query_raw = AsyncMock(side_effect=[[{"total": 1}], [], []])
     fake_db.user.find_many = AsyncMock(return_value=[])
     fake_db.authidentity.find_many = AsyncMock(return_value=[])
     try:
@@ -270,3 +271,72 @@ def test_delete_user_cleanup_failure_is_not_reported_as_success(api_client):
         assert "删除未完成" in response.json()["detail"]
         assert "PRIVATE_DISK_PATH" not in response.text
     finally:app.dependency_overrides.pop(admin,None)
+
+
+def test_serialize_admin_user_exposes_platform_and_activity_times():
+    user = SimpleNamespace(
+        id="user-1", username="alice", role="user", createdAt=datetime(2026, 6, 1, tzinfo=UTC),
+        status="active", archivedAt=None, signupSource="wechat_h5", signupPlatform="ios",
+        lastSeenAt=datetime(2026, 10, 28, 12, 0), agents=[],
+    )
+    payload = _serialize_admin_user(user, [], last_chat_at="2026-10-28T11:30:00")
+    assert payload["signup_platform"] == "ios"
+    # Naive UTC columns are emitted with an explicit offset so the browser does not read them as local time.
+    assert payload["last_seen_at"] == "2026-10-28T12:00:00+00:00"
+    assert payload["last_chat_at"] == "2026-10-28T11:30:00+00:00"
+    assert _serialize_admin_user(user, [], last_chat_at=None)["last_chat_at"] is None
+
+
+def test_list_users_filters_by_login_platform_and_activity_windows(api_client):
+    app, require_admin_jwt = _admin_override()
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=[[{"total": 2}], [{"id": "user-2"}, {"id": "user-1"}], []])
+    fake_db.user.find_many = AsyncMock(return_value=[_fake_user_row("user-1"), _fake_user_row("user-2", "bob")])
+    fake_db.authidentity.find_many = AsyncMock(return_value=[])
+    try:
+        with patch("app.api.admin.users.db", fake_db):
+            response = api_client.get("/admin-api/users", params={
+                "login": "wechat", "platform": "ios", "registered": "30d",
+                "last_login": "over7d", "last_chat": "never", "sort": "last_chat_at", "limit": 30,
+            })
+        assert response.status_code == 200
+        # The SQL page order wins (most recent chat first), not the ORM's created_at order.
+        assert [u["id"] for u in response.json()["users"]] == ["user-2", "user-1"]
+        count_call, page_call, _ = fake_db.query_raw.await_args_list
+        sql, params = count_call.args[0], count_call.args[1:]
+        assert params[0] == TEMPLATE_SYSTEM_USERNAME and "u.username <> $1" in sql
+        assert params[1] == "wechat" and "li.provider = $2" in sql
+        assert params[2] == "ios" and "u.signup_platform = $3" in sql
+        assert "u.created_at >= $4::timestamp" in sql
+        assert "u.last_seen_at < $5::timestamp" in sql
+        assert "lc.last_chat_at IS NULL" in sql and "LEFT JOIN LATERAL" in sql
+        assert "lc.last_chat_at DESC NULLS LAST" in page_call.args[0]
+        assert page_call.args[-2:] == (30, 0)
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+@pytest.mark.parametrize("params", [{"platform": "symbian"}, {"last_chat": "2d"}, {"sort": "username"}, {"login": "qq"}])
+def test_list_users_rejects_unknown_filter_values(api_client, params):
+    app, require_admin_jwt = _admin_override()
+    try:
+        assert api_client.get("/admin-api/users", params=params).status_code == 422
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_list_users_unknown_platform_and_password_login(api_client):
+    app, require_admin_jwt = _admin_override()
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=[[{"total": 0}], [], []])
+    fake_db.user.find_many = AsyncMock(return_value=[])
+    fake_db.authidentity.find_many = AsyncMock(return_value=[])
+    try:
+        with patch("app.api.admin.users.db", fake_db):
+            api_client.get("/admin-api/users", params={"platform": "unknown", "login": "password"})
+        sql = fake_db.query_raw.await_args_list[0].args[0]
+        assert "u.hashed_password IS NOT NULL" in sql
+        assert "u.signup_platform IS NULL OR NOT (u.signup_platform = ANY($2::text[]))" in sql
+        assert "LEFT JOIN LATERAL" not in sql  # only joined when the last-chat filter or sort needs it
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)

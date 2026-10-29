@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -29,6 +30,22 @@ class UpdateUserRoleRequest(BaseModel):
         return v
 
 router = APIRouter(prefix="/admin-api/users", tags=["admin-users"])
+
+
+def _utc_iso(value) -> str | None:
+    """Timestamp columns are UTC without a zone; always emit an explicit offset."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
 
 
 def _text_or_none(value) -> str | None:
@@ -198,6 +215,7 @@ def _serialize_admin_user(
     identities: list[object],
     *,
     agent_count: int | None = None,
+    last_chat_at=None,
 ) -> dict:
     resolved_agent_count = (
         agent_count
@@ -223,6 +241,12 @@ def _serialize_admin_user(
         if getattr(user, "archivedAt", None)
         else None,
         "signup_source": getattr(user, "signupSource", None),
+        # 注册时采集的平台 (ios / android / web); 旧账号可能为空。
+        "signup_platform": getattr(user, "signupPlatform", None),
+        # 最近一次登录或打开 App (含自动登录与心跳), 由 user_activity 写入。
+        "last_seen_at": _utc_iso(getattr(user, "lastSeenAt", None)),
+        # 最近一条用户消息的时间; 从未发过消息为 None。
+        "last_chat_at": _utc_iso(last_chat_at),
         "agent_count": resolved_agent_count,
         "wechat": _serialize_wechat_identity(
             _first_identity(identities, _WECHAT_PROVIDER)
@@ -296,11 +320,58 @@ async def memory_overview(_: dict = Depends(require_admin_jwt)):
     }
 
 
+Window = Literal["", "1d", "7d", "30d", "over7d", "over30d", "never"]
+SignupWindow = Literal["", "1d", "7d", "30d", "over7d", "over30d"]
+_PLATFORMS = ("ios", "android", "web")
+_SORT_COLUMNS = {
+    "created_at": "u.created_at",
+    "last_seen_at": "u.last_seen_at",
+    "last_chat_at": "lc.last_chat_at",
+}
+# A user's latest own message across all conversations (messages(conversation_id, created_at) index).
+_LAST_CHAT_JOIN = """
+            LEFT JOIN LATERAL (
+                SELECT max(m.created_at) AS last_chat_at
+                FROM conversations c JOIN messages m ON m.conversation_id = c.id
+                WHERE c.user_id = u.id AND m.role = 'user'
+            ) lc ON TRUE"""
+
+
+def _window_sql(column: str, window: str, params: list, now: datetime) -> str | None:
+    """"1d"/"7d"/"30d": within the last N days; "overN d": longer ago; "never": no record."""
+    if not window:
+        return None
+    if window == "never":
+        return f"{column} IS NULL"
+    days = int(window.removeprefix("over").removesuffix("d"))
+    params.append((now - timedelta(days=days)).astimezone(UTC).replace(tzinfo=None).isoformat())
+    return f"{column} {'<' if window.startswith('over') else '>='} ${len(params)}::timestamp"
+
+
+async def _last_chat_by_user(user_ids: list[str]) -> dict[str, object]:
+    if not user_ids:
+        return {}
+    rows = await db.query_raw(
+        """SELECT c.user_id, max(m.created_at) AS last_chat_at
+        FROM conversations c JOIN messages m ON m.conversation_id = c.id
+        WHERE c.user_id = ANY($1::text[]) AND m.role = 'user'
+        GROUP BY c.user_id""",
+        user_ids,
+    )
+    return {r["user_id"]: r["last_chat_at"] for r in rows}
+
+
 @router.get("")
 async def list_users(
     search: str = "",
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    login: Literal["", "wechat", "phone", "password"] = "",
+    platform: Literal["", "ios", "android", "web", "unknown"] = "",
+    registered: SignupWindow = "",
+    last_login: Window = "",
+    last_chat: Window = "",
+    sort: Literal["created_at", "last_seen_at", "last_chat_at"] = "created_at",
     _: dict = Depends(require_admin_jwt),
 ):
     # The reserved template system user owns all agent templates; hide it from
@@ -308,11 +379,15 @@ async def list_users(
     # never touch it.
     conditions: list[dict] = [{"username": {"not": TEMPLATE_SYSTEM_USERNAME}}]
     query = search.strip()
-    if query:
-        # EXISTS avoids duplicate users when several login identities match.
-        search_where = """
-            FROM users u
-            WHERE u.username <> $2 AND (
+    filtered = bool(query or login or platform or registered or last_login or last_chat)
+    if filtered or sort != "created_at":
+        now = datetime.now(UTC)
+        params: list = []
+        where: list[str] = []
+        if query:
+            params.append(f"%{query}%")
+            # EXISTS avoids duplicate users when several login identities match.
+            where.append("""(
                 u.username ILIKE $1 OR u.id ILIKE $1
                 OR u.display_name ILIKE $1 OR u.email ILIKE $1
                 OR EXISTS (
@@ -322,21 +397,52 @@ async def list_users(
                         OR (ai.provider = 'phone' AND ai.provider_account_id ILIKE $1)
                     )
                 )
+            )""")
+        params.append(TEMPLATE_SYSTEM_USERNAME)
+        where.insert(0, f"u.username <> ${len(params)}")
+        if login == "password":
+            where.append("u.hashed_password IS NOT NULL")
+        elif login:
+            params.append(login)
+            where.append(
+                f"EXISTS (SELECT 1 FROM auth_identities li WHERE li.user_id = u.id AND li.provider = ${len(params)})"
             )
+        if platform == "unknown":
+            params.append(list(_PLATFORMS))
+            where.append(f"(u.signup_platform IS NULL OR NOT (u.signup_platform = ANY(${len(params)}::text[])))")
+        elif platform:
+            params.append(platform)
+            where.append(f"u.signup_platform = ${len(params)}")
+        for column, window in (
+            ("u.created_at", registered),
+            ("u.last_seen_at", last_login),
+            ("lc.last_chat_at", last_chat),
+        ):
+            clause = _window_sql(column, window, params, now)
+            if clause:
+                where.append(clause)
+        join = _LAST_CHAT_JOIN if last_chat or sort == "last_chat_at" else ""
+        from_sql = f"""
+            FROM users u{join}
+            WHERE {" AND ".join(where)}
         """
-        pattern = f"%{query}%"
-        count_rows = await db.query_raw(
-            f"SELECT COUNT(*)::int AS total {search_where}",
-            pattern, TEMPLATE_SYSTEM_USERNAME,
+        order = (
+            "u.created_at DESC, u.id"
+            if sort == "created_at"
+            else f"{_SORT_COLUMNS[sort]} DESC NULLS LAST, u.created_at DESC, u.id"
         )
+        count_rows = await db.query_raw(f"SELECT COUNT(*)::int AS total {from_sql}", *params)
         total = count_rows[0]["total"]
+        n = len(params)
         rows = await db.query_raw(
-            f"SELECT u.id {search_where} ORDER BY u.created_at DESC, u.id LIMIT $3 OFFSET $4",
-            pattern, TEMPLATE_SYSTEM_USERNAME, limit, offset,
+            f"SELECT u.id {from_sql} ORDER BY {order} LIMIT ${n + 1} OFFSET ${n + 2}",
+            *params, limit, offset,
         )
-        conditions.append({"id": {"in": [row["id"] for row in rows]}})
+        page_ids = [row["id"] for row in rows]
+        conditions.append({"id": {"in": page_ids}})
         skip = 0
     else:
+        page_ids = None
         total = await db.user.count(where={"AND": conditions})
         skip = offset
     users = await db.user.find_many(
@@ -346,7 +452,12 @@ async def list_users(
         skip=skip,
         include={"agents": True},
     )
+    if page_ids is not None:
+        # The SQL page decides the order (e.g. most recent chat first).
+        rank = {user_id: i for i, user_id in enumerate(page_ids)}
+        users.sort(key=lambda u: rank.get(u.id, len(rank)))
     identities_by_user = await _identities_by_user([u.id for u in users])
+    last_chats = await _last_chat_by_user([u.id for u in users])
 
     return {
         "users": [
@@ -354,6 +465,7 @@ async def list_users(
                 u,
                 identities_by_user.get(u.id, []),
                 agent_count=len(u.agents) if u.agents else 0,
+                last_chat_at=last_chats.get(u.id),
             )
             for u in users
         ],
@@ -433,8 +545,11 @@ async def get_user_detail(
             ],
         })
 
+    last_chats = await _last_chat_by_user([user_id])
     return {
-        "user": _serialize_admin_user(user, identities, agent_count=len(agents)),
+        "user": _serialize_admin_user(
+            user, identities, agent_count=len(agents), last_chat_at=last_chats.get(user_id),
+        ),
         "workspaces": [
             {
                 "id": w.id,

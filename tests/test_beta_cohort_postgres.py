@@ -255,3 +255,62 @@ async def test_internal_flag_toggle_changes_cohort_and_cache_identity(pg):
         listed = await client.get("/admin-api/users", params={"search": "cohort-"})
         row = next(u for u in listed.json()["users"] if u["id"] == ids.flagged)
         assert row["is_internal"] is True and row["counts_as_internal"] is True
+
+
+async def test_admin_user_list_filters_and_activity_fields_on_real_sql(pg):
+    """Platform, login method, registration / last login / last chat windows and last-chat sort."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    recent, old = await _user(pg), await _user(pg)
+    silent = await _user(pg)
+    await pg.db.execute_raw(
+        "UPDATE users SET signup_platform=$2, last_seen_at=$3::timestamp, created_at=$4::timestamp WHERE id=$1",
+        recent, "ios", (now - timedelta(hours=2)).isoformat(), (now - timedelta(days=3)).isoformat())
+    await pg.db.execute_raw(
+        "UPDATE users SET signup_platform=$2, last_seen_at=$3::timestamp, created_at=$4::timestamp WHERE id=$1",
+        old, "android", (now - timedelta(days=40)).isoformat(), (now - timedelta(days=60)).isoformat())
+    await pg.db.execute_raw(
+        "UPDATE users SET signup_platform=NULL, last_seen_at=NULL, created_at=$2::timestamp WHERE id=$1",
+        silent, (now - timedelta(days=1)).isoformat())
+    await pg.db.execute_raw(
+        "INSERT INTO auth_identities (id, user_id, provider, provider_account_id, raw_profile, updated_at)"
+        " VALUES ($1,$2,'wechat',$3,'{\"nickname\":\"合成\",\"sex\":0}'::jsonb,NOW())",
+        uuid4().hex, recent, uuid4().hex)
+    conversation = await _conversation(pg, recent)
+    await _message(pg, conversation, "user", now - timedelta(hours=3))
+    await _message(pg, conversation, "assistant", now - timedelta(hours=1))  # assistant replies don't count
+    old_conversation = await _conversation(pg, old)
+    await _message(pg, old_conversation, "user", now - timedelta(days=45))
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app()), base_url="http://test") as client:
+            async def ids(**params):
+                response = await client.get("/admin-api/users", params={"search": "cohort-", "limit": 200, **params})
+                assert response.status_code == 200, response.text
+                body = response.json()
+                mine = [u for u in body["users"] if u["id"] in {recent, old, silent}]
+                return [u["id"] for u in mine], {u["id"]: u for u in mine}
+
+            got, rows = await ids()
+            assert set(got) == {recent, old, silent}
+            assert rows[recent]["signup_platform"] == "ios"
+            assert rows[recent]["last_chat_at"].startswith((now - timedelta(hours=3)).isoformat()[:16])
+            assert rows[recent]["last_chat_at"].endswith("+00:00")
+            assert rows[silent]["last_seen_at"] is None and rows[silent]["last_chat_at"] is None
+
+            assert (await ids(platform="ios"))[0] == [recent]
+            assert (await ids(platform="unknown"))[0] == [silent]
+            assert (await ids(login="wechat"))[0] == [recent]
+            assert set((await ids(registered="7d"))[0]) == {recent, silent}
+            assert (await ids(registered="over30d"))[0] == [old]
+            assert (await ids(last_login="1d"))[0] == [recent]
+            assert (await ids(last_login="over30d"))[0] == [old]
+            assert (await ids(last_login="never"))[0] == [silent]
+            assert (await ids(last_chat="1d"))[0] == [recent]
+            assert (await ids(last_chat="over30d"))[0] == [old]
+            assert (await ids(last_chat="never"))[0] == [silent]
+            # Most recent chat first; never-chatted users sort last.
+            assert (await ids(sort="last_chat_at"))[0] == [recent, old, silent]
+            assert (await ids(sort="last_seen_at"))[0] == [recent, old, silent]
+            detail = await client.get(f"/admin-api/users/{recent}/detail")
+            assert detail.json()["user"]["last_chat_at"] == rows[recent]["last_chat_at"]
+    finally:
+        await pg.db.execute_raw("DELETE FROM auth_identities WHERE user_id = ANY($1::text[])", [recent, old, silent])
