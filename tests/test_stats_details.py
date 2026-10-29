@@ -1,6 +1,7 @@
 """Daily compatibility cards, cost totals and owned drill-downs on real PostgreSQL."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, patch
 import json
 import pytest
@@ -14,6 +15,30 @@ from app.services.effect import (
 )
 from app.services.effect.context_summary import summarize, merge
 from tests.test_beta_daily_facts_postgres import pg, _seed, _now, _at, _msg, DAY
+
+
+@pytest.mark.parametrize("zone", [None, UTC, ZoneInfo("Asia/Shanghai")])
+def test_context_window_serializes_unambiguous_instants(zone):
+    start, end = defs.local_day_bounds(DAY)
+    if zone is not None:
+        start = start.replace(tzinfo=UTC).astimezone(zone)
+        end = end.replace(tzinfo=UTC).astimezone(zone)
+    result = summarize([], start, end, start)
+    for key in ("window_start", "window_end", "sampled_at"):
+        assert result[key].endswith("+00:00")
+    shanghai = ZoneInfo("Asia/Shanghai")
+    assert datetime.fromisoformat(result["window_start"]).astimezone(
+        shanghai
+    ) == datetime.combine(DAY, datetime.min.time(), shanghai)
+    assert datetime.fromisoformat(result["window_end"]).astimezone(
+        shanghai
+    ) == datetime.combine(DAY + timedelta(days=1), datetime.min.time(), shanghai)
+    # A derived response must normalize its outer window too, even if a stored
+    # pre-fix daily payload has timestamps without an offset.
+    old_payload = {**result, "window_start": "2026-10-28T16:00:00"}
+    merged = merge([old_payload], start, end, result["sampled_at"])
+    assert merged["window_start"] == result["window_start"]
+    assert merged["window_end"] == result["window_end"]
 
 
 def test_context_merge_recomputes_cache_ratio_and_does_not_duplicate_multi_model_cost():
@@ -75,6 +100,13 @@ async def test_cards_and_hourly_read_only_derived_rows_and_respect_cohort(pg):
     assert sum(r["count"] for r in hourly["data"]) == 6
     context = await details.read(DAY, DAY, "context", cohort="all")
     assert context["data"]["rows"] >= 1
+    assert context["data"]["window_start"].endswith("+00:00")
+    assert (
+        datetime.fromisoformat(context["data"]["window_start"])
+        .astimezone(ZoneInfo("Asia/Shanghai"))
+        .date()
+        == DAY
+    )
     copied = await details.read(DAY, DAY, "copy_quality", cohort="all")
     assert copied["data"]["total"] == 0 and not copied["data"]["truncated"]
     assert (await details.read(DAY, DAY, "health", cohort="all"))["data"] == {}

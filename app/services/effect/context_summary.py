@@ -1,8 +1,17 @@
 """Pure context-usage summaries shared by legacy and derived admin views."""
 
+from datetime import UTC, datetime
+
 from app.services.chat import context_policy as policy
 
 CACHE_QUALIFIED_MODEL_PREFIXES = ("ark/",)
+
+
+def _utc_iso(value: datetime) -> str:
+    """Daily SQL bounds are naive UTC; API timestamps must carry an offset."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
 
 
 def summarize(rows, start, end, now):
@@ -78,9 +87,9 @@ def summarize(rows, start, end, now):
             else None
         )
     return {
-        "sampled_at": now.isoformat(),
-        "window_start": start.isoformat(),
-        "window_end": end.isoformat(),
+        "sampled_at": _utc_iso(now),
+        "window_start": _utc_iso(start),
+        "window_end": _utc_iso(end),
         "scope": "chat foreground usage rows; excludes background and proactive",
         "rows": len(rows),
         "max_rows": 10000,
