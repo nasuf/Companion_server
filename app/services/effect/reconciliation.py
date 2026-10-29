@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 
 from app.services.effect import definitions as defs
-from app.services.effect.costs import model_key
+from app.services.effect.costs import unpriced_models
 
 ACCOUNTING_VERSION = "trace-linked-v2"
 # Official first price bands, verified 2026-10-29. Unknown routes stay unknown.
@@ -46,7 +46,8 @@ async def compute(tx, day: date, now: datetime) -> list[dict]:
     start, end = defs.local_day_bounds(day)
     prices = {
         r["key"]: r
-        for r in await tx.query_raw("""SELECT provider||'/'||identifier AS key
+        for r in await tx.query_raw("""SELECT provider||'/'||identifier AS key,input_cost_per_million,
+      output_cost_per_million,cached_input_cost_per_million
       FROM model_registry WHERE input_cost_per_million IS NOT NULL AND output_cost_per_million IS NOT NULL""")
     }
     # Full trace totals include background work crossing midnight. Anchor once
@@ -66,7 +67,7 @@ async def compute(tx, day: date, now: datetime) -> list[dict]:
           'output',completion_tokens,'status',status)), '[]'::jsonb) FROM trace_runs t
           WHERE t.trace_id=a.trace_id AND t.run_type='llm') AS calls,
         (SELECT COALESCE(jsonb_agg(jsonb_build_object('input',input_tokens,'output',output_tokens,
-          'models',tokens_by_model)), '[]'::jsonb) FROM llm_usage l WHERE l.trace_id=a.trace_id) AS usage
+          'models',tokens_by_model,'cost',cost_cny)), '[]'::jsonb) FROM llm_usage l WHERE l.trace_id=a.trace_id) AS usage
       FROM anchor a LEFT JOIN LATERAL (SELECT name,inputs_json,extra_json FROM trace_runs t
         WHERE t.trace_id=a.trace_id AND t.parent_id IS NULL ORDER BY started_at,run_id LIMIT 1) root ON TRUE
       LEFT JOIN message_traces mt ON mt.trace_id=a.trace_id
@@ -86,7 +87,6 @@ async def compute(tx, day: date, now: datetime) -> list[dict]:
         for call in calls:
             name = call["model"] or "unknown"
             model_max[name] = max(model_max.get(name, 0), int(call["input"] or 0))
-        keys = {key for row in usage for key in (row["models"] or {})}
         data = dict(
             trace_calls=len(calls),
             usage_rows=len(usage),
@@ -103,7 +103,10 @@ async def compute(tx, day: date, now: datetime) -> list[dict]:
                 for u in usage
                 for b in (u["models"] or {}).values()
             ),
-            unpriced_models=sorted(k for k in keys if model_key(k, prices) is None),
+            unpriced_models=sorted({
+                k for u in usage
+                for k in unpriced_models(u["models"] or {}, float(u.get("cost") or 0), prices)
+            }),
             max_input_by_model=model_max,
             band_exceeded=sorted(
                 k
@@ -137,7 +140,7 @@ async def compute(tx, day: date, now: datetime) -> list[dict]:
             json.dumps(output),
         )
     usage_rows = await tx.query_raw(
-        """SELECT scope,trace_id,tokens_by_model FROM llm_usage l
+        """SELECT scope,trace_id,tokens_by_model,cost_cny FROM llm_usage l
       LEFT JOIN users u ON u.id=l.user_id WHERE l.created_at >= $1::timestamp AND l.created_at<$2::timestamp
         AND (l.user_id IS NULL OR u.status<>'deleting')""",
         start.isoformat(),
@@ -171,8 +174,9 @@ async def compute(tx, day: date, now: datetime) -> list[dict]:
                     {
                         k
                         for r in usages
-                        for k in (r["tokens_by_model"] or {})
-                        if model_key(k, prices) is None
+                        for k in unpriced_models(
+                            r["tokens_by_model"] or {}, float(r["cost_cny"] or 0), prices
+                        )
                     }
                 )
             ),

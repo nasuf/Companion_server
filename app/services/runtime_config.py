@@ -178,6 +178,10 @@ async def _load_caches_unlocked() -> None:
                     ),
                 }
                 continue
+            if r.inputCostPerMillion is None or r.outputCostPerMillion is None:
+                # No price configured: fees cannot be computed, and usage rows
+                # must record that (is_known_model) instead of a silent ¥0.
+                continue
             pricing = {
                 "input": r.inputCostPerMillion or 0.0,
                 "output": r.outputCostPerMillion or 0.0,
@@ -302,16 +306,14 @@ def invalidate_caches() -> None:
     更新到最新, 再调本函数 evict 旧模型实例 — 顺序保证下次 build 用新配置.
     """
     # 循环 import 防御: 延迟导入
-    try:
-        from app.services.llm.models import (
-            get_chat_model, get_utility_model,
-            get_fallback_chat_model,
-        )
-        get_chat_model.cache_clear()
-        get_utility_model.cache_clear()
-        get_fallback_chat_model.cache_clear()
-    except Exception as e:
-        logger.warning(f"[RUNTIME-CONFIG] cache_clear failed: {e}")
+    from app.services.llm import models
+    # Each factory is cleared on its own: one failure must not leave the rest stale.
+    for name in ("get_chat_model", "get_utility_model", "get_grounding_model",
+                 "get_fallback_chat_model", "get_fallback_utility_model"):
+        try:
+            getattr(models, name).cache_clear()
+        except Exception as e:
+            logger.warning(f"[RUNTIME-CONFIG] cache_clear failed for {name} ({type(e).__name__})")
 
 
 async def ensure_loaded() -> None:

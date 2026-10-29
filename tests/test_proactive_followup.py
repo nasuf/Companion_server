@@ -121,6 +121,8 @@ async def test_unfinished_topic_sends_followup_and_restarts_a_mode_clock(harness
     # 追问也进 AI 自我记忆录入管线 (spec §2.2)
     harness.memory.assert_called_once()
     assert harness.memory.call_args.kwargs["message"] == "要不先说说你想要热闹点还是安静点的？"
+    # 记忆抽取的用量挂到这条追问的 Trace 上
+    assert "trace_id" in harness.memory.call_args.kwargs
     # A 模式窗口从这句追问重新起算
     assert harness.advance.await_args.kwargs["restart_cycle"] is True
     assert harness.advance.await_args.kwargs["event_type"] == "followup_sent"

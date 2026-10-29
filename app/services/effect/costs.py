@@ -38,11 +38,53 @@ def blank() -> dict:
     return {**dict.fromkeys(NUMBERS, 0), "unpriced": False, "models": {}}
 
 
+MODEL_FIELDS = ("input", "output", "cached_input", "unmetered_calls", "cost_cny")
+# llm_usage.cost_cny keeps 6 decimals: a priced fee below this was stored as 0.
+_ROUNDED_TO_ZERO = 5e-7
+
+
 def model_key(key: str, prices: dict) -> str | None:
     if key in prices:
         return key
     matches = [name for name in prices if name.split("/", 1)[-1] == key]
     return matches[0] if len(matches) == 1 else None
+
+
+def _tokens(bucket: dict) -> int:
+    return int(bucket.get("input") or 0) + int(bucket.get("output") or 0)
+
+
+def estimate(bucket: dict, price: dict) -> float:
+    """CNY for one model's tokens at a model_registry price row."""
+    total = int(bucket.get("input") or 0)
+    cached = min(total, max(0, int(bucket.get("cached_input") or 0)))
+    cached_price = price["cached_input_cost_per_million"]
+    return (
+        (total - cached) * float(price["input_cost_per_million"])
+        + cached * float(cached_price if cached_price is not None else price["input_cost_per_million"])
+        + int(bucket.get("output") or 0) * float(price["output_cost_per_million"])
+    ) / 1_000_000
+
+
+def unpriced_models(models: dict, stored_cost: float, prices: dict) -> list[str]:
+    """Billed models whose fee the usage row did not record.
+
+    New rows carry the write-time verdict per model (`priced`). Older rows do
+    not: their recorded amount was priced when written, even if the model has
+    since left the registry. A zero amount was not, when a billed model has no
+    current price, or one that would have charged at least 0.000001.
+    """
+    buckets = {k: v for k, v in models.items() if isinstance(v, dict)}
+    if any("priced" in v for v in buckets.values()):
+        return sorted(k for k, v in buckets.items() if v.get("priced") is False and _tokens(v))
+    if stored_cost > 0:
+        return []
+    missing = []
+    for key, bucket in buckets.items():
+        price = prices.get(model_key(key, prices))
+        if _tokens(bucket) and (price is None or estimate(bucket, price) >= _ROUNDED_TO_ZERO):
+            missing.append(key)
+    return sorted(missing)
 
 
 def accumulate(target: dict, data: dict) -> None:
@@ -51,13 +93,11 @@ def accumulate(target: dict, data: dict) -> None:
     target["unpriced"] |= bool(data.get("unpriced"))
     for model, bucket in data.get("models", {}).items():
         out = target["models"].setdefault(
-            model,
-            dict.fromkeys(
-                ("input", "output", "cached_input", "unmetered_calls", "cost_cny"), 0
-            ),
+            model, {**dict.fromkeys(MODEL_FIELDS, 0), "unpriced": False}
         )
-        for field in out:
+        for field in MODEL_FIELDS:
             out[field] += bucket.get(field) or 0
+        out["unpriced"] |= bool(bucket.get("unpriced"))
 
 
 async def compute(tx, day: date, now: datetime) -> None:
@@ -89,40 +129,30 @@ async def compute(tx, day: date, now: datetime) -> None:
         out = groups[(row["user_id"], row["agent_id"], "model", row["scope"])]
         item = {k: row[k] for k in NUMBERS if k in row}
         models = {k: dict(v) for k, v in (row["tokens_by_model"] or {}).items()}
+        stored = float(row["cost_cny"] or 0)
+        missing = unpriced_models(models, stored, prices)
         # Allocate the persisted row amount in the same proportions as the old
         # cost card; never count a multi-model row's entire fee for every model.
-        weights = {}
-        for model, bucket in models.items():
-            price = prices.get(model_key(model, prices))
-            if price is not None:
-                cached = min(
-                    int(bucket.get("input") or 0),
-                    max(0, int(bucket.get("cached_input") or 0)),
-                )
-                cached_price = price["cached_input_cost_per_million"]
-                weights[model] = (
-                    (int(bucket.get("input") or 0) - cached)
-                    * float(price["input_cost_per_million"])
-                    + cached
-                    * float(
-                        cached_price
-                        if cached_price is not None
-                        else price["input_cost_per_million"]
-                    )
-                    + int(bucket.get("output") or 0)
-                    * float(price["output_cost_per_million"])
-                )
+        weights = {
+            model: estimate(bucket, prices[key])
+            for model, bucket in models.items()
+            if (key := model_key(model, prices)) is not None
+        }
+        if not sum(weights.values()):
+            # No current price covers the row (e.g. a model since removed from
+            # the registry): split the recorded fee by tokens, not to nobody.
+            weights = {model: _tokens(bucket) for model, bucket in models.items()}
         weight = sum(weights.values())
         for model, bucket in models.items():
-            bucket["cost_cny"] = (
-                float(row["cost_cny"] or 0) * weights.get(model, 0) / weight
-                if weight
-                else 0
-            )
+            bucket["cost_cny"] = stored * weights.get(model, 0) / weight if weight else 0
+            bucket["unpriced"] = model in missing
+            bucket.pop("priced", None)
 
-        unpriced = any(model_key(m, prices) is None for m in models)
-        # Nonempty billed input with no breakdown cannot be certified as priced.
-        unpriced |= not models and (row["input_tokens"] > 0 or row["output_tokens"] > 0)
+        # Billed tokens with neither a breakdown nor a recorded fee cannot be
+        # certified as priced.
+        unpriced = bool(missing) or (
+            not models and not stored and (row["input_tokens"] > 0 or row["output_tokens"] > 0)
+        )
         item.update(
             request_count=1,
             models=models,
@@ -364,6 +394,7 @@ async def read_costs(
         ],
         "notes": [
             "模型与 TTS 使用入账金额；缺定价不显示成免费。",
+            "已入账的模型费用以入账金额为准，模型之后从价格表删除不影响；只有入账时没有价格的调用才算未定价。",
             "搜索按全账户本地自然月先扣免费额度，按调用时间归属到本窗口；属于配置价估算。",
             "quality_eval 单列，不计入用户成本；无 user_id 的系统任务仍计入全站费用。",
         ],

@@ -606,15 +606,19 @@ def schedule_proactive_ai_memory(
     agent_id: str,
     conversation_id: str,
     message: str,
+    trace_id: str | None = None,
 ) -> None:
     """Spec §2.2: 每条 AI 主动消息也进 AI 自我记忆录入管线 (后台, 不阻塞发送).
 
     fire_background 持有任务引用 —— 裸 asyncio.create_task 的任务可能被中途 GC。
+    Call it inside the message's trace: the task inherits the trace handler, and
+    its usage row carries trace_id, so the message's usage includes this work.
     """
     fire_background(_bg_proactive_ai_memory(
         user_id, message,
         conversation_id=conversation_id,
         agent_id=agent_id,
+        trace_id=trace_id,
     ))
 
 
@@ -976,6 +980,13 @@ async def generate_and_send_proactive(
             assistant_message_id=assistant_message_id,
             attachments=attachments,
         )
+        schedule_proactive_ai_memory(
+            user_id=state.user_id,
+            agent_id=state.agent_id,
+            conversation_id=prep.conversation_id,
+            message=message,
+            trace_id=tracer.safe_trace_id,
+        )
     logger.info(
         f"proactive sent: trigger={trigger_type} source={source} stage={stage}",
         extra={
@@ -1000,12 +1011,6 @@ async def generate_and_send_proactive(
     )
     # A 模式是一次全新开场: 旧话题翻篇, 用户回来后开启新会话 (B 名额恢复)
     await topic_continuity.close_session(prep.conversation_id)
-    schedule_proactive_ai_memory(
-        user_id=state.user_id,
-        agent_id=state.agent_id,
-        conversation_id=prep.conversation_id,
-        message=message,
-    )
     return True
 
 
@@ -1389,7 +1394,7 @@ async def _create_default_conversation(
 
 async def _bg_proactive_ai_memory(
     user_id: str, message: str,
-    *, conversation_id: str, agent_id: str,
+    *, conversation_id: str, agent_id: str, trace_id: str | None = None,
 ) -> None:
     """Spec §2.2：把刚发出的主动消息送进 per-message AI 自我记忆 pipeline。
 
@@ -1399,6 +1404,7 @@ async def _bg_proactive_ai_memory(
     async with usage_session(
         scope="post_process", conversation_id=conversation_id,
         agent_id=agent_id, user_id=user_id,
+        trace_id_provider=lambda: trace_id,
     ):
         try:
             from app.services.workspace.workspaces import resolve_workspace_id

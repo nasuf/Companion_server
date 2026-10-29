@@ -18,7 +18,8 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME
 
-DEFINITION_VERSION = "beta-metrics-v2"
+# v3: a recorded model fee stays priced after the model leaves model_registry.
+DEFINITION_VERSION = "beta-metrics-v3"
 
 Cohort = Literal["external", "all"]
 COHORTS: tuple[Cohort, ...] = ("external", "all")

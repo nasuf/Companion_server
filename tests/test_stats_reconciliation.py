@@ -26,6 +26,8 @@ async def trace(
     unmetered=0,
     model="qwen3.5-flash",
     qualified=True,
+    cost=0.001,
+    priced=None,
 ):
     tid = uuid4().hex
     await pg.db.execute_raw(
@@ -60,7 +62,7 @@ async def trace(
         )[0]["user_id"]
         await pg.db.execute_raw(
             """INSERT INTO llm_usage(id,trace_id,conversation_id,user_id,scope,input_tokens,output_tokens,
-          tokens_by_model,call_count,cost_cny,created_at) VALUES($1,$2,$3,$4,'chat',$5,$6,$7::jsonb,1,.001,$8::timestamp)""",
+          tokens_by_model,call_count,cost_cny,created_at) VALUES($1,$2,$3,$4,'chat',$5,$6,$7::jsonb,1,$9,$8::timestamp)""",
             uuid4().hex,
             tid,
             conv,
@@ -72,10 +74,12 @@ async def trace(
                         "input": usage[0],
                         "output": usage[1],
                         "unmetered_calls": unmetered,
+                        **({} if priced is None else {"priced": priced}),
                     }
                 }
             ),
             _at(DAY + timedelta(days=1), 0, 1).isoformat(),
+            cost,
         )
     return tid
 
@@ -93,8 +97,14 @@ async def test_reconciliation_cross_midnight_exact_unknown_and_missing(pg):
         traces.append(unknown)
         mismatch = await trace(pg, conv, usage=(101, 10))
         traces.append(mismatch)
-        unpriced = await trace(pg, conv, model="not-registered")
+        # Never priced: a legacy row stored 0, or a new row marked unpriced at write time.
+        unpriced = await trace(pg, conv, model="not-registered", cost=0)
         traces.append(unpriced)
+        flagged = await trace(pg, conv, model="flagged-model", priced=False)
+        traces.append(flagged)
+        # A recorded fee stays priced after its model leaves model_registry.
+        removed = await trace(pg, conv, model="since-removed")
+        traces.append(removed)
         await daily_facts.compute_day(DAY, now=_now(DAY + timedelta(days=2)))
         out = await r.read(DAY, DAY, now=_now(DAY + timedelta(days=2)))
         byid = {x["trace_id"]: x for x in out["items"]}
@@ -106,7 +116,10 @@ async def test_reconciliation_cross_midnight_exact_unknown_and_missing(pg):
         assert byid[unknown]["status"] == "unmetered" and out["unmetered_calls"] == 1
         assert byid[mismatch]["status"] == "mismatch"
         assert byid[unpriced]["data"]["unpriced_models"] == ["dashscope/not-registered"]
-        assert out["counts"]["matched"] == 2 and out["comparable_traces"] == 4
+        assert byid[flagged]["data"]["unpriced_models"] == ["dashscope/flagged-model"]
+        assert byid[removed]["data"]["unpriced_models"] == []
+        assert out["counts"]["unpriced"] == 2
+        assert out["counts"]["matched"] == 4 and out["comparable_traces"] == 6
         assert out["match"]["state"] == "insufficient_sample"
         assert (
             len(

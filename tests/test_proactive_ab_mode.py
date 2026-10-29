@@ -689,3 +689,62 @@ def test_memory_source_distributions_sum_to_one():
         assert abs(sum(dist.values()) - 1.0) < 1e-9, stage
     # 冷启动还不熟, 不追问对方的事
     assert MEMORY_SOURCE_DIST["p1_cold"].get("recent_dialogue", 0.0) == 0.0
+
+
+async def test_sent_proactive_message_links_ai_memory_usage_to_its_trace(monkeypatch):
+    """The memory task starts inside the message's trace and records its trace_id."""
+    from app.services.proactive import sender
+
+    prep = sender._SendPrep(conversation_id="c-1", cooldown={}, exclude_memory_ids=set())
+    ctx = {"source": "greeting", "stage": "warming", "topic_theme": "问候"}
+    monkeypatch.setattr("app.services.runtime_config.bind_agent_context", AsyncMock())
+    monkeypatch.setattr(sender, "_check_send_eligibility", AsyncMock(return_value=prep))
+    monkeypatch.setattr(sender, "_resolve_topic", AsyncMock(return_value=ctx))
+    monkeypatch.setattr(sender, "_attach_trending", AsyncMock(return_value=False))
+    monkeypatch.setattr(sender, "_generate_message", AsyncMock(return_value="最近咋样呀"))
+    monkeypatch.setattr(
+        sender, "_prepare_attachments",
+        AsyncMock(return_value=sender._Attachments(extra_metadata={})),
+    )
+    monkeypatch.setattr(sender, "emit_proactive_message", AsyncMock(return_value="msg-1"))
+    monkeypatch.setattr(sender, "_after_emit", AsyncMock())
+    monkeypatch.setattr(sender, "increment_proactive_count", AsyncMock())
+    monkeypatch.setattr(sender, "_persist_proactive_state", AsyncMock())
+    monkeypatch.setattr(sender.topic_continuity, "close_session", AsyncMock())
+    order = []
+
+    class _Trace:
+        safe_trace_id = "trace-1"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            order.append("trace_closed")
+            return False
+
+    monkeypatch.setattr("app.services.llm.usage_tracker.traced_usage_session", lambda **_: _Trace())
+    monkeypatch.setattr(
+        sender, "schedule_proactive_ai_memory", lambda **kw: order.append(("memory", kw["trace_id"])),
+    )
+
+    assert await sender.generate_and_send_proactive(_record(), trigger_type="silence_wakeup", now=NOW)
+    assert order == [("memory", "trace-1"), "trace_closed"]
+
+
+async def test_proactive_ai_memory_usage_row_carries_the_trace_id(monkeypatch):
+    from contextlib import asynccontextmanager
+    from app.services.proactive import sender
+
+    seen = {}
+
+    @asynccontextmanager
+    async def session(**kwargs):
+        seen.update(kwargs)
+        yield
+
+    monkeypatch.setattr("app.services.llm.usage_tracker.usage_session", session)
+    monkeypatch.setattr("app.services.workspace.workspaces.resolve_workspace_id", AsyncMock(return_value="ws-1"))
+    monkeypatch.setattr(sender, "process_memory_pipeline", AsyncMock())
+    await sender._bg_proactive_ai_memory("u-1", "你好", conversation_id="c-1", agent_id="a-1", trace_id="trace-1")
+    assert seen["scope"] == "post_process" and seen["trace_id_provider"]() == "trace-1"

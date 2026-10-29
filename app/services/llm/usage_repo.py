@@ -8,7 +8,7 @@ import logging
 from prisma import Json
 
 from app.db import db
-from app.services.llm.pricing import estimate_cost_cny
+from app.services.llm.pricing import estimate_cost_cny, is_known_model
 from app.services.llm.usage_tracker import UsageScope, UsageSummary
 
 logger = logging.getLogger(__name__)
@@ -116,6 +116,13 @@ async def write_usage_row(
     scope: UsageScope = "chat",
 ) -> None:
     cost = _total_cost_cny(summary["tokens_by_model"])
+    # Record whether each model had a price when its fee was computed. A model
+    # later removed from the registry must not turn this recorded fee unknown,
+    # and one unpriced model in a multi-model row must not hide behind the rest.
+    tokens_by_model = {
+        model: {**bucket, "priced": is_known_model(model)}
+        for model, bucket in summary["tokens_by_model"].items()
+    }
     try:
         await db.llmusage.create(
             data={
@@ -126,7 +133,7 @@ async def write_usage_row(
                 "traceId": trace_id,
                 "inputTokens": summary["input_tokens"],
                 "outputTokens": summary["output_tokens"],
-                "tokensByModel": Json(summary["tokens_by_model"]),
+                "tokensByModel": Json(tokens_by_model),
                 "costCny": cost,
                 "callCount": summary["call_count"],
                 "webSearchCalls": summary.get("web_search_calls", 0),

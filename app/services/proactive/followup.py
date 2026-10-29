@@ -330,6 +330,7 @@ async def _send_followup(
         agent_id=state.agent_id,
         conversation_id=str(state.conversation_id),
         message=message,
+        trace_id=trace_id,
     )
     logger.info(
         f"[FOLLOWUP] sent reason={verdict.reason}",

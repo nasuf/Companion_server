@@ -193,6 +193,8 @@ def get_fallback_for(primary: BaseChatModel) -> BaseChatModel | None:
 get_chat_model.cache_clear = _build_chat_model.cache_clear  # type: ignore[attr-defined]
 get_utility_model.cache_clear = _build_utility_model.cache_clear  # type: ignore[attr-defined]
 get_fallback_chat_model.cache_clear = _build_fallback_chat_model.cache_clear  # type: ignore[attr-defined]
+get_grounding_model.cache_clear = _build_grounding_model.cache_clear  # type: ignore[attr-defined]
+get_fallback_utility_model.cache_clear = _build_fallback_utility_model.cache_clear  # type: ignore[attr-defined]
 
 
 @lru_cache(maxsize=1)
