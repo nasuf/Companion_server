@@ -25,6 +25,16 @@ _worker_id = uuid4().hex
 _sequence = 0
 
 
+ROLE_LABELS = {
+    "chat": "主聊天模型",
+    "utility": "小模型",
+    "grounding": "人设校验模型",
+    "other": "其他模型",
+}
+# A dormant incident (see evaluate_incidents) is listed for a day, then forgotten.
+_FORGET_DORMANT_AFTER = 86400
+
+
 def policy() -> dict:
     return {
         "window_seconds": settings.provider_failing_window_seconds,
@@ -32,6 +42,11 @@ def policy() -> dict:
         "failure_ratio_threshold": settings.provider_failing_ratio,
         "route_limit": settings.provider_failing_route_limit,
         "buffer_limit": settings.provider_failing_buffer_limit,
+        # Never shorter than the window, or a dormant route would re-trigger on its own failures.
+        "dormant_seconds": max(
+            settings.provider_failing_dormant_seconds,
+            settings.provider_failing_window_seconds,
+        ),
         "sample_interval_seconds": 30,
     }
 
@@ -41,27 +56,43 @@ def _at() -> float:
 
 
 def _route(provider: str, model: str, role: str) -> str | None:
+    if not all(isinstance(value, str) for value in (provider, model, role)):
+        return None
     if model.startswith(provider + "/"):
         model = model[len(provider) + 1 :]
     if (
         not re.fullmatch(r"[a-zA-Z0-9._:-]{1,40}", provider)
         or not re.fullmatch(r"[a-zA-Z0-9._:-]{1,160}", model)
-        or role not in {"chat", "utility", "grounding", "other"}
+        or role not in ROLE_LABELS
     ):
         return None
     return f"{provider}/{model}/{role}"
 
 
-def _append(event: dict) -> None:
+def _lose() -> None:
     global _lost
+    _lost += 1
+
+
+def _append(event: dict) -> None:
     if len(_pending) >= settings.provider_failing_buffer_limit:
-        _lost += 1
+        _lose()
     else:
         _pending.append(event)
 
 
+def _mark_gap(snapshot: dict, at: float) -> None:
+    # Missing observations can only hide failures inside the rolling window, so a
+    # gap makes the check incomplete for one window rather than forever.
+    snapshot["gap_at"] = max(snapshot.get("gap_at", 0), at)
+
+
 class Call:
-    """One logical invocation; attempts share an ID, backup outcomes reference it."""
+    """One logical invocation; attempts share an ID, backup outcomes reference it.
+
+    Recording runs inside the model call's own try blocks: an exception here would
+    turn a completed reply into a failure. So it never raises; problems count as lost.
+    """
 
     def __init__(self, provider: str, model: str, role: str = "chat"):
         self.route = _route(provider, model, role)
@@ -75,36 +106,41 @@ class Call:
         error: Exception | None = None,
         circuit_open: bool = False,
     ) -> None:
-        if not self.route:
-            global _lost
-            _lost += 1  # unknown route cannot silently count as healthy coverage
-            return
-        from app.services.ops.provider_budget import classify
+        try:
+            if not self.route:
+                _lose()  # unknown route cannot silently count as healthy coverage
+                return
+            from app.services.ops.provider_budget import classify
 
-        if error is not None and classify(self.route.split("/")[0], error):
-            kind = "billing"
-        _append(
-            {
-                "route": self.route,
-                "request": self.id,
-                "kind": kind,
-                "started": started,
-                "at": _at(),
-                "circuit": circuit_open,
-            }
-        )
-
-    def fallback(self, outcome: str) -> None:
-        if self.route:
+            if error is not None and classify(self.route.split("/")[0], error):
+                kind = "billing"
             _append(
                 {
                     "route": self.route,
                     "request": self.id,
-                    "kind": "fallback",
-                    "outcome": outcome,
+                    "kind": kind,
+                    "started": started,
                     "at": _at(),
+                    "circuit": circuit_open,
                 }
             )
+        except Exception:
+            _lose()
+
+    def fallback(self, outcome: str) -> None:
+        try:
+            if self.route:
+                _append(
+                    {
+                        "route": self.route,
+                        "request": self.id,
+                        "kind": "fallback",
+                        "outcome": outcome,
+                        "at": _at(),
+                    }
+                )
+        except Exception:
+            _lose()
 
 
 def _window(route: dict, at: float, config: dict) -> tuple[int, int]:
@@ -134,7 +170,7 @@ def reduce_snapshot(
         key = e["route"]
         if key not in routes:
             if len(routes) >= config["route_limit"]:
-                snapshot["incomplete"] = True
+                _mark_gap(snapshot, now)
                 continue
             routes[key] = {"buckets": {}}
         r = routes[key]
@@ -143,6 +179,7 @@ def reduce_snapshot(
             if e["request"] == r.get("last_failure_request"):
                 r["fallback"] = e["outcome"]
             continue
+        r.pop("dormant_at", None)  # traffic is back: it either recovers or alerts again
         if (
             kind in {"success", "failure", "billing"}
             and at > now - config["window_seconds"]
@@ -152,6 +189,9 @@ def reduce_snapshot(
             bucket[1] += int(kind == "failure")
         if kind == "success":
             r["success_started"] = max(r.get("success_started", 0), e["started"])
+            if e["request"] == r.get("last_failure_request"):
+                # A retry of that request worked; no backup ran.
+                r["fallback"] = "retry_succeeded"
         if kind in {"failure", "circuit"}:
             if at >= r.get("last_failure_at", 0):
                 r.update(
@@ -176,17 +216,48 @@ def evaluate_incidents(snapshot: dict, now: float, config: dict) -> None:
     # Latch at the service sample, after merging worker batches. Latching while
     # each worker flushes can turn its temporarily partial denominator into an
     # irreversible false incident (late, older successes cannot recover it).
-    for r in snapshot.get("routes", {}).values():
+    routes = snapshot.get("routes", {})
+    for key, r in list(routes.items()):
         calls, failures = _window(r, now, config)
-        triggered = r.get("circuit_at", 0) > r.get("success_started", 0) or (
+        if (
+            r.get("incident_at")
+            and now - r.get("last_observed_at", 0) >= config["dormant_seconds"]
+        ):
+            # A retired route or an idle backup gets no call that could prove
+            # recovery; an open incident would hold every alert at warning forever.
+            # Stop alerting, and keep it listed as unconfirmed rather than recovered.
+            r.pop("incident_at")
+            r["dormant_at"] = now
+        circuit = r.get("circuit_at", 0) > max(
+            r.get("success_started", 0), now - config["window_seconds"]
+        )
+        triggered = circuit or (
             failures >= config["failure_threshold"]
             and failures / max(calls, 1) >= config["failure_ratio_threshold"]
         )
         if triggered and r.get("last_failure_at", 0) >= r.get("success_started", 0):
             r.setdefault("incident_at", r["last_failure_at"])
+        idle_since = max(r.get("last_observed_at", 0), r.get("dormant_at", 0))
+        if (
+            not r.get("incident_at")
+            and not r["buckets"]
+            and now - idle_since > _FORGET_DORMANT_AFTER
+        ):
+            del routes[key]  # keeps route_limit for routes still in use
 
 
-async def flush() -> None:
+async def retire() -> None:
+    """Graceful shutdown: write what this worker saw and mark its receipt closed.
+
+    A stopped worker's receipt otherwise looks like a lagging peer for a whole
+    window, so every deploy pushed a false "服务巡检异常" and then "恢复".
+    A worker that dies without this still counts as lagging, which is correct.
+    """
+    await flush()  # includes a frozen retry batch, if any
+    await flush(closing=True)
+
+
+async def flush(*, closing: bool = False) -> None:
     """No request waits on this. Retry a frozen batch after uncertain SQL outcome."""
     global _batch, _lost, _lock, _sequence
     if _lock is None:
@@ -206,11 +277,11 @@ async def flush() -> None:
             }
             _lost = 0
         batch = _batch
-        await _persist_batch(batch)
+        await _persist_batch(batch, closing=closing)
         _batch = None
 
 
-async def _persist_batch(batch: dict) -> None:
+async def _persist_batch(batch: dict, *, closing: bool = False) -> None:
     async with asyncio.timeout(3):
         async with db.tx(timeout=timedelta(seconds=3)) as tx:
             await tx.execute_raw("SET LOCAL lock_timeout='1s'")
@@ -237,9 +308,9 @@ async def _persist_batch(batch: dict) -> None:
             previous_sequence = receipts.get(batch["worker"], {}).get("sequence", 0)
             if batch["sequence"] > previous_sequence:
                 if batch["sequence"] != previous_sequence + 1:
-                    snapshot["incomplete"] = True
+                    _mark_gap(snapshot, now)
                 if batch["at"] <= now - settings.provider_failing_receipt_seconds:
-                    snapshot["incomplete"] = True
+                    _mark_gap(snapshot, now)
                 else:
                     snapshot = reduce_snapshot(
                         snapshot, batch["events"], now, policy(), evaluate=False
@@ -248,14 +319,17 @@ async def _persist_batch(batch: dict) -> None:
                     snapshot.get("lost_observations", 0) + batch["lost"]
                 )
                 if batch["lost"]:
-                    snapshot["incomplete"] = True
+                    _mark_gap(snapshot, now)
                 receipts[batch["worker"]] = {
                     "sequence": batch["sequence"],
                     "at": now,
                     "observed_at": batch["at"],
                 }
+            if closing and batch["worker"] in receipts:
+                receipts[batch["worker"]]["closed"] = True
+            snapshot.pop("incomplete", None)  # legacy permanent flag; gaps now age out
             if len(receipts) > settings.provider_failing_receipt_limit:
-                snapshot["incomplete"] = True
+                _mark_gap(snapshot, now)
                 receipts = dict(
                     sorted(receipts.items(), key=lambda item: item[1]["at"])[
                         -settings.provider_failing_receipt_limit :
@@ -301,6 +375,7 @@ async def measure(now: datetime, carry: dict) -> dict:
             r
             for r in snapshot.get("receipts", {}).values()
             if r["at"] > now.timestamp() - config["window_seconds"]
+            and not r.get("closed")  # a gracefully stopped worker is not lagging
         ]
         peer_incomplete = any(
             r.get("observed_at", r["at"])
@@ -318,25 +393,28 @@ async def measure(now: datetime, carry: dict) -> dict:
     if isinstance(stamp, str):
         stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     age = (now - stamp.replace(tzinfo=UTC)).total_seconds()
+
+    def iso(value):
+        return datetime.fromtimestamp(value, UTC).isoformat() if value else None
+
     routes = []
     for key, r in snapshot.get("routes", {}).items():
         calls, failures = _window(r, now.timestamp(), config)
-        if not calls and not r.get("incident_at"):
+        if not calls and not r.get("incident_at") and not r.get("dormant_at"):
             continue
         provider, model, role = key.split("/")
-
-        def iso(value):
-            return datetime.fromtimestamp(value, UTC).isoformat() if value else None
-
         routes.append(
             {
                 "provider": provider,
                 "model": model,
                 "role": role,
+                "role_label": ROLE_LABELS.get(role, role),
                 "calls": calls,
                 "failures": failures,
                 "failure_ratio": failures / calls if calls else None,
                 "alerting": bool(r.get("incident_at")),
+                "dormant": bool(r.get("dormant_at")),
+                "dormant_at": iso(r.get("dormant_at")),
                 "first_failure_at": iso(r.get("incident_at")),
                 "last_failure_at": iso(r.get("last_failure_at")),
                 "fallback": r.get("fallback", "not_needed"),
@@ -344,9 +422,11 @@ async def measure(now: datetime, carry: dict) -> dict:
             }
         )
     incidents = [r for r in routes if r["alerting"]]
+    # A gap can hide failures only inside the rolling window, so it ages out.
+    gap_until = snapshot.get("gap_at", 0) + config["window_seconds"]
     incomplete = bool(
         peer_incomplete
-        or snapshot.get("incomplete")
+        or gap_until > now.timestamp()
         or _lost
         or age > settings.provider_failing_stale_seconds
         or (
@@ -365,6 +445,7 @@ async def measure(now: datetime, carry: dict) -> dict:
         "sampled_at": stamp.isoformat(),
         "lost_observations": snapshot.get("lost_observations", 0) + _lost,
         "incomplete": incomplete,
+        "gap_until": iso(gap_until) if gap_until > now.timestamp() else None,
         "peer_collection_incomplete": peer_incomplete,
         "observed_workers": len(peers),
     }

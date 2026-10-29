@@ -92,7 +92,7 @@ def test_fallback_evidence_is_for_exact_failure_and_never_recovers_primary():
 
 def test_bounded_routes_counters_and_validated_identifiers(monkeypatch):
     s = reduce([event(999), event(999, model="other")], route_limit=1)
-    assert s["incomplete"] and len(s["routes"]) == 1
+    assert s["gap_at"] == 1000 and len(s["routes"]) == 1
     monkeypatch.setattr(f.settings, "provider_failing_buffer_limit", 1)
     f.Call("ark", "ark/m", "utility").record("failure", 1)
     f.Call("ark", "m", "utility").record("success", 2)
@@ -397,3 +397,139 @@ def test_billing_error_records_only_safe_category():
 
     f.Call("ark", "m").record("failure", 1, error=Billing("PRIVATE"))
     assert f._pending[0]["kind"] == "billing" and "PRIVATE" not in repr(f._pending)
+
+
+def test_idle_alerting_route_goes_dormant_instead_of_alerting_forever():
+    # 10-21: backup routes failed, then got no traffic. Nothing could prove recovery.
+    s = reduce([event(990 + i) for i in range(5)])
+    assert s["routes"]["ark/m/chat"]["incident_at"]
+    s = reduce([], s, now=994 + 3600)
+    route = s["routes"]["ark/m/chat"]
+    assert "incident_at" not in route and route["dormant_at"] == 994 + 3600
+    assert "incident_at" not in reduce([], s, now=994 + 3700)["routes"]["ark/m/chat"]
+    # Traffic returns: the route is judged again, not treated as recovered.
+    s = reduce([event(5000 + i) for i in range(5)], s, now=5005)
+    assert "dormant_at" not in s["routes"]["ark/m/chat"]
+    assert s["routes"]["ark/m/chat"]["incident_at"] == 5004
+
+
+def test_circuit_only_incident_also_goes_dormant_and_idle_routes_are_forgotten():
+    s = reduce([event(999, "circuit")])
+    assert s["routes"]["ark/m/chat"]["incident_at"]
+    s = reduce([], s, now=999 + 3600)
+    assert "incident_at" not in s["routes"]["ark/m/chat"]
+    # An old circuit opening outside the window must not re-latch the incident.
+    assert "incident_at" not in reduce([], s, now=999 + 3660)["routes"]["ark/m/chat"]
+    assert "ark/m/chat" not in reduce([], s, now=999 + 3600 + 86401)["routes"]
+    healthy = reduce([event(999, "success", started=998)])
+    assert "ark/m/chat" not in reduce([], healthy, now=999 + 86401)["routes"]
+
+
+def test_dormancy_never_shorter_than_the_window(monkeypatch):
+    monkeypatch.setattr(f.settings, "provider_failing_dormant_seconds", 600)
+    monkeypatch.setattr(f.settings, "provider_failing_window_seconds", 1200)
+    assert f.policy()["dormant_seconds"] == 1200
+
+
+def test_gap_marks_one_window_not_forever():
+    s = reduce([event(999), event(999, model="other")], route_limit=1)
+    assert s["gap_at"] == 1000 and "incomplete" not in s
+
+
+def test_recording_never_breaks_the_model_call(monkeypatch):
+    import app.services.ops.provider_budget as budget
+
+    def boom(*args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(budget, "classify", boom)
+    f.Call("ark", "m").record("failure", 1, error=ValueError("x"))
+    f.Call(None, "m").record("success", 1)
+    assert f._lost == 2 and not f._pending
+
+
+async def test_classifier_error_keeps_resilience_results(monkeypatch):
+    import app.services.ops.provider_budget as budget
+
+    def boom(*args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(budget, "classify", boom)
+    profile = r.CallProfile(timeout_s=1, max_retries=0, retry_backoff_s=())
+
+    async def fail():
+        raise ValueError("upstream")
+
+    assert (
+        await r.call_with_resilience(
+            fail,
+            primary_provider="ark",
+            primary_model_name="m",
+            profile=profile,
+            op="test",
+            fallback_factory=AsyncMock(return_value="ok"),
+            fallback_provider="deepseek",
+            fallback_model_name="backup",
+        )
+        == "ok"
+    )
+    with pytest.raises(r.LLMFailedError):
+        await r.call_with_resilience(
+            fail, primary_provider="ark", primary_model_name="m", profile=profile, op="test"
+        )
+
+
+async def test_retry_success_is_reported_for_the_failed_request():
+    profile = r.CallProfile(timeout_s=1, max_retries=1, retry_backoff_s=(0,))
+    outcomes = iter([ValueError("first"), "ok"])
+
+    async def flaky():
+        value = next(outcomes)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    assert (
+        await r.call_with_resilience(
+            flaky, primary_provider="ark", primary_model_name="m", profile=profile, op="test"
+        )
+        == "ok"
+    )
+    route = reduce(deepcopy(f._pending), now=f._at() + 1)["routes"]["ark/m/chat"]
+    assert route["fallback"] == "retry_succeeded" and "incident_at" not in route
+
+
+def test_messages_name_the_role_the_cause_and_unconfirmed_dormancy():
+    check = {
+        "status": "measured",
+        "alerting": True,
+        "window_seconds": 600,
+        "dormant_seconds": 3600,
+        "incidents": [
+            {
+                "provider": "ark",
+                "model": "m",
+                "role": "chat",
+                "role_label": "主聊天模型",
+                "first_failure_at": "2026-10-28T00:00Z",
+                "calls": 0,
+                "failures": 0,
+                "fallback": "succeeded",
+                "reason": "circuit_open",
+            }
+        ],
+    }
+    body = h.message_for("warning", {"checks": {"provider_failing": check}})[1]
+    assert "主聊天模型（ark/m）熔断器已打开" in body and "失败0次" not in body
+    dormant = {
+        "status": "measured",
+        "alerting": False,
+        "dormant_seconds": 3600,
+        "incidents": [],
+        "routes": [{"provider": "minimax", "model": "M2-her", "role": "chat", "dormant": True}],
+    }
+    title, body = h.message_for("normal", {"checks": {"provider_failing": dormant}})
+    assert title == "服务告警解除" and "主聊天模型（minimax/M2-her）" in body
+    assert "无法确认是否恢复" in body
+    quiet = {"checks": {"provider_failing": {**dormant, "routes": []}}}
+    assert h.message_for("normal", quiet)[0] == "服务告警恢复"

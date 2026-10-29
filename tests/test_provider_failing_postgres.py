@@ -89,7 +89,7 @@ async def test_atomic_failure_retains_buffer_and_new_events_arrive_during_flush(
     f.Call("ark", "m").record("failure", f._at())
     real = f._persist_batch
 
-    async def outage(batch):
+    async def outage(batch, **kwargs):
         f.Call("ark", "m").record("failure", f._at())
         raise RuntimeError("synthetic SQL outage")
 
@@ -162,7 +162,7 @@ async def test_real_outbox_dedup_with_available_provider_evidence(
             "SELECT type,title,body FROM notification_events WHERE user_id=$1", admin.id
         )
         assert len(rows) == 1 and rows[0]["type"] == "admin_service_health"
-        assert "utility ark/m" in rows[0]["body"] and "5次/5次" in rows[0]["body"]
+        assert "小模型（ark/m）" in rows[0]["body"] and "5次/5次" in rows[0]["body"]
         f.Call("ark", "m", "utility").record("success", f._at() + 1)
         await f.flush()
         await database.execute_raw(
@@ -199,7 +199,7 @@ async def test_receipts_are_bounded_and_partial_monitor_cannot_look_healthy(
     )[0]["snapshot"]
     if isinstance(row, str):
         row = json.loads(row)
-    assert len(row["receipts"]) == 1 and row["incomplete"]
+    assert len(row["receipts"]) == 1 and row["gap_at"]
     assert (await f.measure(datetime.now(UTC), {}))["status"] == "unknown"
 
 
@@ -241,3 +241,76 @@ async def test_healthy_peer_cannot_mask_a_stale_peer_or_latch_partial_denominato
     check = await f.measure(now, {})
     assert check["status"] == "measured" and not check["alerting"]
     assert check["routes"][0]["calls"] == 25
+
+
+async def test_collection_gap_clears_after_one_window(database):
+    now = datetime.now(UTC)
+    t = now.timestamp()
+    await f._persist_batch({**batch("lossy", [], t), "lost": 1})
+    check = await f.measure(now, {})
+    assert check["status"] == "unknown" and check["gap_until"]
+    later = now + timedelta(seconds=f.settings.provider_failing_window_seconds + 5)
+    await database.execute_raw(
+        "UPDATE ops_provider_health SET sampled_at=$1::timestamptz", later.isoformat()
+    )
+    check = await f.measure(later, {})
+    assert check["status"] == "measured" and check["gap_until"] is None
+    assert check["lost_observations"] == 1
+
+
+async def test_legacy_permanent_incomplete_flag_is_dropped(database):
+    t = f._at()
+    await database.execute_raw(
+        "INSERT INTO ops_provider_health(id, snapshot, sampled_at) "
+        "VALUES('primary', $1::jsonb, now())",
+        json.dumps({"routes": {}, "receipts": {}, "incomplete": True}),
+    )
+    await f._persist_batch(batch("upgraded", [], t))
+    check = await f.measure(datetime.now(UTC), {})
+    assert check["status"] == "measured" and not check["incomplete"]
+
+
+async def test_gracefully_stopped_worker_is_not_a_lagging_peer(database, monkeypatch):
+    # Every deploy stops both workers. Their last receipts must not make the
+    # next workers' samples unknown (a false "服务巡检异常" and then "恢复").
+    f.Call("ark", "m").record("success", f._at())
+    await f.retire()
+    row = (
+        await database.query_raw("SELECT snapshot FROM ops_provider_health WHERE id='primary'")
+    )[0]["snapshot"]
+    if isinstance(row, str):
+        row = json.loads(row)
+    receipt = row["receipts"][f._worker_id]
+    assert receipt["closed"] and receipt["sequence"] == 2 and not f._pending
+    now = datetime.now(UTC)
+    later = now + timedelta(seconds=f.settings.provider_failing_stale_seconds + 30)
+    successor = batch("successor", [], later.timestamp())
+    await f._persist_batch(successor)
+    await database.execute_raw(
+        "UPDATE ops_provider_health SET sampled_at=$1::timestamptz", later.isoformat()
+    )
+    check = await f.measure(later, {})
+    assert check["status"] == "measured" and not check["peer_collection_incomplete"]
+    assert check["observed_workers"] == 1
+    # A worker that died without retiring still counts as lagging.
+    await f._persist_batch(batch("crashed", [], now.timestamp()))
+    await f._persist_batch({**successor, "sequence": 2})
+    check = await f.measure(later, {})
+    assert check["status"] == "unknown" and check["peer_collection_incomplete"]
+
+
+async def test_retire_persists_a_frozen_retry_batch_before_closing(database, monkeypatch):
+    f.Call("ark", "m").record("failure", f._at())
+    real = f._persist_batch
+
+    async def outage(batch, **kwargs):
+        raise RuntimeError("synthetic SQL outage")
+
+    monkeypatch.setattr(f, "_persist_batch", outage)
+    with pytest.raises(RuntimeError):
+        await f.flush()
+    f.Call("ark", "m").record("failure", f._at())
+    monkeypatch.setattr(f, "_persist_batch", real)
+    await f.retire()
+    check = await f.measure(datetime.now(UTC), {})
+    assert check["routes"][0]["calls"] == 2 and f._batch is None and not f._pending

@@ -238,14 +238,28 @@ def message_for(level: str, sample: dict) -> tuple[str, str]:
             elif name == "provider_failing":
                 for incident in c.get("incidents", [])[:3]:
                     outcome = {"succeeded": "最近故障请求已由备用模型接住", "failed": "备用也失败",
-                               "not_attempted": "未尝试备用", "cancelled": "备用调用被取消"}.get(incident.get("fallback"), "备用结果尚未确认")
-                    parts.append(f"{incident['role']} {incident['provider']}/{incident['model']} "
-                                 f"{c['window_seconds'] / 60:g}分钟内失败{incident['failures']}次/{incident['calls']}次调用；{outcome}")
+                               "not_attempted": "未尝试备用", "cancelled": "备用调用被取消",
+                               "retry_succeeded": "最近故障请求重试后成功"}.get(incident.get("fallback"), "备用结果尚未确认")
+                    cause = "熔断器已打开" if incident.get("reason") == "circuit_open" else (
+                        f"{c['window_seconds'] / 60:g}分钟内失败{incident['failures']}次/{incident['calls']}次调用")
+                    parts.append(f"{_route_label(incident)}{cause}；{outcome}")
         return "服务告警", "；".join(parts) + "。详情见Web后台资源监控。"
     if level == "unknown":
         missing = [LABELS[n] for n, c in checks.items() if c["status"] != "measured"]
         return "服务巡检异常", f"连续多次无法完成：{'、'.join(missing)}。不代表服务正常，请检查Web后台资源监控。"
+    dormant = [r for r in checks.get("provider_failing", {}).get("routes", []) if r.get("dormant")]
+    if dormant:
+        # No call ever reached these routes again: stopping the alert is not recovery evidence.
+        idle = checks["provider_failing"].get("dormant_seconds", 3600) / 60
+        names = "、".join(_route_label(r) for r in dormant[:3])
+        return "服务告警解除", (f"{names}已超过{idle:g}分钟没有调用，无法确认是否恢复，已停止告警；"
+                                "其余检查正常。详情见Web后台资源监控。")
     return "服务告警恢复", "此前告警的问题已有恢复证据，各项服务检查正常。"
+
+
+def _route_label(route: dict) -> str:
+    role = route.get("role_label") or provider_failing.ROLE_LABELS.get(route.get("role"), route.get("role"))
+    return f"{role}（{route['provider']}/{route['model']}）"
 
 
 def _object(value):

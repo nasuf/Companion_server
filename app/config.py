@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     provider_failing_stale_seconds: int = Field(120, ge=60, le=600)
     provider_failing_receipt_limit: int = Field(128, ge=16, le=1024)
     provider_failing_receipt_seconds: int = Field(86400, ge=7200, le=86400)
+    # An alerting route with no calls this long (a backup the primary no longer
+    # needs, a retired model) stops alerting and is shown as unconfirmed.
+    provider_failing_dormant_seconds: int = Field(3600, ge=600, le=86400)
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"

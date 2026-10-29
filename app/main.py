@@ -198,6 +198,12 @@ async def lifespan(app: FastAPI):
         from app.services.llm.usage_repo import drain_usage_writes
         await drain_usage_writes()
         try:
+            from app.services.ops.provider_failing import retire
+
+            await retire()
+        except Exception as e:
+            logger.warning(f"Provider availability final flush failed ({type(e).__name__})")
+        try:
             await disconnect_db()
         except Exception as e:
             logger.warning(f"DB disconnect failed: {e!r}")
