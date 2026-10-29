@@ -117,7 +117,10 @@ def test_new_route_incident_alerts_without_repeating_old_or_misreporting_recover
     assert notify
     assert not h.decide('warning', first, notified, 0)[0]
     assert h.decide('warning', sample('secondary'), notified, 0)[0]
-    assert h.decide('warning', sample('primary', '2026-10-28T02:00:00Z'), notified, 0)[0]
+    # A fresh incident timestamp on the same route during the recovery debounce
+    # belongs to the same notification episode, not a new push.
+    assert not h.decide('warning', sample('primary', '2026-10-28T02:00:00Z'), notified, 0)[0]
+    assert h.decide('warning', sample('primary', '2026-10-28T02:00:00Z'), {'level':'normal','checks':[]}, 0)[0]
     assert 'ark/primary（欠费）' in h.message_for('warning', first)[1]
     assert h.level_for({'checks': {'provider_budget': {'status': 'unknown'}}}, 'warning') == 'warning'
 

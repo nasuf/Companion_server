@@ -83,7 +83,14 @@ def test_deploy_sync_includes_only_required_runtime_eval_files(tmp_path):
     command = sync["run"].split('rsync -azvcOR --stats', 1)[1]
     args = shlex.split(('rsync -azvcOR --stats' + command).replace('\\\n', ''))
     required = {'evals/__init__.py', 'evals/graders.py', 'evals/run_local.py',
-                'evals/long_companion_sim.py', 'evals/cases.jsonl'}
+                'evals/long_companion_sim.py', 'evals/cases.jsonl',
+                'evals/quality/*.py', 'evals/quality/memory_regressions.json',
+                'evals/persona_grounding/cases.json', 'evals/temporal_awareness/*.py',
+                'evals/reply_register/*.py', 'evals/persona_drift/*.py',
+                'evals/boundary_reply/*.py', 'evals/temporal_binding/cases.json',
+                'evals/temporal_evidence/cases.json', 'evals/context_embedding/cases.json',
+                'evals/temporal_dialogue/cases.jsonl', 'tests/__init__.py',
+                'tests/g02_harness_support.py', 'tests/graph_harness_support.py'}
     assert set(args[5:-1]) == required
     assert args[3:5] == ['-e', 'ssh -i ~/.ssh/deploy_key -p $VPS_PORT -o BatchMode=yes']
     assert args[-1] == '$VPS_USER@$VPS_HOST:/app/companion-server/'
@@ -91,7 +98,10 @@ def test_deploy_sync_includes_only_required_runtime_eval_files(tmp_path):
         pytest.skip('actual rsync rehearsal requires rsync')
     destination = tmp_path / 'checkout'
     destination.mkdir()
-    result = subprocess.run([args[0], args[1], args[2], *args[5:-1], str(destination)],
+    # Shell expands allowlisted globs before rsync; subprocess deliberately
+    # avoids a shell, so expand exactly those patterns here.
+    required = {str(p.relative_to(root)) for pattern in required for p in root.glob(pattern)}
+    result = subprocess.run([args[0], args[1], args[2], *sorted(required), str(destination)],
                             cwd=root, text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
     assert {str(p.relative_to(destination)) for p in destination.rglob('*') if p.is_file()} == required

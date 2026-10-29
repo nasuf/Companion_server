@@ -56,13 +56,25 @@ COPY scripts ./scripts
 # Prompt version snapshots use these deterministic validators at runtime.
 # Keep generated results and optional evaluation datasets out of the image.
 COPY evals/__init__.py evals/graders.py evals/run_local.py evals/long_companion_sim.py evals/cases.jsonl ./evals/
+COPY evals/quality/*.py ./evals/quality/
+COPY evals/quality/memory_regressions.json ./evals/quality/
+COPY evals/persona_grounding/cases.json ./evals/persona_grounding/
+COPY evals/temporal_awareness/*.py ./evals/temporal_awareness/
+COPY evals/reply_register/*.py ./evals/reply_register/
+COPY evals/persona_drift/*.py ./evals/persona_drift/
+COPY evals/boundary_reply/*.py ./evals/boundary_reply/
+COPY evals/temporal_binding/cases.json ./evals/temporal_binding/
+COPY evals/temporal_evidence/cases.json ./evals/temporal_evidence/
+COPY evals/context_embedding/cases.json ./evals/context_embedding/
+COPY evals/temporal_dialogue/cases.jsonl ./evals/temporal_dialogue/
+COPY tests/__init__.py tests/g02_harness_support.py tests/graph_harness_support.py ./tests/
 
 RUN if [ -n "$PIP_INDEX_URL" ]; then \
         pip install --upgrade pip -i "$PIP_INDEX_URL" \
-        && pip install -c runtime-constraints.txt . -i "$PIP_INDEX_URL"; \
+        && pip install -c runtime-constraints.txt ".[quality]" -i "$PIP_INDEX_URL"; \
     else \
         pip install --upgrade pip \
-        && pip install -c runtime-constraints.txt .; \
+        && pip install -c runtime-constraints.txt ".[quality]"; \
     fi \
     && npm_config_registry="${NPM_REGISTRY:-https://registry.npmjs.org}" \
        npm_config_fetch_timeout=120000 npm_config_fetch_retries=2 \

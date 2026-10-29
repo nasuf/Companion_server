@@ -3094,3 +3094,106 @@ model OpsProviderHealth {
   @@map("ops_provider_health")
   @@ignore
 }
+
+// Administrative evaluation tables use bounded SQL, avoiding generated type growth.
+model QualityJob {
+  id String @id
+  kind String
+  sourceKey String @map("source_key")
+  sourceVersion String @map("source_version")
+  localDate DateTime @map("local_date") @db.Date
+  status String @default("pending")
+  notBefore DateTime @default(now()) @map("not_before") @db.Timestamptz
+  leaseToken String? @map("lease_token")
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz
+  snapshot Json @default("{}")
+  report Json @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  @@unique([kind, sourceKey, sourceVersion])
+  @@index([localDate,kind,createdAt], map: "quality_jobs_date_idx")
+  @@map("quality_jobs")
+  @@ignore
+}
+model QualityBudgetMonth {
+  month DateTime @id @db.Date
+  committedCny Decimal @default(0) @map("committed_cny") @db.Decimal(14,8)
+  @@map("quality_budget_months")
+  @@ignore
+}
+model QualityCharge {
+  id String @id
+  jobId String @map("job_id")
+  month DateTime @db.Date
+  localDate DateTime @map("local_date") @db.Date
+  model String
+  reservedCny Decimal @map("reserved_cny") @db.Decimal(14,8)
+  requestPolicy Json @default("{}") @map("request_policy")
+  costCny Decimal? @map("cost_cny") @db.Decimal(14,8)
+  status String @default("reserved")
+  usage Json?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  @@index([jobId], map: "quality_charges_job_idx")
+  @@index([localDate], map: "quality_charges_day_idx")
+  @@map("quality_charges")
+  @@ignore
+}
+model QualitySample {
+  id String @id
+  jobId String @map("job_id")
+  userId String @map("user_id")
+  conversationId String @map("conversation_id")
+  messageId String @map("message_id")
+  replyId String @map("reply_id")
+  traceId String? @map("trace_id")
+  internal Boolean
+  status String @default("pending")
+  verdict Json?
+  reviewQueue Boolean @default(false) @map("review_queue")
+  reviewStatus String @default("unreviewed") @map("review_status")
+  reviewCategory String? @map("review_category")
+  reviewNote String? @map("review_note")
+  reviewedBy String? @map("reviewed_by")
+  reviewedAt DateTime? @map("reviewed_at") @db.Timestamptz
+  revision Int @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  @@unique([jobId,messageId])
+  @@index([jobId,reviewQueue,reviewStatus], map: "quality_samples_review_idx")
+  @@index([userId], map: "quality_samples_user_idx")
+  @@map("quality_samples")
+  @@ignore
+}
+model QualityCase {
+  id String @id
+  sampleId String? @unique @map("sample_id")
+  caseData Json @map("case_data")
+  enabled Boolean @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  @@map("quality_cases")
+  @@ignore
+}
+model QualityResult {
+  jobId String @map("job_id")
+  caseId String @map("case_id")
+  repetition Int
+  result Json
+  @@id([jobId,caseId,repetition])
+  @@map("quality_results")
+  @@ignore
+}
+model QualityExecutor {
+  id String @id
+  jobId String? @map("job_id")
+  leaseToken String? @map("lease_token")
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz
+  @@map("quality_executor")
+  @@ignore
+}
+
+model OpsServiceObservation {
+  sampledAt DateTime @id @map("sampled_at") @db.Timestamptz
+  checks Json
+  @@map("ops_service_observations")
+  @@ignore
+}

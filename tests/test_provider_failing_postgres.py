@@ -165,6 +165,9 @@ async def test_real_outbox_dedup_with_available_provider_evidence(
         assert "小模型（ark/m）" in rows[0]["body"] and "5次/5次" in rows[0]["body"]
         f.Call("ark", "m", "utility").record("success", f._at() + 1)
         await f.flush()
+        # Recovery is now debounced across the SQL-persisted monitoring state.
+        from tests.test_service_health_postgres import elapsed_recovery
+        await elapsed_recovery(database)
         await database.execute_raw(
             "UPDATE ops_service_health SET sampled_at=NOW()-INTERVAL '5 minutes'"
         )

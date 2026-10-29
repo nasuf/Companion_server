@@ -118,12 +118,20 @@ jobs:
             pyproject.toml runtime-constraints.txt Dockerfile docker-compose.deploy.yml .dockerignore .env.example \
             "$VPS_USER@$VPS_HOST:/app/companion-server/"
 
-          # Only deterministic runtime validators are required by Docker COPY.
-          # --relative preserves evals/ without transferring optional datasets/results.
+          # Only the qualified offline renderer and synthetic scenario banks are
+          # required by Docker COPY. Never transfer private outputs or EVAL keys.
+          # --relative preserves evals/ and the two existing harness modules.
           rsync -azvcOR --stats \
             -e "ssh -i ~/.ssh/deploy_key -p $VPS_PORT -o BatchMode=yes" \
             evals/__init__.py evals/graders.py evals/run_local.py \
             evals/long_companion_sim.py evals/cases.jsonl \
+            evals/quality/*.py evals/quality/memory_regressions.json \
+            evals/persona_grounding/cases.json \
+            evals/temporal_awareness/*.py evals/reply_register/*.py \
+            evals/persona_drift/*.py evals/boundary_reply/*.py \
+            evals/temporal_binding/cases.json evals/temporal_evidence/cases.json \
+            evals/context_embedding/cases.json evals/temporal_dialogue/cases.jsonl \
+            tests/__init__.py tests/g02_harness_support.py tests/graph_harness_support.py \
             "$VPS_USER@$VPS_HOST:/app/companion-server/"
 
       - name: Deploy server stack on VPS

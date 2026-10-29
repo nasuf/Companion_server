@@ -61,6 +61,12 @@ async def test_concurrent_workers_one_alert_and_one_recovery(monitor, monkeypatc
     monkeypatch.setattr(c, "collect_metrics", AsyncMock(return_value=sample(64)))
     await c.sample_and_notify()
     assert (await c.read_status())["level"] == "normal"
+    assert len(await database.query_raw("SELECT id FROM notification_events WHERE user_id=$1", uid)) == 1
+    await database.execute_raw("""UPDATE ops_redis_capacity SET notified_signature=
+      jsonb_set(notified_signature::jsonb,'{recovery}',jsonb_build_object(
+        'samples',20,'since',NOW()-INTERVAL '11 minutes','last_at',NOW()-INTERVAL '30 seconds'))::text""")
+    await age(database)
+    await c.sample_and_notify()
     assert len(await database.query_raw("SELECT id FROM notification_events WHERE user_id=$1", uid)) == 2
     await database.execute_raw("UPDATE ops_redis_capacity SET sampled_at=NOW()-INTERVAL '3 minutes'")
     assert (await c.read_status())["status"] == "stale"

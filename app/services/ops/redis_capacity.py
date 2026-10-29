@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime, timedelta
 
 from app.config import settings
 from app.db import db
 from app.redis_client import get_redis
 from app.services.notifications.service import enqueue_notification
+from app.services.ops import recovery
 
 WARNING_PERCENT = 70
 RECOVERY_PERCENT = 65
@@ -27,6 +29,16 @@ async def collect_metrics() -> dict:
             redis = await get_redis()
             info = await redis.info()
             keys = await redis.dbsize()
+            try:
+                errors = await redis.info("errorstats")
+                error_counts = {key.removeprefix("errorstat_"): value["count"] for key, value in errors.items()
+                                if re.fullmatch(r"errorstat_[A-Za-z0-9_]{1,64}", key)
+                                and isinstance(value, dict) and isinstance(value.get("count"), int)
+                                and value["count"] >= 0}
+                errorstats = {"status": "measured", "counts": dict(list(error_counts.items())[:64]),
+                              "truncated": len(error_counts) > 64}
+            except Exception as exc:
+                errorstats = {"status": "unknown", "error_type": type(exc).__name__}
         used, maximum = info.get("used_memory"), info.get("maxmemory")
         valid = isinstance(used, int) and used >= 0 and isinstance(maximum, int) and maximum >= 0
         hits, misses = info.get("keyspace_hits"), info.get("keyspace_misses")
@@ -45,6 +57,7 @@ async def collect_metrics() -> dict:
             "hit_rate": round(hits / total * 100, 1) if total else None,
             "evicted_keys": info.get("evicted_keys"),
             "uptime_seconds": info.get("uptime_in_seconds"),
+            "errorstats": errorstats,
         }
     except Exception as exc:
         return {"available": False, "capacity_status": "unavailable", "sampled_at": sampled_at,
@@ -69,6 +82,28 @@ def _timestamp(value) -> datetime:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
+def error_deltas(sample: dict, previous: dict, now: datetime) -> None:
+    """Redis restart/reset starts a new baseline; never fabricate lost history."""
+    errors = sample.get("errorstats") or {}
+    baseline = previous.get("_error_baseline") or {}
+    events = list(previous.get("error_events") or [])[-20:]
+    if errors.get("status") == "measured" and not errors.get("truncated") and sample.get("run_id"):
+        same_run = baseline.get("run_id") == sample["run_id"]
+        deltas = {}
+        if same_run:
+            for kind, value in errors["counts"].items():
+                old = baseline.get("counts", {}).get(kind, 0)
+                if value > old:
+                    deltas[kind] = value - old
+        if deltas:
+            events.append({"sampled_at": now.isoformat(), "since": baseline["sampled_at"], "counts": deltas})
+        sample["_error_baseline"] = {"run_id": sample["run_id"], "counts": errors["counts"], "sampled_at": now.isoformat()}
+        errors["delta_state"] = "measured" if same_run else "baseline_only"
+    else:
+        sample["_error_baseline"] = baseline
+    sample["error_events"] = events[-20:]
+
+
 async def sample_and_notify() -> None:
     """Each API worker calls this; the SQL row lock serializes sample/outbox commits."""
     sample = await collect_metrics()
@@ -90,14 +125,30 @@ async def sample_and_notify() -> None:
         ) if recipients else []
         active_ids = [r["id"] for r in admins]
         previous = row["level"]
+        previous_sample = _object(row.get("snapshot")) or {}
+        error_deltas(sample, previous_sample, now)
         level = level_for(sample, previous)
+        unknown = level == "unknown"
         # Do not declare recovery after failed/unknown sampling. Preserve the
         # warning latch until a real measurement drops below the recovery band.
         if level == "unknown" and previous == "warning":
             level = "warning"
-        signature = json.dumps({"level": level, "recipients": active_ids}, sort_keys=True)
         old_signature = row.get("notified_signature")
-        notify = bool(active_ids) and signature != old_signature and (level != "normal" or bool(old_signature))
+        state = _object(old_signature) or {"level": "normal", "checks": []}
+        # Recipient changes are configuration, not incidents or recovery evidence.
+        state.pop("recipients", None)
+        unknown_streak = int(previous_sample.get("unknown_streak", 0)) + 1 if unknown else 0
+        sample["unknown_streak"] = unknown_streak
+        recovered, next_state = recovery.advance(level, state, now, interval=SAMPLE_SECONDS)
+        notify = recovered
+        if level == "warning" and not unknown:
+            notify = state.get("level") != "warning"
+            next_state = {"level": "warning", "checks": []}
+        elif level == "unknown" and unknown_streak >= settings.ops_unknown_samples and state.get("level") == "normal":
+            notify, next_state = True, {"level": "unknown", "checks": []}
+        notify = notify and bool(active_ids)
+        if not active_ids:
+            next_state = state
         ids = _object(row["notification_ids"]) or []
         generation = int(row["generation"])
         if notify:
@@ -118,13 +169,15 @@ async def sample_and_notify() -> None:
         await tx.execute_raw(
             "UPDATE ops_redis_capacity SET sampled_at=$1::timestamptz, snapshot=$2::jsonb, level=$3, "
             "notified_signature=$4, generation=$5, notification_ids=$6::jsonb, recipient_count=$7 WHERE id='primary'",
-            now.isoformat(), json.dumps(sample), level, signature if notify else old_signature,
+            now.isoformat(), json.dumps(sample), level, json.dumps(next_state, sort_keys=True),
             generation, json.dumps(ids), len(active_ids),
         )
 
 
 async def read_status() -> dict:
     base = {"warning_percent": WARNING_PERCENT, "recovery_percent": RECOVERY_PERCENT,
+            "recovery_seconds": settings.ops_recovery_seconds, "recovery_samples": settings.ops_recovery_samples,
+            "unknown_samples": settings.ops_unknown_samples,
             "sample_interval_seconds": SAMPLE_SECONDS, "stale_after_seconds": STALE_SECONDS,
             "human_receipt": "not_collected"}
     try:
@@ -141,10 +194,12 @@ async def read_status() -> dict:
             ) if ids else []
         stamp = _timestamp(row["sampled_at"])
         snapshot = _object(row["snapshot"])
+        snapshot.pop("_error_baseline", None)
         stale = (datetime.now(UTC) - stamp).total_seconds() > STALE_SECONDS
         return {**base, "status": "stale" if stale else "active" if row["recipient_count"] else "unconfigured",
                 "level": row["level"], "sampled_at": stamp.isoformat(), "sample": snapshot,
                 "recipient_count": row["recipient_count"], "notifications": events,
+                "recovery_pending": (_object(row.get("notified_signature")) or {}).get("recovery"),
                 "missing_notification_count": max(0, len(ids) - sum(e["count"] for e in events))}
     except Exception as exc:
         return {**base, "status": "unavailable", "error_type": type(exc).__name__, "notifications": []}

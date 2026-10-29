@@ -76,7 +76,9 @@ class TestSchedulerJobs:
                 for c in ast.walk(fn)
             )
         }
-        assert local == {"_run_redis_health_recheck", "_run_runtime_job_queue"}, (
+        # quality evaluation is separately serialized by the SQL executor row;
+        # it deliberately remains usable during a Redis outage.
+        assert local == {"_run_redis_health_recheck", "_run_runtime_job_queue", "_run_quality_evaluation"}, (
             f"「每实例各跑」的任务集合变了: {sorted(local)}。新增前先确认它在 N 个 "
             "worker 上同时跑是安全且必要的。"
         )

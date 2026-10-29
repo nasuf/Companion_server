@@ -153,7 +153,16 @@ async def get_prompt_versions(
         versions = await list_prompt_versions(key, limit=limit)
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt not found") from None
-    return [PromptTemplateVersionResponse(**version) for version in versions]
+    from app.config import settings
+    from app.services.quality.public_results import summaries
+    status = "not_configured" if not settings.quality_enabled else "not_run"
+    evaluations = {}
+    if settings.quality_enabled and versions:
+        try:
+            evaluations = {r["source_version"]: r for r in await summaries("prompt", key, [v["id"] for v in versions])}
+        except Exception:
+            status = "unavailable"
+    return [PromptTemplateVersionResponse(**version, quality_evaluation=evaluations.get(version["id"], {"status": status})) for version in versions]
 
 
 @router.post("/{key}/reset", response_model=PromptTemplateResponse)

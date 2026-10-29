@@ -55,6 +55,7 @@ async def test_recipient_limit_rejects_unbounded_fanout(monkeypatch):
 
 @pytest.mark.parametrize("monitor_fails", [False, True])
 async def test_health_recheck_runs_sql_alert_even_when_redis_health_probe_fails(monkeypatch, monitor_fails):
+    monkeypatch.setattr("app.services.ops.worker_health.heartbeat", AsyncMock())
     from jobs import scheduler
     from app import redis_client
     from unittest.mock import Mock
@@ -84,6 +85,7 @@ async def test_health_recheck_runs_sql_alert_even_when_redis_health_probe_fails(
 
 
 async def test_service_health_failure_is_recorded_without_stopping_the_redis_alert(monkeypatch):
+    monkeypatch.setattr("app.services.ops.worker_health.heartbeat", AsyncMock())
     from jobs import scheduler
     from app import redis_client
     from app.services.ops import service_health

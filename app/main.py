@@ -135,6 +135,13 @@ async def lifespan(app: FastAPI):
         from app.services.runtime_config import refresh_worker_config
         config_refresh_task = asyncio.create_task(refresh_worker_config(), name="configuration-refresh")
 
+        from app.services.ops.worker_health import heartbeat
+        try:
+            async with asyncio.timeout(3):
+                await heartbeat()
+        except Exception as exc:
+            logger.warning("Worker heartbeat unavailable (%s)", type(exc).__name__)
+
         from app.services.agent_avatars import validate_avatar_assets
 
         validate_avatar_assets()
@@ -153,6 +160,11 @@ async def lifespan(app: FastAPI):
             async def recheck_loop():
                 while True:
                     await recheck_redis_health()
+                    try:
+                        async with asyncio.timeout(3):
+                            await heartbeat()
+                    except Exception as exc:
+                        logger.warning("Worker heartbeat unavailable (%s)", type(exc).__name__)
                     await asyncio.sleep(30)
 
             redis_recheck_task = asyncio.create_task(recheck_loop(), name="redis-health-recheck")
@@ -204,6 +216,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Provider availability final flush failed ({type(e).__name__})")
         try:
+            from app.services.ops.worker_health import heartbeat
+            async with asyncio.timeout(3):
+                await heartbeat(closed=True)
+        except Exception as exc:
+            logger.warning("Worker shutdown marker unavailable (%s)", type(exc).__name__)
+        from app.services.quality.worker import stop as stop_quality_worker
+        await stop_quality_worker()
+        try:
             await disconnect_db()
         except Exception as e:
             logger.warning(f"DB disconnect failed: {e!r}")
@@ -230,6 +250,7 @@ app.add_middleware(
 )
 
 # Register routers
+from app.api.quality_ci import router as quality_ci_router
 from app.api.public.health import router as health_router
 from app.api.public.users import router as users_router
 from app.api.public.feedback import router as feedback_router
@@ -276,6 +297,7 @@ from app.api.public.traces import router as traces_router
 from app.api.admin.bug_reports import router as admin_bug_reports_router
 from app.api.admin.user_feedback import router as admin_user_feedback_router
 from app.api.admin.stats import router as admin_stats_router
+from app.api.admin.quality import router as admin_quality_router
 from app.api.admin.runtime_config import router as admin_runtime_config_router
 from app.api.admin.proactive_tuning import router as admin_proactive_tuning_router
 from app.api.admin.chat_context_policy import router as admin_chat_context_policy_router
@@ -301,6 +323,7 @@ from app.api.admin.tts import (
     router as admin_tts_router,
 )
 
+app.include_router(quality_ci_router)
 app.include_router(health_router)
 app.include_router(users_router)
 app.include_router(feedback_router)
@@ -349,6 +372,7 @@ app.include_router(traces_router)
 app.include_router(admin_bug_reports_router)
 app.include_router(admin_user_feedback_router)
 app.include_router(admin_stats_router)
+app.include_router(admin_quality_router)
 app.include_router(admin_runtime_config_router)
 app.include_router(admin_proactive_tuning_router)
 app.include_router(admin_chat_context_policy_router)

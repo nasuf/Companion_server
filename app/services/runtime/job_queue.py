@@ -595,6 +595,29 @@ async def runtime_job_counts() -> dict[str, int]:
     }
 
 
+async def read_monitor_jobs(*, limit: int = 100, carried: list[str] | None = None) -> dict:
+    """Bounded read-only queue observation. Never export payloads or lease tokens.
+
+    Ready jobs use LPUSH/RPOP, so the tail is the oldest side. Sorted indexes
+    are ordered by eligibility/lease time. Truncation remains explicit.
+    """
+    redis = await get_redis()
+    limit = max(1, min(limit, 200))
+    groups = await asyncio.gather(
+        redis.lrange(_READY_KEY, -limit - 1, -1),
+        redis.zrange(_DELAYED_KEY, 0, limit),
+        redis.zrange(_RUNNING_KEY, 0, limit),
+    )
+    ids = list(dict.fromkeys([*list(carried or [])[:limit],
+        *(_decode(raw) for group in groups for raw in group)]))
+    fields = ("id", "status", "created_at", "not_before", "lease_expires_at")
+    records = await asyncio.gather(*(redis.hmget(_job_key(job_id), fields) for job_id in ids))
+    return {"items": [dict(zip(fields, (_decode(v) for v in values), strict=True))
+                      | {"id": job_id, "missing": values[1] is None}
+                      for job_id, values in zip(ids, records, strict=True)],
+            "truncated": any(len(group) > limit for group in groups)}
+
+
 async def _list_ids(redis, key: str, limit: int) -> list[str]:
     if hasattr(redis, "lrange"):
         raw = await redis.lrange(key, 0, limit - 1)

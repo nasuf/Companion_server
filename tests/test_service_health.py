@@ -36,16 +36,20 @@ N, W, U = "normal", "warning", "unknown"
     ((W, ["a"]), W, ["a", "b"], 0, True, (W, ["a", "b"])),   # a newly failing check pushes
     ((W, ["a", "b"]), W, ["b"], 0, False, (W, ["a", "b"])),  # a shrinking set does not
     ((W, ["a", "b"]), W, [], 0, False, (W, ["a", "b"])),     # latched by an unknown sample
-    ((W, ["a"]), N, [], 0, True, (N, [])),                   # recovery is announced once
+    ((W, ["a"]), N, [], 0, False, (W, ["a"])),              # first healthy sample only starts recovery
     ((N, []), U, [], 2, False, (N, [])),                     # unknown must persist first
     ((N, []), U, [], 3, True, (U, [])),
     ((U, []), U, [], 9, False, (U, [])),
-    ((U, []), N, [], 0, True, (N, [])),
+    ((U, []), N, [], 0, False, (U, [])),
 ])
 def test_one_push_per_incident(notified, level, failing, streak, push, after):
     current = {"checks": {name: {"status": "measured", "alerting": True} for name in failing}}
     state = {"level": notified[0], "checks": notified[1]}
-    assert h.decide(level, current, state, streak) == (push, {"level": after[0], "checks": after[1]})
+    actual_push, actual = h.decide(level, current, state, streak)
+    assert actual_push == push
+    if level == N and notified[0] != N:
+        assert actual.pop("recovery")["samples"] == 1
+    assert actual == {"level": after[0], "checks": after[1]}
 
 
 def test_messages_name_each_failing_check_and_never_call_unknown_healthy():

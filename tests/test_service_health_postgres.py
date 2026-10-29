@@ -130,6 +130,14 @@ async def age(database):
     await database.execute_raw("UPDATE ops_service_health SET sampled_at=NOW()-INTERVAL '5 minutes'")
 
 
+async def elapsed_recovery(database):
+    # Persist four healthy samples from the previous ten minutes. The next SQL
+    # transaction must confirm normal again before enqueueing the recovery.
+    await database.execute_raw("""UPDATE ops_service_health SET notified_signature=
+      jsonb_set(notified_signature::jsonb,'{recovery}',jsonb_build_object(
+        'samples',4,'since',NOW()-INTERVAL '11 minutes','last_at',NOW()-INTERVAL '2 minutes'))::text""")
+
+
 def sample(*alerting, unknown=()):
     checks = {n: {"status": "measured", "count": 0, "threshold": 1, "window_minutes": 15, "after_minutes": 3,
                   "replies": 0, "jobs": [], "alerting": n in alerting} for n in h.CHECKS}
@@ -165,7 +173,9 @@ async def test_one_push_per_incident_against_the_real_outbox(world, monkeypatch)
     assert (await h.read_status())["level"] == "warning"
     await step(sample("unanswered"))                             # back from unknown, known check: nothing
     assert await titles() == ["服务告警", "服务告警"]
-    await step(sample())                                         # recovery: once
+    await step(sample())                                         # recovery grace, no notification yet
+    assert await titles() == ["服务告警", "服务告警"]
+    await elapsed_recovery(database)
     await step(sample())
     assert await titles() == ["服务告警", "服务告警", "服务告警恢复"]
     # A recipient change alone pushes nothing.
@@ -254,6 +264,13 @@ async def test_billing_notice_outbox_deduplicates_workers_and_new_episode_notifi
     await age(database); await h.sample_and_notify()
     assert await database.notificationevent.count(where={'userId': admin}) == 1
     await b.record_success('ark', model, datetime.now(UTC))
+    await age(database); await h.sample_and_notify()
+    assert await database.notificationevent.count(where={'userId': admin}) == 1
+    await b.record_failure('ark', model, budget_error('AccountOverdueError'))
+    await age(database); await h.sample_and_notify()
+    assert await database.notificationevent.count(where={'userId': admin}) == 1  # relapse within grace
+    await b.record_success('ark', model, datetime.now(UTC))
+    await elapsed_recovery(database)
     await age(database); await h.sample_and_notify()
     assert await database.notificationevent.count(where={'userId': admin}) == 2
     await b.record_failure('ark', model, budget_error('AccountOverdueError'))

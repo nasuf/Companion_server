@@ -9,5 +9,8 @@ __pycache__
 *.egg-info
 .env
 .server.pid
-tests
+tests/*
+!tests/__init__.py
+!tests/g02_harness_support.py
+!tests/graph_harness_support.py
 uv.lock

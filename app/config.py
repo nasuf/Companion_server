@@ -4,6 +4,24 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Administrative evaluation only; these limits never alter chat routing.
+    ops_new_checks_notify_enabled: bool = False  # observe until natural evidence qualifies
+    quality_daily_turns: int = Field(default=50, ge=1, le=500)
+    quality_review_limit: int = Field(default=10, ge=1, le=50)
+    quality_daily_cny: float = Field(default=1, gt=0, le=100)
+    quality_prompt_run_cny: float = Field(default=.5, gt=0, le=100)
+    quality_prompt_daily_cny: float = Field(default=5, gt=0, le=100)
+    quality_full_run_cny: float = Field(default=3, gt=0, le=100)
+    quality_monthly_cny: float = Field(default=60, gt=0, le=1000)
+    quality_prompt_debounce_seconds: int = Field(default=600, ge=60, le=3600)
+    quality_noise_rate: float = Field(default=1/92, ge=0, le=1)
+    quality_noise_min_cases: int = Field(default=2, ge=0, le=50)
+    quality_critical_repeats: int = Field(default=3, ge=1, le=5)
+    quality_judge_model: str = "qwen3.5-flash"
+    quality_enabled: bool = True  # qualified admin-only worker; QUALITY_ENABLED=false stops dispatch
+    quality_oidc_repository: str = "nasuf/Companion_server"
+    quality_oidc_repository_id: str = "1180603795"
+
     # Android JPush: JSON keyed by package name, values app_key/master_secret.
     # None enables sending when matching credentials exist; False is a kill switch.
     jpush_enabled: bool | None = None
@@ -46,6 +64,23 @@ class Settings(BaseSettings):
     # An alerting route with no calls this long (a backup the primary no longer
     # needs, a retired model) stops alerting and is shown as unconfirmed.
     provider_failing_dormant_seconds: int = Field(3600, ge=600, le=86400)
+
+    # Administrator-only monitoring; thresholds never alter chat execution.
+    ops_recovery_seconds: int = Field(600, ge=60, le=3600)
+    ops_recovery_samples: int = Field(5, ge=2, le=60)
+    ops_unknown_samples: int = Field(3, ge=2, le=10)
+    ops_backlog_seconds: int = Field(300, ge=60, le=7200)
+    ops_backlog_page_size: int = Field(100, ge=10, le=200)
+    ops_worker_heartbeat_seconds: int = Field(90, ge=60, le=300)
+    ops_worker_startup_grace_seconds: int = Field(180, ge=90, le=1800)
+    ops_worker_exit_window_seconds: int = Field(900, ge=300, le=3600)
+    ops_worker_samples: int = Field(2, ge=2, le=10)
+    ops_reply_window_seconds: int = Field(1800, ge=300, le=7200)
+    ops_reply_slow_seconds: int = Field(20, ge=1, le=300)
+    ops_reply_slow_count: int = Field(3, ge=1, le=100)
+    ops_reply_p90_seconds: int = Field(15, ge=1, le=300)
+    ops_reply_p90_min_samples: int = Field(20, ge=5, le=200)
+    ops_reply_recovery_samples: int = Field(3, ge=2, le=20)
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"

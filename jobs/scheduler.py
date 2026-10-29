@@ -797,6 +797,10 @@ def register_scheduler_jobs(scheduler):
         replace_existing=True,
     )
 
+    # The tick only dispatches an isolated, cluster-leased administrator job.
+    scheduler.add_job(_run_quality_evaluation,'interval',seconds=60,id='quality_evaluation',
+                      replace_existing=True,max_instances=1,coalesce=True)
+
 
 def setup_scheduler(*, role="integrated"):
     """Start explicitly selected timers. Independent scheduler excludes consumers."""
@@ -1365,6 +1369,13 @@ async def _run_last_will_dispatch():
     await _run_distributed_job("last_will_dispatch", 300, _body)
 
 
+async def _run_quality_evaluation():
+    # SQL owns polling/execution leases; Redis failure must not stop offline
+    # admin evaluation. Each API worker may dispatch, only one can own a job.
+    from app.services.quality.worker import tick
+    await _run_local_job("quality_evaluation", tick)
+
+
 async def _run_redis_health_recheck():
     """30s 周期 ping Redis 并更新 _redis_healthy flag. 允许 Redis 故障后自愈
     (修好后下次 tick flip 回 healthy, 写 endpoints 自动重开).
@@ -1378,6 +1389,12 @@ async def _run_redis_health_recheck():
             await recheck_redis_health()
         except Exception as e:
             _job_failed("Redis health recheck", e)
+        from app.services.ops.worker_health import heartbeat
+        try:
+            async with asyncio.timeout(3):
+                await heartbeat()
+        except Exception as e:
+            _job_failed("Worker heartbeat", e)
         # SQL claim/outbox remains usable when Redis writes fail under pressure.
         from app.services.ops.redis_capacity import sample_and_notify
         try:

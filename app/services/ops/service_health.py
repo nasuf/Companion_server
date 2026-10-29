@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime, timedelta
 
 from app.config import settings
 from app.db import db
 from app.services.notifications.service import enqueue_notification
-from app.services.ops import provider_budget, provider_failing
+from app.services.ops import provider_budget, provider_failing, recovery, reply_slow, task_backlog, worker_health
 
 SAMPLE_SECONDS = 120
 STALE_SECONDS = 600
@@ -45,6 +46,9 @@ LABELS = {
     "cron_failing": "定时任务失败",
     "provider_failing": "模型供应商持续失败",
     "provider_budget": "模型供应商欠费或额度耗尽",
+    "task_backlog": "任务积压",
+    "worker_exit": "API worker 存活与退出",
+    "reply_slow": "回复处理耗时",
 }
 
 
@@ -153,7 +157,9 @@ async def _cron_failing(now: datetime, carry: dict) -> dict:
 
 CHECKS = {"unanswered": _unanswered, "reply_failed": _reply_failed,
           "memory_blocked": _memory_blocked, "cron_failing": _cron_failing,
-          "provider_budget": provider_budget.measure, "provider_failing": provider_failing.measure}
+          "provider_budget": provider_budget.measure, "provider_failing": provider_failing.measure,
+          "task_backlog": task_backlog.measure, "worker_exit": worker_health.measure,
+          "reply_slow": reply_slow.measure}
 
 
 async def collect_metrics(now: datetime | None = None, carry: dict | None = None) -> dict:
@@ -169,8 +175,12 @@ async def collect_metrics(now: datetime | None = None, carry: dict | None = None
 
     results = dict(await asyncio.gather(*(measure(n, c) for n, c in CHECKS.items())))
     # An unmeasured check keeps its previous evidence for the next sample.
-    next_carry = {name: result.pop("_carry", None) if result["status"] == "measured" else carry.get(name)
-                  for name, result in results.items()}
+    next_carry = {}
+    for name, result in results.items():
+        evidence = result.pop("_carry", None)
+        next_carry[name] = evidence if evidence is not None else carry.get(name) if result["status"] != "measured" else None
+    for name in ("task_backlog", "worker_exit", "reply_slow"):
+        if name in results:results[name]["observation_only"] = not settings.ops_new_checks_notify_enabled
     return {"sampled_at": now.isoformat(), "checks": results,
             "carry": {k: v for k, v in next_carry.items() if v}}
 
@@ -196,23 +206,28 @@ def decide(level: str, sample: dict, notified: dict, unknown_streak: int) -> tup
     a latched warning or a recipient change never pushes.
     """
     previous = notified.get("level", "normal")
+    now = recovery.timestamp(sample["sampled_at"]) if sample.get("sampled_at") else datetime.now(UTC)
+    recovered, notified = recovery.advance(level, notified, now, interval=SAMPLE_SECONDS)
     if level == "warning":
         failing = set(alerting_checks(sample))
         # A second provider/model incident must notify even while another route
         # is already blocked. Recovery/reoccurrence is a distinct incident too.
         for incident in sample["checks"].get("provider_budget", {}).get("incidents", []):
-            failing.add(f"provider_budget:{incident['provider']}/{incident['model']}:{incident['first_failure_at']}")
+            failing.add(f"provider_budget:{incident['provider']}/{incident['model']}")
         for incident in sample["checks"].get("provider_failing", {}).get("incidents", []):
-            failing.add(f"provider_failing:{incident['provider']}/{incident['model']}/{incident['role']}:{incident['first_failure_at']}")
+            failing.add(f"provider_failing:{incident['provider']}/{incident['model']}/{incident['role']}")
             if incident.get("fallback") == "failed":
-                failing.add(f"provider_failing:{incident['provider']}/{incident['model']}/{incident['role']}:{incident['first_failure_at']}:backup_failed")
-        known = set(notified.get("checks", [])) if previous == "warning" else set()
+                failing.add(f"provider_failing:{incident['provider']}/{incident['model']}/{incident['role']}:backup_failed")
+        # Upgrade old incident signatures without re-pushing an already open
+        # route. Model names may themselves contain colons (e.g. Ollama tags).
+        known = {re.sub(r":\d{4}-\d\d-\d\dT[^:]+:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)", "", key)
+                 for key in notified.get("checks", [])} if previous == "warning" else set()
         return previous != "warning" or bool(failing - known), {"level": "warning", "checks": sorted(known | failing)}
     if level == "unknown":
-        if previous == "normal" and unknown_streak >= UNKNOWN_STREAK_TO_NOTIFY:
+        if previous == "normal" and unknown_streak >= settings.ops_unknown_samples:
             return True, {"level": "unknown", "checks": []}
         return False, notified
-    return previous != "normal", {"level": "normal", "checks": []}
+    return recovered, notified
 
 
 def message_for(level: str, sample: dict) -> tuple[str, str]:
@@ -230,6 +245,12 @@ def message_for(level: str, sample: dict) -> tuple[str, str]:
                 parts.append(f"{c['count']}个会话的记忆写入失败超过{c['after_minutes']}分钟，用户仍在聊天")
             elif name == "cron_failing":
                 parts.append(f"{c['count']}个定时任务失败：{'、'.join(c['jobs'][:3])}")
+            elif name == "task_backlog":
+                parts.append(f"至少{c['count']}条任务积压或尚未确认完成，超时阈值{c['after_seconds']}秒")
+            elif name == "worker_exit":
+                parts.append(f"API worker存活{c['count']}/{c['expected']}，近期非正常退出{c['abnormal_exits']}次")
+            elif name == "reply_slow":
+                parts.append(f"{c['window_seconds']/60:g}分钟内{c['count']}个回合处理超过{c['slow_after_seconds']}秒；恢复需后续连续{c['recovery_required_turns']}个正常回合")
             elif name == "provider_budget":
                 incidents = c.get("incidents", [])
                 parts.append("模型调用出现欠费或额度耗尽：" + "、".join(
@@ -308,10 +329,12 @@ async def sample_and_notify() -> None:
         ) if recipients else []
         active_ids = [r["id"] for r in admins]
         level = level_for(sample, row["level"])
-        streak = int((_object(row["snapshot"]) or {}).get("unknown_streak", 0)) + 1 if level == "unknown" else 0
-        sample["unknown_streak"] = streak
         notified = _object(row.get("notified_signature")) or {"level": "normal", "checks": []}
-        notify, next_notified = decide(level, sample, notified, streak)
+        push_sample = {**sample, "checks": {name:check for name,check in sample["checks"].items() if not check.get("observation_only")}}
+        push_level = level_for(push_sample, notified.get("level", "normal"))
+        streak = int((_object(row["snapshot"]) or {}).get("unknown_streak", 0)) + 1 if push_level == "unknown" else 0
+        sample["unknown_streak"] = streak
+        notify, next_notified = decide(push_level, push_sample, notified, streak)
         notify = notify and bool(active_ids)
         if not active_ids:
             next_notified = notified  # nobody was told; keep the last delivered state
@@ -320,7 +343,7 @@ async def sample_and_notify() -> None:
         if notify:
             generation += 1
             ids = []
-            title, body = message_for(level, sample)
+            title, body = message_for(push_level, push_sample)
             for uid in active_ids:
                 event_id = await enqueue_notification(
                     user_id=uid, type="admin_service_health", title=title, body=body,
@@ -329,6 +352,16 @@ async def sample_and_notify() -> None:
                 )
                 if event_id:
                     ids.append(event_id)
+        # Counts/timing only, never private recovery IDs or task payloads.
+        observation = {name: sample["checks"][name] for name in
+                       ("task_backlog", "worker_exit", "reply_slow") if name in sample["checks"]}
+        await tx.execute_raw(
+            "INSERT INTO ops_service_observations(sampled_at,checks) VALUES($1::timestamptz,$2::jsonb) ON CONFLICT DO NOTHING",
+            now.isoformat(), json.dumps(observation),
+        )
+        await tx.execute_raw(
+            "DELETE FROM ops_service_observations WHERE sampled_at IN (SELECT sampled_at FROM ops_service_observations WHERE sampled_at < NOW()-INTERVAL '30 days' ORDER BY sampled_at LIMIT 1000)"
+        )
         await tx.execute_raw(
             "UPDATE ops_service_health SET sampled_at=$1::timestamptz, snapshot=$2::jsonb, level=$3, "
             "notified_signature=$4, generation=$5, notification_ids=$6::jsonb, recipient_count=$7 WHERE id='primary'",
@@ -339,6 +372,7 @@ async def sample_and_notify() -> None:
 
 async def read_status() -> dict:
     base = {"sample_interval_seconds": SAMPLE_SECONDS, "stale_after_seconds": STALE_SECONDS,
+            "recovery_seconds": settings.ops_recovery_seconds, "recovery_samples": settings.ops_recovery_samples,
             "labels": LABELS, "human_receipt": "not_collected"}
     try:
         async with asyncio.timeout(3):
@@ -352,14 +386,22 @@ async def read_status() -> dict:
                 "THEN 'partial' ELSE status END AS status, COUNT(*)::int AS count FROM notification_events "
                 "WHERE id=ANY($1::text[]) GROUP BY 1 LIMIT 10", ids,
             ) if ids else []
+        observation_rows = await _query("""SELECT count(*)::int AS samples,
+          min(sampled_at) AS first_sample_at,max(sampled_at) AS last_sample_at,
+          count(*) FILTER(WHERE EXISTS(SELECT 1 FROM jsonb_each(checks) c WHERE c.value->>'status'='unknown'))::int AS unknown_samples,
+          count(*) FILTER(WHERE EXISTS(SELECT 1 FROM jsonb_each(checks) c WHERE c.value->>'alerting'='true'))::int AS warning_samples
+          FROM ops_service_observations WHERE sampled_at>=NOW()-INTERVAL '24 hours'""")
         stamp = _timestamp(row["sampled_at"])
         stale = (datetime.now(UTC) - stamp).total_seconds() > STALE_SECONDS
         snapshot = _object(row["snapshot"]) or {}
         # Message IDs used as recovery evidence stay server-side.
         snapshot.pop("carry", None)
+        notification_state = _object(row.get("notified_signature")) or {}
         return {**base, "status": "stale" if stale else "active" if row["recipient_count"] else "unconfigured",
                 "level": row["level"], "sampled_at": stamp.isoformat(), "sample": snapshot,
+                "observation": {**observation_rows[0], "window_hours": 24, "retention_days": 30, "expected_samples": 720},
                 "recipient_count": row["recipient_count"], "notifications": events,
+                "recovery_pending": notification_state.get("recovery"),
                 "missing_notification_count": max(0, len(ids) - sum(e["count"] for e in events))}
     except Exception as exc:
         return {**base, "status": "unavailable", "error_type": type(exc).__name__, "notifications": []}

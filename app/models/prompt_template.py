@@ -41,6 +41,7 @@ class PromptTemplateEnabledRequest(PromptTemplateWriteGuard):
 
 
 class PromptTemplateVersionResponse(BaseModel):
+    quality_evaluation: dict[str, Any] | None = None
     id: str
     prompt_key: str
     content: str

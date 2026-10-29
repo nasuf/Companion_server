@@ -1,0 +1,288 @@
+[
+  {
+    "id": "preference_earlier_bubble-failed-run-0",
+    "route": "memory_extraction",
+    "history": [
+      {
+        "id": "m0",
+        "role": "user",
+        "content": "我想聊聊喝茶",
+        "createdAt": "2026-10-26 06:00:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m1",
+        "role": "assistant",
+        "content": "红茶和乌龙茶，你喜欢哪一个？",
+        "createdAt": "2026-10-26 06:00:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m2",
+        "role": "assistant",
+        "content": "可以慢慢想",
+        "createdAt": "2026-10-26 06:00:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m3",
+        "role": "assistant",
+        "content": "不用着急",
+        "createdAt": "2026-10-26 06:01:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m4",
+        "role": "assistant",
+        "content": "跟着感觉选",
+        "createdAt": "2026-10-26 06:01:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m5",
+        "role": "assistant",
+        "content": "每个人口味不同",
+        "createdAt": "2026-10-26 06:01:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m6",
+        "role": "assistant",
+        "content": "我只是好奇",
+        "createdAt": "2026-10-26 06:02:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m7",
+        "role": "assistant",
+        "content": "愿意说就说",
+        "createdAt": "2026-10-26 06:02:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m8",
+        "role": "assistant",
+        "content": "不用解释太多",
+        "createdAt": "2026-10-26 06:02:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      }
+    ],
+    "message": "我喜欢后面那个，已经喝了好多年了。",
+    "required": [
+      "乌龙"
+    ],
+    "forbidden": [
+      "喜欢红茶"
+    ],
+    "criterion": "抽取后的记忆正文必须消解指代为具体对象，不可仅在实体字段提到对象。",
+    "critical": false
+  },
+  {
+    "id": "preference_earlier_bubble-failed-run-1",
+    "route": "memory_extraction",
+    "history": [
+      {
+        "id": "m0",
+        "role": "user",
+        "content": "我想聊聊喝茶",
+        "createdAt": "2026-10-26 06:00:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m1",
+        "role": "assistant",
+        "content": "红茶和乌龙茶，你喜欢哪一个？",
+        "createdAt": "2026-10-26 06:00:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m2",
+        "role": "assistant",
+        "content": "可以慢慢想",
+        "createdAt": "2026-10-26 06:00:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m3",
+        "role": "assistant",
+        "content": "不用着急",
+        "createdAt": "2026-10-26 06:01:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m4",
+        "role": "assistant",
+        "content": "跟着感觉选",
+        "createdAt": "2026-10-26 06:01:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m5",
+        "role": "assistant",
+        "content": "每个人口味不同",
+        "createdAt": "2026-10-26 06:01:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m6",
+        "role": "assistant",
+        "content": "我只是好奇",
+        "createdAt": "2026-10-26 06:02:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m7",
+        "role": "assistant",
+        "content": "愿意说就说",
+        "createdAt": "2026-10-26 06:02:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m8",
+        "role": "assistant",
+        "content": "不用解释太多",
+        "createdAt": "2026-10-26 06:02:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      }
+    ],
+    "message": "我喜欢后面那个，已经喝了好多年了。",
+    "required": [
+      "乌龙"
+    ],
+    "forbidden": [
+      "喜欢红茶"
+    ],
+    "criterion": "抽取后的记忆正文必须消解指代为具体对象，不可仅在实体字段提到对象。",
+    "critical": false
+  },
+  {
+    "id": "work_earlier_bubble-failed-run-0",
+    "route": "memory_extraction",
+    "history": [
+      {
+        "id": "m0",
+        "role": "user",
+        "content": "聊聊我的工作吧",
+        "createdAt": "2026-10-26 06:00:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m1",
+        "role": "assistant",
+        "content": "你现在还是做室内设计吗？",
+        "createdAt": "2026-10-26 06:00:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m2",
+        "role": "assistant",
+        "content": "可以慢慢想",
+        "createdAt": "2026-10-26 06:00:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m3",
+        "role": "assistant",
+        "content": "不用着急",
+        "createdAt": "2026-10-26 06:01:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m4",
+        "role": "assistant",
+        "content": "跟着感觉选",
+        "createdAt": "2026-10-26 06:01:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m5",
+        "role": "assistant",
+        "content": "每个人口味不同",
+        "createdAt": "2026-10-26 06:01:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m6",
+        "role": "assistant",
+        "content": "我只是好奇",
+        "createdAt": "2026-10-26 06:02:00+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m7",
+        "role": "assistant",
+        "content": "愿意说就说",
+        "createdAt": "2026-10-26 06:02:20+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      },
+      {
+        "id": "m8",
+        "role": "assistant",
+        "content": "不用解释太多",
+        "createdAt": "2026-10-26 06:02:40+00:00",
+        "metadata": {
+          "proactive": false
+        }
+      }
+    ],
+    "message": "是的，我现在仍然做这份工作。",
+    "required": [
+      "室内设计"
+    ],
+    "forbidden": [],
+    "criterion": "抽取后的记忆正文必须消解指代为具体对象，不可仅在实体字段提到对象。",
+    "critical": false
+  }
+]
