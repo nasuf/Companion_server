@@ -146,6 +146,8 @@ async def run(payload):
             samples=1,
             provider_call=provider_call,
         )
+        if case.get("judging_instruction"):
+            args.judging_instruction = case["judging_instruction"]
 
         def fixture_hook(patches, chat_module, domain, current_case):
             from unittest.mock import AsyncMock

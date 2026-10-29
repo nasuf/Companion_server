@@ -70,6 +70,26 @@ def test_gate_baseline_missing_incomplete_critical_and_noise():
     assert gates.compare(changed, rows)["status"] == "incomplete"
 
 
+def test_temporal_dialogue_replay_matches_authored_harness():
+    from evals.quality.corpus import load, TEMPORAL_DIALOGUE_JUDGING
+
+    cases = [c for c in load() if c["suite"] == "temporal_dialogue"]
+    assert len(cases) == 240
+    for c in cases:
+        assert c["judging_instruction"] == TEMPORAL_DIALOGUE_JUDGING
+        statements = [m for m in c["history_rows"] if m["role"] == "user"]
+        if c["category"] == "gap":
+            assert c["memories"] == []
+        elif all(m["id"].startswith("statement-") for m in c["memories"]):
+            assert [m["content"] for m in c["memories"]] == [s["content"] for s in statements]
+            assert all(
+                m["occur_time"] is None and m["statement_time"] == s["createdAt"]
+                for m, s in zip(c["memories"], statements)
+            )
+    authored = [c for c in cases if c["memories"] and not c["memories"][0]["id"].startswith("statement-")]
+    assert len(authored) == 2
+
+
 def test_corpus_provenance_and_quick_all_suites():
     from evals.quality.corpus import load
 

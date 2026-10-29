@@ -263,3 +263,38 @@ async def test_real_renderer_uses_pinned_context_window(monkeypatch):
     assert len(rendered) == 2
     assert "第0号" not in rendered[0] and "第0号" in rendered[1]
     assert "第7号" in rendered[0] and "第7号" in rendered[1]
+
+
+async def test_temporal_dialogue_replay_renders_statements_and_case_judge(monkeypatch):
+    from evals.quality.corpus import load, TEMPORAL_DIALOGUE_JUDGING
+
+    seen = []
+
+    async def fake(job, provider, model, messages, **kwargs):
+        seen.append((kwargs.get("json_mode"), str(messages)))
+        text = '{"pass":true,"reason":"合成验证"}' if kwargs.get("json_mode") else "嗯，我记得。"
+        return text, {"input": 10, "output": 10, "cached_input": 0, "cost_cny": 0.0001}
+
+    monkeypatch.setattr(transport, "complete", fake)
+    prompts = [
+        {"key": p.key, "content": p.default_text, "is_enabled": p.default_enabled}
+        for p in PROMPT_DEFINITIONS
+    ]
+    from datetime import datetime, timedelta
+
+    def stale(c):
+        now = datetime.fromisoformat(c["now"])
+        return all(now - datetime.fromisoformat(m["createdAt"]) > timedelta(hours=3)
+                   for m in c["history_rows"])
+
+    # Only the injected memory can carry these statements into the reply prompt.
+    case = next(
+        c for c in load()
+        if c["suite"] == "temporal_dialogue" and c["category"] != "gap" and stale(c)
+        and c["memories"] and c["memories"][0]["id"].startswith("statement-")
+    )
+    result = await replay_turn({}, case, prompts, ["ark", "doubao-seed-2-0-lite-260228"])
+    assert result["judge"]["pass"] is True
+    statement = case["memories"][0]["content"]
+    assert any(not judged and statement in text for judged, text in seen)
+    assert any(judged and TEMPORAL_DIALOGUE_JUDGING[:40] in text for judged, text in seen)
