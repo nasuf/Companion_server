@@ -182,6 +182,14 @@ async def _ensure_conversation_for_admin_test(
                 "title": None,
             }
         )
+        from app.services.admin_takeover.service import attach_takeover_agent
+
+        await attach_takeover_agent(
+            user_id=user_id,
+            conversation_id=conv.id,
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+        )
         return conv.id
     except Exception as e:
         logger.warning(
@@ -1366,6 +1374,15 @@ async def _create_default_conversation(
                 "workspace": {"connect": {"id": workspace.id}},
                 "title": None,
             }
+        )
+        # 客户端随后会复用这个会话而不再 POST /conversations, 接管记录只能在这里补。
+        from app.services.admin_takeover.service import attach_takeover_agent
+
+        await attach_takeover_agent(
+            user_id=user_id,
+            conversation_id=conv.id,
+            agent_id=agent_id,
+            workspace_id=workspace.id,
         )
         return [conv]
     except Exception as e:
