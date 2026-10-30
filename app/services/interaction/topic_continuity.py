@@ -31,6 +31,7 @@ from typing import Literal
 from app.redis_client import get_redis
 from app.services.proactive import tuning
 from app.services.prompting.utils import is_skip_output
+from app.services.temporal import parse_time
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,17 @@ def render_dialogue(
 
     lines = []
     for role, text, created_at in entries:
-        stamp = f"[{created_at.astimezone(_TZ).strftime('%m-%d %H:%M')}] " if created_at else ""
+        # Database naive timestamps mean UTC, never the host's local timezone.
+        # Reuse the chat clock contract before rendering proactive context.
+        instant = parse_time(created_at)
+        stamp = ""
+        if instant is not None:
+            try:
+                stamp = f"[{instant.astimezone(_TZ).strftime('%m-%d %H:%M')}] "
+            except (ValueError, OverflowError):
+                stamp = "[时间未知] "
+        elif created_at is not None:
+            stamp = "[时间未知] "
         speaker = "AI" if role == "assistant" else "用户"
         lines.append(f"{stamp}{speaker}: {text[:max_chars]}")
     return "\n".join(lines)
@@ -173,13 +184,7 @@ def _key(conversation_id: str) -> str:
 
 
 def _parse_dt(raw: str | None) -> datetime | None:
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return parse_time(raw)
 
 
 def _now(now: datetime | None) -> datetime:

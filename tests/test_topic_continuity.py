@@ -353,3 +353,56 @@ def test_explain_cue_reasons_match_resolve_cue(state, previous_id, gap, followup
     cue, why = explain_cue(state, **kwargs)
     assert why == reason and (cue is not None) is has_cue
     assert resolve_cue(state, **kwargs) == cue
+
+
+@pytest.mark.parametrize("host_zone", ["UTC", "Asia/Shanghai", "America/Los_Angeles"])
+@pytest.mark.parametrize("instant,expected", [
+    (datetime(2026, 12, 31, 20, 15), "[01-01 04:15]"),
+    (datetime(2026, 10, 31, 16, 1), "[11-01 00:01]"),
+    (datetime(2024, 2, 28, 16, 1), "[02-29 00:01]"),
+])
+def test_dialogue_naive_database_clock_is_host_independent(host_zone, instant, expected):
+    import os
+    import time
+    if not hasattr(time, "tzset"):
+        pytest.skip("POSIX host timezone qualification")
+    previous = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = host_zone
+        time.tzset()
+        naive = render_dialogue([("user", "明天再聊", instant)])
+        aware = render_dialogue([("user", "明天再聊", instant.replace(tzinfo=UTC))])
+        assert naive == aware == expected + " 用户: 明天再聊"
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+@pytest.mark.parametrize("raw", [None, "", "garbage", "0001-01-01T00:00:00+14:00"])
+def test_continuity_invalid_clock_stays_unknown(raw):
+    assert tc._parse_dt(raw) is None
+
+
+def test_continuity_offset_and_naive_share_utc_contract():
+    naive = tc._parse_dt("2026-10-31T16:00:00")
+    offset = tc._parse_dt("2026-11-01T00:00:00+08:00")
+    assert naive == offset == datetime(2026, 10, 31, 16, tzinfo=UTC)
+    assert offset.tzinfo is UTC
+
+
+@pytest.mark.parametrize("instant", [
+    datetime.max.replace(tzinfo=UTC),
+    datetime.min.replace(tzinfo=timezone(timedelta(hours=14))),
+])
+def test_unrepresentable_dialogue_clock_keeps_content_without_fabricating_date(instant):
+    assert render_dialogue([("user", "以前聊过", instant)]) == "[时间未知] 用户: 以前聊过"
+
+
+def test_dialogue_explicit_offset_retains_instant_and_input():
+    instant = datetime(2026, 11, 1, 1, 30, tzinfo=timezone(timedelta(hours=-4)))
+    entries = [("assistant", "先休息吧", instant)]
+    assert render_dialogue(entries) == "[11-01 13:30] AI: 先休息吧"
+    assert entries == [("assistant", "先休息吧", instant)]

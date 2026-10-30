@@ -66,6 +66,9 @@ class Harness:
 
 @pytest.fixture
 def harness(monkeypatch):
+    # This unit harness supplies all model/gate dependencies. Binding a real
+    # agent would load SQL runtime config and make isolated runs order-dependent.
+    monkeypatch.setattr("app.services.runtime_config.bind_agent_context", AsyncMock())
     monkeypatch.setattr("app.services.admin_takeover.service.is_user_taken_over", AsyncMock(return_value=False))
     h = Harness(
         advance=AsyncMock(),
