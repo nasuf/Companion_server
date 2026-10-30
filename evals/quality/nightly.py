@@ -15,6 +15,55 @@ import sys
 import httpx
 
 BASE = "https://banshengcomp.com/api/admin-api/quality-ci"
+RETRY_WINDOW_SECONDS = 60
+_RETRYABLE_ACTIONS = frozenset(
+    {"renew", "prepare", "result", "baseline", "settle", "uncertain"}
+)
+_OPERATIONS = _RETRYABLE_ACTIONS | {"begin", "reserve", "finish"}
+_TRANSIENT_STATUS = frozenset({500, 502, 503, 504})
+
+
+class ControlRequestError(RuntimeError):
+    """Only allowlisted metadata may cross into public Actions logs."""
+
+    def __init__(self, phase, code, operation, *, http_status=None):
+        self.phase = phase if phase in {"oidc", "control"} else "control"
+        self.code = (
+            code
+            if code
+            in {
+                "http_error",
+                "transport_error",
+                "invalid_response",
+                "deadline_exceeded",
+            }
+            else "invalid_response"
+        )
+        self.operation = operation if operation in _OPERATIONS else "unknown"
+        self.http_status = (
+            http_status
+            if type(http_status) is int and 100 <= http_status <= 599
+            else None
+        )
+        self.attempts = 1
+        super().__init__(self.code)
+
+    @property
+    def transient(self):
+        return self.code == "transport_error" or self.http_status in _TRANSIENT_STATUS
+
+
+def public_failure(exc):
+    result = {"status": "incomplete", "error_type": type(exc).__name__}
+    if isinstance(exc, ControlRequestError):
+        result.update(
+            phase=exc.phase,
+            operation=exc.operation,
+            error_code=exc.code,
+            http_status=exc.http_status,
+            attempts=exc.attempts,
+        )
+    return result
 
 
 class Control:
@@ -22,24 +71,98 @@ class Control:
         self.job = None
 
     async def request(self, path, data):
+        operation = "begin" if path == "/begin" else data.get("operation", "unknown")
+        # begin claims a lease, reserve creates a new charge, and finish releases
+        # the lease. None may be blindly replayed after an ambiguous response.
+        retryable = (
+            path.startswith("/jobs/")
+            and path.count("/") == 2
+            and operation in _RETRYABLE_ACTIONS
+        )
+        attempts = 3 if retryable else 1
+        attempt = 0
+        try:
+            # This window is shorter than the server's 180s lease. Confirmed
+            # lease loss/budget/auth errors still terminate immediately.
+            async with asyncio.timeout(RETRY_WINDOW_SECONDS):
+                for attempt in range(1, attempts + 1):
+                    try:
+                        return await self._request_once(path, data, operation)
+                    except ControlRequestError as exc:
+                        exc.attempts = attempt
+                        if attempt == attempts or not exc.transient:
+                            # regression.run may convert this exception into a
+                            # failed report. Preserve safe diagnostics here too.
+                            print(
+                                json.dumps(
+                                    {
+                                        "event": "quality_control_failure",
+                                        **public_failure(exc),
+                                    }
+                                ),
+                                flush=True,
+                            )
+                            raise
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "quality_control_retry",
+                                    **public_failure(exc),
+                                    "status": "retrying",
+                                }
+                            ),
+                            flush=True,
+                        )
+                        await asyncio.sleep(5 * attempt)
+        except TimeoutError as exc:
+            error = ControlRequestError("control", "deadline_exceeded", operation)
+            error.attempts = attempt
+            print(
+                json.dumps(
+                    {"event": "quality_control_failure", **public_failure(error)}
+                ),
+                flush=True,
+            )
+            raise error from exc
+
+    async def _request_once(self, path, data, operation):
         async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
             url = (
                 os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
                 + "&audience=companion-quality-evaluation"
             )
-            oidc = await client.get(
-                url,
-                headers={
-                    "Authorization": "Bearer "
-                    + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
-                },
-            )
-            oidc.raise_for_status()
-            response = await client.post(
-                BASE + path,
-                headers={"Authorization": "Bearer " + oidc.json()["value"]},
-                json=data,
-            )
+            try:
+                oidc = await client.get(
+                    url,
+                    headers={
+                        "Authorization": "Bearer "
+                        + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+                    },
+                )
+            except httpx.TransportError as exc:
+                raise ControlRequestError("oidc", "transport_error", operation) from exc
+            if oidc.status_code != 200:
+                raise ControlRequestError(
+                    "oidc", "http_error", operation, http_status=oidc.status_code
+                )
+            try:
+                token = oidc.json()["value"]
+                if not isinstance(token, str) or not token:
+                    raise ValueError("missing_token")
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ControlRequestError(
+                    "oidc", "invalid_response", operation
+                ) from exc
+            try:
+                response = await client.post(
+                    BASE + path,
+                    headers={"Authorization": "Bearer " + token},
+                    json=data,
+                )
+            except httpx.TransportError as exc:
+                raise ControlRequestError(
+                    "control", "transport_error", operation
+                ) from exc
             from app.services.quality import budget, jobs
 
             if response.status_code == 429:
@@ -47,8 +170,18 @@ class Control:
             if response.status_code == 409:
                 raise jobs.LostLease("server_lease_busy_or_lost")
             if response.status_code != 200:
-                raise RuntimeError("quality_control_http_" + str(response.status_code))
-            return response.json()
+                raise ControlRequestError(
+                    "control", "http_error", operation, http_status=response.status_code
+                )
+            try:
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise ValueError("invalid_object")
+            except ValueError as exc:
+                raise ControlRequestError(
+                    "control", "invalid_response", operation
+                ) from exc
+            return result
 
     async def action(self, operation, data=None):
         return await self.request(
@@ -206,6 +339,6 @@ if __name__ == "__main__":
         code = asyncio.run(main())
     except BaseException as exc:
         # Never print HTTP errors, private context or tokens in a public Actions log.
-        print(json.dumps({"status": "incomplete", "error_type": type(exc).__name__}))
+        print(json.dumps(public_failure(exc)))
         code = 1
     sys.exit(code)
