@@ -112,6 +112,21 @@ async def test_pending_attach_dismiss_review_and_notification(human):
     assert await service.review_takeover('missing') is None
 
 
+async def test_recreated_agent_replaces_stale_ids_but_same_agent_keeps_conversation(human):
+    h=human; f=h.flow
+    await service.attach_takeover_agent(user_id=f.ids['owner'], conversation_id=str(uuid4()),
+        agent_id=str(uuid4()), workspace_id=str(uuid4()))
+    assert (await service.list_takeovers(h.admins[0],scope='pending'))[0]['agent_name'] is None
+    await attach(h)
+    item=(await service.list_takeovers(h.admins[0],scope='pending'))[0]
+    assert item['agent_name']=='Synthetic' and item['conversation_id']==f.ids['conversation']
+    await service.attach_takeover_agent(user_id=f.ids['owner'], conversation_id=f.ids['other_conversation'],
+        agent_id=f.ids['agent'], workspace_id=None)
+    detail=await service.review_takeover(h.case)
+    assert detail['agent']['conversation_id']==f.ids['conversation']
+    assert detail['agent']['workspace_id']==f.ids['workspace']
+
+
 async def test_claim_is_exclusive_and_missing_cache_uses_sql(human):
     h=human; await attach(h)
     results=await asyncio.gather(*(service.claim_takeover(h.case,admin) for admin in h.admins), return_exceptions=True)

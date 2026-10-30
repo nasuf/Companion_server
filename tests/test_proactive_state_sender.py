@@ -361,3 +361,71 @@ class TestPresenceIncludesGames:
 
         monkeypatch.setattr("app.services.proactive.state.db.query_raw", _boom)
         assert await has_recent_user_activity("ws") is False
+
+
+@pytest.mark.asyncio
+async def test_default_conversation_backfills_takeover_case():
+    conv = SimpleNamespace(id="conv-new")
+    with (
+        patch(
+            "app.services.proactive.sender.get_active_workspace",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(id="ws-1"),
+        ),
+        patch(
+            "app.services.proactive.sender.db",
+            SimpleNamespace(conversation=SimpleNamespace(create=AsyncMock(return_value=conv))),
+        ),
+        patch(
+            "app.services.admin_takeover.service.attach_takeover_agent",
+            new_callable=AsyncMock,
+        ) as mock_attach,
+    ):
+        from app.services.proactive.sender import _create_default_conversation
+
+        convs = await _create_default_conversation(agent_id="agent-1", user_id="user-1")
+
+    assert convs == [conv]
+    mock_attach.assert_awaited_once_with(
+        user_id="user-1",
+        conversation_id="conv-new",
+        agent_id="agent-1",
+        workspace_id="ws-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_test_conversation_backfills_takeover_case():
+    with (
+        patch(
+            "app.services.proactive.sender.db",
+            SimpleNamespace(
+                query_raw=AsyncMock(return_value=[]),
+                conversation=SimpleNamespace(
+                    create=AsyncMock(return_value=SimpleNamespace(id="conv-new")),
+                ),
+            ),
+        ),
+        patch(
+            "app.services.proactive.sender.get_workspace_by_id",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(id="ws-1", status="active"),
+        ),
+        patch(
+            "app.services.admin_takeover.service.attach_takeover_agent",
+            new_callable=AsyncMock,
+        ) as mock_attach,
+    ):
+        from app.services.proactive.sender import _ensure_conversation_for_admin_test
+
+        conversation_id = await _ensure_conversation_for_admin_test(
+            workspace_id="ws-1", user_id="user-1", agent_id="agent-1",
+        )
+
+    assert conversation_id == "conv-new"
+    mock_attach.assert_awaited_once_with(
+        user_id="user-1",
+        conversation_id="conv-new",
+        agent_id="agent-1",
+        workspace_id="ws-1",
+    )

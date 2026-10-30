@@ -214,7 +214,10 @@ async def attach_takeover_agent(
     agent_id: str,
     workspace_id: str | None,
 ) -> None:
-    """Fill the conversation onto a pending case. Does not claim it."""
+    """Fill the conversation onto a pending case. Does not claim it.
+
+    A recreated agent replaces the stale ids left by the deleted one.
+    """
     if not user_id or not conversation_id or not agent_id:
         return
     try:
@@ -227,7 +230,7 @@ async def attach_takeover_agent(
                 updated_at = CURRENT_TIMESTAMP
             WHERE user_id = $1
               AND status = 'pending'
-              AND conversation_id IS NULL
+              AND (conversation_id IS NULL OR agent_id IS DISTINCT FROM $3)
             """,
             user_id,
             conversation_id,
