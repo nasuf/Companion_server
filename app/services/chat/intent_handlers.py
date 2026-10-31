@@ -1323,7 +1323,7 @@ async def _direct_create_reminder(
         )
         if not memory_id:
             return None
-        await upsert_reminder_trigger(
+        trigger_id = await upsert_reminder_trigger(
             user_id=ctx.user_id,
             agent_id=agent_id,
             memory_id=memory_id,
@@ -1332,7 +1332,8 @@ async def _direct_create_reminder(
             recurrence=recurrence,
             side="user",
         )
-        return ot
+        # A stored memory without a trigger never fires; do not report it.
+        return ot if trigger_id else None
 
     results = await asyncio.gather(
         *(_schedule_one(i, ot) for i, ot in enumerate(occur_times)),
@@ -1340,7 +1341,12 @@ async def _direct_create_reminder(
     )
     scheduled = [r for r in results if r is not None]
 
-    if not scheduled:
+    # Confirming only the times that worked would hide the ones that never fire.
+    if len(scheduled) != len(occur_times):
+        logger.warning(
+            f"[RECORD-REQ] {len(occur_times) - len(scheduled)}/{len(occur_times)} "
+            "reminder trigger(s) not created; reporting failure"
+        )
         return ("failed", None)
 
     logger.info(
@@ -1884,7 +1890,11 @@ async def handle_record_request(
             ctx.consumed_full_message = True
             return True, ctx.finalize(reply, kind="record_request_ask_time")
 
-        # status == "scheduled" or "failed"
+        if status == "failed":
+            # Never confirm a reminder that will not fire.
+            reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"
+            return True, ctx.finalize(reply, kind="record_request_failed")
+
         reply = await record_confirm_reply(
             summary=user_message[:120],
             when_text=when_text or "随时",
@@ -1898,8 +1908,7 @@ async def handle_record_request(
                 f"好嘞, {when_text}叫你, 记好啦~" if when_text
                 else "好嘞, 我帮你记上了~"
             )
-        # record_request_scheduled / _failed
-        return True, ctx.finalize(reply, kind=f"record_request_{status}")
+        return True, ctx.finalize(reply, kind="record_request_scheduled")
     except Exception as e:
         logger.warning(f"Record request short-circuit failed, falling through: {e}")
         return False, None

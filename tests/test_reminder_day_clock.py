@@ -77,13 +77,14 @@ def _record_ctx(received_at):
     )
 
 
-async def _direct(message, received_at):
+async def _direct(message, received_at, *, failing=()):
     from app.services.chat import intent_handlers as ih
 
     upserts = []
 
     async def capture(**kwargs):
         upserts.append(kwargs["trigger_time"])
+        return None if kwargs["trigger_time"] in failing else f"t-{len(upserts)}"
 
     with (
         patch("app.services.workspace.workspaces.get_active_workspace", new_callable=AsyncMock,
@@ -156,3 +157,52 @@ async def _pending(message, now):
 ])
 async def test_pending_reminder_answer_uses_the_stated_day(now, message, expected):
     assert await _pending(message, now) == [expected]
+
+
+@pytest.mark.parametrize("message,failing", [
+    ("明天下午3点提醒我开会", (bj(2026, 11, 1, 15),)),
+    # One of two triggers failing must not confirm the other alone.
+    ("8点吃药，9点开会提醒我", (bj(2026, 11, 1, 9),)),
+])
+async def test_direct_reminder_without_a_trigger_is_not_scheduled(message, failing):
+    now = PAST_MIDNIGHT if "8点吃药" in message else AFTERNOON
+    status, upserts = await _direct(message, now, failing=failing)
+    assert status == "failed" and set(failing) <= set(upserts)
+
+
+async def test_failed_reminder_is_never_confirmed_to_the_user():
+    from app.services.chat import intent_handlers as ih
+
+    ctx = _record_ctx(AFTERNOON)
+    ctx.finalize = MagicMock(return_value="events")
+    with (
+        patch.object(ih, "_direct_create_reminder", new_callable=AsyncMock,
+                     return_value=("failed", None)),
+        patch.object(ih, "record_confirm_reply", new_callable=AsyncMock) as confirm,
+    ):
+        handled, events = await ih.handle_record_request("明天下午3点提醒我开会", ctx)
+    assert handled is True and events == "events"
+    confirm.assert_not_awaited()
+    reply = ctx.finalize.call_args.args[0]
+    assert ctx.finalize.call_args.kwargs["kind"] == "record_request_failed"
+    assert "记上" not in reply and "叫你" not in reply and "再跟我说一遍" in reply
+
+
+@pytest.mark.parametrize("confirm,expected", [
+    ("好嘞，明天下午3点叫你", "好嘞，明天下午3点叫你"),
+    (None, "好嘞, 明天 15:00叫你, 记好啦~"),  # LLM failure falls back to the template
+])
+async def test_scheduled_reminder_is_confirmed(confirm, expected):
+    from app.services.chat import intent_handlers as ih
+
+    ctx = _record_ctx(AFTERNOON)
+    ctx.finalize = MagicMock(return_value="events")
+    with (
+        patch.object(ih, "_direct_create_reminder", new_callable=AsyncMock,
+                     return_value=("scheduled", "明天 15:00")),
+        patch.object(ih, "record_confirm_reply", new_callable=AsyncMock, return_value=confirm),
+    ):
+        handled, events = await ih.handle_record_request("明天下午3点提醒我开会", ctx)
+    assert handled is True and events == "events"
+    assert ctx.finalize.call_args.args[0] == expected
+    assert ctx.finalize.call_args.kwargs["kind"] == "record_request_scheduled"
