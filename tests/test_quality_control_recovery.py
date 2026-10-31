@@ -114,7 +114,7 @@ async def test_terminal_rejections_do_not_retry(http_control, status, error):
     delay.assert_not_awaited()
 
 
-async def test_repeated_failure_stops_at_three_attempts(http_control, capsys):
+async def test_repeated_failure_stops_after_bounded_backoff(http_control, capsys):
     count = 0
 
     def respond(request):
@@ -127,9 +127,12 @@ async def test_repeated_failure_stops_at_three_attempts(http_control, capsys):
     delay = http_control(respond)
     with pytest.raises(RuntimeError) as error:
         await nightly.Control().request("/jobs/owned", {"operation": "renew"})
-    assert count == 3 and delay.await_count == 2
+    # Covers a 45s deploy restart, still inside the 60s window and 180s lease.
+    waits = [call.args[0] for call in delay.await_args_list]
+    assert count == 5 and waits == [5, 10, 15, 15]
+    assert sum(waits) < nightly.RETRY_WINDOW_SECONDS
     details = nightly.public_failure(error.value)
-    assert details["http_status"] == 502 and details["attempts"] == 3
+    assert details["http_status"] == 502 and details["attempts"] == 5
     assert details["operation"] == "renew" and details["phase"] == "control"
     assert details["status"] == "incomplete" and "private" not in json.dumps(details)
 

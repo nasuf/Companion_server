@@ -79,7 +79,9 @@ class Control:
             and path.count("/") == 2
             and operation in _RETRYABLE_ACTIONS
         )
-        attempts = 3 if retryable else 1
+        # A deploy restart answers 502 for up to ~30s (14 deploys on 10-30/31:
+        # 9 under 10s, 4 at 13-19s, one 29s). Waits of 5+10+15+15s cover 45s.
+        attempts = 5 if retryable else 1
         attempt = 0
         try:
             # This window is shorter than the server's 180s lease. Confirmed
@@ -113,7 +115,7 @@ class Control:
                             ),
                             flush=True,
                         )
-                        await asyncio.sleep(5 * attempt)
+                        await asyncio.sleep(min(5 * attempt, 15))
         except TimeoutError as exc:
             error = ControlRequestError("control", "deadline_exceeded", operation)
             error.attempts = attempt
