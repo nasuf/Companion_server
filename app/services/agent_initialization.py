@@ -71,6 +71,15 @@ async def _run_agent_initialization_inner(
     """Plan B 主管线（9 段进度）."""
     await set_progress(agent.id, "initializing", message="正在创建空间...")
 
+    # Voice identity is independent of MBTI generation and the output switch.
+    # Retries reuse the persisted assignment instead of drawing another voice.
+    try:
+        from app.services.speech_output.voices import ensure_agent_voice
+
+        await ensure_agent_voice(agent)
+    except Exception:
+        logger.exception("TTS voice assignment failed for agent %s", agent.id)
+
     await set_progress(agent.id, "mbti_deriving", message="正在推导 MBTI 性格...")
     mbti: dict | None = None
     try:
@@ -83,9 +92,6 @@ async def _run_agent_initialization_inner(
         )
         agent.mbti = mbti
         agent.currentMbti = mbti
-        from app.services.speech_output.voices import ensure_agent_voice
-
-        await ensure_agent_voice(agent)
     except Exception as e:
         logger.error(f"MBTI init failed for agent {agent.id}: {e}")
     await set_progress(agent.id, "mbti_done", message="MBTI 推导完成")

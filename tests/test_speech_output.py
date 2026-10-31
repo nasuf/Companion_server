@@ -147,7 +147,9 @@ async def test_agent_tts_settings_are_loaded_from_latest_db_row(monkeypatch):
 
 def test_style_instruction_prioritizes_natural_conversation():
     instruction = resolve_style_instruction(None)
-    assert "熟人聊天" in instruction
+    assert "微信语音" in instruction
+    assert "自然连读" in instruction
+    assert "少重音" in instruction
     assert instruction_billable_characters(instruction) <= 100
     assert (
         decorate_text_with_emotion(

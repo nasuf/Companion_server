@@ -7,6 +7,7 @@ from app.db import db
 
 
 QWEN_AUDIO_TTS_MODEL = "qwen-audio-3.0-tts-plus"
+DEFAULT_SPEECH_RATE = 0.9
 SYSTEM_VOICE_BY_GENDER = {
     "female": "longanlingxin",
     "male": "longanlufeng",
@@ -180,7 +181,7 @@ async def get_agent_tts_settings(agent_id: str) -> AgentTtsSettings:
         )
     return AgentTtsSettings(
         voice_id=voice_id,
-        rate=float(row.get("tts_rate") or 1.0),
+        rate=float(row.get("tts_rate") or DEFAULT_SPEECH_RATE),
         pitch=float(row.get("tts_pitch") or 1.0),
         volume=int(row.get("tts_volume") if row.get("tts_volume") is not None else 50),
         seed=int(row.get("tts_seed") or 0),

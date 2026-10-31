@@ -48,6 +48,9 @@ async def test_invalid_origin_does_not_activate_or_replace_persona(monkeypatch):
     agent=SimpleNamespace(id='synthetic-agent',name='Synthetic',gender='女')
     monkeypatch.setattr(init,'db',SimpleNamespace(aiagent=SimpleNamespace(update=AsyncMock())))
     monkeypatch.setattr(init,'seven_dim_to_mbti',AsyncMock(side_effect=RuntimeError('controlled mbti failure')))
+    from app.services.speech_output import voices
+    ensure_voice = AsyncMock()
+    monkeypatch.setattr(voices, 'ensure_agent_voice', ensure_voice)
     monkeypatch.setattr(init,'set_progress',AsyncMock())
     monkeypatch.setattr(init,'generate_l1_coverage',AsyncMock())
     monkeypatch.setattr(init,'activate_agent',AsyncMock())
@@ -55,4 +58,5 @@ async def test_invalid_origin_does_not_activate_or_replace_persona(monkeypatch):
     await init._run_agent_initialization_inner(agent,'owner','space',{},
         profile_override={'invalid':float('nan')},career_template_override={})
     init.generate_l1_coverage.assert_not_awaited();init.activate_agent.assert_not_awaited()
+    ensure_voice.assert_awaited_once_with(agent)
     assert init.set_progress.await_args.args[1]=='failed'

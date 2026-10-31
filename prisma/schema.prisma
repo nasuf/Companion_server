@@ -214,7 +214,7 @@ model AiAgent {
   // Stable TTS voice and per-agent synthesis controls. The admin editor writes
   // these fields directly; the speech hot path reloads them before each call.
   ttsVoiceId               String?                         @map("tts_voice_id")
-  ttsRate                  Float                           @default(1.0) @map("tts_rate")
+  ttsRate                  Float                           @default(0.9) @map("tts_rate")
   ttsPitch                 Float                           @default(1.0) @map("tts_pitch")
   ttsVolume                Int                             @default(50) @map("tts_volume")
   ttsSeed                  Int                             @default(0) @map("tts_seed")

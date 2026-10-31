@@ -125,7 +125,7 @@ async def test_delivery_preserves_transcript_and_shared_plan(monkeypatch, source
     detect = AsyncMock(return_value={"emotion": "高兴", "intensity": 50})
     monkeypatch.setattr(intent_replies, "ai_reply_emotion", detect)
     monkeypatch.setattr(delivery, "resolve_agent_tts_model", AsyncMock(return_value=voices.QWEN_AUDIO_TTS_MODEL))
-    monkeypatch.setattr(delivery, "get_agent_tts_settings", AsyncMock(return_value=voices.AgentTtsSettings("voice", 1, 1, 50, 42, None, True, 1)))
+    monkeypatch.setattr(delivery, "get_agent_tts_settings", AsyncMock(return_value=voices.AgentTtsSettings("voice", 0.9, 1, 50, 42, None, True, 1)))
     monkeypatch.setattr(delivery, "synthesize_speech", synthesize)
     monkeypatch.setattr(delivery, "record_tts_usage", AsyncMock())
     monkeypatch.setattr(delivery.media_storage, "save_audio_blob", lambda **kw: "key")
@@ -143,6 +143,7 @@ async def test_delivery_preserves_transcript_and_shared_plan(monkeypatch, source
     assert synthesize.await_args.kwargs["text"] == expected.text
     assert synthesize.await_args.kwargs["instruction"] == expected.instruction
     assert synthesize.await_args.kwargs["seed"] == 42
+    assert synthesize.await_args.kwargs["rate"] == 0.9
     assert synthesize.await_args.kwargs["model"] == voices.QWEN_AUDIO_TTS_MODEL
 
 
@@ -151,7 +152,7 @@ async def test_preview_uses_the_same_plan_and_runtime_model(monkeypatch):
     from app.api.admin import tts
 
     payload = tts.AgentTtsPreviewPayload(
-        voice_profile_id="profile", rate=1, pitch=1, volume=50, seed=42,
+        voice_profile_id="profile", rate=0.9, pitch=1, volume=50, seed=42,
         emotion_scale=1, text="哈哈，太棒了😊！", emotion="高兴", intensity=50,
     )
     speech = SimpleNamespace(audio=b"wav", mime="audio/wav", duration_milliseconds=500, billable_characters=10, cost_cny=0.01)
@@ -167,3 +168,4 @@ async def test_preview_uses_the_same_plan_and_runtime_model(monkeypatch):
     assert synthesize.await_args.kwargs["instruction"] == expected.instruction
     assert synthesize.await_args.kwargs["model"] == voices.QWEN_AUDIO_TTS_MODEL
     assert response.body == b"wav"
+    assert synthesize.await_args.kwargs["rate"] == 0.9

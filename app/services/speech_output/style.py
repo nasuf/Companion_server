@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from app.services.speech_output.client import count_billable_characters
 
 
-DEFAULT_STYLE_INSTRUCTION = "像熟人聊天，口语自然，按语意停顿，避免播音腔。"
+DEFAULT_STYLE_INSTRUCTION = (
+    "像随手发的微信语音，吐字松弛，自然连读，语气词轻读，"
+    "停顿短，少重音，句尾轻收，保持原文。"
+)
 MAX_INSTRUCTION_BILLABLE_CHARACTERS = 100
 logger = logging.getLogger(__name__)
 

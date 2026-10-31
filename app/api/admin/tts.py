@@ -21,6 +21,7 @@ from app.api.jwt_auth import require_admin_jwt
 from app.db import db
 from app.services.speech_output.client import SpeechSynthesisError, synthesize_speech
 from app.services.speech_output.style import (
+    DEFAULT_STYLE_INSTRUCTION,
     MAX_INSTRUCTION_BILLABLE_CHARACTERS,
     build_speech_plan,
     instruction_billable_characters,
@@ -36,7 +37,11 @@ from app.services.speech_output.voice_enrollment import (
     signed_enrollment_url,
     verify_signed_enrollment_url,
 )
-from app.services.speech_output.voices import QWEN_AUDIO_TTS_MODEL, resolve_agent_tts_model
+from app.services.speech_output.voices import (
+    DEFAULT_SPEECH_RATE,
+    QWEN_AUDIO_TTS_MODEL,
+    resolve_agent_tts_model,
+)
 from app.services.runtime.tasks import fire_background
 
 
@@ -141,7 +146,7 @@ async def _agent_tts_response(agent_id: str) -> dict:
             str(profile_rows[0].get("id")) if profile_rows else None
         ),
         "voice_id": row.get("tts_voice_id"),
-        "rate": float(row.get("tts_rate") or 1.0),
+        "rate": float(row.get("tts_rate") or DEFAULT_SPEECH_RATE),
         "pitch": float(row.get("tts_pitch") or 1.0),
         "volume": int(
             row.get("tts_volume")
@@ -150,6 +155,7 @@ async def _agent_tts_response(agent_id: str) -> dict:
         ),
         "seed": int(row.get("tts_seed") or 0),
         "instruction": row.get("tts_instruction"),
+        "default_instruction": DEFAULT_STYLE_INSTRUCTION,
         "instruction_billable_characters": instruction_billable_characters(
             row.get("tts_instruction")
         ),
