@@ -10,7 +10,7 @@ from app.config import settings
 import json
 import re
 
-from app.services.schedule_domain.time_parser import _parse_cn_number
+from app.services.schedule_domain.time_parser import normalize_clock_words
 
 from app.services.temporal_query import resolve_temporal_query
 from app.services.temporal import exclusive_end
@@ -62,13 +62,7 @@ def resolve_fact_clock(memory: dict, origins) -> FactClock:
         basis['status'] = 'time_quote_invalid'
         return FactClock(statement, None, basis, indices)
     # Normalization only changes a validated time quote, never the source body.
-    # Reuse the parser's number grammar; Chinese clock words must not degrade
-    # silently into a broad afternoon range.
-    normalized = re.sub(r"([零一二三四五六七八九十两]{1,3})(点|时)",
-                        lambda m: str(_parse_cn_number(m[1])) + m[2], quote)
-    normalized = re.sub(r"(?<=[点时])([零一二三四五六七八九十两]{1,3})分",
-                        lambda m: str(_parse_cn_number(m[1])) + "分", normalized)
-    normalized = re.sub(r"(?<=[点时])半", "30分", normalized)
+    normalized = normalize_clock_words(quote)
     parsed = resolve_temporal_query(normalized, anchor=origins[index-1].expected_statement_time,
                                     anchor_source='persisted_message')
     # A reminder is prospective. Preserve the existing month/day convention,

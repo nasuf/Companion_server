@@ -1249,10 +1249,17 @@ async def _direct_create_reminder(
 
     recurrence = _detect_recurrence(user_message)
 
+    from app.services.reminder.scheduling import precise_reminder_time
+
+    # One stated day + clock ("明天下午3点") is a single trigger; the legacy
+    # parser would split it into today 15:00 and tomorrow 00:00.
+    bound, precise = precise_reminder_time(user_message, now=parse_now)
     parsed = parse_with_statement_time(user_message, now=parse_now)
     future_events = [e for e in parsed.event_times if e.is_future]
     occur_times: list[datetime] = []
-    if future_events:
+    if bound:
+        occur_times = [precise] if precise else []
+    elif future_events:
         # 多 occur_time 全保留 ("8 点吃药, 9 点开会"), 按时间升序
         occur_times = sorted(e.start for e in future_events)
     else:

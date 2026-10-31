@@ -791,10 +791,16 @@ async def _handle_pending_set_reminder(
 
     # 解析时间. parse_with_statement_time + parse_loose_offset 兜底.
     parse_now = _now_corrected()
+    from app.services.reminder.scheduling import precise_reminder_time
+
+    # "明天下午3点" must not collapse to today 15:00 (earliest legacy result).
+    bound, precise = precise_reminder_time(user_message, now=parse_now)
     parsed = parse_with_statement_time(user_message, now=parse_now)
     future_events = [e for e in parsed.event_times if e.is_future]
     occur_time = None
-    if future_events:
+    if bound:
+        occur_time = precise
+    elif future_events:
         occur_time = sorted(e.start for e in future_events)[0]
     else:
         loose = parse_loose_offset(user_message, parse_now)

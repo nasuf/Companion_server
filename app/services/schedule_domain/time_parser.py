@@ -110,6 +110,18 @@ def _parse_cn_number(s: str) -> int | None:
         return _CN_DIGIT[s]
     return None
 
+def normalize_clock_words(text: str) -> str:
+    """Chinese clock numerals to digits (三点半 → 3点30分).
+
+    _HOUR_PAT only reads digit clocks. Without this, 三点 degrades silently into
+    a broad afternoon range and 八点半 loses its half hour.
+    """
+    text = re.sub(r"([零一二三四五六七八九十两]{1,3})(点|时)",
+                  lambda m: str(_parse_cn_number(m[1])) + m[2], text)
+    text = re.sub(r"(?<=[点时])([零一二三四五六七八九十两]{1,3})分",
+                  lambda m: str(_parse_cn_number(m[1])) + "分", text)
+    return re.sub(r"(?<=[点时])半", "30分", text)
+
 _MONTH_MAP = [("这个月", 0), ("上个月", -1), ("下个月", 1)]
 
 _PM_PERIODS = {"下午", "晚上"}

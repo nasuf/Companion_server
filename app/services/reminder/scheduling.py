@@ -14,6 +14,7 @@ Round-2 review 找出的架构问题:
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -29,6 +30,41 @@ ReminderState = Literal["completed", "cancelled", "rescheduled", "needed"]
 
 # TimeTrigger.actionType for reminders. 散落 5+ 处的硬编码 "reminder" 字符串都该用这个常量.
 REMINDER_ACTION_TYPE = "reminder"
+
+
+_YEARLESS_DATE = re.compile(r"(?<![\d年])(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+
+
+def precise_reminder_time(message: str, *, now: datetime) -> tuple[bool, datetime | None]:
+    """One day + clock expression bound into a single trigger time.
+
+    The legacy parser returns 明天 and 下午3点 as unrelated results, so a
+    reminder for 明天下午3点 fired today at 15:00 and again at midnight, and
+    今晚8点 read as 08:00. Returns (True, time) when the message states exactly
+    one hour/minute-precise time; time is None if that moment has passed. Returns
+    (False, None) otherwise (offsets, several clocks, no clock), leaving the
+    legacy parser in charge.
+    """
+    from app.services.schedule_domain.time_parser import normalize_clock_words
+    from app.services.schedule_domain.time_service import _TZ
+    from app.services.temporal_query import resolve_temporal_query
+
+    text = normalize_clock_words(message)
+    candidates = [text]
+    # A reminder looks forward: a yearless date means its next occurrence.
+    if len(_YEARLESS_DATE.findall(text)) == 1:
+        year = now.astimezone(_TZ).year
+        candidates = [_YEARLESS_DATE.sub(lambda m, y=y: f"{y}年{m.group()}", text)
+                      for y in (year, year + 1)]
+    for candidate in candidates:
+        query = resolve_temporal_query(candidate, anchor=now, anchor_source="persisted_message")
+        if (query.status != "resolved" or len(query.expressions) != 1
+                or query.expressions[0].precision not in {"hour", "minute"}):
+            return False, None
+        start = query.expressions[0].start
+        if start > now:
+            return True, start
+    return True, None
 
 
 def format_when_text(occur_dt: datetime, *, now: datetime | None = None) -> str:
