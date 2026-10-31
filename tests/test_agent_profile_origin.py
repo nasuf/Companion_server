@@ -8,7 +8,8 @@ from app.services import agent_initialization as init
 
 
 @pytest.mark.parametrize('imported',[False,True])
-async def test_initialization_passes_actual_profile_career_and_input_origin(monkeypatch,imported):
+@pytest.mark.parametrize('voice_fails',[False,True])
+async def test_initialization_passes_actual_profile_career_and_input_origin(monkeypatch,imported,voice_fails):
     agent=SimpleNamespace(id='synthetic-agent',userId='synthetic-owner',name='Synthetic',gender='女')
     profile={'identity':{'name':'Synthetic','location':'Synthetic home','age':27}}
     career={'title':'Synthetic career'};personality={'warmth':75}
@@ -18,7 +19,8 @@ async def test_initialization_passes_actual_profile_career_and_input_origin(monk
     monkeypatch.setattr(init,'seven_dim_to_mbti',AsyncMock(return_value={'EI':50,'summary':'Synthetic'}))
     monkeypatch.setattr(init,'build_mbti',AsyncMock(return_value={'EI':50}))
     from app.services.speech_output import voices
-    monkeypatch.setattr(voices,'ensure_agent_voice',AsyncMock())
+    ensure_voice = AsyncMock(side_effect=RuntimeError('controlled voice assignment failure') if voice_fails else None)
+    monkeypatch.setattr(voices,'ensure_agent_voice',ensure_voice)
     monkeypatch.setattr(init,'pick_random_active_career',AsyncMock(return_value=career))
     monkeypatch.setattr(init,'generate_full_profile',AsyncMock(return_value=profile))
     monkeypatch.setattr(init,'_apply_postprocess_overrides',lambda value,**kwargs:value)
@@ -38,6 +40,7 @@ async def test_initialization_passes_actual_profile_career_and_input_origin(monk
     monkeypatch.setattr(init,'generate_l1_coverage',memories)
     await init._run_agent_initialization_inner(agent,'synthetic-owner','synthetic-space',personality,
         profile_override=profile if imported else None,career_template_override=career if imported else None)
+    ensure_voice.assert_awaited_once_with(agent)
     assert len(captured)==1 and captured[0]['workspace_id']=='synthetic-space'
     assert captured[0]['origin'].kind==('imported_profile' if imported else 'generated_profile')
     init.activate_agent.assert_awaited_once_with(agent.id)
