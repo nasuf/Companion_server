@@ -18,7 +18,7 @@ from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     distributed_lock,
 )
-from app.services.schedule_domain.time_parser import resolve_occur_time
+from app.services.time_domain.parser import resolve_occur_time
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)

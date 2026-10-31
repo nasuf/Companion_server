@@ -25,17 +25,8 @@ from app.observability.events import EVT_SCHEDULE_GROUNDING
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
-from app.services.schedule_domain.time_service import (
-    classify_day_kind,
-    is_holiday,
-    is_workday_swap,
-)
-from app.services.schedule_domain.time_parser import (
-    ParsedTime,
-    _parse_cn_number,
-    has_explicit_time,
-    parse_time_expressions,
-)
+from app.services.time_domain.clock import classify_day_kind, is_holiday, is_workday_swap
+from app.services.time_domain.parser import ParsedTime, _parse_cn_number, has_explicit_time, parse_time_expressions
 from app.services.mbti import get_mbti, signal as mbti_signal
 
 _WEEKDAY_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]

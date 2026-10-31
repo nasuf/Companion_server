@@ -28,7 +28,7 @@ from app.services.rules.chat_keywords import (
 )
 from app.services.rules.keyword_policy import compact_chat_text
 from app.services.schedule_domain.schedule import resolve_schedule_query_scope
-from app.services.schedule_domain.time_parser import has_explicit_time
+from app.services.time_domain.parser import has_explicit_time
 
 
 _WRITE_ACTION_CUES = (

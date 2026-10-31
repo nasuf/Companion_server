@@ -38,8 +38,8 @@ from app.services.proactive.history import (
     increment_proactive_count,
 )
 from app.services.proactive.context import build_proactive_context
-from app.services.schedule_domain.time_expression import format_clock
-from app.services.schedule_domain.time_service import _now_corrected
+from app.services.time_domain.expression import format_clock
+from app.services.time_domain.clock import _now_corrected
 from app.services.proactive.policy import select_topic_source, select_topic_theme
 from app.services.mbti import build_personality_brief
 from app.services.relationship.emotion import emotion_to_tone
@@ -519,7 +519,7 @@ async def _generate_message(ctx: dict) -> str | None:
     if corrected:
         ctx["_skip_reason_detail"] = "persona_location_conflict_or_unverified"
         return None
-    from app.services.chat.followup_policy import guard_optional_questions, repeats_recent_question
+    from app.services.time_domain.followup import guard_optional_questions, repeats_recent_question
     policy = ctx.get("_followup_policy")
     if policy is not None:
         if policy.optional_questions_allowed and repeats_recent_question(response, policy):

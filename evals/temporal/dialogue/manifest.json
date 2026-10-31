@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "name": "temporal-dialogue-v1",
+  "frozen_at": "2026-10-20T08:34:06.172340+00:00",
+  "sha256": "daba01bcc0438ee07b69eb0cc1e79d9087f9630d2287f1ce862fba22732d3400",
+  "cases": 240,
+  "split_counts": {
+    "development": 120,
+    "holdout": 120
+  },
+  "categories": [
+    "gap",
+    "relative",
+    "boundary",
+    "state",
+    "correction",
+    "plan",
+    "order",
+    "count",
+    "topic",
+    "evidence",
+    "identity",
+    "recovery"
+  ],
+  "per_split_category": 10,
+  "qualified_samples_per_holdout": 5,
+  "scope": "Synthetic reply evidence: explicit histories, actual prompt/reply flow, stubbed domain IO. Not durable lifecycle, real retrieval, delivery or production E2E.",
+  "separation": "Authored before candidate changes. Holdout answers are not used for tuning. Shared author, no claim of independent or blinded human authorship.",
+  "gates": {
+    "overall": 0.95,
+    "per_category": 0.9,
+    "critical_failures": 0
+  },
+  "source_baseline": "42c224da87c241f47b6f5d215cf86fbac5b48e0f"
+}

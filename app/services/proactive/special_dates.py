@@ -41,7 +41,7 @@ from app.services.proactive.state import (
     ensure_proactive_state_for_workspace,
 )
 from app.services.schedule_domain.schedule import get_cached_schedule
-from app.services.schedule_domain.time_service import _TZ
+from app.services.time_domain.clock import _TZ
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -213,7 +213,7 @@ async def collect_special_dates_today(
 
     # 公共节假日 (sync, 不进 gather)
     try:
-        from app.services.schedule_domain.time_service import is_holiday
+        from app.services.time_domain.clock import is_holiday
         info = is_holiday(d)
         if info and info.name in ("春节", "元旦"):
             occasions.append(Occasion(type="holiday", name=info.name, owner="user"))

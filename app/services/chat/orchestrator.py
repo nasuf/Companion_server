@@ -7,9 +7,9 @@ Background (fire-and-forget, after response):
   user emotion metadata + memory pipeline + trait/patience updates
 """
 
-from app.services.temporal_query import resolve_temporal_query
-from app.services.chat.temporal_context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
-from app.services.chat.followup_policy import guard_optional_questions
+from app.services.time_domain.query import resolve_temporal_query
+from app.services.time_domain.context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
+from app.services.time_domain.followup import guard_optional_questions
 import asyncio
 import functools
 import json
@@ -70,8 +70,8 @@ from app.services.chat.location_context import (
 )
 from app.services.chat.memory_usage import submit_memory_usage
 from app.services.topic import push_topic
-from app.services.schedule_domain.time_service import build_time_context
-from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
+from app.services.time_domain.clock import build_time_context
+from app.services.time_domain.parser import parse_time_expressions, has_explicit_time
 from app.services.schedule_domain.schedule import (
     format_schedule_context,
     get_cached_schedule,

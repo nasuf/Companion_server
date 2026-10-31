@@ -23,9 +23,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from app.services.chat.temporal_context import build_turn_clock, dated_dialogue, render_temporal_context, SESSION_SECONDS
-from app.services.chat.followup_policy import derive_followup_policy, repeats_recent_question
-from app.services.temporal import parse_time
+from app.services.time_domain.context import build_turn_clock, dated_dialogue, render_temporal_context, SESSION_SECONDS
+from app.services.time_domain.followup import derive_followup_policy, repeats_recent_question
+from app.services.time_domain.timestamps import parse_time
 from app.db import db
 from app.observability.events import (
     EVT_PROACTIVE_FOLLOWUP_SENT,
@@ -54,7 +54,7 @@ from app.services.proactive.state import (
     stop_proactive_state,
 )
 from app.services.prompting.utils import render_prompt
-from app.services.schedule_domain.time_expression import describe_time_scene, format_clock
+from app.services.time_domain.expression import describe_time_scene, format_clock
 
 logger = logging.getLogger(__name__)
 

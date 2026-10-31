@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from app.services.schedule_domain.time_service import _TZ
+from app.services.time_domain.clock import _TZ
 
 RECENT_MESSAGE_LIMIT = 60  # Allows multi-bubble replies within ten user turns.
 

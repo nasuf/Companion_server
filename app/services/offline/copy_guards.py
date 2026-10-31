@@ -131,7 +131,7 @@ _RELATIVE_DAY_OFFSET = {
 
 def local_now() -> datetime:
     """Seam for tests; the NTP-corrected clock is the one the rest of chat uses."""
-    from app.services.schedule_domain.time_service import get_current_time
+    from app.services.time_domain.clock import get_current_time
 
     return get_current_time().now.astimezone(_TZ)
 

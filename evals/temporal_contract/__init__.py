@@ -1,1 +1,1 @@
-"""Frozen deterministic temporal contracts; separate from model qualification."""
+"""Historical namespace. Submodules forward to evals.temporal implementations."""

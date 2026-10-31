@@ -128,6 +128,9 @@ jobs:
             evals/quality/*.py evals/quality/memory_regressions.json \
             evals/persona_grounding/cases.json \
             evals/temporal_awareness/*.py evals/reply_register/*.py \
+            evals/temporal/__init__.py evals/temporal/awareness/*.py \
+            evals/temporal/binding/cases.json evals/temporal/evidence/cases.json \
+            evals/temporal/dialogue/cases.jsonl \
             evals/persona_drift/*.py evals/boundary_reply/*.py \
             evals/temporal_binding/cases.json evals/temporal_evidence/cases.json \
             evals/context_embedding/cases.json evals/temporal_dialogue/cases.jsonl \

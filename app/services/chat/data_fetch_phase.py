@@ -20,8 +20,8 @@ from app.observability.events import (
     EVT_MEMORY_RELEVANCE,
     EVT_MEMORY_RETRIEVED,
 )
-from app.services.temporal_query import TemporalQuery
-from app.services.temporal import parse_time
+from app.services.time_domain.query import TemporalQuery
+from app.services.time_domain.timestamps import parse_time
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.chat.dialogue_context import render_dialogue
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
@@ -58,7 +58,7 @@ from app.services.schedule_domain.schedule import (
     get_cached_schedule,
     get_current_status,
 )
-from app.services.schedule_domain.time_parser import has_explicit_time
+from app.services.time_domain.parser import has_explicit_time
 
 logger = logging.getLogger(__name__)
 

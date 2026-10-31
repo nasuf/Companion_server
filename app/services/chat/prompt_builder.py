@@ -1228,7 +1228,7 @@ def compute_reengagement_gap_seconds(
     _CURRENT_TURN_GRACE_S 兜底排除刚落库的合成消息），间隔 = now − 它的
     createdAt。用户隔几小时回来时，这个间隔驱动「重逢感知」段注入。
     """
-    from app.services.chat.temporal_context import is_proactive
+    from app.services.time_domain.context import is_proactive
 
     exclude = exclude_ids or set()
     now = now or datetime.now(timezone.utc)

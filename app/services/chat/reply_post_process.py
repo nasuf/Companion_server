@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable
 
 from app.config import settings
 from app.observability.events import EVT_LLM_FAIL, EVT_REPLY_DECORATION
-from app.services.schedule_domain.time_service import _now_corrected, _TZ
+from app.services.time_domain.clock import _now_corrected, _TZ
 from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.relationship.ai_mood import save_ai_mood
 from app.services.runtime.recent_items import load_recent_items, remember_item

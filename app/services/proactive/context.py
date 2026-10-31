@@ -19,7 +19,7 @@ from app.services.relationship.intimacy import get_relationship_stage, get_topic
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.core_memory import load_core_memory_strings
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
-from app.services.schedule_domain.time_service import _TZ
+from app.services.time_domain.clock import _TZ
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,7 @@ async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LI
         return ""
     if not rows:
         return ""
-    from app.services.chat.temporal_context import dated_dialogue, prepare_reply_time
+    from app.services.time_domain.context import dated_dialogue, prepare_reply_time
     messages = [{"role": r["role"], "content": r["content"], "createdAt": r.get("created_at"),
                  "metadata": r.get("metadata")} for r in reversed(rows)]
     result = temporal if temporal is not None else {}

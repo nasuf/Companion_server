@@ -157,7 +157,7 @@ async def get_proactive_rhythm_adjustment(
     now_ts = (now or datetime.now(UTC)).astimezone(UTC)
     local_hour = now_ts.astimezone().hour
     try:
-        from app.services.schedule_domain.time_service import _TZ
+        from app.services.time_domain.clock import _TZ
         local_hour = now_ts.astimezone(_TZ).hour
     except Exception:
         pass

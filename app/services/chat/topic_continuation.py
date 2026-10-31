@@ -32,7 +32,7 @@ from app.services.interaction.topic_continuity import (
 )
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_text
 from app.services.prompting.utils import render_prompt
-from app.services.schedule_domain.time_expression import format_clock
+from app.services.time_domain.expression import format_clock
 
 logger = logging.getLogger(__name__)
 

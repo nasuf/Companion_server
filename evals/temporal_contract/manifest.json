@@ -1,10 +1,1 @@
-{
-  "version": 1,
-  "sha256": "cfd412b6a83be0e346175901e024a09730f7fb2c5f5090a435bc2449e0b9b95c",
-  "case_count": 240,
-  "independent_grammar_families": 48,
-  "dataset_kind": "deterministic_contract_regression",
-  "model_evaluation": false,
-  "holdout": false,
-  "note": "48 authored grammar families crossed with five calendar boundaries. Not 240 independent multi-turn model scenarios; full 120 development/120 holdout corpus remains TIME02 qualification work."
-}
+../temporal/contract/manifest.json

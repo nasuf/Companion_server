@@ -37,7 +37,7 @@ MAKEUP_CARD_KIND = "makeup_card"
 
 def _now_utc8() -> datetime:
     # 集中在这里，测试可 monkeypatch；生产走 NTP 修正后的北京时间。
-    from app.services.schedule_domain.time_service import get_current_time
+    from app.services.time_domain.clock import get_current_time
 
     return get_current_time().now
 

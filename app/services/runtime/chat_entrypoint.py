@@ -120,7 +120,7 @@ async def prepare_sql_chat_message(
     from app.services.schedule_domain.schedule import (
         generate_daily_schedule, get_cached_schedule, get_current_status, get_life_overview,
     )
-    from app.services.schedule_domain.time_service import _now_corrected
+    from app.services.time_domain.clock import _now_corrected
 
     original = json.loads(request.input_json)
     text = original["text"].strip()

@@ -31,7 +31,7 @@ from app.services.proactive.special_dates import (
     send_special_date_proactive,
 )
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
-from app.services.schedule_domain.time_service import _TZ
+from app.services.time_domain.clock import _TZ
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)

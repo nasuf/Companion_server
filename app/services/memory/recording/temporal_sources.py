@@ -10,11 +10,11 @@ from app.config import settings
 import json
 import re
 
-from app.services.schedule_domain.time_parser import normalize_clock_words
+from app.services.time_domain.parser import normalize_clock_words
 
-from app.services.temporal_query import resolve_temporal_query
-from app.services.temporal import exclusive_end
-from app.services.schedule_domain.time_service import ensure_aware
+from app.services.time_domain.query import resolve_temporal_query
+from app.services.time_domain.timestamps import exclusive_end
+from app.services.time_domain.clock import ensure_aware
 
 
 @dataclass(frozen=True)

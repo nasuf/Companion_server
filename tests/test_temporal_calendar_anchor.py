@@ -142,6 +142,7 @@ async def test_real_reminder_handler_keeps_received_day_after_processing_delay(
         agent_id="a",
         conversation_id="c",
         reply_context={"received_at": received.isoformat()},
+        turn_clock=None, response_diagnostics={},
     )
     status, _ = await handlers._direct_create_reminder(user_message=message, ctx=ctx)
     expected = datetime.fromisoformat(expected_day).replace(tzinfo=SHANGHAI)

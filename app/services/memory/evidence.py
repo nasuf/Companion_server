@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from app.services.schedule_domain.time_service import ensure_aware
+from app.services.time_domain.clock import ensure_aware
 from hashlib import sha256
 import json
 from typing import Literal

@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "old": "evals/temporal_awareness/prompt_dedup_cases.json",
+      "new": "evals/temporal/awareness/prompt_dedup_cases.json",
+      "sha256": "0165dae81bd3a712e6776f503a1734e3d3aba05e74e36afefde0037b908d9a6d",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_binding/cases.json",
+      "new": "evals/temporal/binding/cases.json",
+      "sha256": "177885b29e48b69e2a6991dea67c8b005fbf0721ec5b5a72660207c8980af604",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_contract/cases.jsonl",
+      "new": "evals/temporal/contract/cases.jsonl",
+      "sha256": "cfd412b6a83be0e346175901e024a09730f7fb2c5f5090a435bc2449e0b9b95c",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_contract/manifest.json",
+      "new": "evals/temporal/contract/manifest.json",
+      "sha256": "9e2ca9b3c293973976cafc41a367d5a479ccd4deaeb913ea4a0e64fe9d4fcbc5",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_dialogue/cases.jsonl",
+      "new": "evals/temporal/dialogue/cases.jsonl",
+      "sha256": "daba01bcc0438ee07b69eb0cc1e79d9087f9630d2287f1ce862fba22732d3400",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_dialogue/manifest.json",
+      "new": "evals/temporal/dialogue/manifest.json",
+      "sha256": "b738647cf526bc6f22fcbfab5cd65662d0b715e68ed436586b2891d1c52dbe91",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_evidence/acceptance.json",
+      "new": "evals/temporal/evidence/acceptance.json",
+      "sha256": "35881bebd55ca801bfd8d18a75711f9657b209389b250e28cf865928fe1c42bf",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_evidence/cases.json",
+      "new": "evals/temporal/evidence/cases.json",
+      "sha256": "37a8af4becb852b1d2d68ce394dfa55854809419a241f807bff37641010eba5d",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_evidence/release_cases.json",
+      "new": "evals/temporal/evidence/release_cases.json",
+      "sha256": "9d8ee866de13671403ecc0b25deef7099af5c9ba0555e1c4aefe202cd4c6efbe",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_evidence/holdout.json",
+      "new": "evals/temporal/evidence/holdout.json",
+      "sha256": "591badfb7c8de62e55ad4ca3c1793c20b9382b8a07a80390884aa2028bb446f1",
+      "kind": "corpus_or_document"
+    },
+    {
+      "old": "evals/temporal_evidence/final_review_cases.json",
+      "new": "evals/temporal/evidence/final_review_cases.json",
+      "sha256": "d2ba810cda6016526c38799f21e4188f6f1e59fdca91a425896d76311694c685",
+      "kind": "corpus_or_document"
+    }
+  ]
+}

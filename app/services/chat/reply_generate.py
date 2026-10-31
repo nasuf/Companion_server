@@ -375,7 +375,7 @@ async def generate_reply(
                 personality_section.body if personality_section else (getattr(agent, "name", "") or "")
             )
             if not l3_memories and diagnostics is not None:
-                from app.services.chat.temporal_recall import answer_temporal_recall
+                from app.services.time_domain.recall import answer_temporal_recall
 
                 tier_reply_text = await answer_temporal_recall(
                     user_message, classified_memories, diagnostics, max_chars=max_total,

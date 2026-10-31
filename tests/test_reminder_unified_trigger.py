@@ -1638,23 +1638,14 @@ def test_post_process_datetime_aware_normalize():
 
 
 def test_handle_record_request_uses_received_at_not_now():
-    """生产观察: '两分钟后' 提醒比预期晚 ~25s. 根因: handler 用
-    `_now_corrected()` 而非用户消息接收时刻 — 处理链路上前面的 LLM 调用
-    累计 25s 漂移. 修复: 从 ctx.reply_context['received_at'] 取消息时刻."""
-    import inspect
-    from app.services.chat import intent_handlers as ih
-
-    src = inspect.getsource(ih._direct_create_reminder)
-    assert "received_at" in src, (
-        "_direct_create_reminder must read received_at from ctx.reply_context "
-        "to avoid drift from upstream LLM processing latency"
-    )
-    assert "ctx.reply_context" in src, (
-        "must consult reply_context, not just _now_corrected()"
-    )
-    assert "parse_with_statement_time(user_message, now=parse_now)" in src, (
-        "parse must be invoked with the explicit received-at time, not implicit now"
-    )
+    """The shared contract preserves the original 25-second latency regression."""
+    from datetime import datetime, timedelta, timezone
+    from app.services.time_domain.reminders import resolve_reminder_targets
+    received = datetime(2026, 10, 31, 0, tzinfo=timezone.utc)
+    result = resolve_reminder_targets("两分钟后提醒我", statement_at=received,
+        statement_end_at=received, now=received + timedelta(seconds=25), allow_multiple=True)
+    assert result.targets == (received + timedelta(minutes=2),)
+    assert result.reason == "resolved"
 
 
 def test_trigger_scan_runs_at_least_every_15s():

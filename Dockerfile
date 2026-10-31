@@ -60,6 +60,12 @@ COPY evals/quality/*.py ./evals/quality/
 COPY evals/quality/memory_regressions.json ./evals/quality/
 COPY evals/persona_grounding/cases.json ./evals/persona_grounding/
 COPY evals/temporal_awareness/*.py ./evals/temporal_awareness/
+# Legacy entry points import the canonical time evaluation package.
+COPY evals/temporal/__init__.py ./evals/temporal/
+COPY evals/temporal/awareness/*.py ./evals/temporal/awareness/
+COPY evals/temporal/binding/cases.json ./evals/temporal/binding/
+COPY evals/temporal/evidence/cases.json ./evals/temporal/evidence/
+COPY evals/temporal/dialogue/cases.jsonl ./evals/temporal/dialogue/
 COPY evals/reply_register/*.py ./evals/reply_register/
 COPY evals/persona_drift/*.py ./evals/persona_drift/
 COPY evals/boundary_reply/*.py ./evals/boundary_reply/

@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import logging
 
-from app.services.chat.temporal_context import dated_dialogue
-from app.services.temporal import local_clock, parse_time
+from app.services.time_domain.context import dated_dialogue
+from app.services.time_domain.timestamps import local_clock, parse_time
 
 from app.observability.events import EVT_SESSION_RECAP
 from app.redis_client import get_redis

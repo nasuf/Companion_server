@@ -22,7 +22,7 @@ from app.services.memory.storage import repo
 from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.storage.persistence import after_memory_changelog, normalize_memory_type
 from app.services.memory.taxonomy import resolve_taxonomy, is_singleton
-from app.services.schedule_domain.time_parser import resolve_occur_time
+from app.services.time_domain.parser import resolve_occur_time
 
 
 OPERATIONS = {

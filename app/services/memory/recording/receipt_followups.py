@@ -13,7 +13,7 @@ from prisma import Json
 from app.db import db
 from app.services.memory.recording import receipts
 from app.services.memory.storage import entity_repo
-from app.services.schedule_domain.time_service import ensure_aware
+from app.services.time_domain.clock import ensure_aware
 
 
 async def finish_followups(

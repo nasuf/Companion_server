@@ -30,7 +30,7 @@ from app.services.proactive.state import (
     has_recent_proactive_or_reminder,
     has_recent_user_activity,
 )
-from app.services.schedule_domain.time_service import _TZ
+from app.services.time_domain.clock import _TZ
 from app.services.topic import detect_topic_fatigue
 
 logger = logging.getLogger(__name__)

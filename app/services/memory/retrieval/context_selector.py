@@ -49,7 +49,7 @@ class ClassifiedMemory:
 
 def format_memory_time(memory: ClassifiedMemory) -> str:
     """Keep event time separate from statement/storage/access clocks."""
-    from app.services.temporal import local_clock, parse_time
+    from app.services.time_domain.timestamps import local_clock, parse_time
 
     if parse_time(memory.occur_time) is not None:
         label = f"事件时间 {local_clock(memory.occur_time)}"

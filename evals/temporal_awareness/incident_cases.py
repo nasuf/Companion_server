@@ -1,58 +1,13 @@
-"""Synthetic, dated cases based on TIME01 failure shapes. No production text/IDs."""
-CASES = [
-    dict(id="state_after_nine_days", now="2026-10-19T11:11:00Z", gap=9*86400,
-         history=[("user", "今天肚子不舒服"), ("assistant", "先休息一下")],
-         message="你在干嘛", route="current_state", memory=False,
-         criterion="回答自己的当前活动；不得把九天前的肚子不舒服当成现在仍在持续，也不要主动追问那件旧事。"),
-    dict(id="state_after_midnight", now="2026-10-19T02:18:00Z", gap=8*3600+33*60,
-         history=[("user", "我还没睡"), ("assistant", "早点休息吧")],
-         message="你在干嘛", route="current_state", memory=False,
-         criterion="现在为北京时间上午10:18，不能追问昨晚没睡为何现在还没睡；应回答自己的当前活动。"),
-    dict(id="old_meal_is_not_today", now="2026-10-19T11:54:00Z", gap=240,
-         history=[("user", "别一直问我了"), ("assistant", "好，不问了")],
-         message="你今天中午吃了什么", route="ordinary", memory=True,
-         criterion="唯一午饭记忆是9月8日三明治，今天是10月19日。不可说今天吃了三明治或编造今日餐食；可坦言没记清今天的午饭，也不得反问用户。"),
-    dict(id="optout_current_state", now="2026-10-19T11:54:00Z", gap=240,
-         history=[("user", "能不能不要一直问了"), ("assistant", "好呀，不问啦")],
-         message="你在干嘛", route="current_state", memory=False,
-         criterion="回答自己的当前活动，不得附加任何对用户的闲聊追问；说自己在做什么不算追问。"),
-    dict(id="repeated_work_questions", now="2026-10-19T11:54:00Z", gap=180,
-         history=[("assistant", "你今天工作忙吗？"), ("user", "还行"),
-                  ("assistant", "那你今天事情都做完了吗？"), ("user", "差不多"),
-                  ("assistant", "你忙完了吗？"), ("user", "嗯，忙完了")],
-         message="随便聊点别的吧", route="ordinary", memory=False,
-         criterion="顺着用户换个话题，不得继续追问忙不忙、工作完成与否或工作进展。"),
-    dict(id="explicit_historical_meal", now="2026-10-19T11:54:00Z", gap=180,
-         history=[("user", "想聊聊以前的事"), ("assistant", "好呀")],
-         message="9月8日中午你吃了什么", route="ordinary", memory=True,
-         criterion="记忆明确说9月8日午饭吃三明治，必须能回答三明治，不能因为这是旧记忆而拒绝回忆。"),
-    dict(id="fresh_event_continuity", now="2026-10-19T11:54:00Z", gap=120,
-         history=[("user", "我刚面试完，有点紧张"), ("assistant", "先缓口气")],
-         message="现在还没缓过来", route="ordinary", memory=False,
-         criterion="可以承接两分钟前面试紧张的情绪；不要误认为是几天前的旧事，也不要换成无关话题。"),
-    dict(id="reopened_conversation", now="2026-10-19T11:54:00Z", gap=180,
-         history=[("user", "不要一直问我"), ("assistant", "好，我听着")],
-         message="你现在可以问我了，想了解什么", route="ordinary", memory=False,
-         criterion="用户重新允许提问，应该能提出一个自然的新问题，而不是仍说不能问或强行只回应好。"),
-]
+"""Historical entry point; implementation is evals.temporal.awareness.incident_cases."""
+from importlib import import_module
+import sys
 
-# TIME02A read-path probes, paired against the same production snapshot.
-CASES += [
-    dict(id="original_midnight_anchor", now="2026-10-20T01:00:00Z", gap=3*86400,
-         received_at="2026-10-18T15:50:00Z", history=[], memory=False, route="ordinary",
-         message="我这条消息里说的昨天，具体是几月几号？",
-         criterion="消息原始时间是北京时间10月18日23:50，昨天指10月17日；不能按10月20日的处理时间回答10月19日。"),
-    dict(id="mention_is_not_event_date", now="2026-10-20T01:00:00Z", gap=86400,
-         history=[], memory=False, route="ordinary", message="我那次去博物馆是什么日期？",
-         timeline_rows=[dict(content="去过博物馆", statement_time="2026-10-19T00:00:00Z", source="user")],
-         criterion="只知道用户10月19日提过博物馆，不知道事件日期；不能把10月19日或昨天当成游览日，必须表达不知道具体日期。"),
-    dict(id="event_assertion_survives_old_mention", now="2026-10-20T01:00:00Z", gap=86400,
-         history=[], memory=False, route="ordinary", message="我记录的那次博物馆是什么日期？",
-         timeline_rows=[dict(content="去了博物馆", occur_time="2024-02-29T00:00:00Z", statement_time="2026-10-19T00:00:00Z", source="user")],
-         criterion="根据记录回答2024年2月29日，不能把提及时间10月19日当成事件日期。"),
-    dict(id="partial_candidates_do_not_prove_total", now="2026-10-20T01:00:00Z", gap=86400,
-         history=[], memory=False, route="ordinary", message="我从小到大总共去过几次博物馆？",
-         timeline_rows=[dict(content="去了博物馆", occur_time="2024-02-29T00:00:00Z", source="user"),
-                        dict(content="去了博物馆", occur_time="2025-03-01T00:00:00Z", source="user")],
-         criterion="可以说目前记录里有两次，但必须说明不知道完整总次数；不能断言一生总共只有两次。"),
-]
+if __name__ == "__main__":
+    from pathlib import Path
+    import runpy
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    runpy.run_module("evals.temporal.awareness.incident_cases", run_name="__main__")
+else:
+    _implementation = import_module("evals.temporal.awareness.incident_cases")
+    globals().update({key: value for key, value in vars(_implementation).items() if not key.startswith("__")})
+    sys.modules[__name__] = _implementation

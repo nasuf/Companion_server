@@ -13,13 +13,10 @@ import asyncio
 import logging
 import re
 
-from app.services.temporal_query import TemporalQuery, resolve_temporal_query
+from app.services.time_domain.query import TemporalQuery, resolve_temporal_query
 from datetime import datetime, timezone
 
-from app.services.memory.retrieval.timeline import (
-    timeline_evidence,
-    is_aggregate_time_question,
-)
+from app.services.time_domain.timeline import timeline_evidence, is_aggregate_time_question
 from app.services.memory.retrieval.vector_search import (
     search_by_time_range,
     search_similar_tiers,
@@ -34,7 +31,7 @@ from app.services.runtime.cache import (
     cache_retrieval,
     cache_set_retrieval,
 )
-from app.services.schedule_domain.time_parser import has_explicit_time, parse_time_expressions
+from app.services.time_domain.parser import has_explicit_time, parse_time_expressions
 
 logger = logging.getLogger(__name__)
 

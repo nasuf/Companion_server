@@ -31,7 +31,7 @@ from typing import Literal
 from app.redis_client import get_redis
 from app.services.proactive import tuning
 from app.services.prompting.utils import is_skip_output
-from app.services.temporal import parse_time
+from app.services.time_domain.timestamps import parse_time
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ def render_dialogue(
 
     主动交流 / 被动承接的各个提示词都以这种带时间戳的对话上下文为输入。
     """
-    from app.services.schedule_domain.time_service import _TZ
+    from app.services.time_domain.clock import _TZ
 
     lines = []
     for role, text, created_at in entries:

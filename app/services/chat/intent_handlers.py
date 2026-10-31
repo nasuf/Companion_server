@@ -18,6 +18,7 @@ from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.services.chat.tracing import ChatTracer
+    from app.services.time_domain.context import TurnClock
 
 from app.db import db
 from app.observability.events import EVT_INTENT_SHORT_CIRCUIT
@@ -61,7 +62,7 @@ from app.services.schedule_domain.schedule import (
     resolve_schedule_query_scope,
     update_schedule_slot,
 )
-from app.services.schedule_domain.time_service import get_current_time, resolve_implicit_time
+from app.services.time_domain.clock import get_current_time, resolve_implicit_time
 from app.services.prompting.store import get_prompt_text_or_default
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, safe_format
 from app.services.rules.chat_keywords import (
@@ -139,6 +140,7 @@ class ShortCircuitCtx:
     defer_turn_finalization: bool = False
     memory_usage_event_id: str | None = None
     followup_policy: Any = None
+    turn_clock: "TurnClock | None" = None
 
     async def finalize(
         self,
@@ -150,7 +152,7 @@ class ShortCircuitCtx:
         """`kind` 是该 handler 的 intent 名 (e.g. "apology_promise", "deletion_delete"),
         作为 EVT_INTENT_SHORT_CIRCUIT 的查询维度. 必填以防止 handler 漏标."""
         if self.followup_policy is not None and kind in {"current_state", "schedule_query", "apology_promise"}:
-            from app.services.chat.followup_policy import guard_optional_questions
+            from app.services.time_domain.followup import guard_optional_questions
             parts, suppressed = guard_optional_questions(reply.split("||"), self.followup_policy)
             reply = "||".join(parts)
             if self.response_diagnostics is not None:
@@ -1225,47 +1227,46 @@ async def _direct_create_reminder(
     from datetime import datetime
     from app.services.memory.interaction.deletion import save_pending_action
     from app.services.reminder.scheduling import upsert_reminder_trigger
-    from app.services.schedule_domain.time_parser import (
-        parse_loose_offset, parse_with_statement_time,
-    )
-    from app.services.schedule_domain.time_service import _now_corrected
+    from app.services.time_domain.clock import _now_corrected
     from app.services.workspace.workspaces import get_active_workspace
 
     if not ctx.user_id:
         return ("failed", None)
 
-    # parse 必须用"用户消息接收时刻"而不是 handler 跑到这一行的时刻 — 链路上前面
-    # 的 LLM 调用累计 ~25s, "两分钟后" 实际算成 "处理完 + 2分钟" 比期望晚.
-    received_at: datetime | None = None
-    if ctx.reply_context:
-        raw = ctx.reply_context.get("received_at")
-        if raw:
-            try:
-                received_at = datetime.fromisoformat(str(raw))
-            except (TypeError, ValueError):
-                received_at = None
-    parse_now = received_at or _now_corrected()
-    statement_time = parse_now
+    from app.services.time_domain.timestamps import parse_time
+    from app.services.time_domain.reminders import resolve_reminder_targets
 
-    recurrence = _detect_recurrence(user_message)
-
-    from app.services.reminder.scheduling import precise_reminder_time
-
-    # One stated day + clock ("明天下午3点") is a single trigger; the legacy
-    # parser would split it into today 15:00 and tomorrow 00:00.
-    bound, precise = precise_reminder_time(user_message, now=parse_now)
-    parsed = parse_with_statement_time(user_message, now=parse_now)
-    future_events = [e for e in parsed.event_times if e.is_future]
-    occur_times: list[datetime] = []
-    if bound:
-        occur_times = [precise] if precise else []
-    elif future_events:
-        # 多 occur_time 全保留 ("8 点吃药, 9 点开会"), 按时间升序
-        occur_times = sorted(e.start for e in future_events)
+    processing_now = _now_corrected()
+    if ctx.turn_clock is not None:
+        statement_time = ctx.turn_clock.statement_at
+        statement_end = ctx.turn_clock.statement_end_at
+        anchor_source = ctx.turn_clock.anchor_source
     else:
-        loose = parse_loose_offset(user_message, parse_now)
-        if loose is not None:
-            occur_times = [loose]
+        # Legacy standalone callers lack graph evidence. The real graph always
+        # supplies its TurnClock, including unknown; it never takes this branch.
+        received = parse_time((ctx.reply_context or {}).get("received_at"))
+        statement_time = statement_end = received or processing_now
+        anchor_source = "legacy_received" if received else "legacy_processing"
+    recurrence = _detect_recurrence(user_message)
+    resolution = resolve_reminder_targets(
+        user_message, statement_at=statement_time, statement_end_at=statement_end,
+        now=processing_now, allow_multiple=True,
+    )
+    time_diagnostics = {
+        "version": 1, "reason": resolution.reason, "anchor_source": anchor_source,
+        "statement_at": statement_time.isoformat() if statement_time else None,
+        "statement_end_at": statement_end.isoformat() if statement_end else None,
+        "processing_at": processing_now.isoformat(),
+        "targets": [t.isoformat() for t in resolution.targets],
+        "creation_status": "not_attempted",
+    }
+    if ctx.response_diagnostics is not None:
+        ctx.response_diagnostics["reminder_direct_time"] = time_diagnostics
+    occur_times = list(resolution.targets)
+    if resolution.reason in {"expired_before_processing", "invalid_statement_interval",
+                             "missing_statement_clock", "ambiguous_statement_interval",
+                             "invalid_execution_clock", "invalid_expression"}:
+        return ("failed", None)
 
     if not occur_times:
         # Round-3 工程扩展: 时间没说清 → save pending + 反问. 之前 fallback 假装
@@ -1307,6 +1308,10 @@ async def _direct_create_reminder(
         return ("failed", None)
     workspace_id = workspace.id
 
+    if any(target <= _now_corrected() for target in occur_times):
+        time_diagnostics["reason"] = "expired_before_write"
+        return ("failed", None)
+
     # 每个 occur_time 各建一条 (memory + trigger). 多条时并发建 (gather), N=1 也走
     # 同一路径无副作用. summary 第一人称 ("我让 AI 提醒") 让用户在记忆面板看到时
     # 不错位; (N/M) 后缀防 dedup 误合并.
@@ -1337,11 +1342,15 @@ async def _direct_create_reminder(
 
     results = await asyncio.gather(
         *(_schedule_one(i, ot) for i, ot in enumerate(occur_times)),
-        return_exceptions=False,
+        return_exceptions=True,
     )
-    scheduled = [r for r in results if r is not None]
+    scheduled = [r for r in results if isinstance(r, datetime)]
 
     # Confirming only the times that worked would hide the ones that never fire.
+    time_diagnostics["creation_status"] = ("created" if len(scheduled) == len(occur_times) else "partial" if scheduled else "failed")
+    time_diagnostics["created_targets"] = [target.isoformat() for target in scheduled]
+    time_diagnostics["created_count"] = len(scheduled)
+    time_diagnostics["target_count"] = len(occur_times)
     if len(scheduled) != len(occur_times):
         logger.warning(
             f"[RECORD-REQ] {len(occur_times) - len(scheduled)}/{len(occur_times)} "
@@ -1892,7 +1901,14 @@ async def handle_record_request(
 
         if status == "failed":
             # Never confirm a reminder that will not fire.
-            reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"
+            diagnostic = (ctx.response_diagnostics or {}).get("reminder_direct_time", {})
+            if diagnostic.get("creation_status") == "partial":
+                from app.services.time_domain.timestamps import parse_time
+                targets = [parse_time(value) for value in diagnostic.get("created_targets", [])]
+                when = " / ".join(_format_when_text(target) for target in targets if target)
+                reply = f"只设好了{when}的提醒，其他的没能设好，先别重复添加。"
+            else:
+                reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"
             return True, ctx.finalize(reply, kind="record_request_failed")
 
         reply = await record_confirm_reply(

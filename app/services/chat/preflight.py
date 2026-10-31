@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.services.chat.tracing import ChatTracer
-    from app.services.chat.temporal_context import TurnClock
+    from app.services.time_domain.context import TurnClock
 
 from app.observability.events import EVT_PREFLIGHT_FAILED, EVT_PREFLIGHT_RESOLVED
 from app.services.chat.intent_replies import deletion_done_reply, record_confirm_reply
@@ -44,11 +44,8 @@ from app.services.rules.chat_keywords import (
     CANCEL_CONFIRM_KEYWORDS,
     CANCEL_DENY_KEYWORDS,
 )
-from app.services.schedule_domain.time_parser import (
-    parse_loose_offset,
-    parse_with_statement_time,
-)
-from app.services.schedule_domain.time_service import _now_corrected
+from app.services.time_domain.parser import parse_loose_offset, parse_with_statement_time
+from app.services.time_domain.clock import _now_corrected
 
 logger = logging.getLogger(__name__)
 

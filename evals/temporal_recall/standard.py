@@ -1,97 +1,13 @@
-"""temporal_recall 判定线 + P3 求近排序 (feat 674c3b4) 的完整评估结论。
+"""Historical entry point; implementation is evals.temporal.recall.standard."""
+from importlib import import_module
+import sys
 
-## 演化历史
-
-- **v1 (P3 上线时, 2026-09-09)**: 8 用例, 无对抗组, 无 prod pool. 聚合命中率
-  没变化. 结论"live 且无害但未验证".
-- **v2 (2026-09-13 拆解)**: 加 --isolate-ranking 绕开保护槽 + --ab-recency 只算
-  求近路径 + 3 道对抗组. 露出 P3 在 w=0.5 已经悄悄打错一道 (recency_stable_l1)
-  的事实, 但只有 3 道对抗组结论"缺覆盖".
-- **v3 (2026-09-13 本次)**: 对抗组扩到 10 道 + 新增 --prod-pool-size N 让真实
-  DB 记忆当分散注意力候选. 5 轮独立采样 × 3 种 pool 大小 × 4 种权重 = 60 组数据,
-  拿到有方差的统计证据 —— **P3 在任何测试的权重、任何 pool 大小下都是净负**.
-
-## v3 权重扫描 (5 轮平均, sd 见 __doc__)
-
-    pool   w=0    w=0.5     w=1.0     w=1.5
-    -------------------------------------------
-    0      13.0   11.0(-2)  12.0(-1)  12.0(-1)   合成种子, 无 pool
-    60      9.0    8.0(-1)   7.2(-2)   7.6(-1)   +60 条真实记忆
-    150     7.8    6.8(-1)   6.4(-1)   5.8(-2)   +150 条真实记忆
-
-pool=0 时 P3 在 needs_time 子集上小幅正向 (+1 recency 胜利 -1 pick_middle
-边缘 case), 但在 control 子集上因为 stable_l1 显著回退 (-2), 总和净负。
-pool=60/150 时**没有任何权重、任何子集**出现正 delta —— 真实候选压力下, P3 的
-微弱 recency 胜利全被"新鲜噪音顶掉正确答案"淹没。
-
-方差数据 (5 轮 sd, 供判断信号强度):
-  pool=60,  sd 0.7~1.3  (随机 pool 组成)
-  pool=150, sd 0.5~0.9  (更大 pool 稀释了 sd)
-  pool=0,   sd 0.0      (无随机源)
-delta 的绝对值 (-1 到 -2) 均显著大于 sd, 结论稳定, 不是噪声.
-
-## 观测到的 P3 失败机制 (3 类)
-
-**A) L1 identity/preference 被新鲜无关事件挤下去**
-  cases: recency_stable_l1_coffee ("最近喝咖啡还是喝茶多"),
-          recency_stable_l1_job ("你现在做的是什么工作")
-  机制: L1 稳定事实 (like_coffee, profession_designer) 无 occur_time → 无 P3 boost;
-        对手 (gym_3 一天前 / prod 池随便一条新鲜事件) 拿到近满 boost → 直接顶掉.
-        P3 单向 boost, 无对称保护.
-
-**B) 多目标召回时新鲜噪音挤掉正确答案**
-  cases: recency_multi_return_full_history ("最近去健身都练哪些部位", 期望 gym_1/2/3)
-  机制: 权重高时, gym_3 稳排 top-1, gym_2 稳排 top-2, 但 top-3 位置被 prod 池里
-        一条新鲜但离题的记忆 (guitar_now 一样机制) 挤掉, gym_1 排到第 4 位.
-
-**C) 已知边界: 无法处理"指定序号"求近**
-  cases: recency_pick_middle ("倒数第二次")
-  机制: 求近词命中但答案是"次新" —— P3 只会把最新那条顶到 top-1, 而 baseline
-        (w=0) 恰巧靠相似度把 gym_2 排在前面碰对. 这条是 P3 结构性做不到, 不是
-        权重问题.
-
-## 与"温和的甜蜜点 w=1.0"的差异 (v2 vs v3)
-
-v2 报告 w=1.0 是候选甜蜜点 (+1 net 净胜, -1 recency_pick_middle 已知边界). 但
-v3 加了 (a) 7 道新对抗组, (b) 100+ 条真实候选压力后, 那个 +1 的胜利被淹没在
-"新鲜噪音" 里. 现在没有任何权重跑出正 delta.
-
-## 判定与建议
-
-**判定 (锁 baseline 不回退)**:
-  合成种子 baseline (w=0):  13/19 = 68%
-  求近路径 baseline (w=0):  7/11 = 64%
-  控制组 baseline (w=0):    4/4 = 100%
-
-**关于 P3 (feat 674c3b4) 的推荐**: 眼下的评测证据表明 P3 在 w=0.5 (生产当前)
-是**净负** —— 每种 pool 大小、每种权重都没跑出正 delta. 两条路都可以选:
-
-  (1) **降 P3 权重到 0 (软禁用)** —— 保留代码路径 (未来若加上"L1 保护槽" /
-      "查询意图分类" 能修 A 类失败机制后可重新激活), 权重通过 registry / 配置
-      开关随时能开. 最保守.
-  (2) **revert 整个 P3 commit** —— 干净利落, 但删掉代码后想复活成本更高.
-
-这条推荐**基于评测证据**, 不是生产 A/B. 评测 vs 生产的 gap:
-  - 用例分布可能非代表性 (adversarial 组是刻意构造)
-  - prod pool 是跨用户随机抽样, 不是任一用户实际检索时的候选集
-  - eval 判"排名对不对", 生产判"回复好不好" (top-3 里有正确答案也许够用)
-一个稳妥的路径是先降权重到 0 (=禁用), 若有用户反馈"求近类问题变差"再重启.
-"""
-
-# 硬 baseline (v3, 5 轮平均, isolate-ranking, 权重 0)
-BASELINE = {
-    "no_pool": {"all_19": 13.0, "time_15": 9.0, "ctrl_4": 4.0},
-    "pool_60": {"all_19": 9.0, "time_15": 8.2, "ctrl_4": 0.8},
-    "pool_150": {"all_19": 7.8, "time_15": 7.6, "ctrl_4": 0.2},
-}
-
-# P3 权重扫描的 delta (5 轮平均). 正数 = 净胜; 负数 = 净负; 每种情况的 sd 见 __doc__.
-P3_DELTA_VS_BASELINE = {
-    "no_pool":  {"w_0.5": -2, "w_1.0": -1, "w_1.5": -1},
-    "pool_60":  {"w_0.5": -1, "w_1.0": -2, "w_1.5": -1},
-    "pool_150": {"w_0.5": -1, "w_1.0": -1, "w_1.5": -2},
-}
-
-# CI 只锁 baseline 不回退, 不作为提升目标 (提升目标由权重选择决定)
-MIN_TIME_STRICT_HIT_ISOLATED = 0.60   # 时间题命中 (裸排序 w=0, 无 pool): baseline 9/15
-MIN_TIME_LOOSE_RECALL = 1.00          # 召回覆盖: baseline 15/15 (小池子命中率上限)
+if __name__ == "__main__":
+    from pathlib import Path
+    import runpy
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    runpy.run_module("evals.temporal.recall.standard", run_name="__main__")
+else:
+    _implementation = import_module("evals.temporal.recall.standard")
+    globals().update({key: value for key, value in vars(_implementation).items() if not key.startswith("__")})
+    sys.modules[__name__] = _implementation

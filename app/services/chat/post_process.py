@@ -569,7 +569,7 @@ async def _pipeline_with_watermark(
 def _parse_ts(m: dict) -> datetime | None:
     """规范化 message.createdAt → tz-aware. naive 假定 UTC, 防 'can't compare
     offset-naive and offset-aware datetimes' (Prisma client 某些版本返 naive)."""
-    from app.services.schedule_domain.time_service import ensure_aware
+    from app.services.time_domain.clock import ensure_aware
     ts = m.get("createdAt")
     if isinstance(ts, datetime):
         return ensure_aware(ts)
@@ -583,7 +583,7 @@ def _parse_ts(m: dict) -> datetime | None:
 
 # 测试期望的兼容 alias (test_post_process_datetime_aware_normalize 用)
 def _ensure_aware(dt: datetime | None) -> datetime | None:
-    from app.services.schedule_domain.time_service import ensure_aware
+    from app.services.time_domain.clock import ensure_aware
     return ensure_aware(dt)
 
 

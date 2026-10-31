@@ -87,6 +87,7 @@ async def _direct(message, received_at, *, failing=()):
         return None if kwargs["trigger_time"] in failing else f"t-{len(upserts)}"
 
     with (
+        patch("app.services.time_domain.clock._now_corrected", return_value=received_at),
         patch("app.services.workspace.workspaces.get_active_workspace", new_callable=AsyncMock,
               return_value=SimpleNamespace(agentId="agent-A", id="ws-1")),
         patch("app.services.memory.storage.persistence.store_memory",

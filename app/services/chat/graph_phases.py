@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from app.services.chat.memory_usage import submit_memory_usage
 from app.services.chat.repetition_guard import find_repeated_ai_phrases
-from app.services.temporal_query import resolve_temporal_query
-from app.services.chat.temporal_context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
-from app.services.chat.followup_policy import guard_optional_questions
+from app.services.time_domain.query import resolve_temporal_query
+from app.services.time_domain.context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
+from app.services.time_domain.followup import guard_optional_questions
 
 
 async def load_turn(ctx):
@@ -472,6 +472,7 @@ async def prepare_routes(ctx):
                         ctx.temporal_instructions + "\n" + dated_active_dialogue(
                             ctx.messages_dicts, now=ctx.turn_clock.now, exclude_ids=ctx.current_turn_ids)),
         followup_policy=ctx.followup_policy,
+        turn_clock=ctx.turn_clock,
         response_diagnostics=ctx.response_diagnostics,
         covered_until_user_ts=ctx.covered_until_user_ts,
         achievement_turn_final=ctx.achievement_turn_final,
@@ -1158,7 +1159,7 @@ async def normalize_reply(ctx):
         ctx.reply_emotion_pre = None
         ctx.response_diagnostics["persona_location_corrected"] = True
     if not ctx.crisis_care_turn and not ctx.reply_is_fallback and not ctx.contradiction_inquiry:
-        from app.services.chat.temporal_guard import guard_temporal_reply
+        from app.services.time_domain.guard import guard_temporal_reply
         from app.services.memory.retrieval.context_selector import format_memory_time
         temporal_checked = await guard_temporal_reply(
             " ".join(ctx.replies), question=ctx.user_message,

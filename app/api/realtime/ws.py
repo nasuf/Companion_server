@@ -1191,7 +1191,7 @@ async def _send_ack(
     `client_id`: 前端发消息时塞的 UUID, 后端原样回. 让前端在快速连发多条时
     精确对应 ack 跟具体气泡, 不用按时间猜. 没传时仅返 message_id (DB id).
     """
-    from app.services.schedule_domain.time_service import _now_corrected
+    from app.services.time_domain.clock import _now_corrected
     ui_timing = compute_ack_ui_timing(plan=plan, reply_context=reply_context)
     try:
         await ws.send_json({

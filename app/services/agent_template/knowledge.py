@@ -47,7 +47,7 @@ from app.services.memory.input_evidence import InputOrigin, persist_input_origin
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.storage.persistence import after_memory_changelog
-from app.services.schedule_domain.time_parser import resolve_occur_time
+from app.services.time_domain.parser import resolve_occur_time
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     distributed_lock,

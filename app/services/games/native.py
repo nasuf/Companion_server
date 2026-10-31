@@ -22,7 +22,7 @@ from app.services.games.finish_reply import generate_finish_reply
 from app.services.games.narrative import build_narrative
 from app.services.games.quick_exit import quick_exit_reply
 from app.services.games.substance import action_floor, played_enough
-from app.services.schedule_domain import time_service
+from app.services.time_domain import clock as time_service
 from app.services import game_points, wallet
 from app.services.memory.storage import repo as memory_repo
 from app.services.offline.memory_hooks import remember_shared_game_experience

@@ -1494,7 +1494,7 @@ async def _run_ntp_calibration():
     """Part 5 §2.1: NTP 校准, 漂移 > 阈值时告警."""
     async def _body():
         import asyncio
-        from app.services.schedule_domain.time_service import calibrate_against_ntp
+        from app.services.time_domain.clock import calibrate_against_ntp
         try:
             # ntplib 是同步阻塞调用, 放线程池
             drift = await asyncio.to_thread(calibrate_against_ntp)

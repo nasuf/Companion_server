@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.interaction.user_turn_aggregation import UserMessageAggregationPlan
-from app.services.schedule_domain.time_service import _now_corrected
+from app.services.time_domain.clock import _now_corrected
 
 
 def _parse_received_at(raw: Any) -> datetime | None:

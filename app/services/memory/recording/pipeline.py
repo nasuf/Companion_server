@@ -42,11 +42,8 @@ from app.services.memory.taxonomy import (
     SUBCATEGORY_ALIASES,
     l1_promotion_requirement,
 )
-from app.services.schedule_domain.time_parser import (
-    has_explicit_time,
-    parse_with_statement_time,
-)
-from app.services.schedule_domain.time_service import _now_corrected, ensure_aware
+from app.services.time_domain.parser import has_explicit_time, parse_with_statement_time
+from app.services.time_domain.clock import _now_corrected, ensure_aware
 from app.services.workspace.workspaces import get_active_workspace, resolve_workspace_id
 
 logger = logging.getLogger(__name__)
