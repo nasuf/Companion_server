@@ -8,6 +8,31 @@ import re
 _YEARLESS_DATE = re.compile(r"(?<![\d年])(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
 
 
+def _weekday_variants(text: str, now: datetime) -> list[str] | None:
+    """Anchor a bare 周五/星期五/礼拜五 to its next occurrence.
+
+    The parser only reads 这/下/上周X; a bare weekday was dropped, so
+    周五晚上7点 on a Saturday fired that Saturday at 19:00. Today's weekday
+    tries this week first, then next week. Returns None for several bare
+    weekdays, which cannot be bound to one target.
+    """
+    from app.services.time_domain.clock import _TZ
+    from app.services.time_domain.parser import _WEEKDAY_CN, _WEEKDAY_TOKEN
+
+    # 每周一 keeps its 每 (first occurrence of a weekly reminder); 这/下/上周X
+    # and counts such as 两周一次 are left to the parser.
+    pattern = re.compile(
+        rf"(?<![上下这本个两\d一二三四五六七八九十])(?:周|星期|礼拜)({_WEEKDAY_TOKEN})")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return [text]
+    if len(matches) > 1:
+        return None
+    day, today = _WEEKDAY_CN[matches[0][1]], now.astimezone(_TZ).weekday()
+    prefixes = ["这"] if day > today else ["下"] if day < today else ["这", "下"]
+    return [pattern.sub(lambda m, p=p: f"{p}周{m[1]}", text) for p in prefixes]
+
+
 def precise_reminder_time(
     message: str, *, now: datetime
 ) -> tuple[bool, datetime | None]:
@@ -24,15 +49,18 @@ def precise_reminder_time(
     from app.services.time_domain.clock import _TZ
     from app.services.time_domain.query import resolve_temporal_query
 
-    text = normalize_clock_words(message)
-    candidates = [text]
+    weekdays = _weekday_variants(normalize_clock_words(message), now)
+    if weekdays is None:
+        return False, None
     # A reminder looks forward: a yearless date means its next occurrence.
-    if len(_YEARLESS_DATE.findall(text)) == 1:
-        year = now.astimezone(_TZ).year
-        candidates = [
-            _YEARLESS_DATE.sub(lambda m, y=y: f"{y}年{m.group()}", text)
-            for y in (year, year + 1)
-        ]
+    year = now.astimezone(_TZ).year
+    candidates = []
+    for text in weekdays:
+        if len(_YEARLESS_DATE.findall(text)) == 1:
+            candidates += [_YEARLESS_DATE.sub(lambda m, y=y: f"{y}年{m.group()}", text)
+                           for y in (year, year + 1)]
+        else:
+            candidates.append(text)
     for candidate in candidates:
         query = resolve_temporal_query(
             candidate, anchor=now, anchor_source="persisted_message"

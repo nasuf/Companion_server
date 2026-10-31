@@ -1049,6 +1049,12 @@ async def handle_crisis_followup(
 # ═══════════════════════════════════════════════════════════════════
 
 
+# A stated time that passed before it could be written. Saying "unclear" or
+# "something went wrong" would misdescribe what the user said.
+EXPIRED_REMINDER_REASONS = frozenset({"expired_before_processing", "expired_before_write"})
+EXPIRED_REMINDER_REPLY = "刚才说的那个时间已经过了，这条先没记上，你再完整说一次想几点提醒吧~"
+
+
 def _format_when_text(occur_dt) -> str:
     """渲染时间给 confirm prompt 用. 真实现在 reminder/scheduling.format_when_text
     (智能相对/绝对切换, 不再死板"05月02日 22:50叫你")."""
@@ -1345,10 +1351,18 @@ async def _direct_create_reminder(
         return_exceptions=True,
     )
     scheduled = [r for r in results if isinstance(r, datetime)]
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning(
+                f"[RECORD-REQ] reminder creation raised {type(result).__name__}: {result}"
+            )
 
     # Confirming only the times that worked would hide the ones that never fire.
     time_diagnostics["creation_status"] = ("created" if len(scheduled) == len(occur_times) else "partial" if scheduled else "failed")
     time_diagnostics["created_targets"] = [target.isoformat() for target in scheduled]
+    time_diagnostics["failed_targets"] = [
+        target.isoformat() for target in occur_times if target not in scheduled
+    ]
     time_diagnostics["created_count"] = len(scheduled)
     time_diagnostics["target_count"] = len(occur_times)
     if len(scheduled) != len(occur_times):
@@ -1904,9 +1918,17 @@ async def handle_record_request(
             diagnostic = (ctx.response_diagnostics or {}).get("reminder_direct_time", {})
             if diagnostic.get("creation_status") == "partial":
                 from app.services.time_domain.timestamps import parse_time
-                targets = [parse_time(value) for value in diagnostic.get("created_targets", [])]
-                when = " / ".join(_format_when_text(target) for target in targets if target)
-                reply = f"只设好了{when}的提醒，其他的没能设好，先别重复添加。"
+
+                def _when(key):
+                    targets = [parse_time(value) for value in diagnostic.get(key, [])]
+                    return " / ".join(_format_when_text(t) for t in targets if t)
+
+                # Name the missing time so the user can set just that one; the
+                # ones that worked must not be re-added.
+                reply = (f"只设好了{_when('created_targets')}的提醒，"
+                         f"{_when('failed_targets')}的没设上，这个你再单独跟我说一次吧~")
+            elif diagnostic.get("reason") in EXPIRED_REMINDER_REASONS:
+                reply = EXPIRED_REMINDER_REPLY
             else:
                 reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"
             return True, ctx.finalize(reply, kind="record_request_failed")

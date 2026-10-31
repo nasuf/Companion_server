@@ -41,6 +41,15 @@ def bj(*args):
     (PAST_MIDNIGHT, "今晚8点提醒我", bj(2026, 11, 1, 20)),
     (NEW_YEARS_EVE, "明天下午3点提醒我", bj(2027, 1, 1, 15)),
     (NEW_YEARS_EVE, "11月5日下午2点提醒我", bj(2027, 11, 5, 14)),
+    # A bare weekday is its next occurrence; 10-31 is a Saturday. The parser
+    # used to drop 周五 and schedule that Saturday at 19:00.
+    (AFTERNOON, "周五晚上7点提醒我", bj(2026, 11, 6, 19)),
+    (AFTERNOON, "星期天下午3点提醒我", bj(2026, 11, 1, 15)),
+    (AFTERNOON, "礼拜一上午10点提醒我开会", bj(2026, 11, 2, 10)),
+    (AFTERNOON, "每周一上午10点提醒我开会", bj(2026, 11, 2, 10)),
+    (AFTERNOON, "周六晚上8点提醒我", bj(2026, 10, 31, 20)),   # today, still ahead
+    (AFTERNOON, "周六上午10点提醒我", bj(2026, 11, 7, 10)),   # today, passed: next week
+    (AFTERNOON, "下周五晚上7点提醒我", bj(2026, 11, 6, 19)),
 ])
 def test_day_and_clock_bind_to_one_future_time(now, message, expected):
     assert precise_reminder_time(message, now=now) == (True, expected)
@@ -59,6 +68,9 @@ def test_stated_time_already_passed_is_not_moved(now, message):
     "明天提醒我",           # no clock: day precision is not a trigger time
     "8点吃药，9点开会提醒我",  # several clocks stay several reminders
     "待会提醒我喝水",        # vague: ask back
+    "周一到周五早上8点提醒我",  # several weekdays cannot bind to one target
+    "周五提醒我交报告",       # weekday without a clock
+    "两周一次提醒我",
 ])
 def test_other_phrasings_stay_with_the_legacy_parser(message):
     assert precise_reminder_time(message, now=AFTERNOON) == (False, None)

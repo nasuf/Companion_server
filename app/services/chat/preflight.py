@@ -834,8 +834,13 @@ async def _handle_pending_set_reminder(
     # 分支 3: 有时间表达但不是 future (用户给的还是模糊 / 过去时刻 / 已过期)
     # 防无限反问 loop, 直接清 pending + 提示让用户重新说.
     if occur_time is None:
+        from app.services.chat.intent_handlers import (
+            EXPIRED_REMINDER_REASONS, EXPIRED_REMINDER_REPLY,
+        )
+
         await clear_pending_deletion(ctx.conversation_id)
-        reply = "嗯, 这个时间不太明确, 先不记了, 你想清楚再跟我说哈~"
+        reply = (EXPIRED_REMINDER_REPLY if resolution.reason in EXPIRED_REMINDER_REASONS
+                 else "嗯, 这个时间不太明确, 先不记了, 你想清楚再跟我说哈~")
         logger.info(
             f"[SET-REMINDER-PENDING] time expression but no future occur_time "
             f"({user_message[:30]!r}); declining to re-ask"
@@ -906,6 +911,10 @@ async def _handle_pending_set_reminder(
             f"[SET-REMINDER-PENDING] scheduled at {occur_time.isoformat()} "
             f"when={when_text!r} summary={summary[:30]!r}"
         )
+    elif time_diagnostics["reason"] == "expired_before_write":
+        from app.services.chat.intent_handlers import EXPIRED_REMINDER_REPLY
+
+        reply = EXPIRED_REMINDER_REPLY
     else:
         reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"
         logger.warning(

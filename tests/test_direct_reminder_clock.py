@@ -232,10 +232,25 @@ async def test_partial_creation_reports_exact_successes_without_inviting_retry(
     handled, gen = await ih.handle_record_request("8点吃药，9点开会提醒我", io.ctx)
     events = [e async for e in gen]
     assert handled and events[0]["kind"] == "record_request_failed"
-    assert "只设好了" in events[0]["text"] and "先别重复添加" in events[0]["text"]
+    # Names both the time that was set and the one to repeat.
+    assert "只设好了" in events[0]["text"] and "没设上" in events[0]["text"]
+    assert "08:00" in events[0]["text"] and "09:00" in events[0]["text"]
     assert "你再跟我说一遍" not in events[0]["text"]
     confirm.assert_not_awaited()
     diagnostic = io.ctx.response_diagnostics["reminder_direct_time"]
     assert diagnostic["creation_status"] == "partial"
     assert diagnostic["created_count"] == 1 and diagnostic["target_count"] == 2
     assert len(diagnostic["created_targets"]) == 1
+
+
+async def test_expired_direct_reminder_says_the_time_has_passed(io, monkeypatch):
+    async def final(reply, **kwargs):
+        yield {"event": "reply", "text": reply, "kind": kwargs["kind"]}
+
+    io.ctx.finalize = final
+    monkeypatch.setattr(ih, "record_confirm_reply", AsyncMock())
+    handled, gen = await ih.handle_record_request("15秒后提醒我", io.ctx)
+    events = [e async for e in gen]
+    assert handled and events[0]["kind"] == "record_request_failed"
+    assert events[0]["text"] == ih.EXPIRED_REMINDER_REPLY
+    io.persist.assert_not_awaited()

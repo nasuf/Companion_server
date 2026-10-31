@@ -323,3 +323,19 @@ async def test_handler_unrelated_message_continues_normal_chat(handler_io):
     handler_io.ctx.short_circuit_fn.assert_not_awaited()
     handler_io.create.assert_not_awaited()
     preflight.clear_pending_deletion.assert_awaited_once()
+
+
+async def test_expired_answer_says_the_time_has_passed(handler_io):
+    from app.services.chat.intent_handlers import EXPIRED_REMINDER_REPLY
+
+    # Received 15 minutes and more before processing: the target has passed.
+    handler_io.ctx.turn_clock = clock_for(PROCESSING - timedelta(minutes=16))
+    await invoke(handler_io, "15分钟后")
+    handler_io.create.assert_not_awaited()
+    assert handler_io.ctx.last_short_circuit_reply == EXPIRED_REMINDER_REPLY
+
+
+async def test_unclear_answer_keeps_the_unclear_reply(handler_io):
+    handler_io.ctx.turn_clock = clock_for(RECEIVED, PROCESSING)
+    await invoke(handler_io, "15分钟后")
+    assert "不太明确" in handler_io.ctx.last_short_circuit_reply
