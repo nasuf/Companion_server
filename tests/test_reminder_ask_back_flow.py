@@ -71,10 +71,10 @@ async def test_direct_create_reminder_returns_asked_when_no_time():
     ctx = _make_short_circuit_ctx()
     saved: dict = {}
 
-    async def _capture_save(conv_id, *, action, candidates=None, new_time=None, summary=None):
+    async def _capture_save(conv_id, *, action, candidates=None, new_time=None, summary=None, recurrence=None):
         saved.update({
             "conv_id": conv_id, "action": action,
-            "summary": summary, "candidates": candidates,
+            "summary": summary, "candidates": candidates, "recurrence": recurrence,
         })
 
     with patch.object(del_mod, "save_pending_action", side_effect=_capture_save):
@@ -88,6 +88,7 @@ async def test_direct_create_reminder_returns_asked_when_no_time():
     assert saved.get("action") == "set_reminder", (
         f"必须 save_pending_action(action='set_reminder'); got {saved}"
     )
+    assert saved["recurrence"] == "once"
     assert saved.get("summary") == "待会提醒我喝水好吗", (
         f"summary 必须是用户原话; got {saved.get('summary')!r}"
     )

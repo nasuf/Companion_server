@@ -17,7 +17,7 @@ from app.services.workspace import workspaces
 
 
 @pytest.mark.parametrize(
-    "mode", ["success", "expired", "trigger_failure", "storage_failure"]
+    "mode", ["success", "daily", "expired", "trigger_failure", "storage_failure"]
 )
 async def test_direct_clock_and_trigger_are_consistent_in_sql(
     origins, monkeypatch, mode
@@ -74,9 +74,11 @@ async def test_direct_clock_and_trigger_are_consistent_in_sql(
     before = await db.usermemory.count(where={"userId": uid})
     try:
         text = "1秒后提醒我" if mode == "expired" else "明天下午3点提醒我开会"
+        if mode == "daily":
+            text = "每天早上8点提醒我吃药"
         status, _ = await ih._direct_create_reminder(user_message=text, ctx=ctx)
         triggers = await db.timetrigger.find_many(where={"userId": uid})
-        if mode == "success":
+        if mode in {"success", "daily"}:
             assert status == "scheduled" and len(triggers) == 1
             row = await db.usermemory.find_unique(
                 where={"id": triggers[0].actionData["memory_id"]}
@@ -85,8 +87,9 @@ async def test_direct_clock_and_trigger_are_consistent_in_sql(
             assert (
                 row.occurTime
                 == triggers[0].triggerTime
-                == datetime(2026, 11, 1, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+                == datetime(2026, 11, 1, 8 if mode == "daily" else 15, tzinfo=ZoneInfo("Asia/Shanghai"))
             )
+            assert row.recurrence == triggers[0].actionData["recurrence"] == ("daily" if mode == "daily" else "once")
         else:
             assert status == "failed" and not triggers
             if mode != "trigger_failure":

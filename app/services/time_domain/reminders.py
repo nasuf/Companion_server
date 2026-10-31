@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 
 _YEARLESS_DATE = re.compile(r"(?<![\d年])(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+_CLOCK_ONLY = re.compile(r"(?:凌晨|早上|早晨|上午|中午|下午|晚上|夜里|傍晚)?\s*\d{1,2}[点时](?:\d{1,2}分?)?")
+
+
+def _clock_only(query, text: str) -> bool:
+    binding = query.binding or {}
+    spans = binding.get("spans", [])
+    return (binding.get("decision") == "single_expression" and len(spans) == 1
+            and bool(_CLOCK_ONLY.fullmatch(text[spans[0]["start"]:spans[0]["end"]])))
 
 
 def _weekday_variants(text: str, now: datetime) -> list[str] | None:
@@ -34,7 +42,7 @@ def _weekday_variants(text: str, now: datetime) -> list[str] | None:
 
 
 def precise_reminder_time(
-    message: str, *, now: datetime
+    message: str, *, now: datetime, recurrence: str = "once"
 ) -> tuple[bool, datetime | None]:
     """One day + clock expression bound into a single trigger time.
 
@@ -74,6 +82,16 @@ def precise_reminder_time(
         start = query.expressions[0].start
         if start > now:
             return True, start
+        if recurrence == "daily" and _clock_only(query, candidate):
+            # Only an undated daily wall-clock rolls forward. Explicit dates,
+            # elapsed offsets and delayed execution never acquire a new target.
+            tomorrow = now.astimezone(_TZ) + timedelta(days=1)
+            following = resolve_temporal_query(
+                candidate, anchor=tomorrow, anchor_source="persisted_message"
+            )
+            if following.status == "resolved" and len(following.expressions) == 1:
+                return True, following.expressions[0].start
+            return True, None  # e.g. a nonexistent/ambiguous DST wall-clock
     return True, None
 
 
@@ -98,6 +116,7 @@ def resolve_reminder_targets(
     statement_end_at: datetime | None,
     now: datetime,
     allow_multiple: bool = False,
+    recurrence: str = "once",
 ) -> ReminderTargets:
     """Interpret at the statement clock, then check validity at execution.
 
@@ -116,7 +135,7 @@ def resolve_reminder_targets(
         return ReminderTargets(True, (), "invalid_execution_clock")
 
     def candidate(at):
-        bound, precise = precise_reminder_time(message, now=at)
+        bound, precise = precise_reminder_time(message, now=at, recurrence=recurrence)
         parsed = parse_with_statement_time(message, now=at)
         future = [item.start for item in parsed.event_times if item.is_future]
         if bound:
@@ -155,10 +174,12 @@ def resolve_confirmation_time(
     statement_at: datetime | None,
     statement_end_at: datetime | None,
     now: datetime,
+    recurrence: str = "once",
 ) -> ReminderTimeResolution:
     """Existing single-target pending contract, backed by the shared resolver."""
     result = resolve_reminder_targets(
-        message, statement_at=statement_at, statement_end_at=statement_end_at, now=now
+        message, statement_at=statement_at, statement_end_at=statement_end_at, now=now,
+        recurrence=recurrence,
     )
     return ReminderTimeResolution(
         result.has_expression,

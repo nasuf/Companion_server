@@ -417,6 +417,7 @@ async def save_pending_action(
     candidates: list[dict] | None = None,
     new_time: datetime | str | None = None,
     summary: str | None = None,
+    recurrence: str | None = None,
 ) -> None:
     """统一跨消息 pending 写入. action ∈ {delete, reschedule, set_reminder}.
 
@@ -432,6 +433,8 @@ async def save_pending_action(
         )
     if summary is not None:
         payload["summary"] = summary
+    if action == "set_reminder" and isinstance(recurrence, str) and recurrence in {"once", "daily", "weekly", "monthly", "yearly"}:
+        payload["recurrence"] = recurrence
     redis = await get_redis()
     async with user_erasure.conversation_write_scope(conversation_id):
         await redis.set(
@@ -470,12 +473,15 @@ async def load_pending_action(conversation_id: str) -> dict | None:
             "new_time": None, "summary": None,
         }
     if isinstance(data, dict):
-        return {
+        result = {
             "action": str(data.get("action") or "delete"),
             "candidates": list(data.get("candidates") or []),
             "new_time": data.get("new_time"),
             "summary": data.get("summary"),
         }
+        if data.get("action") == "set_reminder" and isinstance(data.get("recurrence"), str) and data["recurrence"] in {"once", "daily", "weekly", "monthly", "yearly"}:
+            result["recurrence"] = data["recurrence"]
+        return result
     return None
 
 

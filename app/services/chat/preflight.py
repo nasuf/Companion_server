@@ -749,6 +749,13 @@ async def _handle_pending_set_reminder(
     from app.services.workspace.workspaces import get_active_workspace
 
     summary = pending.get("summary") or "(未指定事项)"
+    from app.services.chat.intent_handlers import _detect_recurrence
+
+    recurrence = _detect_recurrence(user_message)
+    if recurrence == "once" and not re.search(r"(?:只|就|仅)(?:提醒)?一次", user_message):
+        recurrence = pending.get("recurrence") or _detect_recurrence(summary)
+    if not isinstance(recurrence, str) or recurrence not in {"once", "daily", "weekly", "monthly", "yearly"}:
+        recurrence = "once"
 
     # 用户在反问时间之后补的是“提醒内容/文案”，这不是取消，也不应清掉 pending。
     # 保留原待办状态，更新 summary 后继续要时间。
@@ -760,6 +767,7 @@ async def _handle_pending_set_reminder(
                 ctx.conversation_id,
                 action="set_reminder",
                 summary=content[:200],
+                recurrence=recurrence,
             )
             summary = content
         reply = "好，提醒内容我按这句来。具体什么时候提醒你?"
@@ -806,12 +814,13 @@ async def _handle_pending_set_reminder(
         anchor_source = "unknown"
     resolution = resolve_confirmation_time(
         user_message, statement_at=parse_now, statement_end_at=statement_end,
-        now=processing_now,
+        now=processing_now, recurrence=recurrence,
     )
     occur_time = resolution.occur_time
     time_diagnostics = {
         "version": 1,
         "reason": resolution.reason,
+        "recurrence": recurrence,
         "anchor_source": anchor_source,
         "statement_at": parse_now.isoformat() if parse_now else None,
         "statement_end_at": statement_end.isoformat() if statement_end else None,
@@ -835,11 +844,12 @@ async def _handle_pending_set_reminder(
     # 防无限反问 loop, 直接清 pending + 提示让用户重新说.
     if occur_time is None:
         from app.services.chat.intent_handlers import (
-            EXPIRED_REMINDER_REASONS, EXPIRED_REMINDER_REPLY,
+            AMBIGUOUS_REMINDER_REPLY, EXPIRED_REMINDER_REASONS, EXPIRED_REMINDER_REPLY,
         )
 
         await clear_pending_deletion(ctx.conversation_id)
         reply = (EXPIRED_REMINDER_REPLY if resolution.reason in EXPIRED_REMINDER_REASONS
+                 else AMBIGUOUS_REMINDER_REPLY if resolution.reason == "ambiguous_statement_interval"
                  else "嗯, 这个时间不太明确, 先不记了, 你想清楚再跟我说哈~")
         logger.info(
             f"[SET-REMINDER-PENDING] time expression but no future occur_time "
@@ -889,7 +899,7 @@ async def _handle_pending_set_reminder(
             summary=f"我让 AI 提醒: {summary[:120]}",
             occur_time=occur_time,
             statement_time=parse_now,
-            recurrence="once",  # 反问场景默认一次性 — 用户没说重复关键词
+            recurrence=recurrence,
         )
         time_diagnostics["creation_status"] = "created" if memory_id else "failed"
 
@@ -904,7 +914,7 @@ async def _handle_pending_set_reminder(
         reply = await record_confirm_reply(
             summary=summary[:120],
             when_text=when_text,
-            is_recurring=False,
+            is_recurring=recurrence != "once",
             personality_brief=agent_name,
         ) or f"好嘞, {when_text}叫你, 记好啦~"
         logger.info(

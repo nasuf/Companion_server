@@ -1053,6 +1053,7 @@ async def handle_crisis_followup(
 # "something went wrong" would misdescribe what the user said.
 EXPIRED_REMINDER_REASONS = frozenset({"expired_before_processing", "expired_before_write"})
 EXPIRED_REMINDER_REPLY = "刚才说的那个时间已经过了，这条先没记上，你再完整说一次想几点提醒吧~"
+AMBIGUOUS_REMINDER_REPLY = "这几条消息里的时间我还没对齐，这条先没记上。请把提醒事项和具体时间放在同一条消息里再告诉我吧~"
 
 
 def _format_when_text(occur_dt) -> str:
@@ -1256,10 +1257,11 @@ async def _direct_create_reminder(
     recurrence = _detect_recurrence(user_message)
     resolution = resolve_reminder_targets(
         user_message, statement_at=statement_time, statement_end_at=statement_end,
-        now=processing_now, allow_multiple=True,
+        now=processing_now, allow_multiple=True, recurrence=recurrence,
     )
     time_diagnostics = {
         "version": 1, "reason": resolution.reason, "anchor_source": anchor_source,
+        "recurrence": recurrence,
         "statement_at": statement_time.isoformat() if statement_time else None,
         "statement_end_at": statement_end.isoformat() if statement_end else None,
         "processing_at": processing_now.isoformat(),
@@ -1283,6 +1285,7 @@ async def _direct_create_reminder(
                 ctx.conversation_id,
                 action="set_reminder",
                 summary=user_message[:200],
+                recurrence=recurrence,
             )
             logger.info(
                 f"[RECORD-REQ] no time parsed from {user_message[:60]!r}; "
@@ -1354,14 +1357,15 @@ async def _direct_create_reminder(
     for result in results:
         if isinstance(result, BaseException):
             logger.warning(
-                f"[RECORD-REQ] reminder creation raised {type(result).__name__}: {result}"
+                f"[RECORD-REQ] reminder creation raised {type(result).__name__}"
             )
 
     # Confirming only the times that worked would hide the ones that never fire.
     time_diagnostics["creation_status"] = ("created" if len(scheduled) == len(occur_times) else "partial" if scheduled else "failed")
     time_diagnostics["created_targets"] = [target.isoformat() for target in scheduled]
     time_diagnostics["failed_targets"] = [
-        target.isoformat() for target in occur_times if target not in scheduled
+        target.isoformat() for target, result in zip(occur_times, results)
+        if not isinstance(result, datetime)
     ]
     time_diagnostics["created_count"] = len(scheduled)
     time_diagnostics["target_count"] = len(occur_times)
@@ -1929,6 +1933,8 @@ async def handle_record_request(
                          f"{_when('failed_targets')}的没设上，这个你再单独跟我说一次吧~")
             elif diagnostic.get("reason") in EXPIRED_REMINDER_REASONS:
                 reply = EXPIRED_REMINDER_REPLY
+            elif diagnostic.get("reason") == "ambiguous_statement_interval":
+                reply = AMBIGUOUS_REMINDER_REPLY
             else:
                 reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"
             return True, ctx.finalize(reply, kind="record_request_failed")
@@ -1936,7 +1942,7 @@ async def handle_record_request(
         reply = await record_confirm_reply(
             summary=user_message[:120],
             when_text=when_text or "随时",
-            is_recurring=False,
+            is_recurring=_detect_recurrence(user_message) != "once",
             personality_brief=_agent_name(ctx.agent),
         )
         if not reply:

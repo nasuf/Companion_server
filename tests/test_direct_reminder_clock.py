@@ -197,17 +197,12 @@ async def test_daily_future_clock_keeps_recurrence(io, monkeypatch):
     )
 
 
-async def test_daily_clock_already_past_preserves_ask_back(io):
-    from app.services.memory.interaction import deletion
-
-    # This is existing behavior; clock convergence does not add a recurrence engine.
-    from unittest.mock import patch
-
-    with patch.object(deletion, "save_pending_action", new_callable=AsyncMock):
-        assert (
-            await ih._direct_create_reminder(user_message="每天8点提醒我", ctx=io.ctx)
-        )[0] == "asked"
-    io.persist.assert_not_awaited()
+async def test_daily_clock_already_past_schedules_next_occurrence(io):
+    assert (
+        await ih._direct_create_reminder(user_message="每天8点提醒我", ctx=io.ctx)
+    )[0] == "scheduled"
+    assert io.trigger.await_args.kwargs["trigger_time"] == datetime(2026, 11, 1, 8, tzinfo=BJ)
+    assert io.trigger.await_args.kwargs["recurrence"] == "daily"
 
 
 @pytest.mark.parametrize("outcome", [None, RuntimeError("synthetic trigger failure")])
