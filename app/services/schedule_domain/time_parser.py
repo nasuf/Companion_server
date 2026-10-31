@@ -181,7 +181,12 @@ def parse_time_expressions(
         # The read contract treats naive stored timestamps as UTC. Legacy
         # scheduling callers retain their existing local-clock convention.
         now = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(zone)
-    today = now.date()
+    # A receipt's offset identifies an instant, not its business calendar.
+    # Reminder/recording callers pass UTC while read queries pass the calendar
+    # zone explicitly. Both must resolve the same local day, month and year.
+    # Keep the original instant for elapsed offsets and future comparisons;
+    # naive legacy inputs retain their existing local-calendar convention.
+    today = (now.astimezone(zone) if now.tzinfo is not None else now).date()
     results: list[ParsedTime] = []
     used_spans: list[tuple[int, int]] = []
 
