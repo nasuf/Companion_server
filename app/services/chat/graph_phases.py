@@ -148,6 +148,8 @@ async def pending(ctx):
         await services.discard_pending_states_for_crisis(ctx.conversation_id)
     if not ctx.sub_intent_mode and (not ctx.crisis_care_turn):
         ctx.preflight_ctx = services.PreflightCtx(
+            turn_clock=ctx.turn_clock,
+            response_diagnostics=ctx.response_diagnostics,
             workspace_id=ctx.workspace_id, message_ids=tuple(sorted(ctx.current_turn_ids)),
             conversation_id=ctx.conversation_id,
             agent_id=ctx.agent_id,

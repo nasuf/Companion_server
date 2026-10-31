@@ -373,9 +373,9 @@ async def test_pending_set_reminder_branch_fuzzy_no_reask():
     with (
         patch("app.services.chat.preflight.load_pending_action", side_effect=_load),
         patch("app.services.chat.preflight.clear_pending_deletion", side_effect=_clear),
-        patch("app.services.chat.preflight.parse_with_statement_time",
+        patch("app.services.schedule_domain.time_parser.parse_with_statement_time",
               return_value=fake_parsed),
-        patch("app.services.chat.preflight.parse_loose_offset", return_value=None),
+        patch("app.services.schedule_domain.time_parser.parse_loose_offset", return_value=None),
     ):
         events = []
         async for evt in resolve_pending_deletion("过会儿再说吧", ctx):

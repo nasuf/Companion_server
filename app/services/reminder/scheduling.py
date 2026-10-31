@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -65,6 +66,65 @@ def precise_reminder_time(message: str, *, now: datetime) -> tuple[bool, datetim
         if start > now:
             return True, start
     return True, None
+
+
+@dataclass(frozen=True)
+class ReminderTimeResolution:
+    has_expression: bool
+    occur_time: datetime | None
+    reason: str
+
+
+def resolve_confirmation_time(
+    message: str, *, statement_at: datetime | None,
+    statement_end_at: datetime | None, now: datetime,
+) -> ReminderTimeResolution:
+    """Interpret at the statement clock, then check validity at execution.
+
+    An aggregate has no per-expression source binding here. Only accept a
+    target that is identical at both ends of its verified statement interval.
+    Missing evidence never falls back to execution time for a business write.
+    """
+    from app.services.temporal import parse_time
+    from app.services.schedule_domain.time_parser import (
+        parse_loose_offset, parse_with_statement_time,
+    )
+
+    anchor, end, execution = map(parse_time, (statement_at, statement_end_at, now))
+    if execution is None:
+        return ReminderTimeResolution(True, None, "invalid_execution_clock")
+
+    def candidate(at):
+        bound, precise = precise_reminder_time(message, now=at)
+        parsed = parse_with_statement_time(message, now=at)
+        future = [item.start for item in parsed.event_times if item.is_future]
+        if bound:
+            target = precise
+        elif future:
+            target = min(future)
+        else:
+            target = parse_loose_offset(message, at)
+        return bool(bound or parsed.event_times or target is not None), target
+
+    try:
+        # Execution is used only for syntactic detection when evidence is absent.
+        # Such a candidate is rejected below, never used for persistence.
+        has_expression, target = candidate(anchor or execution)
+        if not has_expression:
+            return ReminderTimeResolution(False, None, "no_expression")
+        if anchor is None:
+            return ReminderTimeResolution(True, None, "missing_statement_clock")
+        if end is None or end < anchor or end > execution or anchor > execution:
+            return ReminderTimeResolution(True, None, "invalid_statement_interval")
+        if end != anchor and candidate(end) != (has_expression, target):
+            return ReminderTimeResolution(True, None, "ambiguous_statement_interval")
+        if target is None:
+            return ReminderTimeResolution(True, None, "past_or_unresolved")
+        if target <= execution:
+            return ReminderTimeResolution(True, None, "expired_before_processing")
+        return ReminderTimeResolution(True, target, "resolved")
+    except (ValueError, OverflowError):
+        return ReminderTimeResolution(True, None, "invalid_expression")
 
 
 def format_when_text(occur_dt: datetime, *, now: datetime | None = None) -> str:
@@ -556,7 +616,7 @@ async def create_user_reminder(
         logger.warning("[REMINDER] every store path failed; aborting")
         return None
 
-    await upsert_reminder_trigger(
+    trigger_id = await upsert_reminder_trigger(
         user_id=user_id,
         agent_id=agent_id,
         memory_id=memory_id,
@@ -565,4 +625,5 @@ async def create_user_reminder(
         recurrence=recurrence,
         side="user",
     )
-    return memory_id
+    # A stored memory without a trigger is not a scheduled reminder.
+    return memory_id if trigger_id else None

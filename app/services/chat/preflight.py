@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.services.chat.tracing import ChatTracer
+    from app.services.chat.temporal_context import TurnClock
 
 from app.observability.events import EVT_PREFLIGHT_FAILED, EVT_PREFLIGHT_RESOLVED
 from app.services.chat.intent_replies import deletion_done_reply, record_confirm_reply
@@ -64,6 +65,8 @@ class PreflightCtx:
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
     workspace_id: str | None = None
     message_ids: tuple[str, ...] = ()
+    turn_clock: "TurnClock | None" = None
+    response_diagnostics: dict | None = None
     memory_confirmation: bool = False
     stopped: bool = False
     # 短路 reply 文本回写: orchestrator finally 兜底 fire post_process 用
@@ -789,27 +792,39 @@ async def _handle_pending_set_reminder(
         ctx.stopped = True
         return
 
-    # 解析时间. parse_with_statement_time + parse_loose_offset 兜底.
-    parse_now = _now_corrected()
-    from app.services.reminder.scheduling import precise_reminder_time
+    from app.services.reminder.scheduling import resolve_confirmation_time
 
-    # "明天下午3点" must not collapse to today 15:00 (earliest legacy result).
-    bound, precise = precise_reminder_time(user_message, now=parse_now)
-    parsed = parse_with_statement_time(user_message, now=parse_now)
-    future_events = [e for e in parsed.event_times if e.is_future]
-    occur_time = None
-    if bound:
-        occur_time = precise
-    elif future_events:
-        occur_time = sorted(e.start for e in future_events)[0]
+    processing_now = _now_corrected()
+    clock = ctx.turn_clock
+    # Standalone legacy callers without message IDs keep their synchronous
+    # contract. The graph always passes its validated TurnClock, even unknown.
+    if clock is not None:
+        parse_now, statement_end = clock.statement_at, clock.statement_end_at
+        anchor_source = clock.anchor_source
+    elif not ctx.message_ids:
+        parse_now = statement_end = processing_now
+        anchor_source = "legacy_processing"
     else:
-        loose = parse_loose_offset(user_message, parse_now)
-        if loose is not None:
-            occur_time = loose
-
-    # 分支 4: 完全没时间表达 → 用户答非所问. 清 pending + 不阻塞主流程.
-    # 判别: 任何 event_times (含 past/present) 都没抽到 + parse_loose_offset 也 None
-    has_any_time_expr = bool(parsed.event_times) or occur_time is not None
+        parse_now = statement_end = None
+        anchor_source = "unknown"
+    resolution = resolve_confirmation_time(
+        user_message, statement_at=parse_now, statement_end_at=statement_end,
+        now=processing_now,
+    )
+    occur_time = resolution.occur_time
+    time_diagnostics = {
+        "version": 1,
+        "reason": resolution.reason,
+        "anchor_source": anchor_source,
+        "statement_at": parse_now.isoformat() if parse_now else None,
+        "statement_end_at": statement_end.isoformat() if statement_end else None,
+        "processing_at": processing_now.isoformat(),
+        "target_at": occur_time.isoformat() if occur_time else None,
+        "creation_status": "not_attempted",
+    }
+    if ctx.response_diagnostics is not None:
+        ctx.response_diagnostics["reminder_confirmation_time"] = time_diagnostics
+    has_any_time_expr = resolution.has_expression
     if not has_any_time_expr:
         await clear_pending_deletion(ctx.conversation_id)
         logger.info(
@@ -858,22 +873,30 @@ async def _handle_pending_set_reminder(
     )
     workspace_id = workspace.id if workspace else None
 
-    memory_id = await create_user_reminder(
-        user_id=ctx.user_id,
-        agent_id=ctx.agent_id,
-        workspace_id=workspace_id,
-        summary=f"我让 AI 提醒: {summary[:120]}",
-        occur_time=occur_time,
-        statement_time=parse_now,
-        recurrence="once",  # 反问场景默认一次性 — 用户没说重复关键词
-    )
+    # Workspace IO can outlast a very short requested delay. Never rebase an
+    # expired target to "now + delay", and never claim creation without a write.
+    if occur_time <= _now_corrected():
+        memory_id = None
+        time_diagnostics["reason"] = "expired_before_write"
+        time_diagnostics["creation_status"] = "not_attempted"
+    else:
+        memory_id = await create_user_reminder(
+            user_id=ctx.user_id,
+            agent_id=ctx.agent_id,
+            workspace_id=workspace_id,
+            summary=f"我让 AI 提醒: {summary[:120]}",
+            occur_time=occur_time,
+            statement_time=parse_now,
+            recurrence="once",  # 反问场景默认一次性 — 用户没说重复关键词
+        )
+        time_diagnostics["creation_status"] = "created" if memory_id else "failed"
 
     await clear_pending_deletion(ctx.conversation_id)
 
     if memory_id:
         # 智能 when_text — 同天显示相对/绝对, 不再死板"05月02日 22:50"
         from app.services.reminder.scheduling import format_when_text
-        when_text = format_when_text(occur_time, now=parse_now)
+        when_text = format_when_text(occur_time, now=_now_corrected())
         # 走 LLM 确认回复 (跟第一轮一致, 不要硬编码模板). LLM 失败 fallback 模板.
         agent_name = ctx.agent.name if ctx.agent else "AI"
         reply = await record_confirm_reply(
