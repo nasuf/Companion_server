@@ -24,6 +24,18 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from app.services.reminder.precheck import PrecheckContext
+
+
+@pytest.fixture(autouse=True)
+def unit_reminder_dependencies(monkeypatch):
+    monkeypatch.setattr("app.services.admin_takeover.service.is_user_taken_over", AsyncMock(return_value=False))
+    async def claim_boundary(database,trigger,now):
+        await database.timetrigger.update(where={"id":trigger.id},data={"isActive":False,"lastFired":now})
+        return True
+    monkeypatch.setattr("app.services.reminder.mutations.claim_due_reminder",claim_boundary)
+
+
 
 
 _TZ = timezone.utc
@@ -287,7 +299,7 @@ async def test_reminder_fire_passes_trace_id_to_emit():
     with (
         patch.object(trig_mod, "db") as mock_db,
         patch.object(trig_mod, "_fetch_recent_messages_for_reminder",
-                     new_callable=AsyncMock, return_value=""),
+                     new_callable=AsyncMock, return_value=PrecheckContext(text='')),
         patch("app.services.chat.intent_replies.reminder_pre_check",
               side_effect=_needed),
         patch("app.services.chat.intent_replies.reminder_message",
@@ -378,8 +390,9 @@ async def test_system_only_checkin_does_not_generate_ai_chat():
 
 
 @pytest.mark.asyncio
-async def test_precheck_completed_without_memory_id_still_deactivates_trigger():
-    """LLM pre-check 判定已完成/取消时, 即使旧数据缺 memory_id 也不能继续发提醒。"""
+async def test_precheck_without_source_does_not_invent_completion():
+    """LLM pre-check 判定已完成但没有可核验的用户原话时, 不写完成状态;
+    提醒按到期照常投递 (扫描窗口只有 ±1 分钟, 不投递就永远不会响)。"""
     from app.services.proactive import triggers as trig_mod
     from types import SimpleNamespace
 
@@ -401,7 +414,7 @@ async def test_precheck_completed_without_memory_id_still_deactivates_trigger():
         patch.object(trig_mod, "get_redis", new_callable=AsyncMock,
                      return_value=MagicMock(incr=AsyncMock(), expire=AsyncMock())),
         patch.object(trig_mod, "_fetch_recent_messages_for_reminder",
-                     new_callable=AsyncMock, return_value="刚刚已经喝过了"),
+                     new_callable=AsyncMock, return_value=PrecheckContext(text='刚刚已经喝过了')),
         patch("app.services.chat.intent_replies.reminder_pre_check",
               new_callable=AsyncMock,
               return_value={"state": "completed", "reason": "用户已完成"}),
@@ -414,9 +427,9 @@ async def test_precheck_completed_without_memory_id_still_deactivates_trigger():
         mock_db.timetrigger.update = AsyncMock()
         await trig_mod._handle_reminder_trigger(trigger, now)
 
-    mock_db.timetrigger.update.assert_awaited_once_with(
-        where={"id": "t-no-memory"},
-        data={"isActive": False, "lastFired": now},
-    )
-    reminder_message.assert_not_awaited()
-    emit_message.assert_not_awaited()
+    # The first write is the ordinary delivery claim; no completion is recorded
+    # (the send itself needs a workspace this mock does not provide).
+    claim = mock_db.timetrigger.update.await_args_list[0].kwargs["data"]
+    assert set(claim) == {"isActive", "lastFired"}
+    assert all("completed_at" not in str(c) for c in mock_db.timetrigger.update.await_args_list)
+    del reminder_message, emit_message

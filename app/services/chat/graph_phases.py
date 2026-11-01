@@ -482,6 +482,7 @@ async def prepare_routes(ctx):
                             ctx.messages_dicts, now=ctx.turn_clock.now, exclude_ids=ctx.current_turn_ids)),
         followup_policy=ctx.followup_policy,
         turn_clock=ctx.turn_clock,
+        message_ids=tuple(ctx.current_turn_ids),
         response_diagnostics=ctx.response_diagnostics,
         covered_until_user_ts=ctx.covered_until_user_ts,
         achievement_turn_final=ctx.achievement_turn_final,

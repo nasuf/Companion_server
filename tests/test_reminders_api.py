@@ -21,6 +21,19 @@ from tests.conftest import make_auth_header as _hdr
 
 
 @pytest.fixture
+def mutation_boundary(monkeypatch):
+    """HTTP shape tests stub only persistence; real atomicity lives in PG suite."""
+    from app.services.reminder import checkin, mutations
+    calls=[]
+    async def commit(database, *, trigger, trigger_changes, memory_changes, operation, actor):
+        assert database is checkin.db and actor["sub"]==trigger.userId
+        calls.append((trigger_changes,memory_changes,operation,actor))
+        return await database.timetrigger.update(where={"id":trigger.id},data=trigger_changes)
+    monkeypatch.setattr(mutations,"mutate_reminder",commit)
+    return calls
+
+
+@pytest.fixture
 def client(api_client):
     return api_client
 
@@ -469,7 +482,7 @@ def test_item_classify_status_cancelled_when_inactive_no_lastfired(client):
 # ── check-in write paths ──────────────────────────────────────────────
 
 
-def test_update_reminder_pinned_round_trips(client):
+def test_update_reminder_pinned_round_trips(client, mutation_boundary):
     trigger = _trigger(tid="t-pin")
     updated = _trigger(tid="t-pin")
     updated.actionData["pinned"] = True
@@ -494,7 +507,7 @@ def test_update_reminder_pinned_round_trips(client):
     notify.assert_awaited_once_with("conv-1", kind="rescheduled", trigger_id="t-pin")
 
 
-def test_update_reminder_habit_weekdays_round_trips(client):
+def test_update_reminder_habit_weekdays_round_trips(client, mutation_boundary):
     trigger = _trigger(tid="t-weekly", recurrence="weekly")
     updated = _trigger(tid="t-weekly", recurrence="weekly", habit_weekdays=[1, 3, 5])
 
@@ -517,7 +530,7 @@ def test_update_reminder_habit_weekdays_round_trips(client):
     assert update_data["actionData"].data["habit_weekdays"] == [1, 3, 5]
 
 
-def test_update_reminder_sent_to_ai_round_trips(client):
+def test_update_reminder_sent_to_ai_round_trips(client, mutation_boundary):
     trigger = _trigger(tid="t-ai")
     updated = _trigger(tid="t-ai", sent_to_ai=True)
 
@@ -541,7 +554,7 @@ def test_update_reminder_sent_to_ai_round_trips(client):
     assert update_data["actionData"].data["conversation_id"] == "conv-1"
 
 
-def test_update_reminder_note_round_trips_and_clears(client):
+def test_update_reminder_note_round_trips_and_clears(client, mutation_boundary):
     """空字符串是「清空备注」的显式信号, 要把 key 从 actionData 摘掉."""
     with (
         patch("app.services.reminder.checkin.db") as mock_db,
@@ -727,7 +740,7 @@ def test_update_deleted_reminder_rejected(client):
     mock_db.timetrigger.update.assert_not_awaited()
 
 
-def test_update_completed_once_allows_pin_but_rejects_content_edit(client):
+def test_update_completed_once_allows_pin_but_rejects_content_edit(client, mutation_boundary):
     trigger = _trigger(
         tid="t-completed-edit",
         active=False,
@@ -787,7 +800,7 @@ def test_update_weekly_reminder_rejects_past_trigger_time(client):
     mock_db.timetrigger.update.assert_not_awaited()
 
 
-def test_complete_reminder_archives_memory_and_marks_inactive(client):
+def test_complete_reminder_archives_memory_and_marks_inactive(client, mutation_boundary):
     trigger = _trigger(tid="t-done")
     updated = _trigger(
         tid="t-done",
@@ -812,11 +825,10 @@ def test_complete_reminder_archives_memory_and_marks_inactive(client):
     assert r.json()["status"] == "fired"
     update_data = mock_db.timetrigger.update.await_args.kwargs["data"]
     assert update_data["isActive"] is False
-    archive.assert_awaited_once_with(
-        memory_id="mem-1",
-        side="user",
-        reason="completed_from_checkin",
-    )
+    assert mutation_boundary[0][1]=={"isArchived":True}
+    assert "lastFired" not in update_data
+    assert update_data["actionData"].data["completed_at"]
+    archive.assert_not_awaited()  # no out-of-transaction archive
     notify.assert_awaited_once_with("conv-1", kind="archived", trigger_id="t-done")
 
 
@@ -848,7 +860,7 @@ def test_complete_once_is_idempotent_when_already_completed(client):
     notify.assert_not_awaited()
 
 
-def test_complete_weekly_marks_occurrence_without_archiving_habit(client):
+def test_complete_weekly_marks_occurrence_without_archiving_habit(client, mutation_boundary):
     trigger = _trigger(tid="t-habit-done", recurrence="weekly", habit_weekdays=[1, 3])
     updated = _trigger(
         tid="t-habit-done",
@@ -880,7 +892,7 @@ def test_complete_weekly_marks_occurrence_without_archiving_habit(client):
     notify.assert_awaited_once_with("conv-1", kind="archived", trigger_id="t-habit-done")
 
 
-def test_delete_reminder_archives_memory_and_returns_204(client):
+def test_delete_reminder_archives_memory_and_returns_204(client, mutation_boundary):
     trigger = _trigger(tid="t-delete")
 
     with (
@@ -900,11 +912,8 @@ def test_delete_reminder_archives_memory_and_returns_204(client):
     update_data = mock_db.timetrigger.update.await_args.kwargs["data"]
     assert update_data["isActive"] is False
     assert update_data["actionData"].data["deleted_at"]
-    archive.assert_awaited_once_with(
-        memory_id="mem-1",
-        side="user",
-        reason="deleted_from_checkin",
-    )
+    assert mutation_boundary[0][1]=={"isArchived":True}
+    archive.assert_not_awaited()  # archive committed with trigger
     notify.assert_awaited_once_with("conv-1", kind="cancelled", trigger_id="t-delete")
 
 

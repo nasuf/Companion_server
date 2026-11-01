@@ -8,6 +8,7 @@ from scripts.check_rollback_version import (
     NORMAL_FLOOR,
     ancestor,
     qualify,
+    supports_fact_changes as actual_fact_change_capability,
     supports_topic_policy as actual_topic_capability,
 )
 
@@ -15,6 +16,7 @@ from scripts.check_rollback_version import (
 @pytest.fixture(autouse=True)
 def topic_capability_for_legacy_floor_tests(monkeypatch):
     monkeypatch.setattr('scripts.check_rollback_version.supports_topic_policy', lambda *_: True)
+    monkeypatch.setattr('scripts.check_rollback_version.supports_fact_changes', lambda *_: True)
 
 
 def test_normal_qualified_image():
@@ -100,3 +102,32 @@ def test_topic_capability_requires_all_current_source_entrypoints():
         SimpleNamespace(returncode=0,stdout='no current guard'),
     ]):
         assert not actual_topic_capability('.', 'candidate')
+
+
+@pytest.mark.parametrize('rows',[None,1,-1])
+def test_fact_change_unaware_rollback_cannot_resurrect_corrections(rows):
+    # Old images neither fence retracted sources nor keep the change chain.
+    with patch('scripts.check_rollback_version.supports_fact_changes',return_value=False):
+        with pytest.raises(ValueError,match='corrections forbid'):
+            qualify('.',NORMAL_FLOOR,fact_change_rows=rows,emergency=True,
+                accept_filler_shortcut=True,delay_enabled=False,queued=0,inflight=0)
+
+
+def test_empty_fact_change_state_allows_existing_version_checks():
+    with patch('scripts.check_rollback_version.supports_fact_changes',return_value=False), \
+            patch('scripts.check_rollback_version.ancestor',return_value=True):
+        assert qualify('.',NORMAL_FLOOR,fact_change_rows=0)['mode']=='normal'
+
+
+def test_fact_change_capability_requires_every_fence_reader():
+    from types import SimpleNamespace
+    with patch('scripts.check_rollback_version.subprocess.run',side_effect=[
+        SimpleNamespace(returncode=0,stdout='memory_source_retractions'),
+        SimpleNamespace(returncode=0,stdout='no fence'),
+    ]):
+        assert not actual_fact_change_capability('.', 'candidate')
+
+
+def test_pre_time05_main_lacks_fact_change_capability():
+    # 84d01fc6 is the TIME04 release, the last image without TIME05 fences.
+    assert not actual_fact_change_capability('.', '84d01fc65e433204b910161a519d1491729d002d')

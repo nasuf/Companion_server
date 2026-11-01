@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+from app.config import settings
 from typing import Literal
 
 from fastapi import HTTPException
@@ -45,6 +47,7 @@ class ReminderItem(BaseModel):
     trigger_time: str  # ISO
     last_fired: str | None  # ISO
     completed_at: str | None = None
+    event_state: Literal["pending", "completed", "cancelled"] = "pending"
     recurrence: str  # once | daily | weekly | monthly | yearly
     status: Literal["active", "fired", "cancelled"]
     retry_count: int  # 0 if never retried
@@ -101,7 +104,9 @@ class RemindersResponse(BaseModel):
 def _classify_status(trigger) -> Literal["active", "fired", "cancelled"]:
     if trigger.isActive:
         return "active"
-    if trigger.lastFired is not None:
+    # Completion no longer writes a fake delivery receipt (lastFired). Clients
+    # read `status` only, so a completed one-time item keeps reading as done.
+    if trigger.lastFired is not None or (trigger.actionData or {}).get("completed_at"):
         return "fired"
     return "cancelled"
 
@@ -113,7 +118,7 @@ def _is_open_checkin_item(trigger) -> bool:
     if trigger.isActive:
         return True
     recurrence = str(data.get("recurrence") or "once")
-    return recurrence == "once" and trigger.lastFired is not None
+    return recurrence == "once" and (trigger.lastFired is not None or bool(data.get("completed_at")))
 
 
 def _is_deleted_checkin_item(trigger) -> bool:
@@ -143,6 +148,8 @@ def _to_item(trigger) -> ReminderItem:
         trigger_time=trigger.triggerTime.isoformat(),
         last_fired=trigger.lastFired.isoformat() if trigger.lastFired else None,
         completed_at=data.get("completed_at") or None,
+        event_state=("completed" if data.get("completed_at") else "cancelled"
+            if data.get("cancelled_at") or data.get("deleted_at") else "pending"),
         recurrence=str(data.get("recurrence") or "once"),
         status=_classify_status(trigger),
         retry_count=int(data.get("retry_count") or 0),
@@ -204,7 +211,7 @@ def _normalize_note(value) -> str | None:
 
 def _normalize_date_key(value: str | None) -> str:
     if not value:
-        return datetime.now(UTC).date().isoformat()
+        return datetime.now(ZoneInfo(settings.schedule_timezone)).date().isoformat()
     raw = value.strip()
     try:
         return datetime.fromisoformat(raw).date().isoformat()
@@ -417,6 +424,16 @@ async def create_reminder_for_user(
     return _to_item(trigger)
 
 
+async def _mutate_checked(trigger, trigger_changes, memory_changes, operation, user):
+    from app.services.reminder.mutations import mutate_reminder
+    from app.services.memory.manual_write import MemoryWriteError
+    try:
+        return await mutate_reminder(db,trigger=trigger,trigger_changes=trigger_changes,
+            memory_changes=memory_changes,operation=operation,actor=user)
+    except MemoryWriteError as exc:
+        raise HTTPException(status_code=exc.status_code,detail=exc.detail) from exc
+
+
 async def update_reminder_for_user(
     trigger_id: str,
     data: ReminderUpdate,
@@ -469,16 +486,25 @@ async def update_reminder_for_user(
         trigger_time = _parse_datetime(data.trigger_time, "trigger_time")
         if trigger_time <= datetime.now(UTC):
             raise HTTPException(status_code=400, detail="提醒时间必须在未来")
-        update_data["triggerTime"] = trigger_time
+        update_data.update(triggerTime=trigger_time, isActive=True, lastFired=None)
+        action_data.pop("retry_count", None)
+        action_data.pop("precheck_state", None)
+        action_data.pop("precheck_observed_at", None)
+        # A new time reactivates a cancelled reminder; its memory must leave the
+        # archive too, or the delivery claim (live 提醒 memory) never succeeds.
+        reactivated = bool(action_data.pop("cancelled_at", None)) or not trigger.isActive
 
     update_data["actionData"] = Json(action_data)
-    updated = await db.timetrigger.update(where={"id": trigger_id}, data=update_data)
-    await _patch_reminder_memory(
-        action_data.get("memory_id"),
-        summary=action_data.get("summary") if data.summary is not None else None,
-        trigger_time=update_data.get("triggerTime"),
-        recurrence=data.recurrence,
-    )
+    memory_changes = {}
+    if data.summary is not None:
+        memory_changes["content"] = action_data["summary"]
+    if data.trigger_time is not None:
+        memory_changes["occurTime"] = update_data["triggerTime"]
+        if reactivated:
+            memory_changes["isArchived"] = False
+    if data.recurrence is not None:
+        memory_changes["recurrence"] = data.recurrence
+    updated = await _mutate_checked(trigger,update_data,memory_changes,"reminder_edited",user)
     await notify_reminder_changed(data.conversation_id, kind="rescheduled", trigger_id=trigger_id)
     return _to_item(updated)
 
@@ -506,10 +532,7 @@ async def complete_reminder_for_user(
             completed_dates.append(date_key)
             completed_dates.sort()
         data["completed_dates"] = completed_dates
-        updated = await db.timetrigger.update(
-            where={"id": trigger_id},
-            data={"actionData": Json(data)},
-        )
+        updated = await _mutate_checked(trigger,{"actionData":Json(data)}, {},"reminder_occurrence_completed",user)
         await notify_reminder_changed(conversation_id, kind="archived", trigger_id=trigger_id)
         return _to_item(updated)
 
@@ -517,21 +540,9 @@ async def complete_reminder_for_user(
         return _to_item(trigger)
 
     data["completed_at"] = datetime.now(UTC).isoformat()
-    updated = await db.timetrigger.update(
-        where={"id": trigger_id},
-        data={
-            "isActive": False,
-            "lastFired": datetime.now(UTC),
-            "actionData": Json(data),
-        },
-    )
-    memory_id = data.get("memory_id")
-    if memory_id:
-        await archive_reminder_memory(
-            memory_id=memory_id,
-            side=data.get("memory_side") or "user",
-            reason="completed_from_checkin",
-        )
+    # Completion is an explicit user action; do not invent a delivery receipt.
+    updated = await _mutate_checked(trigger,
+        {"isActive":False,"actionData":Json(data)}, {"isArchived":True},"reminder_completed",user)
     await notify_reminder_changed(conversation_id, kind="archived", trigger_id=trigger_id)
     return _to_item(updated)
 
@@ -547,17 +558,8 @@ async def delete_reminder_for_user(
     if data.get("deleted_at"):
         return None
     data["deleted_at"] = datetime.now(UTC).isoformat()
-    await db.timetrigger.update(
-        where={"id": trigger_id},
-        data={"isActive": False, "actionData": Json(data)},
-    )
-    memory_id = data.get("memory_id")
-    if memory_id:
-        await archive_reminder_memory(
-            memory_id=memory_id,
-            side=data.get("memory_side") or "user",
-            reason="deleted_from_checkin",
-        )
+    await _mutate_checked(trigger,
+        {"isActive":False,"actionData":Json(data)}, {"isArchived":True},"reminder_cancelled",user)
     await notify_reminder_changed(conversation_id, kind="cancelled", trigger_id=trigger_id)
     return None
 

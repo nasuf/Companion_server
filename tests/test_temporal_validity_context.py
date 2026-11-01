@@ -18,6 +18,15 @@ from app.services.memory.recording.validity import resolve_validity
 NOW = datetime(2026, 11, 1, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def no_replacements_in_source_reader_unit_fixtures(monkeypatch):
+    # These fixtures model the source query, not the independent change ledger.
+    # Real constraints, source mutation and replacement chains use PostgreSQL.
+    from app.services.memory.interaction import change_history
+
+    monkeypatch.setattr(change_history, "read_constraints", AsyncMock(return_value=[]))
+
+
 def query(text="2026年8月3日当时我住在哪里？"):
     return resolve_temporal_query(text, anchor=NOW, anchor_source="persisted_message")
 

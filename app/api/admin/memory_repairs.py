@@ -254,3 +254,45 @@ async def correct_topic_preference(topic_id: str, payload: TopicCorrectionReques
         raise HTTPException(status_code=404,detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409 if str(exc)=='topic_revision_conflict' else 400,detail=str(exc)) from exc
+
+
+class TemporalRepairRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=200)
+    workspace_id: str = Field(min_length=1, max_length=200)
+    evidence_id: str = Field(min_length=1, max_length=200)
+    expected_version: str = Field(pattern="^[a-f0-9]{64}$")
+
+
+@router.get("/time-repair/{side}/{memory_id}")
+async def preview_temporal_repair(
+    side: str = Path(pattern="^(user|ai)$"),
+    memory_id: str = Path(min_length=1, max_length=200),
+    user_id: str = Query(min_length=1, max_length=200),
+    workspace_id: str = Query(min_length=1, max_length=200),
+    _: dict = Depends(require_admin_jwt),
+) -> dict:
+    from app.services.memory import temporal_repair
+    from app.services.memory.manual_write import MemoryWriteError
+    try:
+        return await temporal_repair.preview(user_id=user_id, workspace_id=workspace_id,
+                                             side=side, memory_id=memory_id)
+    except MemoryWriteError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.post("/time-repair/{side}/{memory_id}")
+async def apply_temporal_repair(
+    payload: TemporalRepairRequest,
+    side: str = Path(pattern="^(user|ai)$"),
+    memory_id: str = Path(min_length=1, max_length=200),
+    user: dict = Depends(require_admin_jwt),
+) -> dict:
+    from app.services.memory import temporal_repair
+    from app.services.memory.manual_write import MemoryWriteError
+    try:
+        return await temporal_repair.apply(side=side, memory_id=memory_id,
+                                            actor=user, **payload.model_dump())
+    except MemoryWriteError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="temporal_repair_source_changed") from exc

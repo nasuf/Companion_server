@@ -30,6 +30,8 @@ from app.services.memory.storage.persistence import (
 )
 from app.services.memory.taxonomy import resolve_taxonomy, is_singleton
 from .contradiction_state import conversation_scope, memory_version, validate_pending
+from .change_semantics import resolve_change_semantics, select_change_statements
+from .change_history import current_version_id, persist_change
 
 logger = logging.getLogger(__name__)
 EXTRACTOR = "contradiction-confirmation-v1"
@@ -98,11 +100,53 @@ async def apply_confirmed_change(
         or (old.userId, old.workspaceId) != (user_id, workspace_id)
     ):
         raise MemoryWriteError(409, "contradiction_memory_changed")
+    original_sources = sources[:len(ticket["sources"])]
+    message_rows = await db.query_raw(
+        """SELECT id,content,created_at FROM messages WHERE id=ANY($1::text[])
+        AND conversation_id=$2 AND role='user'
+        AND NOT COALESCE(metadata,'{}'::jsonb) ? 'component_card'
+        ORDER BY created_at,id""",
+        [s.ref for s in sources], conversation_id,
+    )
+    pins = {s.ref: s for s in sources}
+    if len(message_rows) != len(pins) or any(
+        content_version(r["content"]) != pins[r["id"]].expected_version
+        for r in message_rows
+    ):
+        raise MemoryWriteError(409, "contradiction_source_changed")
+    if any(
+        message_statement_time(r["created_at"]) != pins[r["id"]].expected_statement_time
+        for r in message_rows
+    ):
+        # Preserve the evidence layer's rejection contract, even when detecting
+        # a changed clock before embedding or transaction acquisition.
+        raise ValueError("evidence_source_time_changed")
+    original_ids = {s.ref for s in original_sources}
+    original_rows = [r for r in message_rows if r["id"] in original_ids]
+    confirmation_rows = [r for r in message_rows if r["id"] not in original_ids]
+    fact_rows = select_change_statements(original_rows, confirmation_rows)
+    semantics = resolve_change_semantics(change, fact_rows)
+    if semantics.kind == "unknown":
+        return {"status": "needs_clarification", "change_semantics": semantics.diagnostic()}
+    old_statement = message_statement_time(old.statementTime) if old.statementTime else None
+    if old_statement and semantics.statement_at < old_statement:
+        raise MemoryWriteError(409, "contradiction_proposal_older_than_current_fact")
+    planned = semantics.kind == "planned"
+    if planned:
+        # Keep the user's plan as a plan. A proposed future address must never
+        # replace the currently true identity, even when the model says 变化.
+        content = "用户的待实施计划（未证实已发生）：" + "；".join(r["content"] for r in fact_rows)
+        if len(content) > 10000:
+            raise MemoryWriteError(422, "contradiction_plan_over_limit")
+    elif semantics.kind == "correction":
+        change = "错误"
     importance = _resolve_new_importance(change, old.importance)
+    if planned:
+        importance = 0.6
     level = 1 if importance >= 0.85 else 2
     taxonomy = resolve_taxonomy(
-        main_category=analysis.get("new_memory_main_category") or old.mainCategory,
-        sub_category=analysis.get("new_memory_sub_category") or old.subCategory,
+        main_category="生活" if planned else analysis.get("new_memory_main_category") or old.mainCategory,
+        sub_category="其他" if planned else analysis.get("new_memory_sub_category") or old.subCategory,
         legacy_type=normalize_memory_type(old.type),
         source="user",
         level=level,
@@ -126,6 +170,7 @@ async def apply_confirmed_change(
             "proposed_content": content,
             "sources": [*ticket["sources"], *confirmation_sources],
             "analysis": analysis,
+            "change_semantics": semantics.diagnostic(),
         },
     )
     events = []
@@ -151,6 +196,7 @@ async def apply_confirmed_change(
         await lock_memories(tx, [old])
         if memory_version(old) != ticket["memory_version"]:
             raise MemoryWriteError(409, "contradiction_memory_changed")
+        old_version_id = await current_version_id(tx, old)
         target_scope = {
             "user_id": user_id,
             "workspace_id": workspace_id,
@@ -159,6 +205,13 @@ async def apply_confirmed_change(
         # Recheck all pinned messages before writes, including no takeover/deletion.
         for source in sources:
             await _resolve_source(tx, source, target_scope)
+        plaintext = await tx.query_raw(
+            """SELECT id FROM messages WHERE id=ANY($1::text[])
+            AND NOT COALESCE(metadata,'{}'::jsonb) ? 'component_card' FOR SHARE""",
+            list(pins),
+        )
+        if len(plaintext) != len(pins):
+            raise MemoryWriteError(409, "contradiction_source_changed")
         if content == old.content:
             return {"status": "no_change"}
         if level == 1 and is_singleton(taxonomy.main_category, taxonomy.sub_category):
@@ -185,9 +238,10 @@ async def apply_confirmed_change(
         ):
             raise MemoryWriteError(409, "contradiction_duplicate_fact")
         now = datetime.now(timezone.utc)
-        # The confirmation is recorded now, but the statement belongs to its
-        # source message. A multi-message span is not one precise statement.
-        times = [s.expected_statement_time for s in sources[len(ticket['sources']):]]
+        # The statement belongs to the messages that carry the fact (the
+        # original proposal, or a substantive correction), never to a bare
+        # "yes". A multi-message span is not one precise statement.
+        times = [pins[r["id"]].expected_statement_time for r in fact_rows]
         statement = times[0] if times and all(t == times[0] for t in times) else None
         new = await repo.create(
             source="user",
@@ -234,7 +288,7 @@ async def apply_confirmed_change(
             ),
             extractor_version=EXTRACTOR,
         )
-        if change in {"变化", "错误"}:
+        if change in {"变化", "错误"} and not planned:
             await repo.update(
                 old.id, source="user", record=old, database=tx, isArchived=True
             )
@@ -251,6 +305,9 @@ async def apply_confirmed_change(
                     ),
                 }
             )
+        await persist_change(tx, old=old, new=new, origin_id=input_source.ref,
+            old_version_id=old_version_id,
+            semantics=semantics)
         await tx.memorychangelog.create(
             data={
                 "userId": user_id,
@@ -279,7 +336,8 @@ async def apply_confirmed_change(
             )
         except Exception:
             logger.warning("Contradiction postcommit hook failed", exc_info=True)
-    return {"status": "applied", "memory_id": new.id, "change_type": change}
+    return {"status": "plan_recorded" if planned else "applied", "memory_id": new.id,
+            "change_type": change, "change_semantics": semantics.diagnostic()}
 
 
 async def confirmation_receipt(database, workspace_id, pending_id):

@@ -141,6 +141,7 @@ class ShortCircuitCtx:
     memory_usage_event_id: str | None = None
     followup_policy: Any = None
     turn_clock: "TurnClock | None" = None
+    message_ids: tuple[str, ...] = ()
 
     async def finalize(
         self,
@@ -342,12 +343,32 @@ async def handle_deletion(
             for i, c in enumerate(candidates[:5])
         )
 
-        if intent == "reschedule" and new_time_raw:
+        if intent == "reschedule":
+            from app.services.reminder.reschedule import prepare_ticket
+            from app.services.memory.manual_write import MemoryWriteError
+            try:
+                ticket = await prepare_ticket(
+                    candidates=candidates, conversation_id=ctx.conversation_id,
+                    user_id=ctx.user_id, workspace_id=ctx.workspace_id,
+                    agent_id=ctx.agent_id, message_ids=ctx.message_ids,
+                    user_message=user_message,
+                )
+            except MemoryWriteError as exc:
+                if ctx.response_diagnostics is not None:
+                    ctx.response_diagnostics["reminder_reschedule"] = {
+                        "status": "needs_clarification", "reason": exc.detail,
+                    }
+                return True, ctx.finalize(
+                    "我还没改动提醒。请再说清楚要改哪条，以及改到哪天几点。",
+                    kind="deletion_reschedule_unresolved",
+                )
+            new_time_raw = ticket["new_time"]
             await save_pending_action(
                 ctx.conversation_id,
                 action="reschedule",
                 candidates=candidates,
                 new_time=new_time_raw,
+                reschedule_ticket=ticket,
             )
             # 简短自然: "你想把 X / Y 挪到 {time} 对吗?". 不再调 LLM (Phase 5
             # 走最小扩展, prompt 加 reschedule 选项不值得为 confirm 文案再加 prompt).

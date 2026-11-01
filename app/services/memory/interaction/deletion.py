@@ -418,6 +418,7 @@ async def save_pending_action(
     new_time: datetime | str | None = None,
     summary: str | None = None,
     recurrence: str | None = None,
+    reschedule_ticket: dict | None = None,
 ) -> None:
     """统一跨消息 pending 写入. action ∈ {delete, reschedule, set_reminder}.
 
@@ -425,6 +426,8 @@ async def save_pending_action(
     - set_reminder: candidates 留空, summary 必填 (用户原话, 第二轮拿到时间后用它建 memory)
     """
     payload: dict = {"action": action}
+    if action == "reschedule" and reschedule_ticket is not None:
+        payload["reschedule_ticket"] = reschedule_ticket
     if candidates is not None:
         payload["candidates"] = candidates
     if new_time is not None:
@@ -481,6 +484,8 @@ async def load_pending_action(conversation_id: str) -> dict | None:
         }
         if data.get("action") == "set_reminder" and isinstance(data.get("recurrence"), str) and data["recurrence"] in {"once", "daily", "weekly", "monthly", "yearly"}:
             result["recurrence"] = data["recurrence"]
+        if data.get("action") == "reschedule":
+            result["reschedule_ticket"] = data.get("reschedule_ticket")
         return result
     return None
 
@@ -491,88 +496,33 @@ async def apply_reschedule(
     new_time: str,
     *,
     agent_id: str | None = None,
+    workspace_id: str | None = None,
+    conversation_id: str | None = None,
+    ticket: dict | None = None,
+    message_ids: tuple[str, ...] = (),
+    user_message: str = "",
 ) -> int:
-    """把候选 memory 的 occurTime + 对应 reminder timetrigger 全部挪到 new_time.
+    """Apply only a scoped versioned proposal; legacy Redis entries cannot write.
 
-    - memory.occurTime ← new_time (按 candidate.source 路由 memories_user / _ai)
-    - timetrigger.actionType=reminder 且 actionData.memory_id ∈ candidates → triggerTime ← new_time
-    - 不删 memory, 不改 isArchived
-
-    `agent_id` 可选但**强烈建议传入**: 多 agent 用户场景下, 不传则 trigger
-    find_many 仅按 userId 过滤, 可能影响到其他 agent 的同名 memory_id 引用
-    (理论上 memory_id 全局唯一所以不会真的 cross-bleed, 但加 agent 闸防御
-    数据漂移). 主路径调用方 preflight 持有 agent_id, 应该传.
-
-    candidate 必须含 'source' 字段 ('user' 或 'ai'); 缺失记 WARN 跳过, 不
-    silently fallback (避免 AI memory 被错路由到 user 表).
-
-    返回成功更新的 memory 数."""
-    try:
-        new_time_dt = datetime.fromisoformat(new_time)
-    except (ValueError, TypeError):
-        logger.warning(f"apply_reschedule: invalid new_time={new_time!r}")
+    Memory time, reminder time, source evidence and audit are one transaction.
+    A caller's candidate list or model-generated timestamp alone grants nothing.
+    """
+    from app.services.memory.manual_write import MemoryWriteError
+    from app.services.reminder.reschedule import apply_ticket, valid_ticket_rows
+    if not ticket or not conversation_id or not workspace_id or not agent_id:
         return 0
-
-    candidate_ids = {c["id"] for c in candidates if c.get("id")}
-    if not candidate_ids:
+    if not valid_ticket_rows(ticket):
+        raise MemoryWriteError(409, "reschedule_ticket_invalid")
+    supplied = {(c.get("source"), c.get("id")) for c in candidates}
+    pinned = {(c["source"], c["id"]) for c in ticket["targets"]}
+    if supplied != pinned or new_time != ticket.get("new_time"):
         return 0
-
-    # 一次性拉所有 (user, agent) 的 active reminder triggers, 按 memory_id 索引.
-    # Round-2 review #9: 用 services/reminder/scheduling 收口 (跟 cancel /
-    # idempotency check 共享 helper). agent_id 闸防多 agent 数据漂移.
-    from app.services.reminder.scheduling import find_active_reminder_triggers
-    trigger_by_memory: dict = {}
-    all_triggers = await find_active_reminder_triggers(
-        user_id=user_id, agent_id=agent_id,
+    result = await apply_ticket(
+        ticket, conversation_id=conversation_id, user_id=user_id,
+        workspace_id=workspace_id, agent_id=agent_id,
+        message_ids=message_ids, user_message=user_message,
     )
-    for t in all_triggers:
-        mid = (t.actionData or {}).get("memory_id")
-        if isinstance(mid, str) and mid in candidate_ids:
-            trigger_by_memory[mid] = t
-
-    updated = 0
-    for c in candidates:
-        memory_id = c.get("id")
-        if not memory_id:
-            continue
-        # repo CRUD router 必须知道 source 才能选对表 (memories_user vs _ai).
-        # candidate 来自 vector_search 的 UNION SELECT, 必带 'source' 字段;
-        # 缺失则数据有问题, 不能 silently fallback 到 'user' (会误更 AI memory).
-        source = c.get("source")
-        if source not in ("user", "ai"):
-            logger.warning(
-                f"apply_reschedule: candidate {memory_id} missing/invalid source "
-                f"({source!r}); skipping"
-            )
-            continue
-        memory = await memory_repo.find_unique(memory_id)
-        old_occur = memory.occurTime if memory else None
-        try:
-            await memory_repo.update(memory_id, source=source, occurTime=new_time_dt)
-        except Exception as e:
-            logger.warning(f"apply_reschedule: memory occurTime update failed {memory_id}: {e}")
-            continue
-
-        t = trigger_by_memory.get(memory_id)
-        if t is not None:
-            try:
-                await db.timetrigger.update(
-                    where={"id": t.id},  # type: ignore[attr-defined]
-                    data={"triggerTime": new_time_dt},
-                )
-            except Exception as e:
-                logger.warning(f"apply_reschedule: timetrigger update failed {memory_id}: {e}")
-
-        try:
-            await log_memory_changelog(
-                user_id, memory_id, "reschedule",
-                old_value=old_occur.isoformat() if old_occur else None,
-                new_value=new_time_dt.isoformat(),
-            )
-        except Exception:
-            pass
-        updated += 1
-    return updated
+    return result["updated"]
 
 
 async def clear_pending_deletion(conversation_id: str) -> None:

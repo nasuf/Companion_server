@@ -421,6 +421,20 @@ async def notify_reminder_changed(
     if not conversation_id:
         return
     try:
+        # A trigger ID may arrive with a client-supplied conversation ID (check-in
+        # API). Never forward it to a different owner, agent, or archived
+        # workspace. Calls without an ID come from the chat turn's own validated
+        # conversation and carry no trigger identity, so they keep refreshing.
+        allowed = trigger_id is None or await db.query_raw(
+            """SELECT 1 FROM time_triggers t JOIN conversations c
+              ON c.user_id=t.user_id AND c.agent_id=t.ai_agent_id
+            JOIN chat_workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id AND w.agent_id=c.agent_id
+            WHERE t.id=$1 AND c.id=$2 AND t.action_type='reminder'
+              AND NOT c.is_deleted AND c.archived_at IS NULL
+              AND w.status='active' AND w.archived_at IS NULL LIMIT 1""",
+            trigger_id, conversation_id)
+        if not allowed:
+            return
         from app.services.runtime.ws_manager import manager
         await manager.send_event(
             conversation_id, "reminder_changed",

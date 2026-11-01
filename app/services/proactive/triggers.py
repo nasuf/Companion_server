@@ -272,28 +272,18 @@ async def _defer_special_date_trigger(
 
 async def _fetch_recent_messages_for_reminder(
     agent_id: str, user_id: str, now: datetime,
-) -> str:
-    """拉最近 30min 对话作为 pre-check LLM 上下文. 取所有相关 conversation 的消息."""
+):
+    """Pin bounded user statements before classifying reminder state.
+
+    A read failure yields an unavailable context: the pre-check can then only
+    lead to delivery, never to an applied state, as before this read existed.
+    """
+    from app.services.reminder.precheck import PrecheckContext, load_context
     try:
-        cutoff = now - REMINDER_PRECHECK_WINDOW
-        msgs = await db.message.find_many(
-            where={
-                "conversation": {"agentId": agent_id, "userId": user_id},
-                "createdAt": {"gte": cutoff},
-            },
-            order={"createdAt": "asc"},
-            take=40,
-        )
-    except Exception as e:
-        logger.warning(f"reminder pre-check: fetch recent messages failed: {e}")
-        return ""
-    lines = []
-    for m in msgs:
-        role = "用户" if m.role == "user" else "AI"
-        text = (m.content or "").strip().replace("\n", " ")
-        if text:
-            lines.append(f"{role}: {text[:120]}")
-    return "\n".join(lines) if lines else ""
+        return await load_context(db,agent_id=agent_id,user_id=user_id,now=now)
+    except Exception as exc:
+        logger.warning("[REMINDER-PRECHECK] context unavailable error=%s", type(exc).__name__)
+        return PrecheckContext(truncated=True)
 
 
 async def _archive_reminder_memory(memory_id: str, side: str, reason: str) -> None:
@@ -342,7 +332,7 @@ async def _push_reminder_dlq(
 
 
 async def _handle_emit_failure(
-    trigger, recurrence: str, exc: BaseException,
+    trigger, recurrence: str, exc: BaseException, *, claimed_at: datetime | None = None,
 ) -> None:
     """reminder emit 链路抛异常时的统一处理: once → 重试上限内重新激活,
     超限进 DLQ; periodic → 不重试 (续期已建, 下周期照常), 仅写 DLQ 留痕.
@@ -393,21 +383,13 @@ async def _handle_emit_failure(
         )
         return
 
-    # 重试: reactivate trigger, 推迟 30s 让下次 scan 重新尝试.
-    # 必须 import Json (Prisma 显式包装 JSON 字段) — 直接 dict 在某些 client 版本拒绝.
-    from prisma import Json
-    new_data = {**data, "retry_count": retry_count + 1}
+    from app.services.reminder.mutations import retry_claimed_reminder
     new_time = datetime.now(_TZ) + REMINDER_RETRY_DELAY
     try:
-        await db.timetrigger.update(
-            where={"id": trigger.id},
-            data={
-                "isActive": True,
-                "lastFired": None,
-                "triggerTime": new_time,
-                "actionData": Json(new_data),
-            },
-        )
+        if not await retry_claimed_reminder(db, trigger, claimed_at=claimed_at,
+                retry_at=new_time, retry_count=retry_count+1):
+            logger.info("[REMINDER-RETRY-STALE] changed reminder was not reactivated: %s", trigger.id)
+            return
         logger.info(
             f"[REMINDER-EMIT] {trigger.id[:8]} retry scheduled at {new_time} "
             f"attempt={retry_count + 1}/{MAX_REMINDER_RETRY}: {error_str}"
@@ -514,7 +496,7 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         state_info = await reminder_pre_check(
             summary=summary,
             trigger_time=trigger.triggerTime.isoformat(),
-            recent_messages=recent,
+            recent_messages=recent.text,
         )
         state = state_info.get("state", "needed")
 
@@ -534,65 +516,28 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         state_info = {"state": "needed", "reason": "system_only_checkin"}
         state = "needed"
 
-    if state in ("completed", "cancelled"):
-        if memory_id:
-            await _archive_reminder_memory(
-                memory_id, side, reason=f"{state}:{state_info.get('reason', '')}",
-            )
-        await db.timetrigger.update(
-            where={"id": trigger.id},
-            data={"isActive": False, "lastFired": now},
-        )
-        logger.info(
-            f"reminder {trigger.id} archived as {state} "
-            f"memory={memory_id and memory_id[:8]} reason={state_info.get('reason')}",
-            extra={
-                "event": EVT_REMINDER_HANDLED,
-                "outcome": state,  # completed / cancelled
-                "trigger_id": trigger.id,
-                "memory_id": memory_id,
-                "recurrence": recurrence,
-            },
-        )
-        return
-
-    if state == "rescheduled":
-        new_iso = state_info.get("new_time")
-        if not new_iso:
-            logger.warning(f"reminder {trigger.id} rescheduled but no new_time; falling through to send")
+    if state in ("completed", "cancelled", "rescheduled"):
+        from app.services.reminder.precheck import apply_state
+        from app.services.memory.manual_write import MemoryWriteError
+        try:
+            await apply_state(db,trigger=trigger,state=state,context=recent,now=now)
+        except Exception as exc:  # CancelledError is BaseException and propagates
+            # Unprovable state ("晚上八点再提醒我" without a resolvable new time,
+            # truncated context, ...) never invents a completion, cancellation
+            # or date. Deliver as due instead: the scan window is ±1 minute, so
+            # returning here would leave the reminder active and never sent. A
+            # concurrently changed reminder still fails the claim CAS below.
+            logger.warning("[REMINDER-PRECHECK-UNAPPLIED] trigger=%s state=%s reason=%s",
+                trigger.id,state,getattr(exc,"detail",None) or type(exc).__name__)
+            state = "needed"
         else:
-            try:
-                new_time = datetime.fromisoformat(new_iso)
-            except ValueError:
-                logger.warning(f"reminder {trigger.id}: invalid rescheduled new_time={new_iso!r}")
-                new_time = None
-            if new_time is not None:
-                await db.timetrigger.update(
-                    where={"id": trigger.id}, data={"triggerTime": new_time},
-                )
-                if memory_id:
-                    from app.services.memory.storage import repo as memory_repo
-                    try:
-                        await memory_repo.update(
-                            memory_id, source=side,  # type: ignore[arg-type]
-                            occurTime=new_time,
-                        )
-                    except Exception as e:
-                        logger.warning(f"reminder reschedule: memory occurTime update failed: {e}")
-                logger.info(
-                    f"reminder {trigger.id} rescheduled to {new_time} "
-                    f"reason={state_info.get('reason')}",
-                    extra={
-                        "event": EVT_REMINDER_RESCHEDULED,
-                        "trigger_id": trigger.id,
-                        "memory_id": memory_id,
-                        "new_trigger_time": new_time.isoformat(),
-                        "reason": state_info.get("reason"),
-                    },
-                )
-                return
+            logger.info("[REMINDER-PRECHECK-APPLIED] trigger=%s state=%s sources=%d",
+                trigger.id,state,len(recent.sources),extra={"event":EVT_REMINDER_HANDLED,
+                    "outcome":state,"trigger_id":trigger.id,"memory_id":memory_id,
+                    "recurrence":recurrence})
+            return
 
-    # state == "needed" (or fall-through from rescheduled-without-time): 发提醒.
+    # state == "needed": 发提醒；未证实的改期不会用模型生成日期写库。
     #
     # ⚠️ 关键顺序: 先 claim 原 trigger, 再 create 续期, 最后 emit.
     # 之前的"续期先于 claim"顺序在 claim 抛异常时会双写续期 (round-2 bug2):
@@ -606,10 +551,10 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
     #   个周期 — 是可接受的"退化", 比双重周期 trigger 好.
     # - emit 失败 (after claim+续期): 原死、续期在、消息丢. 周期性下周期照样
     #   提醒用户; 一次性提醒丢失 (见 WARNING 日志).
-    await db.timetrigger.update(
-        where={"id": trigger.id},
-        data={"isActive": False, "lastFired": now},
-    )
+    from app.services.reminder.mutations import claim_due_reminder
+    if not await claim_due_reminder(db, trigger, now):
+        logger.info("[REMINDER-STALE] skipped changed/inactive reminder %s", trigger.id)
+        return
 
     if recurrence != "once":
         habit_weekdays = _normalize_habit_weekdays(data.get("habit_weekdays"))
@@ -756,7 +701,7 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
             conversation_id, kind="fired", trigger_id=trigger.id,
         )
     except Exception as exc:
-        await _handle_emit_failure(trigger, recurrence, exc)
+        await _handle_emit_failure(trigger, recurrence, exc, claimed_at=now)
 
 
 async def _execute_trigger(trigger, now: datetime) -> None:

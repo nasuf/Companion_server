@@ -37,6 +37,7 @@ async def _load_asserted_validity_context(
         "truncated": False,
         "complete_history": False,
         "token_budget": TOKEN_BUDGET,
+        "source_retraction_fence": "enforced_in_source_query",
     }
     if not memories or not user_id or not workspace_id:
         info["reason"] = "no_scoped_candidates"
@@ -123,6 +124,9 @@ async def _load_asserted_validity_context(
                 AND m.role=CASE t.side WHEN 'user' THEN 'user' ELSE 'assistant' END
                 AND e.source_version=encode(sha256(convert_to(m.content,'UTF8')),'hex')
                 AND e.source_statement_time=m.created_at
+                AND NOT EXISTS (SELECT 1 FROM memory_source_retractions fence
+                  WHERE fence.source_message_id=m.id AND fence.source_version=e.source_version
+                    AND fence.user_id=$1 AND fence.workspace_id=$2 AND fence.memory_id=t.id)
                 AND COALESCE(m.metadata->>'human_takeover','false')<>'true'
                 AND ((e.source_card_version IS NULL AND NOT COALESCE(m.metadata,'{}'::jsonb) ? 'component_card')
                    OR e.source_card_version=encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex'))
@@ -148,12 +152,20 @@ async def _load_asserted_validity_context(
                 AND target.workspace_id=e.workspace_id
               WHERE $4::boolean AND t.side='user' AND e.memory_source='user'
                 AND e.memory_id=t.id AND e.user_id=$1 AND e.workspace_id=$2
-                AND e.source_kind='message' AND e.relation='extracted_from'
+                AND e.source_kind='message'
+                AND (e.relation='extracted_from' OR (e.relation='recorded_from' AND EXISTS (
+                  SELECT 1 FROM memory_fact_changes f WHERE f.new_memory_id=t.id
+                    AND f.user_id=e.user_id AND f.workspace_id=e.workspace_id
+                    AND f.kind IN ('transition','correction','addition')
+                    AND f.semantics->'fact_source_ids' ? m.id)))
                 AND COALESCE(e.temporal_basis->>'source_role','fact')='fact'
                 AND e.content_version=encode(sha256(convert_to(target.content,'UTF8')),'hex')
                 AND m.role='user'
                 AND e.source_version=encode(sha256(convert_to(m.content,'UTF8')),'hex')
                 AND e.source_statement_time=m.created_at
+                AND NOT EXISTS (SELECT 1 FROM memory_source_retractions fence
+                  WHERE fence.source_message_id=m.id AND fence.source_version=e.source_version
+                    AND fence.user_id=$1 AND fence.workspace_id=$2 AND fence.memory_id=t.id)
                 AND char_length(m.content) BETWEEN 1 AND 800
                 AND COALESCE(m.metadata->>'human_takeover','false')<>'true'
                 AND NOT COALESCE(m.metadata,'{}'::jsonb) ? 'component_card'
@@ -186,12 +198,40 @@ async def _load_asserted_validity_context(
         logger.warning("[TEMPORAL-VALIDITY] unavailable: %s", type(exc).__name__)
         return "", {}, info
     groups = {}
+    changes = []
+    info["change_filtered_count"] = 0
+    info["change_filter_reasons"] = {}
+    if historical:
+        from app.services.memory.interaction.change_history import read_constraints
+
+        try:
+            changes = await asyncio.wait_for(read_constraints(
+                database or db, user_id=user_id, workspace_id=workspace_id,
+                memory_ids=list(dict.fromkeys(row["historical_memory_id"]
+                    for row in rows if row["side"] == "user")),
+            ), timeout=3)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            info.update(status="unavailable", reason="change_revalidation_failed")
+            logger.warning("[TEMPORAL-VALIDITY] change unavailable: %s", type(exc).__name__)
+            return "", {}, info
     for row in rows:
         info["truncated"] |= bool(
             row.get("chain_truncated") or row.get("any_chain_truncated")
         )
         info["truncated"] |= (row.get("candidate_total") or 0) > PER_MEMORY_LIMIT
         if row.get("assertion_id") is not None:
+            from app.services.time_domain.change_constraints import historical_change_filter
+
+            allowed, reason, identities = historical_change_filter(
+                row["historical_memory_id"], period, changes
+            ) if row["side"] == "user" else (True, "agent_history", ())
+            if not allowed:
+                info["change_filtered_count"] += 1
+                info["change_filter_reasons"][reason] = info["change_filter_reasons"].get(reason, 0) + 1
+                continue
+            row["change_ids"] = identities
             key = (row["side"], row["memory_id"])
             groups.setdefault(key, []).append(row)
     info.update(
@@ -227,6 +267,7 @@ async def _load_asserted_validity_context(
                         "content": row["content"],
                         "source_excerpt": row["content"],
                         "statement_time": row["statement_time"],
+                        "change_ids": row.get("change_ids", ()),
                     }
                 ]
                 info["linked_source_count"] += 1
@@ -274,6 +315,7 @@ async def _load_asserted_validity_context(
                 "historical_memory_id": row["historical_memory_id"],
                 "event_time": row["occur_time"],
                 "statement_time": row["statement_time"],
+                "change_ids": row.get("change_ids", ()),
             }
             associations.setdefault(key, []).append(record)
             # Compact data only, not a new unmanaged prompt. Existing temporal
@@ -371,6 +413,10 @@ async def load_validity_context(
               AND encode(sha256(convert_to(m.content,'UTF8')),'hex')=r.version
               AND COALESCE(m.metadata->>'human_takeover','false')<>'true'
               AND NOT COALESCE(m.metadata,'{}'::jsonb) ? 'component_card'
+              AND NOT EXISTS (
+                SELECT 1 FROM memory_source_retractions f
+                WHERE f.source_message_id=m.id AND f.user_id=$1 AND f.workspace_id=$2
+                  AND f.source_version=r.version AND f.source_statement_time=m.created_at)
             ORDER BY m.created_at,m.id LIMIT 12""",
                 user_id,
                 workspace_id,
@@ -441,6 +487,7 @@ async def assertions_still_available(
                 item.get("assertion_id"),
                 item.get("version_id"),
                 str(item.get("retracted_at")),
+                tuple(item.get("change_ids", ())),
             )
             for key, values in groups.items()
             for item in values

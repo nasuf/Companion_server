@@ -25,11 +25,38 @@ async def persist_assertion(
     side,
     memory_id,
 ):
+    verified = validate_assertion_source(
+        source=source, origin=origin, side=side, revision_id=revision_id
+    )
+    if verified is None:
+        return
+    raw, value = verified
+    await database.execute_raw(
+        """INSERT INTO memory_temporal_assertions
+        (id,temporal_version_id,source_message_id,user_id,workspace_id,side,memory_id,
+         assertion,statement_at,valid_from,valid_to)
+        VALUES ($1,$2::bigint,$3,$4,$5,$6,$7,$8::jsonb,$9::timestamptz,$10::timestamptz,$11::timestamptz)
+        ON CONFLICT (id) DO NOTHING""",
+        evidence_id,
+        revision_id,
+        source.ref,
+        user_id,
+        workspace_id,
+        side,
+        memory_id,
+        json.dumps(raw, ensure_ascii=False),
+        value["statement_at"],
+        value["valid_from"],
+        value["valid_to"],
+    )
+
+
+def validate_assertion_source(*, source, origin, side, revision_id):
     basis = source.temporal_basis or {}
     raw = basis.get("validity")
     value = public_validity(raw)
     if value["state"] != "asserted":
-        return
+        return None
     expected_role = "user" if side == "user" else "assistant"
     if (
         source.kind != "message"
@@ -55,24 +82,7 @@ async def persist_assertion(
     verified = resolve_validity({"temporal_assertion": proposed}, [source], (1,))
     if public_validity(verified) != value:
         raise ValueError("temporal_assertion_bounds_changed")
-    await database.execute_raw(
-        """INSERT INTO memory_temporal_assertions
-        (id,temporal_version_id,source_message_id,user_id,workspace_id,side,memory_id,
-         assertion,statement_at,valid_from,valid_to)
-        VALUES ($1,$2::bigint,$3,$4,$5,$6,$7,$8::jsonb,$9::timestamptz,$10::timestamptz,$11::timestamptz)
-        ON CONFLICT (id) DO NOTHING""",
-        evidence_id,
-        revision_id,
-        source.ref,
-        user_id,
-        workspace_id,
-        side,
-        memory_id,
-        json.dumps(raw, ensure_ascii=False),
-        value["statement_at"],
-        value["valid_from"],
-        value["valid_to"],
-    )
+    return raw, value
 
 
 async def read_assertions(
@@ -118,6 +128,9 @@ async def read_assertions(
           AND m.role=CASE a.side WHEN 'user' THEN 'user' ELSE 'assistant' END
           AND e.source_version=encode(sha256(convert_to(m.content,'UTF8')),'hex')
           AND e.source_statement_time=m.created_at
+                AND NOT EXISTS (SELECT 1 FROM memory_source_retractions fence
+                  WHERE fence.source_message_id=m.id AND fence.source_version=e.source_version
+                    AND fence.user_id=$1 AND fence.workspace_id=$2 AND fence.memory_id=a.memory_id)
           AND COALESCE(m.metadata->>'human_takeover','false')<>'true'
           AND ((e.source_card_version IS NULL AND NOT COALESCE(m.metadata,'{}'::jsonb) ? 'component_card')
             OR e.source_card_version=encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex'))

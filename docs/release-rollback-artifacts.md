@@ -159,3 +159,18 @@ from old jobs. If an older image is otherwise necessary, prepare a qualified
 compatibility release carrying the minimum guards first; do not delete preferences
 to make a version gate pass. These source checks do not certify a production image
 or the truth of an operator-supplied row count.
+
+
+## TIME05 confirmed fact changes and source retractions
+
+`memory_fact_changes` records confirmed transitions, corrections and plans on top
+of the `memory_quality_states` replacement chain; `memory_source_retractions` fences
+a corrected message so background extraction cannot rebuild the wrong fact from it.
+Images before TIME05 read neither table. Once either has rows, rolling back to such
+an image lets a retracted source be extracted again, so the gate rejects it unless
+`--fact-change-rows 0` comes from a fresh, native read-only count of both tables
+(their sum). Unknown is not zero and there is no emergency override.
+
+The rollback for this package is to stop applying new automatic candidates while
+keeping the confirmation path. A confirmed current fact must never revert to the old
+one because code was rolled back; do not delete rows to make the gate pass.

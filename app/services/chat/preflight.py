@@ -209,7 +209,9 @@ async def resolve_pending_contradiction(
             pending, analysis, **context, confirmation_sources=sources
         )
         outcome = result["status"]
-        if outcome == "applied":
+        if outcome == "plan_recorded":
+            reply = "这个计划我记下了，先不当成已经发生的变化。"
+        elif outcome == "applied":
             try:
                 reply = await generate_contradiction_reply(
                     user_message=user_message,
@@ -383,10 +385,28 @@ async def resolve_pending_deletion(
                 for c in target_candidates[:5]
             ) or "(无)"
 
-            if action == "reschedule" and new_time:
-                updated = await apply_reschedule(
-                    ctx.user_id, target_candidates, new_time, agent_id=ctx.agent_id,
-                )
+            if action == "reschedule":
+                from app.services.memory.manual_write import MemoryWriteError
+                outcome = "applied"
+                try:
+                    updated = await apply_reschedule(
+                        ctx.user_id, target_candidates, new_time, agent_id=ctx.agent_id,
+                        workspace_id=ctx.workspace_id, conversation_id=ctx.conversation_id,
+                        ticket=pending.get("reschedule_ticket"), message_ids=ctx.message_ids,
+                        user_message=user_message,
+                    )
+                    if not updated:
+                        outcome = "proposal_unavailable"
+                except MemoryWriteError as exc:
+                    updated, outcome = 0, exc.detail
+                except Exception:
+                    logger.exception("Reminder reschedule transaction failed")
+                    updated, outcome = 0, "write_unavailable"
+                if ctx.response_diagnostics is not None:
+                    ctx.response_diagnostics["reminder_reschedule"] = {
+                        "status": "applied" if updated else "not_applied",
+                        "reason": outcome, "updated": updated,
+                    }
                 await clear_pending_deletion(ctx.conversation_id)
                 reply = (
                     f"好嘞, 已经把以下 {updated} 件事挪到 {new_time} 啦~\n{preview}"

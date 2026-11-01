@@ -178,6 +178,18 @@ async def _resolve_source(database, source: EvidenceSource, target: dict) -> dic
         if not allowed:
             raise ValueError("evidence_template_scope_mismatch")
     version = content_version(row["version_text"])
+    basis_role = (source.temporal_basis or {}).get("source_role") or "fact"
+    if kind == "message" and source.relation == "extracted_from" and basis_role == "fact":
+        # A corrected fact's source cannot back a new fact again. Batch-only
+        # guard rows are context, not claims, and stay bindable. Re-binding an
+        # existing memory (temporal repair) is fenced only for the corrected
+        # memory itself; other facts from the same message keep their source.
+        if await database.query_raw("""SELECT 1 FROM memory_source_retractions
+            WHERE source_message_id=$1 AND source_version=$2 AND user_id=$3 AND workspace_id=$4
+              AND ($5::text IS NULL OR memory_id=$5) LIMIT 1""",
+            ref,version,target["user_id"],target["workspace_id"],target.get("existing_memory_id")):
+            raise ValueError("evidence_source_retracted")
+
     if source.expected_version and source.expected_version != version:
         raise ValueError("evidence_source_version_changed")
     origin = {"kind": kind, "ref": ref, "version": version, "role": row.get("role"),

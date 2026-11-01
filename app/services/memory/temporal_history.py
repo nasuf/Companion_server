@@ -106,6 +106,9 @@ async def read_history(
                 "assertions": [a for a in assertions['items'] if a['version_id'] == str(row['id'])] if assertions else [],
             }
         )
+    from app.services.memory.interaction.change_history import read_changes
+    changes = await read_changes(db, user_id=user_id, workspace_id=workspace_id,
+        memory_id=memory_id, limit=limit, known_at=known_at) if side == "user" else None
     return {
         "items": items,
         "limit": limit,
@@ -116,4 +119,5 @@ async def read_history(
         "at": at.isoformat() if at else None,
         "known_at": known_at.isoformat() if known_at else None,
         "complete_history": False,
+        "fact_changes": changes,
     }

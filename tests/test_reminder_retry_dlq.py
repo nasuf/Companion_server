@@ -18,6 +18,28 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from app.services.reminder.precheck import PrecheckContext
+
+
+@pytest.fixture(autouse=True)
+def unit_reminder_dependencies(monkeypatch):
+    monkeypatch.setattr("app.services.admin_takeover.service.is_user_taken_over", AsyncMock(return_value=False))
+    async def claim_boundary(database,trigger,now):
+        await database.timetrigger.update(where={"id":trigger.id},data={"isActive":False,"lastFired":now})
+        return True
+    monkeypatch.setattr("app.services.reminder.mutations.claim_due_reminder",claim_boundary)
+    async def retry_boundary(database,trigger,*,claimed_at,retry_at,retry_count):
+        # SQL ownership/race guards are exercised by the real PostgreSQL suite.
+        assert claimed_at is not None
+        from prisma import Json
+        await database.timetrigger.update(where={"id":trigger.id},data={
+            "isActive":True,"lastFired":None,"triggerTime":retry_at,
+            "actionData":Json({**trigger.actionData,"retry_count":retry_count})})
+        return True
+    monkeypatch.setattr("app.services.reminder.mutations.retry_claimed_reminder",retry_boundary)
+
+
+
 
 from app.services.proactive import triggers as trig_mod
 
@@ -144,7 +166,7 @@ async def test_emit_failure_once_first_attempt_reactivates():
     ):
         mock_db.timetrigger.update = AsyncMock(side_effect=_capture_update)
         await trig_mod._handle_emit_failure(
-            trigger, "once", RuntimeError("emit 链路 dashscope 503"),
+            trigger, "once", RuntimeError("emit 链路 dashscope 503"), claimed_at=datetime.now(_TZ),
         )
 
     assert len(update_calls) == 1, "应 reactivate trigger (1 次 update)"
@@ -244,7 +266,7 @@ async def test_emit_failure_reactivate_failure_falls_to_dlq():
             side_effect=ConnectionError("DB unreachable"),
         )
         await trig_mod._handle_emit_failure(
-            trigger, "once", RuntimeError("original emit failure"),
+            trigger, "once", RuntimeError("original emit failure"), claimed_at=datetime.now(_TZ),
         )
 
     assert len(dlq_calls) == 1
@@ -345,7 +367,8 @@ async def test_handle_reminder_trigger_emit_failure_invokes_retry_handler():
 
     failure_calls = []
 
-    async def _capture_failure(trig, recurrence, exc):
+    async def _capture_failure(trig, recurrence, exc, *, claimed_at):
+        assert claimed_at == now
         failure_calls.append({
             "trigger_id": trig.id, "recurrence": recurrence,
             "exc_type": type(exc).__name__, "msg": str(exc)[:50],
@@ -354,7 +377,7 @@ async def test_handle_reminder_trigger_emit_failure_invokes_retry_handler():
     with (
         patch.object(trig_mod, "db") as mock_db,
         patch.object(trig_mod, "_fetch_recent_messages_for_reminder",
-                     new_callable=AsyncMock, return_value=""),
+                     new_callable=AsyncMock, return_value=PrecheckContext(text='')),
         patch("app.services.chat.intent_replies.reminder_pre_check",
               side_effect=_needed),
         patch.object(trig_mod, "resolve_workspace_id",

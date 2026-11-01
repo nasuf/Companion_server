@@ -33,11 +33,29 @@ def supports_topic_policy(repo, target):
     return True
 
 
+def supports_fact_changes(repo, target):
+    """TIME05: retracted sources stay fenced and confirmed changes stay current."""
+    for path, marker in (
+        ('app/services/memory/evidence.py', 'memory_source_retractions'),
+        ('app/services/time_domain/validity_context.py', 'memory_source_retractions'),
+        ('app/services/memory/interaction/contradiction_write.py', 'persist_change'),
+    ):
+        result = subprocess.run(['git', '-C', str(repo), 'show', f'{target}:{path}'],
+                                capture_output=True, timeout=10, text=True)
+        if result.returncode != 0 or marker not in result.stdout:
+            return False
+    return True
+
+
 def qualify(repo, target, *, emergency=False, accept_filler_shortcut=False,
-            delay_enabled=None, queued=None, inflight=None, topic_policy_rows=None):
+            delay_enabled=None, queued=None, inflight=None, topic_policy_rows=None,
+            fact_change_rows=None):
     if not supports_topic_policy(repo, target) and topic_policy_rows != 0:
         raise ValueError('topic-unaware target requires verified topic-policy row count 0; '
                          'existing or unknown preferences forbid this rollback, including emergency')
+    if not supports_fact_changes(repo, target) and fact_change_rows != 0:
+        raise ValueError('fact-change-unaware target requires verified fact-change row count 0; '
+                         'existing or unknown corrections forbid this rollback, including emergency')
     if ancestor(repo, NORMAL_FLOOR, target):
         return {'version_gate': 'passed', 'mode': 'normal', 'minimum_commit': NORMAL_FLOOR}
     # Older images ignore the stored probability and hardcode a 30% emoji-only
@@ -74,12 +92,16 @@ def main():
     parser.add_argument('--inflight', type=int)
     parser.add_argument('--topic-policy-rows', type=int,
                         help='Fresh native read-only count of conversation_topics, including reopened rows')
+    parser.add_argument('--fact-change-rows', type=int,
+                        help='Fresh native read-only count of memory_fact_changes plus '
+                             'memory_source_retractions')
     args = parser.parse_args()
     try:
         result = qualify(args.repo, args.target_commit, emergency=args.emergency,
                          accept_filler_shortcut=args.accept_filler_shortcut,
                          delay_enabled=None if args.delay_enabled is None else args.delay_enabled == 'true',
-                         queued=args.queued, inflight=args.inflight, topic_policy_rows=args.topic_policy_rows)
+                         queued=args.queued, inflight=args.inflight, topic_policy_rows=args.topic_policy_rows,
+                         fact_change_rows=args.fact_change_rows)
     except ValueError as exc:
         parser.exit(1, str(exc) + '\n')
     print(json.dumps(result))

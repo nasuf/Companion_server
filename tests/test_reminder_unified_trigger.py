@@ -16,6 +16,18 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from app.services.reminder.precheck import PrecheckContext
+
+
+@pytest.fixture(autouse=True)
+def unit_reminder_dependencies(monkeypatch):
+    monkeypatch.setattr("app.services.admin_takeover.service.is_user_taken_over", AsyncMock(return_value=False))
+    async def claim_boundary(database,trigger,now):
+        await database.timetrigger.update(where={"id":trigger.id},data={"isActive":False,"lastFired":now})
+        return True
+    monkeypatch.setattr("app.services.reminder.mutations.claim_due_reminder",claim_boundary)
+
+
 
 from app.services.chat.intent_handlers import ShortCircuitCtx
 
@@ -153,75 +165,8 @@ def test_idempotency_window_math():
 # ═══════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
-async def test_apply_reschedule_passes_source_to_repo_update():
-    """Bug fix: memory_repo.update needs `source=` to route memories_user vs _ai.
-    Without it the wrong table is targeted (or update fails silently)."""
-    from app.services.memory.interaction import deletion as deletion_mod
-
-    candidates = [
-        {"id": "mem-user", "source": "user", "content": "提醒喝水"},
-        {"id": "mem-ai", "source": "ai", "content": "提醒打卡"},
-    ]
-    new_time = "2026-05-10T08:00:00+00:00"
-
-    update_calls: list[dict] = []
-
-    async def _capture_update(memory_id, source=None, **data):
-        update_calls.append({"id": memory_id, "source": source, **data})
-
-    with (
-        patch.object(deletion_mod.memory_repo, "find_unique",
-                     new_callable=AsyncMock,
-                     return_value=SimpleNamespace(occurTime=None, userId="u1")),
-        patch.object(deletion_mod.memory_repo, "update",
-                     side_effect=_capture_update),
-        patch.object(deletion_mod, "db") as mock_db,
-        patch.object(deletion_mod, "log_memory_changelog",
-                     new_callable=AsyncMock),
-    ):
-        mock_db.timetrigger = MagicMock()
-        mock_db.timetrigger.find_many = AsyncMock(return_value=[])
-        mock_db.timetrigger.update = AsyncMock()
-        n = await deletion_mod.apply_reschedule("u1", candidates, new_time)
-
-    assert n == 2
-    sources = [c["source"] for c in update_calls]
-    assert sources == ["user", "ai"], f"source not threaded: {sources}"
 
 
-@pytest.mark.asyncio
-async def test_apply_reschedule_uses_single_find_many_for_triggers():
-    """Round-1 P1: per-candidate find_many was N×M — must hoist out of loop.
-    Round-2 重构: lookup 现在通过 services.reminder.scheduling.find_active_reminder_triggers
-    收口, 仍要保证只调 1 次 (不在 per-candidate loop 内重复调)."""
-    from app.services.memory.interaction import deletion as deletion_mod
-    from app.services.reminder import scheduling as sch_mod
-
-    candidates = [{"id": f"m{i}", "source": "user"} for i in range(5)]
-
-    with (
-        patch.object(deletion_mod.memory_repo, "find_unique",
-                     new_callable=AsyncMock,
-                     return_value=SimpleNamespace(occurTime=None, userId="u1")),
-        patch.object(deletion_mod.memory_repo, "update",
-                     new_callable=AsyncMock),
-        patch.object(deletion_mod, "db") as mock_deletion_db,
-        patch.object(sch_mod, "db") as mock_sch_db,
-        patch.object(deletion_mod, "log_memory_changelog",
-                     new_callable=AsyncMock),
-    ):
-        find_many_mock = AsyncMock(return_value=[])
-        mock_sch_db.timetrigger = MagicMock()
-        mock_sch_db.timetrigger.find_many = find_many_mock
-        mock_deletion_db.timetrigger = MagicMock()
-        mock_deletion_db.timetrigger.update = AsyncMock()
-        await deletion_mod.apply_reschedule("u1", candidates, "2026-01-01T00:00:00+00:00")
-
-    assert find_many_mock.call_count == 1, (
-        f"find_many called {find_many_mock.call_count} times; "
-        "expected 1 (hoisted out of candidate loop)"
-    )
 
 
 @pytest.mark.asyncio
@@ -231,79 +176,8 @@ async def test_apply_reschedule_invalid_new_time_returns_zero():
     assert n == 0
 
 
-@pytest.mark.asyncio
-async def test_apply_reschedule_scopes_triggers_by_agent_id():
-    """Round-2 bug1: multi-agent users — agent_id 必须传到 trigger find_many,
-    否则跨 agent 误删. Round-3 重构后 lookup 走 scheduling.find_active_reminder_triggers,
-    where 在那里组装. 验证 agent_id 透传."""
-    from app.services.memory.interaction import deletion as deletion_mod
-    from app.services.reminder import scheduling as sch_mod
-
-    captured_where: dict = {}
-
-    async def _capture_find_many(*, where):
-        captured_where.update(where)
-        return []
-
-    with (
-        patch.object(deletion_mod.memory_repo, "find_unique",
-                     new_callable=AsyncMock,
-                     return_value=SimpleNamespace(occurTime=None, userId="u1")),
-        patch.object(deletion_mod.memory_repo, "update", new_callable=AsyncMock),
-        patch.object(deletion_mod, "db") as mock_deletion_db,
-        patch.object(sch_mod, "db") as mock_sch_db,
-        patch.object(deletion_mod, "log_memory_changelog", new_callable=AsyncMock),
-    ):
-        mock_sch_db.timetrigger = MagicMock()
-        mock_sch_db.timetrigger.find_many = AsyncMock(side_effect=_capture_find_many)
-        mock_deletion_db.timetrigger = MagicMock()
-        mock_deletion_db.timetrigger.update = AsyncMock()
-
-        await deletion_mod.apply_reschedule(
-            "u1", [{"id": "m1", "source": "user"}],
-            "2026-01-01T00:00:00+00:00",
-            agent_id="agent-A",
-        )
-
-    assert captured_where.get("aiAgentId") == "agent-A", (
-        f"agent_id must scope timetrigger find_many; got {captured_where!r}"
-    )
 
 
-@pytest.mark.asyncio
-async def test_apply_reschedule_skips_candidate_with_invalid_source():
-    """Round-2 bug4: defensive `or 'user'` masked source-field drift.
-    Candidates without valid source MUST be skipped, not fallback-routed."""
-    from app.services.memory.interaction import deletion as deletion_mod
-
-    candidates = [
-        {"id": "good", "source": "ai"},
-        {"id": "bad", "source": None},  # invalid — must skip
-        {"id": "ugly", "source": "garbage"},  # invalid — must skip
-    ]
-
-    update_calls: list[str] = []
-
-    async def _record(memory_id, **kwargs):
-        update_calls.append(memory_id)
-
-    with (
-        patch.object(deletion_mod.memory_repo, "find_unique",
-                     new_callable=AsyncMock,
-                     return_value=SimpleNamespace(occurTime=None, userId="u1")),
-        patch.object(deletion_mod.memory_repo, "update", side_effect=_record),
-        patch.object(deletion_mod, "db") as mock_db,
-        patch.object(deletion_mod, "log_memory_changelog", new_callable=AsyncMock),
-    ):
-        mock_db.timetrigger = MagicMock()
-        mock_db.timetrigger.find_many = AsyncMock(return_value=[])
-        mock_db.timetrigger.update = AsyncMock()
-        n = await deletion_mod.apply_reschedule(
-            "u1", candidates, "2026-01-01T00:00:00+00:00",
-        )
-
-    assert n == 1, f"only the 'good' candidate should update; got {n}"
-    assert update_calls == ["good"]
 
 
 @pytest.mark.asyncio
@@ -340,7 +214,7 @@ async def test_handle_reminder_claims_before_renewal_actual_calls():
         patch.object(triggers_mod, "get_cached_schedule",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(triggers_mod, "_fetch_recent_messages_for_reminder",
-                     new_callable=AsyncMock, return_value=""),
+                     new_callable=AsyncMock, return_value=PrecheckContext(text='')),
         patch("app.services.chat.intent_replies.reminder_pre_check",
               side_effect=_ok_pre_check),
         # 让 emit 短路 (workspace 找不到 → 早返)
@@ -733,95 +607,22 @@ async def test_cancel_active_reminders_scopes_by_agent():
 
 
 @pytest.mark.asyncio
-async def test_pre_check_state_completed_archives_memory():
-    """pre-check 返 completed → archive memory + deactivate trigger + 不 emit."""
-    from app.services.proactive import triggers as triggers_mod
-    from app.services.reminder import scheduling as sch_mod
-
-    now = datetime(2025, 6, 15, 2, 0, tzinfo=_TZ)
-    trig = _make_trigger(
-        action_data={"summary": "喝水", "memory_id": "m1", "recurrence": "once"},
-        trigger_time=now - timedelta(seconds=5),
-        last_fired=None,
-    )
-
-    archive_calls: list[dict] = []
-    async def _capture_archive(**kwargs):
-        archive_calls.append(kwargs)
-        return True
-
-    deactivate_called = []
-    async def _capture_update(*, where, data):
-        if data.get("isActive") is False:
-            deactivate_called.append(where["id"])
-
-    async def _completed_pre_check(**kwargs):
-        return {"state": "completed", "new_time": None, "reason": "用户说喝完了"}
-
-    with (
-        patch.object(triggers_mod, "db") as mock_db,
-        patch.object(triggers_mod, "get_cached_schedule",
-                     new_callable=AsyncMock, return_value=[]),
-        patch.object(triggers_mod, "_fetch_recent_messages_for_reminder",
-                     new_callable=AsyncMock, return_value=""),
-        patch("app.services.chat.intent_replies.reminder_pre_check",
-              side_effect=_completed_pre_check),
-        patch.object(sch_mod, "archive_reminder_memory",
-                     side_effect=_capture_archive),
-    ):
-        mock_db.timetrigger = MagicMock()
-        mock_db.timetrigger.update = AsyncMock(side_effect=_capture_update)
-        await triggers_mod._handle_reminder_trigger(trig, now)
-
-    assert archive_calls, f"completed → 必须调 archive_reminder_memory; got {archive_calls}"
-    assert archive_calls[0]["memory_id"] == "m1"
-    assert archive_calls[0]["reason"].startswith("completed:")
-    assert deactivate_called == ["trig1"], (
-        f"completed → trigger 必须 deactivate; got {deactivate_called}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_pre_check_state_rescheduled_updates_trigger_time():
-    """pre-check 返 rescheduled + new_time → update trigger.triggerTime, 不 emit."""
-    from app.services.proactive import triggers as triggers_mod
-
-    now = datetime(2025, 6, 15, 2, 0, tzinfo=_TZ)
-    trig = _make_trigger(
-        action_data={"summary": "喝水", "memory_id": "m1", "recurrence": "once"},
-        trigger_time=now - timedelta(seconds=5),
-        last_fired=None,
-    )
-
-    new_time_iso = "2025-06-15T03:00:00+00:00"
-    update_calls: list[dict] = []
-    async def _capture_update(*, where, data):
-        update_calls.append({"where": where, "data": data})
-
-    async def _rescheduled_pre_check(**kwargs):
-        return {"state": "rescheduled", "new_time": new_time_iso, "reason": "改时间"}
-
-    with (
-        patch.object(triggers_mod, "db") as mock_db,
-        patch.object(triggers_mod, "get_cached_schedule",
-                     new_callable=AsyncMock, return_value=[]),
-        patch.object(triggers_mod, "_fetch_recent_messages_for_reminder",
-                     new_callable=AsyncMock, return_value=""),
-        patch("app.services.chat.intent_replies.reminder_pre_check",
-              side_effect=_rescheduled_pre_check),
-        patch("app.services.memory.storage.repo.update", new_callable=AsyncMock),
-    ):
-        mock_db.timetrigger = MagicMock()
-        mock_db.timetrigger.update = AsyncMock(side_effect=_capture_update)
-        await triggers_mod._handle_reminder_trigger(trig, now)
-
-    # 必须有一个 update 设新 triggerTime
-    trigger_updates = [
-        c for c in update_calls
-        if c["data"].get("triggerTime") is not None
-    ]
-    assert trigger_updates, f"rescheduled → 必须 update triggerTime; got {update_calls}"
-    assert trigger_updates[0]["data"]["triggerTime"] == datetime.fromisoformat(new_time_iso)
+@pytest.mark.parametrize("state",["completed","cancelled","rescheduled"])
+async def test_precheck_dispatches_atomic_mutation_before_delivery(monkeypatch,state):
+    from app.services.proactive import triggers as module
+    from app.services.reminder import precheck
+    now=datetime(2025,6,15,2,0,tzinfo=_TZ)
+    trigger=_make_trigger(trigger_time=now-timedelta(seconds=5))
+    context=PrecheckContext(text="用户: 我已经喝完水了")
+    monkeypatch.setattr(module,"_fetch_recent_messages_for_reminder",AsyncMock(return_value=context))
+    monkeypatch.setattr("app.services.chat.intent_replies.reminder_pre_check",AsyncMock(return_value={"state":state}))
+    apply=AsyncMock()
+    monkeypatch.setattr(precheck,"apply_state",apply)
+    claim=AsyncMock()
+    monkeypatch.setattr("app.services.reminder.mutations.claim_due_reminder",claim)
+    await module._handle_reminder_trigger(trigger,now)
+    apply.assert_awaited_once_with(module.db,trigger=trigger,state=state,context=context,now=now)
+    claim.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1715,11 +1516,10 @@ async def test_handle_reminder_proceeds_when_exactly_due():
     with (
         patch.object(triggers_mod, "db") as mock_db,
         patch.object(triggers_mod, "_fetch_recent_messages_for_reminder",
-                     new_callable=AsyncMock, return_value=""),
+                     new_callable=AsyncMock, return_value=PrecheckContext(text='')),
         patch("app.services.chat.intent_replies.reminder_pre_check",
               side_effect=_cancelled_pre_check),
-        patch("app.services.reminder.scheduling.archive_reminder_memory",
-              new_callable=AsyncMock, return_value=True),
+        patch("app.services.reminder.precheck.apply_state",new_callable=AsyncMock) as apply_state,
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.update = AsyncMock()
@@ -1727,9 +1527,8 @@ async def test_handle_reminder_proceeds_when_exactly_due():
         # Should NOT trigger the not-yet-due early return.
         # 走到 pre-check (cancelled) 然后 archive + deactivate → 不 crash
         await triggers_mod._handle_reminder_trigger(trig, now)
-        assert mock_db.timetrigger.update.call_count >= 1, (
-            "exactly-due trigger 应至少更新一次 (deactivate)"
-        )
+        apply_state.assert_awaited_once()
+        assert apply_state.await_args.kwargs["state"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -1755,7 +1554,7 @@ async def test_reminder_exempt_from_quiet_hours_and_ai_sleep():
     with (
         patch.object(triggers_mod, "db") as mock_db,
         patch.object(triggers_mod, "_fetch_recent_messages_for_reminder",
-                     new_callable=AsyncMock, return_value=""),
+                     new_callable=AsyncMock, return_value=PrecheckContext(text='')),
         patch.object(triggers_mod, "get_cached_schedule",
                      new_callable=AsyncMock, return_value=[]),
         # AI sleep status — 之前会 SKIP, 现在豁免应当继续
@@ -1885,3 +1684,50 @@ async def test_pipeline_reminder_timetrigger_skips_without_workspace():
 
     # WARNING level so admin notices reminder loss — not silent DEBUG
     assert mock_logger.warning.called, "no-workspace skip must WARN, not DEBUG"
+
+
+@pytest.mark.asyncio
+async def test_reschedule_legacy_pending_grants_no_write_permission():
+    """An unversioned candidate list cannot authorize a reschedule anymore."""
+    from app.services.memory.interaction import deletion as d
+    from app.services.reminder import reschedule as r
+    with patch.object(r, "apply_ticket", new_callable=AsyncMock) as write:
+        for candidates in ([{"id":"m","source":"user"}], [{"id":"m","source":"ai"}], [{"id":"m"}]):
+            assert await d.apply_reschedule("u",candidates,"2026-12-02T08:00:00Z",agent_id="a")==0
+        write.assert_not_awaited()
+
+
+def _structural_ticket(targets, new_time="2026-12-02T08:00:00Z"):
+    # Shape a Redis proposal passes structural validation with; content is fake.
+    return {
+        "conversation_id": "c", "scope": {}, "new_time": new_time,
+        "targets": [{**t, "memory_version": "v", "trigger_id": "t" + t["id"],
+                     "trigger_version": "tv"} for t in targets],
+        "sources": [{"kind": "message", "ref": "m0", "expected_role": "user",
+                     "expected_conversation_id": "c", "expected_version": "h",
+                     "expected_statement_time": "2026-12-01T08:00:00+00:00"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_reschedule_wrapper_preserves_scope_and_both_memory_sides():
+    from app.services.memory.interaction import deletion as d
+    from app.services.reminder import reschedule as r
+    candidates=[{"id":"u1","source":"user"},{"id":"a1","source":"ai"}]
+    ticket=_structural_ticket(candidates)
+    with patch.object(r,"apply_ticket",new_callable=AsyncMock,return_value={"updated":2}) as write:
+        assert await d.apply_reschedule("u",candidates,ticket["new_time"],agent_id="a",workspace_id="w",conversation_id="c",ticket=ticket,message_ids=("m",),user_message="好")==2
+        write.assert_awaited_once_with(ticket,conversation_id="c",user_id="u",workspace_id="w",agent_id="a",message_ids=("m",),user_message="好")
+
+
+@pytest.mark.asyncio
+async def test_reschedule_wrapper_rejects_replaced_targets_or_time():
+    from app.services.memory.interaction import deletion as d
+    from app.services.reminder import reschedule as r
+    ticket=_structural_ticket([{"id":"m","source":"user"}])
+    with patch.object(r,"apply_ticket",new_callable=AsyncMock) as write:
+        for candidates,time in (([{"id":"other","source":"user"}],ticket["new_time"]),
+                                ([{"id":"m","source":"user"}],"2026-12-03T08:00:00Z"),
+                                ([{"id":"m","source":"ai"}],ticket["new_time"])):
+            assert await d.apply_reschedule("u",candidates,time,agent_id="a",workspace_id="w",conversation_id="c",ticket=ticket)==0
+        write.assert_not_awaited()

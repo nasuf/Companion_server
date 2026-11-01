@@ -153,8 +153,154 @@ async def test_confirmed_change_preserves_policy_and_scoped_evidence(
     assert (await f.apply(analysis=a))["status"] == "already_applied"
 
 
+async def _repin_original(f, text, *, created_at=None, confirmation="是的"):
+    data = {"content": text}
+    if created_at is not None:
+        data["createdAt"] = created_at
+    first = await f.db.message.update(where={"id": f.first.id}, data=data)
+    pending = await state.prepare_pending(
+        {"has_conflict": True, "conflicting_memory_id": f.old.id,
+         "old_content": f.old.content, "new_info": text},
+        **f.scope, message_ids=[first.id], user_message=text,
+    )
+    second = await f.db.message.update(where={"id": f.second.id}, data={"content": confirmation})
+    sources = await state.prepare_confirmation(
+        pending, **f.scope, message_ids=[second.id], user_message=second.content,
+    )
+    return pending, sources
+
+
+async def test_future_plan_never_archives_present_identity_or_promotes_plan_to_l1(confirming):
+    from app.services.memory.interaction.change_history import read_changes
+    f = confirming
+    pending, sources = await _repin_original(f, "我打算下个月搬到乙城")
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    assert result["status"] == "plan_recorded"
+    old = await f.db.usermemory.find_unique(where={"id": f.old.id})
+    new = await f.db.usermemory.find_unique(where={"id": result["memory_id"]})
+    assert not old.isArchived and old.content == f.old.content
+    assert new.level == 2 and new.mainCategory == "生活" and new.subCategory == "其他"
+    assert "待实施计划" in new.content and new.occurTime is None
+    assert not await f.db.query_raw("SELECT 1 FROM memory_quality_states WHERE memory_id=$1 AND superseded_by_memory_id IS NOT NULL", old.id)
+    history = await read_changes(f.db, user_id=f.uid, workspace_id=f.wid, memory_id=new.id)
+    assert history["items"][0]["kind"] == "planned" and history["items"][0]["source_available"]
+
+
+async def test_confirmed_transition_chain_is_atomic_and_source_bound(confirming):
+    from app.services.memory.interaction.change_history import read_changes
+    f = confirming
+    pending, sources = await _repin_original(f, "我昨天搬到乙城了")
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    edge = await f.db.query_raw("SELECT superseded_by_memory_id FROM memory_quality_states WHERE memory_id=$1 AND memory_source='user'", f.old.id)
+    assert edge[0]["superseded_by_memory_id"] == result["memory_id"]
+    history = await read_changes(f.db, user_id=f.uid, workspace_id=f.wid, memory_id=result["memory_id"])
+    change = history["items"][0]
+    assert change["kind"] == "transition" and change["source_available"]
+    assert change["semantics"]["boundary"]["precision"] == "day"
+    assert change["old_version_id"] != change["new_version_id"]
+    await f.db.message.update(where={"id": f.first.id}, data={"content": "我并没有搬家"})
+    unavailable = await read_changes(f.db, user_id=f.uid, workspace_id=f.wid, memory_id=result["memory_id"])
+    assert not unavailable["items"][0]["source_available"]
+    assert (await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources))["status"] == "already_applied"
+    assert not (await read_changes(f.db, user_id=f.users[1], workspace_id=f.wid, memory_id=result["memory_id"]))["items"]
+
+
+async def test_retrospective_correction_does_not_invent_change_date(confirming):
+    from app.services.memory.interaction.change_history import read_changes
+    f = confirming
+    pending, sources = await _repin_original(f, "上次说错了，其实我一直住在乙城")
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    assert result["change_type"] == "错误"
+    value = (await read_changes(f.db, user_id=f.uid, workspace_id=f.wid, memory_id=result["memory_id"]))["items"][0]
+    assert value["kind"] == "correction"
+    assert value["semantics"]["boundary"]["state"] == "unknown"
+
+
+async def test_deleting_transition_date_source_preserves_retraction_but_revokes_date(confirming):
+    from app.services.memory.interaction.change_history import read_changes
+    f = confirming
+    pending, sources = await _repin_original(f, "我昨天搬到乙城了")
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    await f.db.message.delete(where={"id": f.first.id})
+    page = await read_changes(f.db, user_id=f.uid, workspace_id=f.wid, memory_id=result["memory_id"])
+    assert len(page["items"]) == 1 and not page["items"][0]["source_available"]
+    assert (await f.db.usermemory.find_unique(where={"id": f.old.id})).isArchived
+    assert (await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources))["status"] == "already_applied"
+    await f.db.usermemory.delete(where={"id": result["memory_id"]})
+    assert not await f.db.query_raw("SELECT id FROM memory_fact_changes WHERE user_id=$1", f.uid)
+
+
+async def test_late_original_cannot_use_later_yes_to_overwrite_newer_fact(confirming):
+    from datetime import timedelta
+    f = confirming
+    now = datetime.now(timezone.utc)
+    await f.db.usermemory.update(where={"id": f.old.id}, data={"statementTime": now - timedelta(hours=1)})
+    pending, sources = await _repin_original(f, "我昨天搬到乙城了", created_at=now - timedelta(days=2))
+    with pytest.raises(MemoryWriteError, match="older_than_current_fact"):
+        await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    assert not (await f.db.usermemory.find_unique(where={"id": f.old.id})).isArchived
+
+
+@pytest.mark.parametrize("text", ["我昨天搬到乙城了", "我打算下个月搬到乙城"])
+async def test_legacy_fact_without_temporal_revision_gets_labelled_baseline(confirming, text):
+    from app.services.memory.interaction.change_history import read_changes
+    f = confirming
+    # Facts written before temporal versions existed have no revision row until
+    # their first semantic update; a confirmation must not fail on them.
+    await f.db.execute_raw(
+        "DELETE FROM memory_temporal_versions WHERE side='user' AND memory_id=$1", f.old.id)
+    pending, sources = await _repin_original(f, text)
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    assert result["status"] in {"applied", "plan_recorded"}
+    rows = await f.db.query_raw(
+        "SELECT id,record_kind,content FROM memory_temporal_versions WHERE side='user' AND memory_id=$1 ORDER BY id",
+        f.old.id)
+    assert rows[0]["record_kind"] == "baseline" and rows[0]["content"] == f.old.content
+    change = (await read_changes(f.db, user_id=f.uid, workspace_id=f.wid, memory_id=result["memory_id"]))["items"][0]
+    assert str(change["old_version_id"]) == str(rows[0]["id"])
+
+
+async def test_late_acknowledgement_keeps_the_fact_source_statement_clock(confirming):
+    from datetime import timedelta
+    from app.services.memory.evidence import message_statement_time
+    f = confirming
+    now = datetime.now(timezone.utc)
+    await f.db.usermemory.update(where={"id": f.old.id}, data={"statementTime": now - timedelta(days=1)})
+    said_at = now - timedelta(hours=3)
+    pending, sources = await _repin_original(f, "我昨天搬到乙城了", created_at=said_at)
+    # A bare "yes" hours later authorizes the write; it does not restate the fact.
+    await f.db.message.update(where={"id": f.second.id}, data={"createdAt": now})
+    sources = await state.prepare_confirmation(
+        pending, **f.scope, message_ids=[f.second.id], user_message="是的")
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    new = await f.db.usermemory.find_unique(where={"id": result["memory_id"]})
+    original = await f.db.message.find_unique(where={"id": f.first.id})
+    assert message_statement_time(new.statementTime) == message_statement_time(original.createdAt)
+    assert result["change_semantics"]["statement_at"] == message_statement_time(original.createdAt).isoformat()
+
+
+async def test_confirmation_that_corrects_to_future_plan_preserves_current_fact(confirming):
+    f = confirming
+    pending, sources = await _repin_original(f, "我搬到乙城了", confirmation="不是，我只是计划下个月搬到乙城")
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    assert result["status"] == "plan_recorded"
+    assert not (await f.db.usermemory.find_unique(where={"id": f.old.id})).isArchived
+
+
+async def test_confirmation_with_new_explicit_fact_is_not_only_an_acknowledgement(confirming):
+    from datetime import timedelta
+    f = confirming
+    now = datetime.now(timezone.utc)
+    await f.db.usermemory.update(where={"id": f.old.id}, data={"statementTime": now - timedelta(hours=1)})
+    pending, sources = await _repin_original(f, "我以前搬到乙城了", created_at=now-timedelta(days=2),
+                                            confirmation="我今天已经搬到乙城了")
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    assert result["status"] == "applied"
+    assert result["change_semantics"]["boundary"]["source_message_id"] == f.second.id
+
+
 @pytest.mark.parametrize(
-    "step", ["memory", "vector", "origin", "link", "archive", "audit"]
+    "step", ["memory", "vector", "origin", "link", "archive", "audit", "change"]
 )
 async def test_each_failure_rolls_back_without_compensating_writes(confirming, step):
     f = confirming
@@ -173,6 +319,7 @@ async def test_each_failure_rolls_back_without_compensating_writes(confirming, s
         ),
         "archive": ("memories_user", "NEW.is_archived", "UPDATE"),
         "audit": ("memory_changelogs", "NEW.operation='contradiction_new'", "INSERT"),
+        "change": ("memory_fact_changes", "true", "INSERT"),
     }[step]
     count = await f.db.usermemory.count(where={"workspaceId": f.wid})
     async with reject_write(f.db, table, predicate, operation=operation):
@@ -187,6 +334,8 @@ async def test_each_failure_rolls_back_without_compensating_writes(confirming, s
         == []
     )
     assert await f.db.memorychangelog.count(where={"workspaceId": f.wid}) == 0
+    assert not await f.db.query_raw("SELECT id FROM memory_fact_changes WHERE user_id=$1", f.uid)
+    assert not await f.db.query_raw("SELECT 1 FROM memory_quality_states WHERE memory_id=$1 AND superseded_by_memory_id IS NOT NULL", f.old.id)
     assert (await f.apply())["status"] == "applied"
 
 
@@ -534,6 +683,59 @@ async def test_ordinary_usage_does_not_expire_pending_but_semantic_edit_does(
     ).importance == pytest.approx(0.88)
 
 
+async def test_card_added_during_embedding_cannot_become_plaintext_change(confirming):
+    f = confirming
+
+    async def embedding(*args):
+        await f.db.message.update(where={"id": f.second.id}, data={
+            "metadata": Json({"component_card": {"title": "not user prose"}})})
+        return VECTOR
+
+    f.embedding.side_effect = embedding
+    with pytest.raises(MemoryWriteError, match="contradiction_source_changed"):
+        await f.apply()
+    assert not (await f.db.usermemory.find_unique(where={"id": f.old.id})).isArchived
+    assert not await f.db.query_raw("SELECT id FROM memory_fact_changes WHERE user_id=$1", f.uid)
+
+
+async def test_retrospective_correction_blocks_old_fact_in_chain_and_recent_text(confirming):
+    from app.services.time_domain.validity_context import load_validity_context, assertions_still_available
+    from app.services.time_domain.query import resolve_temporal_query
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+    from app.services.memory.interaction.change_history import read_changes
+
+    f = confirming
+    past = await f.db.message.create(data={"conversationId": f.convs[0], "role": "user",
+        "content": "我从2026年8月1日到2026年8月6日住在甲城。",
+        "createdAt": datetime(2026, 9, 1, tzinfo=timezone.utc)})
+    await evidence.bind_memory_evidence(database=f.db, memory_id=f.old.id, side="user",
+        user_id=f.uid, workspace_id=f.wid, extractor_version="synthetic-history-v1",
+        sources=(evidence.EvidenceSource("message", past.id, relation="extracted_from",
+            expected_version=evidence.content_version(past.content), expected_role="user",
+            expected_statement_time=past.createdAt),))
+    question = resolve_temporal_query("2026年8月3日当时我住哪里？",
+        anchor=datetime(2026, 11, 1, tzinfo=timezone.utc), anchor_source="persisted_message")
+    old = ClassifiedMemory(id=f.old.id, text=f.old.content, source="user", relevance="strong", score=1)
+    recent = [{"id": past.id, "role": "user", "content": past.content, "createdAt": past.createdAt}]
+    args = dict(user_id=f.uid, workspace_id=f.wid, query=question, database=f.db, recent_messages=recent)
+    _, before, _ = await load_validity_context([old], **args)
+    assert before
+    pending, sources = await _repin_original(f, "我上次说错了，其实一直住在乙城", confirmation="是的")
+    result = await writer.apply_confirmed_change(pending, f.analysis, **f.scope, confirmation_sources=sources)
+    new = await f.db.usermemory.find_unique(where={"id": result["memory_id"]})
+    current = ClassifiedMemory(id=new.id, text=new.content, source="user", relevance="strong", score=1)
+    _, records, info = await load_validity_context([current], **args)
+    assert records and info["source_retraction_fence"] == "enforced_in_source_query"
+    assert all("甲城" not in item["content"] for group in records.values() for item in group)
+    assert any("其实一直住在乙城" in item["content"] for group in records.values() for item in group)
+    assert ("dialogue", past.id) not in records
+    assert not await assertions_still_available(before, [old], **args)
+    await f.db.message.delete(where={"id": f.first.id})
+    page = await read_changes(f.db, user_id=f.uid, workspace_id=f.wid, memory_id=new.id)
+    assert page["items"] and page["items"][0]["source_available"] is False
+    assert not (await load_validity_context([current], **args))[1]
+
+
 async def test_different_tickets_competing_for_same_old_fact_apply_only_once(
     confirming,
 ):
@@ -715,3 +917,58 @@ async def test_confirmation_reply_matches_durable_outcome(
         assert send.await_args.args[0] == "好的，这条更正已经保存了。"
     if mode == "cleanup_unavailable":
         assert (await f.apply())["status"] == "already_applied"
+
+
+@pytest.mark.parametrize('deleted',['old_memory','new_memory','input'])
+async def test_retracted_source_cannot_return_after_change_history_is_deleted(confirming,deleted):
+    f=confirming
+    original=await f.db.message.create(data={'conversationId':f.convs[0],'role':'user','content':'我住在甲城'})
+    pin=evidence.EvidenceSource('message',original.id,relation='extracted_from',expected_role='user',
+        expected_conversation_id=f.convs[0],expected_version=evidence.content_version(original.content),
+        expected_statement_time=original.createdAt)
+    await evidence.bind_memory_evidence(memory_id=f.old.id,side='user',user_id=f.uid,
+        workspace_id=f.wid,sources=(pin,),extractor_version='test')
+    pending,sources=await _repin_original(f,'上次说错了，其实我一直住在乙城')
+    result=await writer.apply_confirmed_change(pending,f.analysis,**f.scope,confirmation_sources=sources)
+    changes=await f.db.query_raw('SELECT id FROM memory_fact_changes WHERE new_memory_id=$1',result['memory_id'])
+    assert await f.db.query_raw('SELECT 1 FROM memory_source_retractions WHERE source_message_id=$1',original.id)
+    if deleted=='old_memory':await f.db.usermemory.delete(where={'id':f.old.id})
+    elif deleted=='new_memory':await f.db.usermemory.delete(where={'id':result['memory_id']})
+    else:await f.db.execute_raw('DELETE FROM memory_input_origins WHERE id=$1',changes[0]['id'])
+    assert not await f.db.query_raw('SELECT 1 FROM memory_fact_changes WHERE id=$1',changes[0]['id'])
+    assert await f.db.query_raw('SELECT 1 FROM memory_source_retractions WHERE source_message_id=$1',original.id)
+    with pytest.raises(ValueError,match='evidence_source_retracted'):
+        await evidence._resolve_source(f.db,pin,{'user_id':f.uid,'workspace_id':f.wid,'agent_id':f.agents[0]})
+    await f.db.message.delete(where={'id':original.id})
+    assert not await f.db.query_raw('SELECT 1 FROM memory_source_retractions WHERE source_message_id=$1',original.id)
+
+
+async def test_correction_fences_only_the_corrected_fact_and_its_fact_sources(confirming):
+    from dataclasses import replace
+    f=confirming
+    shared=await f.db.message.create(data={'conversationId':f.convs[0],'role':'user','content':'我住在甲城，养了一只猫'})
+    batch=await f.db.message.create(data={'conversationId':f.convs[0],'role':'user','content':'今天天气不错'})
+    def pin(message, role):
+        return evidence.EvidenceSource('message',message.id,relation='extracted_from',expected_role='user',
+            expected_conversation_id=f.convs[0],expected_version=evidence.content_version(message.content),
+            expected_statement_time=message.createdAt,temporal_basis={'version':1,'status':'time_not_stated','source_role':role})
+    # The wrong city came from `shared`; `batch` was only extraction context.
+    await evidence.bind_memory_evidence(memory_id=f.old.id,side='user',user_id=f.uid,workspace_id=f.wid,
+        sources=(pin(shared,'fact'),pin(batch,'batch')),extractor_version='test')
+    pending,sources=await _repin_original(f,'上次说错了，其实我一直住在乙城')
+    await writer.apply_confirmed_change(pending,f.analysis,**f.scope,confirmation_sources=sources)
+    fenced={r['source_message_id'] for r in await f.db.query_raw(
+        'SELECT source_message_id FROM memory_source_retractions WHERE memory_id=$1',f.old.id)}
+    assert fenced=={shared.id}
+    scope={'user_id':f.uid,'workspace_id':f.wid,'agent_id':f.agents[0]}
+    # The corrected message cannot become a fact source again, but it can still
+    # be batch context, and an unrelated message stays fully usable.
+    with pytest.raises(ValueError,match='evidence_source_retracted'):
+        await evidence._resolve_source(f.db,pin(shared,'fact'),scope)
+    await evidence._resolve_source(f.db,pin(shared,'batch'),scope)
+    await evidence._resolve_source(f.db,pin(batch,'fact'),scope)
+    # Re-binding another existing memory (e.g. the cat fact) to the same
+    # message stays allowed; only the corrected memory itself is fenced.
+    await evidence._resolve_source(f.db,pin(shared,'fact'),scope|{'existing_memory_id':'other-memory'})
+    with pytest.raises(ValueError,match='evidence_source_retracted'):
+        await evidence._resolve_source(f.db,pin(shared,'fact'),scope|{'existing_memory_id':f.old.id})

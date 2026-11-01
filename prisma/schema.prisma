@@ -3303,3 +3303,38 @@ model ConversationTopicFence {
   @@map("conversation_topic_fences")
   @@ignore
 }
+
+// Immutable confirmed change metadata; authoritative replacement uses memory_quality_states.
+model MemoryFactChange {
+  id String @id
+  userId String @map("user_id")
+  workspaceId String @map("workspace_id")
+  oldMemoryId String @map("old_memory_id")
+  newMemoryId String @unique @map("new_memory_id")
+  oldVersionId BigInt @map("old_version_id")
+  newVersionId BigInt @map("new_version_id")
+  kind String
+  semantics Json
+  statementAt DateTime @map("statement_at") @db.Timestamptz(6)
+  boundaryStart DateTime? @map("boundary_start") @db.Timestamptz(6)
+  boundaryEnd DateTime? @map("boundary_end") @db.Timestamptz(6)
+  boundarySourceId String? @map("boundary_source_id")
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+  @@map("memory_fact_changes")
+  @@ignore
+}
+
+// Payload-free source retraction survives deletion of a replacement memory.
+model MemorySourceRetraction {
+  sourceMessageId String @map("source_message_id")
+  sourceVersion String @map("source_version")
+  sourceStatementTime DateTime @map("source_statement_time") @db.Timestamp(6)
+  userId String @map("user_id")
+  workspaceId String @map("workspace_id")
+  memoryId String @map("memory_id")
+  originId String @map("origin_id")
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+  @@id([sourceMessageId,sourceVersion,memoryId])
+  @@map("memory_source_retractions")
+  @@ignore
+}
