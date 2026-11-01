@@ -48,6 +48,23 @@ def test_captured_inputs_and_snapshots_have_no_mutable_aliases():
         snapshot.graph_version = "changed"
 
 
+def test_internal_prompt_capacity_does_not_relax_client_payload_limits():
+    from app.services.runtime.chat_ingress_contracts import (
+        MAX_PROMPT_SNAPSHOT_BYTES, canonical_prompt_snapshot,
+    )
+    prompts = {"templates": {"test": {"content": "字" * 100_000}}}
+    snapshot = ChatExecutionSnapshot.capture(executor="langgraph", graph_version="g1",
+        state_version=1, config={}, prompts=prompts, budget={})
+    assert snapshot.prompts_json == canonical_prompt_snapshot(prompts)
+    assert len(snapshot.prompts_json.encode()) > MAX_JSON_BYTES
+    with pytest.raises(ValueError, match="too large"):
+        canonical_object(prompts)
+    with pytest.raises(ValueError, match="too large"):
+        canonical_prompt_snapshot({"templates": "x" * MAX_PROMPT_SNAPSHOT_BYTES})
+    with pytest.raises(ValueError, match="too large"):
+        ChatRequestInput.from_client(client_id="test", text="hi", component_card=prompts)
+
+
 @pytest.mark.parametrize("client_id", ["", " ", "a\n", "x" * 250, "\ud800", None, 1])
 def test_invalid_client_identity_is_rejected_before_io(client_id):
     with pytest.raises(ValueError):

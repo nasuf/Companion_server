@@ -17,11 +17,22 @@ from typing import Any, Literal
 
 AggregationMode = Literal["immediate", "fragment_window", "turn_window"]
 MAX_JSON_BYTES = 262_144
+# Internal registry snapshots contain all bound templates, not client input.
+# Keep their separate cap bounded without loosening request/payload limits.
+MAX_PROMPT_SNAPSHOT_BYTES = 1_048_576
 MAX_TURN_MESSAGES = 32
 MAX_TURN_CHARS = 32_768
 
 
 def canonical_object(value: dict[str, Any]) -> str:
+    return _canonical_object(value, MAX_JSON_BYTES)
+
+
+def canonical_prompt_snapshot(value: dict[str, Any]) -> str:
+    return _canonical_object(value, MAX_PROMPT_SNAPSHOT_BYTES)
+
+
+def _canonical_object(value: dict[str, Any], maximum_bytes: int) -> str:
     """Capture JSON with strict string keys and finite numbers, without aliases."""
     def validate(item: Any) -> None:
         if type(item) is dict:
@@ -46,7 +57,7 @@ def canonical_object(value: dict[str, Any]) -> str:
         validate(value)
         encoded = json.dumps(value, sort_keys=True, ensure_ascii=False,
                              separators=(",", ":"), allow_nan=False)
-        if len(encoded.encode("utf-8")) > MAX_JSON_BYTES:
+        if len(encoded.encode("utf-8")) > maximum_bytes:
             raise ValueError("JSON input is too large")
         return encoded
     except (TypeError, OverflowError, UnicodeError, RecursionError) as exc:
@@ -170,9 +181,11 @@ class ChatExecutionSnapshot:
             raise ValueError("Invalid state version")
         if type(self.max_attempts) is not int or not 1 <= self.max_attempts <= 10:
             raise ValueError("Invalid execution attempt budget")
-        for value in (self.config_json, self.prompts_json, self.budget_json):
+        for value in (self.config_json, self.budget_json):
             if canonical_object(json.loads(value)) != value:
                 raise ValueError("Snapshot must be canonical JSON")
+        if canonical_prompt_snapshot(json.loads(self.prompts_json)) != self.prompts_json:
+            raise ValueError("Prompt snapshot must be canonical JSON")
         if self.deadline_at is not None:
             if not isinstance(self.deadline_at, datetime) or self.deadline_at.utcoffset() is None:
                 raise ValueError("Deadline must have a timezone")
@@ -183,7 +196,7 @@ class ChatExecutionSnapshot:
                 config: dict, prompts: dict, budget: dict,
                 deadline_at: datetime | None = None, max_attempts: int = 3) -> ChatExecutionSnapshot:
         return cls(executor, graph_version, state_version, canonical_object(config),
-                   canonical_object(prompts), canonical_object(budget), deadline_at, max_attempts)
+                   canonical_prompt_snapshot(prompts), canonical_object(budget), deadline_at, max_attempts)
 
 
 @dataclass(frozen=True, slots=True)

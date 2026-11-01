@@ -247,4 +247,9 @@ async def bind_memory_evidence(
             origin.get("card_version"), source.expected_statement_time.astimezone(timezone.utc).replace(tzinfo=None) if source.expected_statement_time else None,
             json.dumps(source.temporal_basis) if source.temporal_basis is not None else None, revision_id,
         )
+        if (source.temporal_basis or {}).get("validity") is not None:
+            from app.services.memory.temporal_assertions import persist_assertion
+            await persist_assertion(database=database, evidence_id=eid, revision_id=revision_id,
+                source=source, origin=origin, user_id=user_id, workspace_id=workspace_id,
+                side=side, memory_id=memory_id)
     return inserted

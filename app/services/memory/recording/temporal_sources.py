@@ -27,9 +27,14 @@ class FactClock:
     def bind(self, origins):
         # Retain the complete model input as transaction guards. Only selected
         # rows are labelled as proposed fact sources; other rows are batch input.
-        return tuple(replace(source, temporal_basis={**self.basis,
-            'source_role': 'fact' if i in self.indices else 'batch'})
-            for i, source in enumerate(origins, 1))
+        result = []
+        for i, source in enumerate(origins, 1):
+            basis = {**self.basis, 'source_role': 'fact' if i in self.indices else 'batch'}
+            validity = basis.pop('validity', None)
+            if isinstance(validity, dict) and validity.get('source_index') == i:
+                basis['validity'] = validity
+            result.append(replace(source, temporal_basis=basis))
+        return tuple(result)
 
 
 def source_table(origins) -> str:
@@ -39,6 +44,19 @@ def source_table(origins) -> str:
 
 
 def resolve_fact_clock(memory: dict, origins) -> FactClock:
+    from app.services.memory.recording.validity import resolve_validity
+
+    clock = _resolve_event_clock(memory, origins)
+    if memory.get('temporal_assertion') is None:
+        return clock  # Preserve already-frozen v1 plans and old prompt contracts.
+    validity = resolve_validity(memory, origins, clock.indices)
+    if (validity.get('state') == 'asserted' and validity.get('status') in {'occurred', 'completed'}
+            and clock.occur_time and clock.occur_time > datetime.fromisoformat(validity['statement_at'])):
+        validity = {'version': 1, 'state': 'unknown', 'reason': 'future_event_not_occurred'}
+    return replace(clock, basis={**clock.basis, 'validity': validity})
+
+
+def _resolve_event_clock(memory: dict, origins) -> FactClock:
     basis = {'version': 1, 'status': 'source_unresolved'}
     raw = memory.get('source_indices')
     if (not isinstance(raw, list) or not 1 <= len(raw) <= len(origins)
@@ -137,4 +155,7 @@ def public_temporal_basis(value):
         if not isinstance(value['precision'], str) or value['precision'] not in {'instant','minute','hour','day','week','month','year','range','day_part'}:
             return invalid
         result['precision']=value['precision']
+    if 'validity' in value:
+        from app.services.memory.recording.validity import public_validity
+        result['validity'] = public_validity(value['validity'])
     return result

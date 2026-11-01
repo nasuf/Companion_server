@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
@@ -206,12 +207,13 @@ async def get_memory_time_history(
     side: str, memory_id: str = Path(min_length=1, max_length=200),
     user_id: str = Query(min_length=1, max_length=200), workspace_id: str = Query(min_length=1, max_length=200),
     limit: int = Query(20, ge=1, le=50), before: str | None = Query(None, max_length=20),
+    at: datetime | None = Query(None), known_at: datetime | None = Query(None),
     _: dict = Depends(require_admin_jwt),
 ) -> dict:
     from app.services.memory.temporal_history import read_history
     try:
         return await read_history(user_id=user_id,workspace_id=workspace_id,side=side,
-                                  memory_id=memory_id,before=before,limit=limit)
+                                  memory_id=memory_id,before=before,limit=limit,at=at,known_at=known_at)
     except ValueError as exc:
         raise HTTPException(status_code=400,detail=str(exc)) from exc
     except LookupError as exc:

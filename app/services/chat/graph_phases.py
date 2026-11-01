@@ -1090,6 +1090,47 @@ async def prepare_reply(ctx):
 
 async def generate_reply(ctx):
     services = ctx.services
+    # New assertions are consumed by the source-checked historical route.
+    # Other routes keep their existing memory/date context. Broad date words
+    # in casual statements are not requests to revisit old personal events.
+    temporal_request = ctx.temporal_query.operation.type == "as_of"
+    # Read historical sources after deliberate pacing and immediately before
+    # constructing the reply prompt, rather than retaining an earlier snapshot.
+    if not ctx.crisis_care_turn and not ctx.contradiction_inquiry and temporal_request:
+        from app.services.time_domain.validity_context import load_validity_context
+
+        _validity_excerpt, ctx.temporal_validity_records, validity_diagnostics = (
+            await load_validity_context(
+                ctx.classified_memories,
+                user_id=ctx.user_id,
+                workspace_id=ctx.workspace_id,
+                query=ctx.temporal_query,
+                recent_messages=[
+                    m
+                    for m in ctx.messages_dicts
+                    if m.get("id") not in ctx.current_turn_ids
+                ],
+            )
+        )
+        ctx.response_diagnostics["temporal_context"]["validity"] = validity_diagnostics
+    elif not temporal_request:
+        from app.services.time_domain.validity_context import TOKEN_BUDGET
+
+        # Ordinary chat already receives selected memories. Repeating their
+        # source quotes in a final evidence block overweights old topics and
+        # can provoke unrelated follow-up questions. Leave that input intact.
+        ctx.response_diagnostics["temporal_context"]["validity"] = {
+            "version": 1,
+            "status": "not_requested",
+            "reason": "no_temporal_request",
+            "candidate_count": min(len(ctx.classified_memories or []), 500),
+            "assertion_count": 0,
+            "shown_count": 0,
+            "token_budget": TOKEN_BUDGET,
+            "estimated_tokens": 0,
+            "truncated": len(ctx.classified_memories or []) > 500,
+            "complete_history": False,
+        }
     (
         ctx.replies,
         _raw_response,
@@ -1133,49 +1174,107 @@ async def generate_reply(ctx):
         reengagement_gap_seconds=ctx.reengagement_gap_seconds,
         temporal_instructions=ctx.temporal_instructions,
         temporal_evidence=ctx.temporal_evidence,
+        temporal_validity_records=getattr(ctx, "temporal_validity_records", None),
         timeline=ctx.fetched.timeline,
         # 问到双方在哪时必须走带「你们各自在哪」段的主 prompt, tier 轻量 prompt 没有它
-        force_main_prompt=bool(ctx.offering_context) or bool(ctx.continuation_lines)
+        force_main_prompt=bool(ctx.offering_context)
+        or bool(ctx.continuation_lines)
         or services.asks_about_user_location(ctx.user_message),
         diagnostics=ctx.response_diagnostics,
         exclude_message_ids=ctx.current_turn_ids,
     )
+    if getattr(ctx, "temporal_validity_records", None):
+        from app.services.time_domain.validity_context import assertions_still_available
+
+        current = await assertions_still_available(
+            ctx.temporal_validity_records,
+            ctx.classified_memories,
+            user_id=ctx.user_id,
+            workspace_id=ctx.workspace_id,
+            query=ctx.temporal_query,
+            recent_messages=[
+                m for m in ctx.messages_dicts if m.get("id") not in ctx.current_turn_ids
+            ],
+        )
+        ctx.response_diagnostics["temporal_context"]["validity"][
+            "post_generation_source_check"
+        ] = ("unchanged" if current else "changed_or_unavailable")
+        if not current:
+            ctx.replies = ["这件事的时间和细节，我还没完全对上，先不乱说。"]
+            ctx.reply_is_fallback = True
+            ctx.reply_emotion_pre = None
     yield ctx.completed("generate_reply")
 
 
 async def normalize_reply(ctx):
     services = ctx.services
-    if ctx.continuation_lines and (not ctx.reply_is_fallback):
+    historical_answer = bool(ctx.response_diagnostics.get("historical_recall_required"))
+    if ctx.continuation_lines and (not ctx.reply_is_fallback) and not historical_answer:
         ctx.replies = [*ctx.continuation_lines, *ctx.replies]
     ctx.full_response = " ".join(ctx.replies)
     from app.services.persona_grounding import guard_reply
-    guarded, corrected = await guard_reply(
-        ctx.agent, ctx.full_response, question=ctx.user_message,
-        user_location=ctx.location_context,
-    )
+
+    if historical_answer:
+        # The historical route checked subject, source and validity together.
+        # Today's location verifier must not overwrite an accepted past place
+        # with the Agent's current city, nor rewrite its fixed unknown fallback.
+        # No unverified continuation text is appended to this checked answer.
+        guarded, corrected = ctx.full_response, False
+        ctx.response_diagnostics["historical_location_guard"] = (
+            "source_and_validity_check"
+        )
+        ctx.response_diagnostics["temporal_context"]["validity"][
+            "reply_guard"
+        ] = "historical_source_check"
+    else:
+        guarded, corrected = await guard_reply(
+            ctx.agent,
+            ctx.full_response,
+            question=ctx.user_message,
+            user_location=ctx.location_context,
+        )
     if corrected:
         ctx.replies = [guarded]
         ctx.full_response = guarded
         ctx.reply_emotion_pre = None
         ctx.response_diagnostics["persona_location_corrected"] = True
-    if not ctx.crisis_care_turn and not ctx.reply_is_fallback and not ctx.contradiction_inquiry:
+    if (
+        not ctx.crisis_care_turn
+        and not ctx.reply_is_fallback
+        and not ctx.contradiction_inquiry
+        and not historical_answer
+    ):
         from app.services.time_domain.guard import guard_temporal_reply
         from app.services.memory.retrieval.context_selector import format_memory_time
+
         temporal_checked = await guard_temporal_reply(
-            " ".join(ctx.replies), question=ctx.user_message,
-            evidence="\n".join([
-                dated_dialogue(ctx.messages_dicts, max_chars=3000),
-                *[format_memory_time(m) for m in (ctx.classified_memories or [])],
-                *(ctx.time_memories or []), *(ctx.l3_memories or []),
-            ]), diagnostics=ctx.response_diagnostics,
+            " ".join(ctx.replies),
+            question=ctx.user_message,
+            evidence="\n".join(
+                [
+                    dated_dialogue(ctx.messages_dicts, max_chars=3000),
+                    *[format_memory_time(m) for m in (ctx.classified_memories or [])],
+                    *(ctx.time_memories or []),
+                    *(ctx.l3_memories or []),
+                ]
+            ),
+            diagnostics=ctx.response_diagnostics,
         )
         if temporal_checked != " ".join(ctx.replies):
             ctx.replies = [temporal_checked]
             ctx.reply_emotion_pre = None
-    if (ctx.followup_policy is not None and not ctx.crisis_care_turn
-            and not ctx.reply_is_fallback and not ctx.contradiction_inquiry):
-        ctx.replies, suppressed = guard_optional_questions(ctx.replies, ctx.followup_policy)
-        ctx.response_diagnostics["temporal_context"]["suppressed_question_count"] = suppressed
+    if (
+        ctx.followup_policy is not None
+        and not ctx.crisis_care_turn
+        and not ctx.reply_is_fallback
+        and not ctx.contradiction_inquiry
+    ):
+        ctx.replies, suppressed = guard_optional_questions(
+            ctx.replies, ctx.followup_policy
+        )
+        ctx.response_diagnostics["temporal_context"][
+            "suppressed_question_count"
+        ] = suppressed
     ctx.full_response = " ".join(ctx.replies)
     if ctx.reply_emotion_pre is not None:
         reply_emotion = ctx.reply_emotion_pre

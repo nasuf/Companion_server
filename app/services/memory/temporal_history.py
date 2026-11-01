@@ -12,13 +12,16 @@ from app.services.memory.recording.temporal_sources import public_temporal_basis
 
 
 async def read_history(
-    *, user_id, workspace_id, side, memory_id, before=None, limit=20
+    *, user_id, workspace_id, side, memory_id, before=None, limit=20, at=None, known_at=None
 ):
     table = _table(side)
     if not 1 <= limit <= 50 or (
         before is not None and (not before.isdigit() or not 0 < int(before) < 2**63)
     ):
         raise ValueError("invalid_temporal_history_page")
+    for clock in (at, known_at):
+        if clock is not None and (not isinstance(clock, datetime) or clock.tzinfo is None):
+            raise ValueError("temporal_history_requires_timezone")
     targets = await db.query_raw(
         f"""SELECT w.agent_id FROM {table} m
         JOIN chat_workspaces w ON w.id=m.workspace_id AND w.user_id=m.user_id
@@ -32,14 +35,21 @@ async def read_history(
     rows = await db.query_raw(
         """SELECT id,content,content_version,occur_time,statement_time,is_archived,record_kind,recorded_at
         FROM memory_temporal_versions WHERE side=$1 AND memory_id=$2 AND user_id=$3 AND workspace_id=$4
-          AND ($5::bigint IS NULL OR id<$5::bigint) ORDER BY id DESC LIMIT $6""",
+          AND ($5::bigint IS NULL OR id<$5::bigint)
+          AND ($7::timestamptz IS NULL OR recorded_at<=$7::timestamptz)
+          ORDER BY id DESC LIMIT $6""",
         side,
         memory_id,
         user_id,
         workspace_id,
         int(before) if before else None,
         limit + 1,
+        known_at.isoformat() if known_at else None,
     )
+    from app.services.memory.temporal_assertions import read_assertions
+    assertions = await read_assertions(database=db, user_id=user_id, workspace_id=workspace_id,
+        side=side, memory_id=memory_id, revision_ids=[int(r['id']) for r in rows[:limit]],
+        known_at=known_at, at=at, limit=50) if rows else None
     items = []
     for row in rows[:limit]:
         # At most 6 candidates per revision, never all history. Details do not
@@ -57,8 +67,10 @@ async def read_history(
               AND (e.source_kind='input' OR (e.source_kind='message' AND c.user_id=e.user_id
                 AND c.workspace_id=e.workspace_id AND c.agent_id=e.agent_id AND NOT c.is_deleted
                 AND encode(sha256(convert_to(m.content,'UTF8')),'hex')=e.source_version
+                AND m.role=e.source_role
+                AND COALESCE(m.metadata->>'human_takeover','false')<>'true'
                 AND (e.source_statement_time IS NULL OR e.source_statement_time=m.created_at)
-                AND (e.source_card_version IS NULL OR e.source_card_version=
+                AND ((e.source_card_version IS NULL AND NOT COALESCE(m.metadata,'{}'::jsonb) ? 'component_card') OR e.source_card_version=
                     encode(sha256(convert_to((m.metadata->'component_card')::text,'UTF8')),'hex'))))
             ORDER BY e.id LIMIT 6""",
             row["id"],
@@ -91,6 +103,7 @@ async def read_history(
                 "evidence_truncated": len(evidence) > 5,
                 "change_type": next(iter(changes)) if len(changes) == 1 else None,
                 "validity": {"status": "unknown", "from": None, "to": None},
+                "assertions": [a for a in assertions['items'] if a['version_id'] == str(row['id'])] if assertions else [],
             }
         )
     return {
@@ -99,4 +112,8 @@ async def read_history(
         "next_cursor": str(rows[limit - 1]["id"]) if len(rows) > limit else None,
         "state": "recorded" if rows else "empty_page" if before else "not_collected",
         "sampled_at": datetime.now(timezone.utc).isoformat(),
+        "assertions_truncated": assertions['truncated'] if assertions else False,
+        "at": at.isoformat() if at else None,
+        "known_at": known_at.isoformat() if known_at else None,
+        "complete_history": False,
     }

@@ -49,6 +49,51 @@ async def test_graph_ordinary_turn_saves_and_finishes_once(chat_io):
     )
 
 
+async def test_temporal_source_change_during_generation_blocks_old_answer(
+    chat_io, monkeypatch
+):
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+    from app.services.time_domain import validity_context
+    from app.services.chat import graph_phases
+
+    candidate = ClassifiedMemory(
+        id="m", text="old scoped fact", source="user", relevance="strong", score=1
+    )
+    fetched = chat.fetch_parallel_context.return_value
+    fetched.classified_memories = [candidate]
+    monkeypatch.setattr(
+        graph_phases, "scope_event_memories", lambda memories, *a, **kw: memories
+    )
+    loader = AsyncMock(
+        return_value=(
+            "synthetic validity",
+            {("user", "m"): [{"assertion_id": "a"}]},
+            {"version": 1, "status": "recorded"},
+        )
+    )
+    monkeypatch.setattr(validity_context, "load_validity_context", loader)
+    check = AsyncMock(return_value=False)
+    monkeypatch.setattr(validity_context, "assertions_still_available", check)
+    monkeypatch.setattr(
+        chat,
+        "_generate_reply",
+        AsyncMock(return_value=(["PRIVATE_STALE_FACT"], "", False, None)),
+    )
+    events = await run(chat_io, text="2026年8月3日当时我住在哪里？")
+    loader.assert_awaited_once()
+    assert loader.await_args.kwargs["query"].operation.type == "as_of"
+    check.assert_awaited_once()
+    assert "PRIVATE_STALE_FACT" not in str(events)
+    replies = [
+        json.loads(event["data"])["text"]
+        for event in events
+        if event["event"] == "reply"
+    ]
+    assert any("先不乱说" in text for text in replies)
+    saved = chat._save_replies.await_args.args[1]
+    assert "PRIVATE_STALE_FACT" not in str(saved)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("primary", [IntentType.CONVERSATION_END, IntentType.NONE])
 async def test_explicit_fragments_share_parent_lifecycle(chat_io, monkeypatch, primary):

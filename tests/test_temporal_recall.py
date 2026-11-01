@@ -219,9 +219,11 @@ async def test_empty_enabled_template_disables_whole_route(model, monkeypatch):
 
 def test_validity_and_future_operations_are_not_answered_by_point_recall():
     query=diagnostic()['temporal_context']['query']
-    for operation in ('planned','current','as_of','order','duration','count'):
+    for operation in ('planned','current','order','duration','count'):
         query['operation']={'type':operation}
         assert recall.recall_payload('今年那个活动在哪里？',[memory()],query)==(None,'unsupported_operation')
+    query['operation']={'type':'as_of'}
+    assert recall.recall_payload('当时住在哪里？',[memory()],query)==(None,'unknown_as_of_time')
 
 
 @pytest.mark.asyncio

@@ -2945,6 +2945,30 @@ model MemoryTemporalVersion {
   @@map("memory_temporal_versions")
   @@ignore
 }
+// Source assertions belong to immutable evidence and a semantic memory version.
+// FK cascades, scope checks and retraction-only updates are migration managed.
+model MemoryTemporalAssertion {
+  id String @id
+  temporalVersionId BigInt @map("temporal_version_id")
+  sourceMessageId String @map("source_message_id")
+  userId String @map("user_id")
+  workspaceId String @map("workspace_id")
+  side String
+  memoryId String @map("memory_id")
+  assertion Json
+  statementAt DateTime @map("statement_at") @db.Timestamptz
+  validFrom DateTime? @map("valid_from") @db.Timestamptz
+  validTo DateTime? @map("valid_to") @db.Timestamptz
+  recordedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("recorded_at") @db.Timestamptz
+  retractedAt DateTime? @map("retracted_at") @db.Timestamptz
+  @@index([workspaceId,side,memoryId,statementAt(sort: Desc),id],map:"memory_temporal_assertions_page_idx")
+  @@index([temporalVersionId],map:"memory_temporal_assertions_version_idx")
+  @@index([sourceMessageId],map:"memory_temporal_assertions_source_idx")
+  @@index([userId],map:"memory_temporal_assertions_user_idx")
+  @@map("memory_temporal_assertions")
+  @@ignore
+}
+
 // SQL-locked singleton; capacity alerts do not depend on Redis writes.
 model OpsRedisCapacity {
   id String @id

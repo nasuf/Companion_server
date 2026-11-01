@@ -26,6 +26,7 @@ from app.services.runtime.chat_ingress_contracts import (
     MAX_TURN_MESSAGES,
     _identity,
     canonical_object,
+    canonical_prompt_snapshot,
 )
 from app.services.runtime.execution_scope import (
     ExecutionScope,
@@ -427,7 +428,7 @@ class SqlJobQueue:
                         _time(run["deadline_at"]) if run["deadline_at"] else None,
                         canonical_object(_object(job["payload"])),
                         canonical_object(_object(run["config_snapshot"])),
-                        canonical_object(_object(run["prompt_snapshot"])),
+                        canonical_prompt_snapshot(_object(run["prompt_snapshot"])),
                         canonical_object(_object(run["budget_snapshot"])),
                         run["graph_version"],
                         run["state_version"],

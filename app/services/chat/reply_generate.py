@@ -257,6 +257,7 @@ async def generate_reply(
     force_main_prompt: bool = False,
     temporal_instructions: str = "",
     temporal_evidence: str = "",
+    temporal_validity_records: dict | None = None,
     timeline: str | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
@@ -324,20 +325,42 @@ async def generate_reply(
         diagnostics["memory_relevance"] = memory_relevance
         diagnostics["needs_web_search"] = needs_web_search
     temporal_recall_selected = False
-    if tier_eligible:
+    # Historical validity must not depend on the incidental tier/main choice.
+    # The main model can otherwise ignore an outside interval or turn a plan
+    # into an accomplished fact. Reuse the existing bounded, checked answer
+    # route; crisis/contradiction paths never supply these assertion records.
+    historical_recall = bool(
+        temporal_validity_records is not None
+        and diagnostics is not None
+        and diagnostics.get("temporal_context", {})
+        .get("query", {})
+        .get("operation", {})
+        .get("type")
+        == "as_of"
+        and detected_intent.intent == IntentType.NONE
+        and not needs_web_search
+    )
+    if tier_eligible or historical_recall:
+        if historical_recall and diagnostics is not None:
+            diagnostics["historical_recall_required"] = True
         # Reuse the same managed identity/personality section as the main reply.
         # A name alone makes known age/job/city inaccessible on the tier path.
         # This adds no business read or model call and respects admin disable.
         from app.services.chat.prompt_builder import _build_personality_section
 
         from app.services.chat.dialogue_context import render_dialogue
-        dialogue = render_dialogue(messages_dicts, exclude_ids=exclude_message_ids, purpose="tier")
+
+        dialogue = render_dialogue(
+            messages_dicts, exclude_ids=exclude_message_ids, purpose="tier"
+        )
         context_text = dialogue.text
         if diagnostics is not None:
             diagnostics["dialogue_context"] = dialogue.metrics
         portrait_text = str(portrait) if portrait else "(未知)"
         user_lines, ai_lines = split_by_source(classified_memories)
-        user_memory_text = "\n".join(f"- {t}" for t in user_lines) if user_lines else "(无)"
+        user_memory_text = (
+            "\n".join(f"- {t}" for t in user_lines) if user_lines else "(无)"
+        )
         ai_memory_text = "\n".join(f"- {t}" for t in ai_lines) if ai_lines else "(无)"
         base_params = {
             "message": user_message,
@@ -369,36 +392,65 @@ async def generate_reply(
 
                 cancelled = await get_cancelled_activity_plans(user_id, workspace_id)
                 if cancelled:
-                    base_params["context"] += "\n出行计划取消记录（当前业务状态）：" + json.dumps(cancelled, ensure_ascii=False)
+                    base_params[
+                        "context"
+                    ] += "\n出行计划取消记录（当前业务状态）：" + json.dumps(
+                        cancelled, ensure_ascii=False
+                    )
             personality_section = await _build_personality_section(agent)
             base_params["personality_brief"] = (
-                personality_section.body if personality_section else (getattr(agent, "name", "") or "")
+                personality_section.body
+                if personality_section
+                else (getattr(agent, "name", "") or "")
             )
-            if not l3_memories and diagnostics is not None:
+            if (not l3_memories or historical_recall) and diagnostics is not None:
                 from app.services.time_domain.recall import answer_temporal_recall
 
                 tier_reply_text = await answer_temporal_recall(
-                    user_message, classified_memories, diagnostics, max_chars=max_total,
+                    user_message,
+                    classified_memories,
+                    diagnostics,
+                    max_chars=max_total,
                     recent_context=base_params["context"],
                     personality=base_params["personality_brief"],
                     recent_user_context=dialogue.user_text,
+                    validity_records=temporal_validity_records,
                 )
                 temporal_recall_selected = tier_reply_text is not None
+            if historical_recall and not temporal_recall_selected:
+                from app.services.time_domain.recall import _FALLBACK
+
+                # Disabled/oversized evidence cannot fall through to an
+                # unchecked main answer about the same historical facts.
+                tier_reply_text = _FALLBACK
+                temporal_recall_selected = True
             if not temporal_recall_selected:
                 tier_reply_text = await tier_fn(**base_params, **extra)
         except Exception as e:
-            logger.warning(f"Memory tier reply failed, falling back to main prompt: {e}")
+            logger.warning(
+                f"Memory tier reply failed, falling back to main prompt: {e}"
+            )
             tier_reply_text = None
             if diagnostics is not None:
                 diagnostics["tier_error"] = type(e).__name__
+            if historical_recall:
+                from app.services.time_domain.recall import _FALLBACK
+
+                tier_reply_text = _FALLBACK
+                temporal_recall_selected = True
 
     if tier_reply_text:
         if diagnostics is not None:
-            diagnostics["reply_path"] = "temporal_recall" if temporal_recall_selected else "tier"
+            diagnostics["reply_path"] = (
+                "temporal_recall" if temporal_recall_selected else "tier"
+            )
         # Phase: tier reply 输出可能含 || 多条 (n≥2 时), 走 split_and_validate_replies
         # 拆分. n=1 单条时也走 (含 || 时仍能正确切, 不含时返单条).
         tier_replies = pipe_fallback_fn(
-            tier_reply_text, max_reply_count, MAX_PER_REPLY, max_total,
+            tier_reply_text,
+            max_reply_count,
+            MAX_PER_REPLY,
+            max_total,
         )
         logger.info(
             f"[REPLY-TIER] memory_relevance={memory_relevance} "
@@ -417,7 +469,12 @@ async def generate_reply(
                 tier_replies, last_reply_count,
                 max_count=max_reply_count, max_per=MAX_PER_REPLY,
             )
-        return tier_replies, tier_reply_text, False, None
+        temporal_fallback = False
+        if temporal_recall_selected:
+            from app.services.time_domain.recall import _FALLBACK
+
+            temporal_fallback = tier_reply_text == _FALLBACK
+        return tier_replies, tier_reply_text, temporal_fallback, None
 
     if diagnostics is not None:
         diagnostics["reply_path"] = "main_llm"

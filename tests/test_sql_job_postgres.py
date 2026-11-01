@@ -111,6 +111,19 @@ async def test_claim_commits_one_attempt_and_fence_without_changing_inputs(flow)
     ).prompt_text == "synthetic"
 
 
+async def test_claim_and_reload_preserve_large_internal_prompt_snapshot(flow):
+    from app.services.runtime.chat_ingress_contracts import MAX_JSON_BYTES
+    prompts = {"templates": {"synthetic": {"content": "字" * 100_000}}}
+    captured = snapshot(prompts=prompts)
+    assert len(captured.prompts_json.encode()) > MAX_JSON_BYTES
+    accepted = await accept(flow, execution=captured)
+    claim = await queue(flow).claim_next("worker-large-snapshot")
+    assert claim.run_id == accepted.run_id
+    assert claim.prompts_json == captured.prompts_json
+    loaded = await load_chat_turn(flow.bound, claim.run_id, database=flow.db)
+    assert loaded.snapshot.prompts_json == captured.prompts_json
+
+
 async def test_eight_competing_workers_claim_only_once(flow):
     await accept(flow)
     other = RuntimeDatabase(

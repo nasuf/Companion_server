@@ -72,12 +72,19 @@ _NONFACTUAL = re.compile(
 )
 _QUOTES = re.compile(r"[“”‘’「」『』\"']")
 
+# Shared explicit interval connector; never bridge arbitrary prose.
+RANGE_CONNECTOR = r"(?:持续到|一直到|直至|直到|到|至|—|~|～)"
+
+
+def is_range_connector(text: str) -> bool:
+    return re.fullmatch(r"\s*" + RANGE_CONNECTOR + r"\s*", text) is not None
+
 
 def binding_uncertainty(text: str) -> str | None:
     """Conservative gates, not a claim to resolve negation or quoted speakers."""
     if _QUOTES.search(text):
         return "quoted_expression"
-    if _NONFACTUAL.search(text):
+    if _NONFACTUAL.search(re.sub(r"有没有", "有无", text)):
         return "nonfactual_or_corrected"
     return None
 
