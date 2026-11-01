@@ -25,16 +25,18 @@ async def test_unresolvable_reschedule_asks_again_without_a_pending_proposal():
 
     ctx = _make_short_circuit_ctx()
     ctx.response_diagnostics = {}
+    sent = {}
+    # Capture the short-circuit reply without running the delivery pipeline.
+    ctx.finalize = lambda reply, *, kind, metadata=None: sent.update(reply=reply, kind=kind)
     save = AsyncMock()
     with patch.object(ih, "detect_deletion_intent", side_effect=_detected), \
             patch.object(ih, "find_matching_memories", AsyncMock(return_value=CANDIDATES)), \
             patch.object(ih, "save_pending_action", save), \
             patch("app.services.reminder.reschedule.prepare_ticket",
                   AsyncMock(side_effect=MemoryWriteError(422, "reschedule_time_unresolved"))):
-        handled, events = await ih.handle_deletion("把喝水提醒改一下", ctx)
-        _ = [e async for e in events]
+        handled, _ = await ih.handle_deletion("把喝水提醒改一下", ctx)
     assert handled
-    assert ctx.last_short_circuit_reply.startswith("我还没改动提醒")
+    assert sent["reply"].startswith("我还没改动提醒") and sent["kind"] == "deletion_reschedule_unresolved"
     assert ctx.response_diagnostics["reminder_reschedule"] == {
         "status": "needs_clarification", "reason": "reschedule_time_unresolved"}
     save.assert_not_awaited()
