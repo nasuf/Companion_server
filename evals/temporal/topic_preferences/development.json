@@ -1,0 +1,1082 @@
+[
+  {
+    "id": "development-session-00",
+    "family": "session",
+    "topic": "面试",
+    "message": "暂时别问面试了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-01",
+    "family": "session",
+    "topic": "升职",
+    "message": "暂时别问升职了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-02",
+    "family": "session",
+    "topic": "前任",
+    "message": "暂时别问前任了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-03",
+    "family": "session",
+    "topic": "工资",
+    "message": "暂时别问工资了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-04",
+    "family": "session",
+    "topic": "考试",
+    "message": "暂时别问考试了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-05",
+    "family": "session",
+    "topic": "相亲",
+    "message": "暂时别问相亲了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-06",
+    "family": "session",
+    "topic": "买房",
+    "message": "暂时别问买房了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-07",
+    "family": "session",
+    "topic": "离职",
+    "message": "暂时别问离职了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-08",
+    "family": "session",
+    "topic": "体重",
+    "message": "暂时别问体重了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-session-09",
+    "family": "session",
+    "topic": "失眠",
+    "message": "暂时别问失眠了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-00",
+    "family": "durable",
+    "topic": "面试",
+    "message": "以后不要再提面试了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-01",
+    "family": "durable",
+    "topic": "升职",
+    "message": "以后不要再提升职了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-02",
+    "family": "durable",
+    "topic": "前任",
+    "message": "以后不要再提前任了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-03",
+    "family": "durable",
+    "topic": "工资",
+    "message": "以后不要再提工资了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-04",
+    "family": "durable",
+    "topic": "考试",
+    "message": "以后不要再提考试了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-05",
+    "family": "durable",
+    "topic": "相亲",
+    "message": "以后不要再提相亲了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-06",
+    "family": "durable",
+    "topic": "买房",
+    "message": "以后不要再提买房了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-07",
+    "family": "durable",
+    "topic": "离职",
+    "message": "以后不要再提离职了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-08",
+    "family": "durable",
+    "topic": "体重",
+    "message": "以后不要再提体重了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-durable-09",
+    "family": "durable",
+    "topic": "失眠",
+    "message": "以后不要再提失眠了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-00",
+    "family": "global",
+    "topic": "面试",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-01",
+    "family": "global",
+    "topic": "升职",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-02",
+    "family": "global",
+    "topic": "前任",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-03",
+    "family": "global",
+    "topic": "工资",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-04",
+    "family": "global",
+    "topic": "考试",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-05",
+    "family": "global",
+    "topic": "相亲",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-06",
+    "family": "global",
+    "topic": "买房",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-07",
+    "family": "global",
+    "topic": "离职",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-08",
+    "family": "global",
+    "topic": "体重",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-global-09",
+    "family": "global",
+    "topic": "失眠",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-00",
+    "family": "reopen",
+    "topic": "面试",
+    "message": "现在可以问面试了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-01",
+    "family": "reopen",
+    "topic": "升职",
+    "message": "现在可以问升职了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-02",
+    "family": "reopen",
+    "topic": "前任",
+    "message": "现在可以问前任了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-03",
+    "family": "reopen",
+    "topic": "工资",
+    "message": "现在可以问工资了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-04",
+    "family": "reopen",
+    "topic": "考试",
+    "message": "现在可以问考试了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-05",
+    "family": "reopen",
+    "topic": "相亲",
+    "message": "现在可以问相亲了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-06",
+    "family": "reopen",
+    "topic": "买房",
+    "message": "现在可以问买房了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-07",
+    "family": "reopen",
+    "topic": "离职",
+    "message": "现在可以问离职了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-08",
+    "family": "reopen",
+    "topic": "体重",
+    "message": "现在可以问体重了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reopen-09",
+    "family": "reopen",
+    "topic": "失眠",
+    "message": "现在可以问失眠了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-00",
+    "family": "quote",
+    "topic": "面试",
+    "message": "同事说“以后不要问面试了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-01",
+    "family": "quote",
+    "topic": "升职",
+    "message": "同事说“以后不要问升职了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-02",
+    "family": "quote",
+    "topic": "前任",
+    "message": "同事说“以后不要问前任了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-03",
+    "family": "quote",
+    "topic": "工资",
+    "message": "同事说“以后不要问工资了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-04",
+    "family": "quote",
+    "topic": "考试",
+    "message": "同事说“以后不要问考试了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-05",
+    "family": "quote",
+    "topic": "相亲",
+    "message": "同事说“以后不要问相亲了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-06",
+    "family": "quote",
+    "topic": "买房",
+    "message": "同事说“以后不要问买房了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-07",
+    "family": "quote",
+    "topic": "离职",
+    "message": "同事说“以后不要问离职了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-08",
+    "family": "quote",
+    "topic": "体重",
+    "message": "同事说“以后不要问体重了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-quote-09",
+    "family": "quote",
+    "topic": "失眠",
+    "message": "同事说“以后不要问失眠了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-00",
+    "family": "conditional",
+    "topic": "面试",
+    "message": "如果以后我说不要问面试了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-01",
+    "family": "conditional",
+    "topic": "升职",
+    "message": "如果以后我说不要问升职了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-02",
+    "family": "conditional",
+    "topic": "前任",
+    "message": "如果以后我说不要问前任了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-03",
+    "family": "conditional",
+    "topic": "工资",
+    "message": "如果以后我说不要问工资了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-04",
+    "family": "conditional",
+    "topic": "考试",
+    "message": "如果以后我说不要问考试了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-05",
+    "family": "conditional",
+    "topic": "相亲",
+    "message": "如果以后我说不要问相亲了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-06",
+    "family": "conditional",
+    "topic": "买房",
+    "message": "如果以后我说不要问买房了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-07",
+    "family": "conditional",
+    "topic": "离职",
+    "message": "如果以后我说不要问离职了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-08",
+    "family": "conditional",
+    "topic": "体重",
+    "message": "如果以后我说不要问体重了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-conditional-09",
+    "family": "conditional",
+    "topic": "失眠",
+    "message": "如果以后我说不要问失眠了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-00",
+    "family": "negated",
+    "topic": "面试",
+    "message": "我不是让你别问面试",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-01",
+    "family": "negated",
+    "topic": "升职",
+    "message": "我不是让你别问升职",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-02",
+    "family": "negated",
+    "topic": "前任",
+    "message": "我不是让你别问前任",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-03",
+    "family": "negated",
+    "topic": "工资",
+    "message": "我不是让你别问工资",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-04",
+    "family": "negated",
+    "topic": "考试",
+    "message": "我不是让你别问考试",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-05",
+    "family": "negated",
+    "topic": "相亲",
+    "message": "我不是让你别问相亲",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-06",
+    "family": "negated",
+    "topic": "买房",
+    "message": "我不是让你别问买房",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-07",
+    "family": "negated",
+    "topic": "离职",
+    "message": "我不是让你别问离职",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-08",
+    "family": "negated",
+    "topic": "体重",
+    "message": "我不是让你别问体重",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-negated-09",
+    "family": "negated",
+    "topic": "失眠",
+    "message": "我不是让你别问失眠",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-00",
+    "family": "date",
+    "topic": "面试",
+    "message": "今天别问面试了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-01",
+    "family": "date",
+    "topic": "升职",
+    "message": "今天别问升职了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-02",
+    "family": "date",
+    "topic": "前任",
+    "message": "今天别问前任了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-03",
+    "family": "date",
+    "topic": "工资",
+    "message": "今天别问工资了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-04",
+    "family": "date",
+    "topic": "考试",
+    "message": "今天别问考试了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-05",
+    "family": "date",
+    "topic": "相亲",
+    "message": "今天别问相亲了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-06",
+    "family": "date",
+    "topic": "买房",
+    "message": "今天别问买房了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-07",
+    "family": "date",
+    "topic": "离职",
+    "message": "今天别问离职了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-08",
+    "family": "date",
+    "topic": "体重",
+    "message": "今天别问体重了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-date-09",
+    "family": "date",
+    "topic": "失眠",
+    "message": "今天别问失眠了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-00",
+    "family": "interleaved",
+    "topic": "面试",
+    "message": "以后别问面试了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-01",
+    "family": "interleaved",
+    "topic": "升职",
+    "message": "以后别问升职了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-02",
+    "family": "interleaved",
+    "topic": "前任",
+    "message": "以后别问前任了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-03",
+    "family": "interleaved",
+    "topic": "工资",
+    "message": "以后别问工资了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-04",
+    "family": "interleaved",
+    "topic": "考试",
+    "message": "以后别问考试了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-05",
+    "family": "interleaved",
+    "topic": "相亲",
+    "message": "以后别问相亲了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-06",
+    "family": "interleaved",
+    "topic": "买房",
+    "message": "以后别问买房了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-07",
+    "family": "interleaved",
+    "topic": "离职",
+    "message": "以后别问离职了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-08",
+    "family": "interleaved",
+    "topic": "体重",
+    "message": "以后别问体重了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-interleaved-09",
+    "family": "interleaved",
+    "topic": "失眠",
+    "message": "以后别问失眠了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-00",
+    "family": "ambiguous",
+    "topic": "面试",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-01",
+    "family": "ambiguous",
+    "topic": "升职",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-02",
+    "family": "ambiguous",
+    "topic": "前任",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-03",
+    "family": "ambiguous",
+    "topic": "工资",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-04",
+    "family": "ambiguous",
+    "topic": "考试",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-05",
+    "family": "ambiguous",
+    "topic": "相亲",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-06",
+    "family": "ambiguous",
+    "topic": "买房",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-07",
+    "family": "ambiguous",
+    "topic": "离职",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-08",
+    "family": "ambiguous",
+    "topic": "体重",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-ambiguous-09",
+    "family": "ambiguous",
+    "topic": "失眠",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-00",
+    "family": "reported",
+    "topic": "面试",
+    "message": "她说以后别问面试了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-01",
+    "family": "reported",
+    "topic": "升职",
+    "message": "她说以后别问升职了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-02",
+    "family": "reported",
+    "topic": "前任",
+    "message": "她说以后别问前任了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-03",
+    "family": "reported",
+    "topic": "工资",
+    "message": "她说以后别问工资了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-04",
+    "family": "reported",
+    "topic": "考试",
+    "message": "她说以后别问考试了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-05",
+    "family": "reported",
+    "topic": "相亲",
+    "message": "她说以后别问相亲了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-06",
+    "family": "reported",
+    "topic": "买房",
+    "message": "她说以后别问买房了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-07",
+    "family": "reported",
+    "topic": "离职",
+    "message": "她说以后别问离职了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-08",
+    "family": "reported",
+    "topic": "体重",
+    "message": "她说以后别问体重了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-reported-09",
+    "family": "reported",
+    "topic": "失眠",
+    "message": "她说以后别问失眠了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "development-required_confirmation-00",
+    "family": "required_confirmation",
+    "topic": "面试",
+    "message": "以后别问面试了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-01",
+    "family": "required_confirmation",
+    "topic": "升职",
+    "message": "以后别问升职了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-02",
+    "family": "required_confirmation",
+    "topic": "前任",
+    "message": "以后别问前任了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-03",
+    "family": "required_confirmation",
+    "topic": "工资",
+    "message": "以后别问工资了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-04",
+    "family": "required_confirmation",
+    "topic": "考试",
+    "message": "以后别问考试了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-05",
+    "family": "required_confirmation",
+    "topic": "相亲",
+    "message": "以后别问相亲了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-06",
+    "family": "required_confirmation",
+    "topic": "买房",
+    "message": "以后别问买房了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-07",
+    "family": "required_confirmation",
+    "topic": "离职",
+    "message": "以后别问离职了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-08",
+    "family": "required_confirmation",
+    "topic": "体重",
+    "message": "以后别问体重了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "development-required_confirmation-09",
+    "family": "required_confirmation",
+    "topic": "失眠",
+    "message": "以后别问失眠了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  }
+]

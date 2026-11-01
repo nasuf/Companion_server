@@ -73,7 +73,7 @@ async def build_proactive_context(
         ),
         get_topic_intimacy(agent_id, user_id),
         get_latest_portrait(user_id, agent_id),
-        _load_recent_context(workspace_id, temporal=temporal),
+        _load_recent_context(workspace_id, temporal=temporal, user_id=user_id),
         # AI 上一轮的残留情绪 (30min 半衰期衰减后). 主动消息的 current_mood 靠它 —
         # 没有它 ctx 里永远没 "emotion" 键, emotion_to_tone(None) 恒为中性语气.
         load_ai_mood(conversation_id),
@@ -130,7 +130,7 @@ async def build_proactive_context(
     }
 
 
-async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LIMIT, *, temporal: dict | None = None) -> str:
+async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LIMIT, *, temporal: dict | None = None, user_id: str | None = None) -> str:
     """Spec §4.1 step 4 汇总参考信息里的"近期对话上下文"。
 
     取工作空间有界消息窗口，保留最多十轮对话并标注时间戳。
@@ -150,15 +150,14 @@ async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LI
             limit,
         )
     except Exception:
-        return ""
-    if not rows:
-        return ""
+        rows = []
     from app.services.time_domain.context import dated_dialogue, prepare_reply_time
     messages = [{"role": r["role"], "content": r["content"], "createdAt": r.get("created_at"),
                  "metadata": r.get("metadata")} for r in reversed(rows)]
     result = temporal if temporal is not None else {}
     _, policy, instructions = await prepare_reply_time(
         messages, exclude_ids=set(), current_message="", diagnostics=result, now=datetime.now(UTC),
+        user_id=user_id, workspace_id=workspace_id,
     )
     result["policy"] = policy
     return instructions + "\n" + dated_dialogue(messages, max_chars=3000)

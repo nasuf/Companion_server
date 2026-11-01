@@ -39,6 +39,15 @@ _QUESTION = re.compile(
     r"(?:(?:今天|最近|这会儿|现在|刚才|这两天)\s*)?(?:是有|有|是)?(?:啥|什么)"
     r"(?:(?:(?:开心|有趣|特别|新鲜|好|烦心)的?)?事(?:情|儿)?|好消息|情况|打算|安排|想法|原因|意思)"
     r"[呀啊呢嘛哇不~～…\s]*$"
+    # Standalone colloquial questions can omit the subject and question mark.
+    # Anchor the whole clause so statements such as 忙什么都可以 stay intact.
+    r"|^(?:(?:那|所以|然后)\s*)?(?:(?:今天|昨天|最近|刚才|现在|这会儿)\s*)?"
+    r"(?:是)?(?:忙(?:啥|什么)|干(?:啥|什么)|做(?:啥|什么)|吃(?:啥|什么)|去哪|怎么了|咋了|进展怎么样)"
+    r"(?:了|啦)?[呀啊呢嘛哇~～…\s]*$"
+    # Short care questions remain interrogative without 吗 or a question mark.
+    r"|^(?:(?:那|所以|然后|今天|昨天|最近|刚才|现在|这会儿)\s*)?"
+    r"(?:(?:是)?忙(?:啥|什么)(?:累到|累着|忙成这样)(?:了|啦)?|怎么(?:了|啦)|咋(?:了|啦)|(?:怎么|咋)这么(?:累|困|难过|烦|忙))"
+    r"[呀啊呢嘛哇~～…\s]*$"
     # Modal + sentence-final negation is another colloquial yes/no form.
     # Exclude declarative endings such as 勇敢说不 and conditional 或不/就不.
     r"|^(?:(?:那|所以|然后)\s*)?(?:你|您)?"
@@ -59,7 +68,14 @@ _NON_WORD = re.compile(r"[\W_]+")
 def _is_question(text: str) -> bool:
     # Informal generated replies may end an interrogative clause with a full
     # stop. Keep question marks, but ignore whitespace/declarative terminators.
-    return bool(_QUESTION.search(text.strip().rstrip("。.;；,，").rstrip()))
+    if "?" in text or "？" in text:
+        return True
+    cleaned = text.strip()
+    while cleaned and (unicodedata.category(cleaned[-1])[0] in "PSM" or cleaned[-1] == "\u200d" or cleaned[-1].isspace()):
+        cleaned = cleaned[:-1]
+    while cleaned and (unicodedata.category(cleaned[0])[0] in "PSM" or cleaned[0] == "\u200d" or cleaned[0].isspace()):
+        cleaned = cleaned[1:]
+    return bool(_QUESTION.search(cleaned))
 
 
 def _key(text: str) -> str:
@@ -76,16 +92,38 @@ class FollowupPolicy:
     optional_questions_allowed: bool = True
     reason: str = "no_recent_opt_out"
     recent_questions: tuple[str, ...] = ()
+    topic_snapshot: object | None = None
+    topic_context: str = ""
 
     def prompt_value(self) -> str:
+        import json
+        restrictions = getattr(self.topic_snapshot, "items", ())
+        status = getattr(self.topic_snapshot, "status", "not_requested")
+        topic_value = ""
+        if restrictions or status in {"unavailable", "scope_unavailable", "capacity_exceeded", "source_unavailable"}:
+            values = [{"scope": item.scope, "topic": item.topic, "action": item.action}
+                      for item in restrictions[:20]]
+            payload = {"status": status, "restrictions": values}
+            rendered = json.dumps(payload, ensure_ascii=False)
+            # Bound added prompt bytes, never truncate a label or JSON token.
+            # The output guard still checks every stored restriction. This
+            # affects crowded ledgers only; ordinary/no-policy inputs stay exact.
+            while len(rendered.encode("utf-8")) > 256 and values:
+                values.pop()
+                payload["omitted_restriction_count"] = len(restrictions) - len(values)
+                rendered = json.dumps(payload, ensure_ascii=False)
+            topic_value = "; topic_preferences=" + rendered
         return ("optional_questions_allowed=" + str(self.optional_questions_allowed).lower()
                 + f"; reason={self.reason}; recent_questions="
-                + " / ".join(self.recent_questions))
+                + " / ".join(self.recent_questions) + topic_value)
 
     def diagnostics(self) -> dict:
-        return {"optional_questions_allowed": self.optional_questions_allowed,
-                "followup_reason": self.reason,
-                "recent_question_count": len(self.recent_questions)}
+        result = {"optional_questions_allowed": self.optional_questions_allowed,
+                  "followup_reason": self.reason,
+                  "recent_question_count": len(self.recent_questions)}
+        if self.topic_snapshot is not None:
+            result["topic_preferences"] = self.topic_snapshot.diagnostics()
+        return result
 
 
 def _direct_request(text: str) -> str:
@@ -117,6 +155,14 @@ def _requested_permission(text: str) -> bool | None:
 
 def derive_followup_policy(messages: list[dict], *, now: datetime,
                            current_message: str = "") -> FollowupPolicy:
+    from app.services.time_domain.topic_policy import parse_commands
+
+    def permission(text):
+        commands = parse_commands(text, statement_at=now)
+        if commands and all(command.scope == "topic" for command in commands):
+            return None
+        return _requested_permission(text)
+
     reference = parse_time(now)
     allowed = True
     reason = "no_recent_opt_out"
@@ -133,17 +179,18 @@ def derive_followup_policy(messages: list[dict], *, now: datetime,
     for _, msg in sorted(recent, key=lambda row: row[0]):
         text = str(msg.get("content") or "")
         if msg.get("role") == "user":
-            permission = _requested_permission(text)
-            if permission is not None:
-                allowed = permission
-                reason = "user_reopened" if permission else "user_opted_out"
+            decision = permission(text)
+            if decision is not None:
+                allowed = decision
+                reason = "user_reopened" if decision else "user_opted_out"
         elif msg.get("role") == "assistant":
             questions.extend(s.strip() for s in _SENTENCE.findall(text) if _is_question(s))
-    permission = _requested_permission(current_message)
-    if permission is not None:
-        allowed = permission
-        reason = "user_reopened" if permission else "user_opted_out"
-    return FollowupPolicy(allowed, reason, tuple(q[:100] for q in questions[-6:]))
+    decision = permission(current_message)
+    if decision is not None:
+        allowed = decision
+        reason = "user_reopened" if decision else "user_opted_out"
+    return FollowupPolicy(allowed, reason, tuple(q[:100] for q in questions[-6:]),
+                          topic_context=(" ".join(str(msg.get("content") or "") for _, msg in sorted(recent, key=lambda row: row[0])[-2:]) + " " + current_message)[-1000:])
 
 
 def guard_optional_questions(replies: list[str], policy: FollowupPolicy, *, fallback: str | None = "好，我听着。") -> tuple[list[str], int]:
@@ -152,14 +199,41 @@ def guard_optional_questions(replies: list[str], policy: FollowupPolicy, *, fall
     Similarity alone never deletes a reply. Required confirmations, crisis care,
     and fallback errors must bypass this guard at the call site.
     """
-    if policy.optional_questions_allowed:
+    snapshot = policy.topic_snapshot
+    restrictions = getattr(snapshot, "items", ())
+    unavailable = getattr(snapshot, "status", "") in {"unavailable", "scope_unavailable", "capacity_exceeded", "source_unavailable"}
+    if unavailable:
+        # Unknown/over-capacity storage cannot authorize an unobserved topic,
+        # including declarative rementions. Required replies bypass this guard.
+        return ([fallback] if fallback else []), len(replies)
+    if policy.optional_questions_allowed and not restrictions and not unavailable:
         return replies, 0
+    from app.services.time_domain.topic_policy import topic_matches
+    now = getattr(snapshot, "sampled_at", None)
+    restrictions = tuple(item for item in restrictions if now is not None and item.active(now))
+    global_stop = unavailable or not policy.optional_questions_allowed or any(item.scope in {"session", "global"} for item in restrictions)
     kept, removed = [], 0
     for reply in replies:
         parts = _SENTENCE.findall(reply)
         accepted = []
         for part in parts:
-            if _is_question(part):
+            named = any(item.scope == "topic" and topic_matches(item.topic, part) for item in restrictions)
+            contextual = any(item.scope == "topic" and topic_matches(item.topic, policy.topic_context) for item in restrictions)
+            # A generated question that points back to a prior issue while
+            # repeating a substantial part of a restricted label is ambiguous.
+            # Suppress that optional question, without merging topic identities
+            # or treating the partial reference as new evidence about the event.
+            partial_reference = False
+            if _is_question(part) and re.search(r"之前|上次|原来|那件|这件|后来", part):
+                for item in restrictions:
+                    if item.scope != "topic":
+                        continue
+                    label, clause = _key(item.topic), _key(part)
+                    overlap = SequenceMatcher(None, label, clause).find_longest_match().size
+                    if len(label) >= 4 and overlap >= max(2, (len(label) + 1) // 2):
+                        partial_reference = True
+                        break
+            if (global_stop and _is_question(part)) or named or partial_reference or (contextual and re.search(r"(?:那件事|这件事|那个|这个|后来|结果|进展|后续|怎么样|如何)", part) and _is_question(part)):
                 removed += 1
             else:
                 accepted.append(part)

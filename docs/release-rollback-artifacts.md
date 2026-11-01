@@ -138,3 +138,24 @@ Older images can read the additive schema but ignore `filler_emoji_probability=0
 and restore the old 30% emoji-only shortcut. Schema compatibility does not preserve
 the paused behavior, which is why the gate requires `--accept-filler-shortcut`
 for them.
+
+
+## TIME04 persistent topic preferences
+
+Once `conversation_topics` contains any rows, do not roll back to a source/image
+that lacks the shared durable preference reader and ordinary/proactive guards.
+Disabling the new optional topic selector must never disable those minimum guards.
+The version gate checks the target source entry points; it rejects a topic-unaware
+target unless `--topic-policy-rows 0` is supplied from a fresh, native read-only
+count. Unknown counts are not zero. Count **all rows**, including reopened and
+expired projections, because those rows preserve source/replay ordering. There is
+no emergency override for losing a saved preference. Preserve the migration,
+source FK deletion behavior, projection, audit events and generation fences.
+
+Before any switch, independently verify target image/source hashes and exercise
+source write -> delayed read -> named reopen in an isolated migrated database.
+After switching check user/workspace ownership, source deletion and no resurrection
+from old jobs. If an older image is otherwise necessary, prepare a qualified
+compatibility release carrying the minimum guards first; do not delete preferences
+to make a version gate pass. These source checks do not certify a production image
+or the truth of an operator-supplied row count.

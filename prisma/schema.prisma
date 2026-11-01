@@ -3221,3 +3221,85 @@ model OpsServiceObservation {
   @@map("ops_service_observations")
   @@ignore
 }
+
+// Raw-SQL scoped policy projection. FK/source/generation guards live in migration.
+model ConversationTopic {
+  id String @id
+  userId String @map("user_id")
+  agentId String @map("agent_id")
+  workspaceId String @map("workspace_id")
+  workspaceGeneration String @map("workspace_generation")
+  agentGeneration String @map("agent_generation")
+  ownerGeneration String @map("owner_generation")
+  topicKey String @map("topic_key")
+  label String
+  scope String
+  state String
+  action String
+  expiresAt DateTime? @map("expires_at") @db.Timestamptz
+  sourceMessageId String @map("source_message_id")
+  sourceVersion String @map("source_version")
+  sourceStatementAt DateTime @map("source_statement_at") @db.Timestamptz
+  decisionAt DateTime @map("decision_at") @db.Timestamptz
+  sourceOrdinal Int @map("source_ordinal")
+  revision Int @default(1)
+  policyVersion String @map("policy_version")
+  lastUserMention DateTime? @map("last_user_mention") @db.Timestamptz
+  lastAgentQuestion DateTime? @map("last_agent_question") @db.Timestamptz
+  answeredAt DateTime? @map("answered_at") @db.Timestamptz
+  askedCount Int @default(0) @map("asked_count")
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz
+  @@unique([workspaceId,workspaceGeneration,topicKey])
+  @@index([workspaceId,workspaceGeneration,updatedAt(sort:Desc),id],map:"conversation_topics_scope_idx")
+  @@index([userId],map:"conversation_topics_user_idx")
+  @@index([sourceMessageId],map:"conversation_topics_source_idx")
+  @@map("conversation_topics")
+  @@ignore
+}
+model ConversationTopicEvent {
+  id String @id
+  topicId String @map("topic_id")
+  userId String @map("user_id")
+  sourceMessageId String @map("source_message_id")
+  actorUserId String? @map("actor_user_id")
+  sourceType String @default("user") @map("source_type")
+  action String
+  expiresAt DateTime? @map("expires_at") @db.Timestamptz
+  sourceVersion String @map("source_version")
+  statementAt DateTime @map("statement_at") @db.Timestamptz
+  ordinal Int
+  reason String
+  policyVersion String @map("policy_version")
+  recordedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("recorded_at") @db.Timestamptz
+  @@index([topicId,recordedAt(sort:Desc),id],map:"conversation_topic_events_topic_idx")
+  @@index([userId],map:"conversation_topic_events_user_idx")
+  @@index([sourceMessageId],map:"conversation_topic_events_source_idx")
+  @@index([actorUserId],map:"conversation_topic_events_actor_idx")
+  @@map("conversation_topic_events")
+  @@ignore
+}
+
+model ConversationTopicObservation {
+  topicId String @map("topic_id")
+  sourceMessageId String @map("source_message_id")
+  userId String @map("user_id")
+  kind String
+  statementAt DateTime @map("statement_at") @db.Timestamptz
+  sourceVersion String @map("source_version")
+  @@id([topicId,sourceMessageId])
+  @@index([sourceMessageId],map:"conversation_topic_observations_source_idx")
+  @@index([userId],map:"conversation_topic_observations_user_idx")
+  @@map("conversation_topic_observations")
+  @@ignore
+}
+
+// Payload-free replay fence. Ownership and retention are enforced by raw SQL.
+model ConversationTopicFence {
+  topicId String @id @map("topic_id")
+  workspaceId String @map("workspace_id")
+  decisionAt DateTime @map("decision_at") @db.Timestamptz
+  deleted Boolean @default(false)
+  @@map("conversation_topic_fences")
+  @@ignore
+}

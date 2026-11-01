@@ -125,6 +125,7 @@ async def save_replies(
     """
     try:
         first_message_id: str | None = None
+        topic_message_ids: set[str] = set()
         for i, reply in enumerate(replies):
             if isinstance(reply, dict):
                 text = str(reply.get("text", ""))
@@ -158,6 +159,7 @@ async def save_replies(
                     "metadata": Json(metadata),
                 }
             )
+            topic_message_ids.add(created.id)
             if i == 0:
                 try:
                     from app.services.operations.metrics import record_reply_operational_metrics
@@ -182,6 +184,9 @@ async def save_replies(
                     logger.debug(f"[PUSH] assistant reply notification skipped: {push_err}")
             if i == 0:
                 first_message_id = created.id
+        if topic_message_ids:
+            from app.services.time_domain.topic_store import observe_reply_messages
+            fire_background(observe_reply_messages(conversation_id, topic_message_ids))
         from app.services.chat.legacy_completion import current_completion
         completion = current_completion.get()
         if completion is not None:

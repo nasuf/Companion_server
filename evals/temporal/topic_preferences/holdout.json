@@ -1,0 +1,1082 @@
+[
+  {
+    "id": "holdout-session-00",
+    "family": "session",
+    "topic": "论文答辩",
+    "message": "暂时别问论文答辩了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-01",
+    "family": "session",
+    "topic": "驾照考试",
+    "message": "暂时别问驾照考试了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-02",
+    "family": "session",
+    "topic": "家里催婚",
+    "message": "暂时别问家里催婚了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-03",
+    "family": "session",
+    "topic": "搬家预算",
+    "message": "暂时别问搬家预算了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-04",
+    "family": "session",
+    "topic": "创业失败",
+    "message": "暂时别问创业失败了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-05",
+    "family": "session",
+    "topic": "父亲住院",
+    "message": "暂时别问父亲住院了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-06",
+    "family": "session",
+    "topic": "年终考核",
+    "message": "暂时别问年终考核了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-07",
+    "family": "session",
+    "topic": "朋友失联",
+    "message": "暂时别问朋友失联了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-08",
+    "family": "session",
+    "topic": "宠物手术",
+    "message": "暂时别问宠物手术了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-session-09",
+    "family": "session",
+    "topic": "生日聚会",
+    "message": "暂时别问生日聚会了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-00",
+    "family": "durable",
+    "topic": "论文答辩",
+    "message": "以后不要再提论文答辩了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-01",
+    "family": "durable",
+    "topic": "驾照考试",
+    "message": "以后不要再提驾照考试了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-02",
+    "family": "durable",
+    "topic": "家里催婚",
+    "message": "以后不要再提家里催婚了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-03",
+    "family": "durable",
+    "topic": "搬家预算",
+    "message": "以后不要再提搬家预算了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-04",
+    "family": "durable",
+    "topic": "创业失败",
+    "message": "以后不要再提创业失败了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-05",
+    "family": "durable",
+    "topic": "父亲住院",
+    "message": "以后不要再提父亲住院了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-06",
+    "family": "durable",
+    "topic": "年终考核",
+    "message": "以后不要再提年终考核了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-07",
+    "family": "durable",
+    "topic": "朋友失联",
+    "message": "以后不要再提朋友失联了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-08",
+    "family": "durable",
+    "topic": "宠物手术",
+    "message": "以后不要再提宠物手术了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-durable-09",
+    "family": "durable",
+    "topic": "生日聚会",
+    "message": "以后不要再提生日聚会了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-00",
+    "family": "global",
+    "topic": "论文答辩",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-01",
+    "family": "global",
+    "topic": "驾照考试",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-02",
+    "family": "global",
+    "topic": "家里催婚",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-03",
+    "family": "global",
+    "topic": "搬家预算",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-04",
+    "family": "global",
+    "topic": "创业失败",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-05",
+    "family": "global",
+    "topic": "父亲住院",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-06",
+    "family": "global",
+    "topic": "年终考核",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-07",
+    "family": "global",
+    "topic": "朋友失联",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-08",
+    "family": "global",
+    "topic": "宠物手术",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-global-09",
+    "family": "global",
+    "topic": "生日聚会",
+    "message": "我不喜欢一直被问",
+    "expected_scope": "global",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-00",
+    "family": "reopen",
+    "topic": "论文答辩",
+    "message": "现在可以问论文答辩了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-01",
+    "family": "reopen",
+    "topic": "驾照考试",
+    "message": "现在可以问驾照考试了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-02",
+    "family": "reopen",
+    "topic": "家里催婚",
+    "message": "现在可以问家里催婚了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-03",
+    "family": "reopen",
+    "topic": "搬家预算",
+    "message": "现在可以问搬家预算了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-04",
+    "family": "reopen",
+    "topic": "创业失败",
+    "message": "现在可以问创业失败了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-05",
+    "family": "reopen",
+    "topic": "父亲住院",
+    "message": "现在可以问父亲住院了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-06",
+    "family": "reopen",
+    "topic": "年终考核",
+    "message": "现在可以问年终考核了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-07",
+    "family": "reopen",
+    "topic": "朋友失联",
+    "message": "现在可以问朋友失联了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-08",
+    "family": "reopen",
+    "topic": "宠物手术",
+    "message": "现在可以问宠物手术了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reopen-09",
+    "family": "reopen",
+    "topic": "生日聚会",
+    "message": "现在可以问生日聚会了",
+    "expected_scope": "topic",
+    "expected_action": "resume",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-00",
+    "family": "quote",
+    "topic": "论文答辩",
+    "message": "同事说“以后不要问论文答辩了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-01",
+    "family": "quote",
+    "topic": "驾照考试",
+    "message": "同事说“以后不要问驾照考试了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-02",
+    "family": "quote",
+    "topic": "家里催婚",
+    "message": "同事说“以后不要问家里催婚了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-03",
+    "family": "quote",
+    "topic": "搬家预算",
+    "message": "同事说“以后不要问搬家预算了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-04",
+    "family": "quote",
+    "topic": "创业失败",
+    "message": "同事说“以后不要问创业失败了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-05",
+    "family": "quote",
+    "topic": "父亲住院",
+    "message": "同事说“以后不要问父亲住院了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-06",
+    "family": "quote",
+    "topic": "年终考核",
+    "message": "同事说“以后不要问年终考核了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-07",
+    "family": "quote",
+    "topic": "朋友失联",
+    "message": "同事说“以后不要问朋友失联了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-08",
+    "family": "quote",
+    "topic": "宠物手术",
+    "message": "同事说“以后不要问宠物手术了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-quote-09",
+    "family": "quote",
+    "topic": "生日聚会",
+    "message": "同事说“以后不要问生日聚会了”",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-00",
+    "family": "conditional",
+    "topic": "论文答辩",
+    "message": "如果以后我说不要问论文答辩了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-01",
+    "family": "conditional",
+    "topic": "驾照考试",
+    "message": "如果以后我说不要问驾照考试了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-02",
+    "family": "conditional",
+    "topic": "家里催婚",
+    "message": "如果以后我说不要问家里催婚了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-03",
+    "family": "conditional",
+    "topic": "搬家预算",
+    "message": "如果以后我说不要问搬家预算了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-04",
+    "family": "conditional",
+    "topic": "创业失败",
+    "message": "如果以后我说不要问创业失败了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-05",
+    "family": "conditional",
+    "topic": "父亲住院",
+    "message": "如果以后我说不要问父亲住院了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-06",
+    "family": "conditional",
+    "topic": "年终考核",
+    "message": "如果以后我说不要问年终考核了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-07",
+    "family": "conditional",
+    "topic": "朋友失联",
+    "message": "如果以后我说不要问朋友失联了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-08",
+    "family": "conditional",
+    "topic": "宠物手术",
+    "message": "如果以后我说不要问宠物手术了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-conditional-09",
+    "family": "conditional",
+    "topic": "生日聚会",
+    "message": "如果以后我说不要问生日聚会了，你会怎么办",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-00",
+    "family": "negated",
+    "topic": "论文答辩",
+    "message": "我不是让你别问论文答辩",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-01",
+    "family": "negated",
+    "topic": "驾照考试",
+    "message": "我不是让你别问驾照考试",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-02",
+    "family": "negated",
+    "topic": "家里催婚",
+    "message": "我不是让你别问家里催婚",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-03",
+    "family": "negated",
+    "topic": "搬家预算",
+    "message": "我不是让你别问搬家预算",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-04",
+    "family": "negated",
+    "topic": "创业失败",
+    "message": "我不是让你别问创业失败",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-05",
+    "family": "negated",
+    "topic": "父亲住院",
+    "message": "我不是让你别问父亲住院",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-06",
+    "family": "negated",
+    "topic": "年终考核",
+    "message": "我不是让你别问年终考核",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-07",
+    "family": "negated",
+    "topic": "朋友失联",
+    "message": "我不是让你别问朋友失联",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-08",
+    "family": "negated",
+    "topic": "宠物手术",
+    "message": "我不是让你别问宠物手术",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-negated-09",
+    "family": "negated",
+    "topic": "生日聚会",
+    "message": "我不是让你别问生日聚会",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-00",
+    "family": "date",
+    "topic": "论文答辩",
+    "message": "今天别问论文答辩了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-01",
+    "family": "date",
+    "topic": "驾照考试",
+    "message": "今天别问驾照考试了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-02",
+    "family": "date",
+    "topic": "家里催婚",
+    "message": "今天别问家里催婚了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-03",
+    "family": "date",
+    "topic": "搬家预算",
+    "message": "今天别问搬家预算了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-04",
+    "family": "date",
+    "topic": "创业失败",
+    "message": "今天别问创业失败了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-05",
+    "family": "date",
+    "topic": "父亲住院",
+    "message": "今天别问父亲住院了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-06",
+    "family": "date",
+    "topic": "年终考核",
+    "message": "今天别问年终考核了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-07",
+    "family": "date",
+    "topic": "朋友失联",
+    "message": "今天别问朋友失联了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-08",
+    "family": "date",
+    "topic": "宠物手术",
+    "message": "今天别问宠物手术了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-date-09",
+    "family": "date",
+    "topic": "生日聚会",
+    "message": "今天别问生日聚会了",
+    "expected_scope": "topic",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-00",
+    "family": "interleaved",
+    "topic": "论文答辩",
+    "message": "以后别问论文答辩了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-01",
+    "family": "interleaved",
+    "topic": "驾照考试",
+    "message": "以后别问驾照考试了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-02",
+    "family": "interleaved",
+    "topic": "家里催婚",
+    "message": "以后别问家里催婚了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-03",
+    "family": "interleaved",
+    "topic": "搬家预算",
+    "message": "以后别问搬家预算了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-04",
+    "family": "interleaved",
+    "topic": "创业失败",
+    "message": "以后别问创业失败了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-05",
+    "family": "interleaved",
+    "topic": "父亲住院",
+    "message": "以后别问父亲住院了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-06",
+    "family": "interleaved",
+    "topic": "年终考核",
+    "message": "以后别问年终考核了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-07",
+    "family": "interleaved",
+    "topic": "朋友失联",
+    "message": "以后别问朋友失联了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-08",
+    "family": "interleaved",
+    "topic": "宠物手术",
+    "message": "以后别问宠物手术了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-interleaved-09",
+    "family": "interleaved",
+    "topic": "生日聚会",
+    "message": "以后别问生日聚会了，今天的天气很好",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-00",
+    "family": "ambiguous",
+    "topic": "论文答辩",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-01",
+    "family": "ambiguous",
+    "topic": "驾照考试",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-02",
+    "family": "ambiguous",
+    "topic": "家里催婚",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-03",
+    "family": "ambiguous",
+    "topic": "搬家预算",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-04",
+    "family": "ambiguous",
+    "topic": "创业失败",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-05",
+    "family": "ambiguous",
+    "topic": "父亲住院",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-06",
+    "family": "ambiguous",
+    "topic": "年终考核",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-07",
+    "family": "ambiguous",
+    "topic": "朋友失联",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-08",
+    "family": "ambiguous",
+    "topic": "宠物手术",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-ambiguous-09",
+    "family": "ambiguous",
+    "topic": "生日聚会",
+    "message": "这件事以后别提了",
+    "expected_scope": "session",
+    "expected_action": "pause",
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-00",
+    "family": "reported",
+    "topic": "论文答辩",
+    "message": "她说以后别问论文答辩了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-01",
+    "family": "reported",
+    "topic": "驾照考试",
+    "message": "她说以后别问驾照考试了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-02",
+    "family": "reported",
+    "topic": "家里催婚",
+    "message": "她说以后别问家里催婚了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-03",
+    "family": "reported",
+    "topic": "搬家预算",
+    "message": "她说以后别问搬家预算了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-04",
+    "family": "reported",
+    "topic": "创业失败",
+    "message": "她说以后别问创业失败了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-05",
+    "family": "reported",
+    "topic": "父亲住院",
+    "message": "她说以后别问父亲住院了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-06",
+    "family": "reported",
+    "topic": "年终考核",
+    "message": "她说以后别问年终考核了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-07",
+    "family": "reported",
+    "topic": "朋友失联",
+    "message": "她说以后别问朋友失联了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-08",
+    "family": "reported",
+    "topic": "宠物手术",
+    "message": "她说以后别问宠物手术了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-reported-09",
+    "family": "reported",
+    "topic": "生日聚会",
+    "message": "她说以后别问生日聚会了",
+    "expected_scope": null,
+    "expected_action": null,
+    "required_confirmation_exempt": false
+  },
+  {
+    "id": "holdout-required_confirmation-00",
+    "family": "required_confirmation",
+    "topic": "论文答辩",
+    "message": "以后别问论文答辩了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-01",
+    "family": "required_confirmation",
+    "topic": "驾照考试",
+    "message": "以后别问驾照考试了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-02",
+    "family": "required_confirmation",
+    "topic": "家里催婚",
+    "message": "以后别问家里催婚了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-03",
+    "family": "required_confirmation",
+    "topic": "搬家预算",
+    "message": "以后别问搬家预算了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-04",
+    "family": "required_confirmation",
+    "topic": "创业失败",
+    "message": "以后别问创业失败了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-05",
+    "family": "required_confirmation",
+    "topic": "父亲住院",
+    "message": "以后别问父亲住院了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-06",
+    "family": "required_confirmation",
+    "topic": "年终考核",
+    "message": "以后别问年终考核了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-07",
+    "family": "required_confirmation",
+    "topic": "朋友失联",
+    "message": "以后别问朋友失联了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-08",
+    "family": "required_confirmation",
+    "topic": "宠物手术",
+    "message": "以后别问宠物手术了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  },
+  {
+    "id": "holdout-required_confirmation-09",
+    "family": "required_confirmation",
+    "topic": "生日聚会",
+    "message": "以后别问生日聚会了",
+    "expected_scope": "topic",
+    "expected_action": "stop",
+    "required_confirmation_exempt": true
+  }
+]

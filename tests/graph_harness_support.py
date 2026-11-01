@@ -37,6 +37,20 @@ def configure_chat(monkeypatch):
         ),
     )
     monkeypatch.setattr(chat, "db", database)
+    # This harness replaces domain IO, not policy behavior. Durable topic tests
+    # override this snapshot explicitly; SQL ownership/retention has real-PG tests.
+    from app.services.time_domain import topic_store
+
+    monkeypatch.setattr(
+        topic_store,
+        "load_snapshot",
+        AsyncMock(
+            return_value=topic_store.TopicSnapshot(
+                "no_active_restrictions", sampled_at=now
+            )
+        ),
+    )
+    monkeypatch.setattr(topic_store, "record_commands", AsyncMock(return_value=0))
     monkeypatch.setattr(chat, "_save_replies", AsyncMock(return_value="a-new"))
     monkeypatch.setattr(chat, "finish_assistant_turn", AsyncMock())
     monkeypatch.setattr(chat, "_background_post_process", AsyncMock())
@@ -143,7 +157,9 @@ def configure_chat(monkeypatch):
     monkeypatch.setattr(chat_management, "reply_delay_enabled", lambda: False)
     from app.services.runtime import turn_followups
 
-    monkeypatch.setattr(turn_followups, "register_completed_turn", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        turn_followups, "register_completed_turn", AsyncMock(return_value=True)
+    )
     tracer = MagicMock(trace_id="trace-1", safe_trace_id="trace-1", is_active=True)
     tracer.enter.return_value = tracer
     monkeypatch.setattr(chat, "create_tracer", lambda *_, **__: tracer)

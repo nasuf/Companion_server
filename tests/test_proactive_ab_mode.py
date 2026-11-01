@@ -434,6 +434,12 @@ async def test_short_circuit_ctx_maps_kind_to_reason(monkeypatch):
 
 async def test_emit_aborts_when_user_replied_during_generation(monkeypatch):
     from app.services.proactive import emit
+    from app.services.time_domain.followup import FollowupPolicy
+
+    monkeypatch.setattr(
+        "app.services.time_domain.topic_store.resolve_policy",
+        AsyncMock(return_value=FollowupPolicy()),
+    )
 
     query = AsyncMock(return_value=[])  # INSERT ... WHERE NOT EXISTS 没插入
     create = AsyncMock()

@@ -229,7 +229,9 @@ async def render_temporal_context(clock: TurnClock, policy: str,
 async def prepare_reply_time(messages: list[dict], *, exclude_ids: set[str],
                              current_message: str, diagnostics: dict,
                              now: datetime | None = None, clock: TurnClock | None = None,
-                             temporal_query: TemporalQuery | None = None):
+                             temporal_query: TemporalQuery | None = None,
+                             user_id: str | None = None, workspace_id: str | None = None,
+                             conversation_id: str | None = None):
     """One clock/policy snapshot shared by graph and legacy execution paths."""
     from app.services.time_domain.followup import derive_followup_policy
 
@@ -237,6 +239,18 @@ async def prepare_reply_time(messages: list[dict], *, exclude_ids: set[str],
     query = temporal_query or resolve_temporal_query(current_message, anchor=clock.statement_at,
                                    anchor_source=clock.anchor_source, anchor_end=clock.statement_end_at)
     policy = derive_followup_policy(messages, now=clock.now, current_message=current_message)
+    if user_id and workspace_id:
+        from app.services.time_domain.topic_store import resolve_policy
+        policy = await resolve_policy(policy, user_id=user_id, workspace_id=workspace_id,
+            now=clock.now, conversation_id=conversation_id, message_ids=exclude_ids,
+            current_message=current_message)
+        if conversation_id and getattr(policy.topic_snapshot, "items", ()):
+            from app.services.time_domain.topic_store import observe_messages
+            ids = {str(row["id"]) for row in messages[-8:] if row.get("id")}
+            try:
+                await observe_messages(user_id=user_id, conversation_id=conversation_id, message_ids=ids)
+            except Exception as exc:
+                logger.warning("[TOPIC-POLICY] observation unavailable error=%s", type(exc).__name__)
     try:
         instructions = await render_temporal_context(clock, policy.prompt_value(), query)
         prompt_status = "enabled" if instructions else "disabled"

@@ -134,6 +134,23 @@ async def emit_proactive_message(
                     type(voice_error).__name__,
                 )
 
+    # Optional social outreach respects durable preferences even if the policy
+    # changed while the model/TTS was running. Required reminders and business
+    # confirmations keep their existing separate delivery policy.
+    if trigger_type in {"memory_proactive", "silence_wakeup", "followup_unfinished", "scheduled_scene"}:
+        from app.services.time_domain.topic_store import resolve_policy
+        from app.services.time_domain.followup import FollowupPolicy, guard_optional_questions
+        policy = await resolve_policy(FollowupPolicy(), user_id=user_id,
+            workspace_id=workspace_id or "", now=datetime.now(timezone.utc), database=db)
+        _, removed = guard_optional_questions([message], policy, fallback=None)
+        metadata.setdefault("response_diagnostics", {}).setdefault("temporal_context", {}).update(policy.diagnostics())
+        if removed:
+            if prepared_voice is not None:
+                from app.services.speech_output.delivery import discard_prepared_voice_output
+                await discard_prepared_voice_output(prepared_voice)
+            logger.info("[TOPIC-POLICY] optional proactive message suppressed trigger=%s", trigger_type)
+            return ""
+
     try:
         if arrival_delivery:
             from app.services.offline.arrival_followups import persist_delivery, ArrivalVoiceBindingFailed

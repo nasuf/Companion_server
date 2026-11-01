@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.time_domain.context import build_turn_clock, dated_dialogue, render_temporal_context, SESSION_SECONDS
-from app.services.time_domain.followup import derive_followup_policy, repeats_recent_question
+from app.services.time_domain.followup import derive_followup_policy, repeats_recent_question, guard_optional_questions
 from app.services.time_domain.timestamps import parse_time
 from app.db import db
 from app.observability.events import (
@@ -226,6 +226,8 @@ async def generate_followup_message(
         return None
     messages = _turn_messages(turns)
     policy = derive_followup_policy(messages, now=now)
+    from app.services.time_domain.topic_store import resolve_policy
+    policy = await resolve_policy(policy, user_id=state.user_id, workspace_id=state.workspace_id, now=now)
     if not policy.optional_questions_allowed:
         return None
     clock = build_turn_clock(messages, now=now)
@@ -260,6 +262,11 @@ async def generate_followup_message(
         logger.info("[FOLLOWUP] generation timed out")
         return None
     message = _clean_followup(raw)
+    if message:
+        kept, removed = guard_optional_questions([message], policy, fallback=None)
+        if diagnostics is not None:
+            diagnostics["temporal_context"]["suppressed_question_count"] = removed
+        message = " ".join(kept) if kept else None
     if message and repeats_recent_question(message, policy):
         await _log(state, "followup_skipped", {"reason": "repeated_question"})
         return None

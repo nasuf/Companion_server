@@ -218,3 +218,39 @@ async def get_memory_time_history(
         raise HTTPException(status_code=400,detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404,detail=str(exc)) from exc
+
+
+class TopicCorrectionRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=200)
+    workspace_id: str = Field(min_length=1, max_length=200)
+    expected_revision: int = Field(ge=1)
+    action: str = Field(pattern="^(resume|pause|stop)$")
+    reason: str = Field(min_length=1, max_length=500)
+
+
+@router.get("/topics/page")
+async def get_topic_preferences(
+    user_id: str = Query(min_length=1, max_length=200),
+    workspace_id: str = Query(min_length=1, max_length=200),
+    limit: int = Query(20, ge=1, le=50), after_id: str = Query("", max_length=64),
+    _: dict = Depends(require_admin_jwt),
+) -> dict:
+    from app.services.time_domain.topic_store import admin_page
+    try:
+        return await admin_page(user_id=user_id,workspace_id=workspace_id,limit=limit,after_id=after_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+
+
+@router.post("/topics/{topic_id}/correction")
+async def correct_topic_preference(topic_id: str, payload: TopicCorrectionRequest,
+                                  user: dict = Depends(require_admin_jwt)) -> dict:
+    from app.services.time_domain.topic_store import admin_correct
+    try:
+        return await admin_correct(actor_id=user['sub'],user_id=payload.user_id,
+            workspace_id=payload.workspace_id,ident=topic_id,expected_revision=payload.expected_revision,
+            action=payload.action,reason=payload.reason)
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409 if str(exc)=='topic_revision_conflict' else 400,detail=str(exc)) from exc

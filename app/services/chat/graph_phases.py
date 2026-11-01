@@ -62,6 +62,14 @@ async def load_turn(ctx):
     )
     ctx.covered_until_user_ts = services._max_user_created_at(ctx.messages_dicts)
     ctx.turn_clock = build_turn_clock(ctx.messages_dicts, exclude_ids=ctx.current_turn_ids, received_at=(ctx.reply_context or {}).get("received_at"))
+    from app.services.time_domain.topic_store import record_turn_preferences
+    topic_write = await record_turn_preferences(
+        user_id=ctx.user_id, conversation_id=ctx.conversation_id,
+        message_ids=ctx.current_turn_ids, current_message=ctx.user_message,
+        statement_at=ctx.turn_clock.statement_at,
+    )
+    if topic_write["status"] != "not_requested":
+        ctx.response_diagnostics["topic_preference_write"] = topic_write
     from app.services.chat.context_policy import observation
     if observation() is not None:
         observation()["message_received_at"] = ctx.turn_clock.now.isoformat()
@@ -257,6 +265,7 @@ async def prepare_reads(ctx):
         ctx.messages_dicts, exclude_ids=ctx.current_turn_ids,
         current_message=ctx.user_message, diagnostics=ctx.response_diagnostics,
         now=ctx.turn_clock.now, clock=ctx.turn_clock, temporal_query=ctx.temporal_query,
+        user_id=ctx.user_id, workspace_id=ctx.workspace_id, conversation_id=ctx.conversation_id,
     )
     ctx.fetch_task: services.asyncio.Task | None = None
     ctx.crisis_memory_task: services.asyncio.Task | None = None

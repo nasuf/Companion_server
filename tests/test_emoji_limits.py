@@ -224,6 +224,7 @@ async def test_emit_proactive_limits_emojis(monkeypatch):
 
     created = SimpleNamespace(id="msg-1", createdAt=None)
     fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=[[{"used": 0}], []])
     fake_db.message.create = AsyncMock(return_value=created)
     fake_db.proactivechatlog.create = AsyncMock()
     monkeypatch.setattr(emit_mod, "db", fake_db)

@@ -8,7 +8,13 @@ from scripts.check_rollback_version import (
     NORMAL_FLOOR,
     ancestor,
     qualify,
+    supports_topic_policy as actual_topic_capability,
 )
+
+
+@pytest.fixture(autouse=True)
+def topic_capability_for_legacy_floor_tests(monkeypatch):
+    monkeypatch.setattr('scripts.check_rollback_version.supports_topic_policy', lambda *_: True)
 
 
 def test_normal_qualified_image():
@@ -69,3 +75,28 @@ def test_unknown_git_revision_is_not_treated_as_safe():
         run.return_value.returncode = 128
         with pytest.raises(ValueError):
             ancestor('.', NORMAL_FLOOR, 'missing')
+
+
+@pytest.mark.parametrize('rows',[None,1,100,-1])
+def test_topic_unaware_rollback_cannot_drop_preferences_even_in_emergency(rows):
+    with patch('scripts.check_rollback_version.supports_topic_policy',return_value=False):
+        with pytest.raises(ValueError,match='preferences forbid'):
+            qualify('.',NORMAL_FLOOR,topic_policy_rows=rows,emergency=True,
+                accept_filler_shortcut=True,delay_enabled=False,queued=0,inflight=0)
+
+
+def test_empty_topic_state_allows_existing_version_checks():
+    with patch('scripts.check_rollback_version.supports_topic_policy',return_value=False), \
+            patch('scripts.check_rollback_version.ancestor',return_value=True):
+        assert qualify('.',NORMAL_FLOOR,topic_policy_rows=0)['mode']=='normal'
+
+
+def test_topic_capability_requires_all_current_source_entrypoints():
+    from scripts.check_rollback_version import supports_topic_policy
+    from types import SimpleNamespace
+    with patch('scripts.check_rollback_version.subprocess.run',side_effect=[
+        SimpleNamespace(returncode=0,stdout='topic_policy_v1'),
+        SimpleNamespace(returncode=0,stdout='record_turn_preferences'),
+        SimpleNamespace(returncode=0,stdout='no current guard'),
+    ]):
+        assert not actual_topic_capability('.', 'candidate')

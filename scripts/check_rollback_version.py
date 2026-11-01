@@ -19,8 +19,25 @@ def ancestor(repo, base, target):
     return result.returncode == 0
 
 
+def supports_topic_policy(repo, target):
+    """Check source capability, not image qualification or state truth."""
+    for path, marker in (
+        ('app/services/time_domain/topic_policy.py', 'topic_policy_v1'),
+        ('app/services/chat/graph_phases.py', 'record_turn_preferences'),
+        ('app/services/proactive/emit.py', 'resolve_policy'),
+    ):
+        result = subprocess.run(['git', '-C', str(repo), 'show', f'{target}:{path}'],
+                                capture_output=True, timeout=10, text=True)
+        if result.returncode != 0 or marker not in result.stdout:
+            return False
+    return True
+
+
 def qualify(repo, target, *, emergency=False, accept_filler_shortcut=False,
-            delay_enabled=None, queued=None, inflight=None):
+            delay_enabled=None, queued=None, inflight=None, topic_policy_rows=None):
+    if not supports_topic_policy(repo, target) and topic_policy_rows != 0:
+        raise ValueError('topic-unaware target requires verified topic-policy row count 0; '
+                         'existing or unknown preferences forbid this rollback, including emergency')
     if ancestor(repo, NORMAL_FLOOR, target):
         return {'version_gate': 'passed', 'mode': 'normal', 'minimum_commit': NORMAL_FLOOR}
     # Older images ignore the stored probability and hardcode a 30% emoji-only
@@ -55,12 +72,14 @@ def main():
     parser.add_argument('--delay-enabled', choices=('true', 'false'))
     parser.add_argument('--queued', type=int)
     parser.add_argument('--inflight', type=int)
+    parser.add_argument('--topic-policy-rows', type=int,
+                        help='Fresh native read-only count of conversation_topics, including reopened rows')
     args = parser.parse_args()
     try:
         result = qualify(args.repo, args.target_commit, emergency=args.emergency,
                          accept_filler_shortcut=args.accept_filler_shortcut,
                          delay_enabled=None if args.delay_enabled is None else args.delay_enabled == 'true',
-                         queued=args.queued, inflight=args.inflight)
+                         queued=args.queued, inflight=args.inflight, topic_policy_rows=args.topic_policy_rows)
     except ValueError as exc:
         parser.exit(1, str(exc) + '\n')
     print(json.dumps(result))

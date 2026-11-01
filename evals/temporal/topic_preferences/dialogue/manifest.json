@@ -1,0 +1,7 @@
+{
+  "cases": 120,
+  "sha256": "ded4e5a19c1aca124d6a399d69a511a9ea436e3f68d4bd8d33a03505d18ea8af",
+  "split": "internal heldout from source-template and topic identity families; frozen before first candidate execution on this corpus; not external independent blind evaluation",
+  "samples_per_version": 5,
+  "development_source_sha": "7a9791e3d0a5f444ff3c5876178373ea87139ab14bb76f95607976b772b48c38"
+}

@@ -401,6 +401,8 @@ def test_format_turns_stamps_each_line_in_utc8():
 
 async def test_generation_feeds_spec_inputs_and_keeps_all_segments(monkeypatch):
     """render_prompt 默认只留 || 前第一段; B 追问要整句."""
+    from app.services.time_domain import topic_store
+    monkeypatch.setattr(topic_store, "load_snapshot", AsyncMock(return_value=topic_store.TopicSnapshot("no_active_restrictions")))
     render = AsyncMock(return_value="诶我先说||我肯定选火锅")
     monkeypatch.setattr(followup, "render_prompt", render)
     monkeypatch.setattr(
