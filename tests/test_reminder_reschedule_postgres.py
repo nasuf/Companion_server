@@ -913,3 +913,103 @@ async def test_aggregate_notification_without_trigger_id_still_refreshes(
     monkeypatch.setattr(manager, "send_event", send)
     await _real_notify(f.convs[0], kind="rescheduled")
     send.assert_awaited_once()
+
+
+async def _contract_violation(f, change):
+    from dataclasses import replace
+    from app.services.reminder.mutations import mutate_reminder
+
+    owner = {"sub": f.uid, "role": "user"}
+    trigger = await f.db.timetrigger.find_unique(where={"id": f.trigger.id})
+    kwargs = dict(trigger=trigger, trigger_changes={"isActive": False},
+                  memory_changes={}, operation="test", actor=owner)
+    if change == "unsupported_field":
+        kwargs["trigger_changes"] = {"userId": "someone"}
+    elif change == "memory_change_without_authority":
+        kwargs.update(memory_changes={"isArchived": True}, actor=None)
+    elif change == "too_many_sources":
+        kwargs["sources"] = tuple(range(41))
+    elif change == "bad_memory_side":
+        kwargs["trigger"] = replace_trigger(trigger, {"memory_side": "admin"})
+    elif change == "scheduler_with_missing_memory":
+        await f.db.usermemory.delete(where={"id": f.memory.id})
+        kwargs["actor"] = None
+    elif change == "memory_reclassified":
+        await f.db.usermemory.update(where={"id": f.memory.id}, data={"subCategory": "其他"})
+    elif change == "invalid_actor":
+        kwargs["actor"] = {"sub": "intruder", "role": "user"}
+    elif change == "takeover":
+        await f.db.execute_raw(
+            "INSERT INTO human_takeovers(id,user_id,status,updated_at) VALUES($1,$2,'active',NOW())",
+            "reminder-takeover-" + f.uid, f.uid)
+        kwargs.update(actor=None, memory_changes={"isArchived": True}, sources=(replace(
+            f.ticket_source, expected_statement_time=f.ticket_source.expected_statement_time),))
+    elif change == "orphan_revival":
+        await f.db.usermemory.delete(where={"id": f.memory.id})
+        kwargs["trigger_changes"] = {"isActive": True}
+    elif change == "orphan_stale":
+        await f.db.usermemory.delete(where={"id": f.memory.id})
+        await f.db.timetrigger.update(where={"id": f.trigger.id}, data={"triggerTime": f.now + timedelta(days=9)})
+    return await mutate_reminder(f.db, **kwargs)
+
+
+def replace_trigger(trigger, data):
+    from types import SimpleNamespace as NS
+    return NS(**{**trigger.__dict__, "actionData": {**trigger.actionData, **data}})
+
+
+@pytest.mark.parametrize("change,status,detail", [
+    ("unsupported_field", 422, "unsupported_reminder_mutation"),
+    ("memory_change_without_authority", 409, "reminder_mutation_source_required"),
+    ("too_many_sources", 422, "reminder_mutation_source_limit"),
+    ("bad_memory_side", 409, "reminder_memory_unavailable"),
+    ("scheduler_with_missing_memory", 409, "reminder_memory_unavailable"),
+    ("memory_reclassified", 409, "reminder_memory_scope_changed"),
+    ("invalid_actor", 403, "reminder_actor_invalid"),
+    ("takeover", 409, "reminder_human_takeover"),
+    ("orphan_revival", 409, "reminder_memory_unavailable"),
+    ("orphan_stale", 409, "reminder_changed_refresh_and_retry"),
+])
+async def test_reminder_mutation_contract_rejects_without_writing(rescheduling, change, status, detail):
+    from app.services.memory.evidence import EvidenceSource, content_version, message_statement_time
+
+    f = rescheduling
+    f.ticket_source = EvidenceSource(
+        "message", f.first.id, expected_role="user", expected_conversation_id=f.convs[0],
+        expected_version=content_version(f.first.content),
+        expected_statement_time=message_statement_time(f.first.createdAt))
+    before = await f.db.timetrigger.find_unique(where={"id": f.trigger.id})
+    with pytest.raises(MemoryWriteError) as failure:
+        await _contract_violation(f, change)
+    assert (failure.value.status_code, failure.value.detail) == (status, detail)
+    after = await f.db.timetrigger.find_unique(where={"id": f.trigger.id})
+    if change != "orphan_stale":
+        assert after.isActive == before.isActive and after.triggerTime == before.triggerTime
+
+
+async def test_content_edit_rewrites_embedding_in_the_same_transaction(rescheduling, monkeypatch):
+    from app.services.reminder import checkin, mutations
+
+    f = rescheduling
+    monkeypatch.setattr(checkin, "db", f.db)
+    monkeypatch.setattr(checkin, "notify_reminder_changed", AsyncMock())
+    monkeypatch.setattr(mutations, "generate_embedding", AsyncMock(return_value=[0.1] * 1024))
+    stored = AsyncMock()
+    monkeypatch.setattr(mutations, "store_embedding", stored)
+    result = await checkin.update_reminder_for_user(
+        f.trigger.id, checkin.ReminderUpdate(summary="提醒我喝温水"), {"sub": f.uid, "role": "user"})
+    assert result.summary == "提醒我喝温水"
+    assert stored.await_args.args[0] == f.memory.id
+    memory = await f.db.usermemory.find_unique(where={"id": f.memory.id})
+    assert memory.content == "提醒我喝温水"
+
+
+async def test_claim_and_retry_refuse_an_unknown_memory_side(rescheduling):
+    from app.services.reminder.mutations import claim_due_reminder, retry_claimed_reminder
+
+    f = rescheduling
+    trigger = replace_trigger(await f.db.timetrigger.find_unique(where={"id": f.trigger.id}),
+                              {"memory_side": "admin"})
+    assert not await claim_due_reminder(f.db, trigger, f.now)
+    assert not await retry_claimed_reminder(f.db, trigger, claimed_at=f.now,
+                                            retry_at=f.now + timedelta(seconds=30), retry_count=1)
