@@ -210,19 +210,38 @@ async def _identities_by_user(user_ids: list[str]) -> dict[str, list[object]]:
     return by_user
 
 
+def _agents_brief(agents) -> list[dict]:
+    if not agents:
+        return []
+    return [
+        {
+            "id": a.id,
+            "name": getattr(a, "name", None) or "",
+            "gender": getattr(a, "gender", None),
+        }
+        for a in agents
+    ]
+
+
 def _serialize_admin_user(
     user,
     identities: list[object],
     *,
     agent_count: int | None = None,
+    agents_brief: list[dict] | None = None,
     last_chat_at=None,
+    user_message_count: int | None = None,
 ) -> dict:
+    loaded_agents = getattr(user, "agents", None) or []
     resolved_agent_count = (
         agent_count
         if agent_count is not None
-        else len(user.agents)
-        if getattr(user, "agents", None)
-        else 0
+        else len(loaded_agents)
+    )
+    resolved_agents_brief = (
+        agents_brief
+        if agents_brief is not None
+        else _agents_brief(loaded_agents)
     )
     return {
         "id": user.id,
@@ -247,7 +266,9 @@ def _serialize_admin_user(
         "last_seen_at": _utc_iso(getattr(user, "lastSeenAt", None)),
         # 最近一条用户消息的时间; 从未发过消息为 None。
         "last_chat_at": _utc_iso(last_chat_at),
+        "user_message_count": int(user_message_count or 0),
         "agent_count": resolved_agent_count,
+        "agents_brief": resolved_agents_brief,
         "wechat": _serialize_wechat_identity(
             _first_identity(identities, _WECHAT_PROVIDER)
         ),
@@ -327,6 +348,7 @@ _SORT_COLUMNS = {
     "created_at": "u.created_at",
     "last_seen_at": "u.last_seen_at",
     "last_chat_at": "lc.last_chat_at",
+    "user_message_count": "umc.user_message_count",
 }
 # A user's latest own message across all conversations (messages(conversation_id, created_at) index).
 _LAST_CHAT_JOIN = """
@@ -335,6 +357,25 @@ _LAST_CHAT_JOIN = """
                 FROM conversations c JOIN messages m ON m.conversation_id = c.id
                 WHERE c.user_id = u.id AND m.role = 'user'
             ) lc ON TRUE"""
+_USER_MESSAGE_COUNT_JOIN = """
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS user_message_count
+                FROM conversations c JOIN messages m ON m.conversation_id = c.id
+                WHERE c.user_id = u.id AND m.role = 'user'
+            ) umc ON TRUE"""
+
+
+async def _user_message_count_by_user(user_ids: list[str]) -> dict[str, int]:
+    if not user_ids:
+        return {}
+    rows = await db.query_raw(
+        """SELECT c.user_id, COUNT(*)::int AS user_message_count
+        FROM conversations c JOIN messages m ON m.conversation_id = c.id
+        WHERE c.user_id = ANY($1::text[]) AND m.role = 'user'
+        GROUP BY c.user_id""",
+        user_ids,
+    )
+    return {r["user_id"]: r["user_message_count"] for r in rows}
 
 
 def _window_sql(column: str, window: str, params: list, now: datetime) -> str | None:
@@ -371,7 +412,7 @@ async def list_users(
     registered: SignupWindow = "",
     last_login: Window = "",
     last_chat: Window = "",
-    sort: Literal["created_at", "last_seen_at", "last_chat_at"] = "created_at",
+    sort: Literal["created_at", "last_seen_at", "last_chat_at", "user_message_count"] = "created_at",
     _: dict = Depends(require_admin_jwt),
 ):
     # The reserved template system user owns all agent templates; hide it from
@@ -421,7 +462,14 @@ async def list_users(
             clause = _window_sql(column, window, params, now)
             if clause:
                 where.append(clause)
-        join = _LAST_CHAT_JOIN if last_chat or sort == "last_chat_at" else ""
+        join_parts: list[str] = []
+        if last_chat or sort == "last_chat_at":
+            join_parts.append(_LAST_CHAT_JOIN.strip())
+        if sort == "user_message_count":
+            join_parts.append(_USER_MESSAGE_COUNT_JOIN.strip())
+        join = "\n            ".join(join_parts)
+        if join:
+            join = f"\n            {join}"
         from_sql = f"""
             FROM users u{join}
             WHERE {" AND ".join(where)}
@@ -457,7 +505,9 @@ async def list_users(
         rank = {user_id: i for i, user_id in enumerate(page_ids)}
         users.sort(key=lambda u: rank.get(u.id, len(rank)))
     identities_by_user = await _identities_by_user([u.id for u in users])
-    last_chats = await _last_chat_by_user([u.id for u in users])
+    user_ids = [u.id for u in users]
+    last_chats = await _last_chat_by_user(user_ids)
+    message_counts = await _user_message_count_by_user(user_ids)
 
     return {
         "users": [
@@ -466,6 +516,7 @@ async def list_users(
                 identities_by_user.get(u.id, []),
                 agent_count=len(u.agents) if u.agents else 0,
                 last_chat_at=last_chats.get(u.id),
+                user_message_count=message_counts.get(u.id, 0),
             )
             for u in users
         ],
@@ -548,7 +599,11 @@ async def get_user_detail(
     last_chats = await _last_chat_by_user([user_id])
     return {
         "user": _serialize_admin_user(
-            user, identities, agent_count=len(agents), last_chat_at=last_chats.get(user_id),
+            user,
+            identities,
+            agent_count=len(agents),
+            agents_brief=_agents_brief(agents),
+            last_chat_at=last_chats.get(user_id),
         ),
         "workspaces": [
             {
