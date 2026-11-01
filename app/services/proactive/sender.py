@@ -963,6 +963,7 @@ async def generate_and_send_proactive(
                 send_outcome.link_card_skip_reason = attachments.link_skip_reason
             send_outcome.extra.update({"trigger_type": trigger_type, "source": source})
 
+        skip_reasons: list[str] = []
         assistant_message_id = await emit_proactive_message(
             conversation_id=prep.conversation_id,
             user_id=state.user_id,
@@ -975,10 +976,11 @@ async def generate_and_send_proactive(
             trace_id=tracer.safe_trace_id,
             # 生成期间用户回来了 → 不插入, 优先响应用户 (spec 任务互斥)
             abort_if_user_replied_since=_generation_started_at(state, now_ts),
+            skip_reasons=skip_reasons,
         )
         if not assistant_message_id:
             await _log_skip(
-                state, trigger_type, "user_replied_during_generation",
+                state, trigger_type, skip_reasons[0] if skip_reasons else "user_replied_during_generation",
                 conversation_id=prep.conversation_id, send_outcome=send_outcome,
             )
             return False

@@ -1,0 +1,271 @@
+{
+ "version": 1,
+ "frozen": true,
+ "cases": [
+  {
+   "id": "v01",
+   "template_family": "live_detail",
+   "history": [
+    [
+     30,
+     "user",
+     "我明天面试有点紧张"
+    ],
+    [
+     29,
+     "assistant",
+     "几点的面试呀？"
+    ],
+    [
+     20,
+     "user",
+     "上午十点"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "那面试前要不要早点睡？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "v02",
+   "template_family": "next_day_first_outcome",
+   "history": [
+    [
+     1080,
+     "user",
+     "明天上午面试"
+    ],
+    [
+     1079,
+     "assistant",
+     "是什么公司的面试呀？"
+    ],
+    [
+     1078,
+     "user",
+     "字节"
+    ]
+   ],
+   "current_user_message": "我回来啦",
+   "question": "面试怎么样了？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "v03",
+   "template_family": "generic_story",
+   "history": [
+    [
+     2880,
+     "user",
+     "面试过了"
+    ],
+    [
+     10,
+     "user",
+     "我在看一部电影，主角刚出场"
+    ]
+   ],
+   "current_user_message": "主角被抓了",
+   "question": "后来呢？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "v04",
+   "template_family": "generic_work",
+   "history": [
+    [
+     2880,
+     "user",
+     "面试过了"
+    ]
+   ],
+   "current_user_message": "上班第一天",
+   "question": "今天工作顺利吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "v05",
+   "template_family": "casual_reply_not_resolution",
+   "history": [
+    [
+     300,
+     "user",
+     "下午去复查"
+    ],
+    [
+     240,
+     "assistant",
+     "复查结果怎么样？"
+    ],
+    [
+     239,
+     "user",
+     "我回来了"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "复查结果出来了吗？",
+   "expected": "suppress",
+   "note": "泛泛回复只算回应，冷却中"
+  },
+  {
+   "id": "v06",
+   "template_family": "rephrase_same_day",
+   "history": [
+    [
+     480,
+     "user",
+     "今天去面试了"
+    ],
+    [
+     360,
+     "assistant",
+     "面试感觉怎么样？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "那家公司后来有消息了吗？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "v07",
+   "template_family": "ledger_old_ignored",
+   "history": [
+    [
+     21600,
+     "user",
+     "在等签证"
+    ],
+    [
+     17280,
+     "assistant",
+     "签证批下来了吗？"
+    ],
+    [
+     14400,
+     "assistant",
+     "签证有消息了吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "签证办好了吗？",
+   "expected": "suppress",
+   "note": "两次未答已出 7 天页但在台账内"
+  },
+  {
+   "id": "v08",
+   "template_family": "user_returns_with_news",
+   "history": [
+    [
+     4320,
+     "user",
+     "在等签证"
+    ],
+    [
+     2880,
+     "assistant",
+     "签证批下来了吗？"
+    ],
+    [
+     1440,
+     "assistant",
+     "签证有消息了吗？"
+    ]
+   ],
+   "current_user_message": "签证终于有消息了",
+   "question": "签证什么时候能拿到？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "v09",
+   "template_family": "different_round",
+   "history": [
+    [
+     2880,
+     "user",
+     "一面过了"
+    ],
+    [
+     1440,
+     "assistant",
+     "一面结果怎么样？"
+    ],
+    [
+     1435,
+     "user",
+     "过了"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "二面安排在什么时候？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "v10",
+   "template_family": "resolved_named",
+   "history": [
+    [
+     300,
+     "user",
+     "今天去面签"
+    ],
+    [
+     240,
+     "assistant",
+     "面签顺利吗？"
+    ],
+    [
+     238,
+     "user",
+     "面签过了！"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "签证下来了吗？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "v11",
+   "template_family": "generic_good_news",
+   "history": [
+    [
+     2880,
+     "user",
+     "体检做完了"
+    ]
+   ],
+   "current_user_message": "今天心情不错",
+   "question": "有什么好消息吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "v12",
+   "template_family": "unanswered_cooldown",
+   "history": [
+    [
+     1200,
+     "user",
+     "下周有个比赛"
+    ],
+    [
+     600,
+     "assistant",
+     "比赛准备得怎么样？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "比赛有进展吗？",
+   "expected": "suppress",
+   "note": ""
+  }
+ ]
+}

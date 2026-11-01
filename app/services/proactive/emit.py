@@ -42,6 +42,7 @@ async def emit_proactive_message(
     guard_delivery_key: str | None = None,
     abort_if_user_replied_since: datetime | None = None,
     arrival_delivery: tuple[str, int] | None = None,
+    skip_reasons: list[str] | None = None,
 ) -> str:
     """持久化主动消息 + 推 WS, 返回 assistant message id.
 
@@ -134,6 +135,7 @@ async def emit_proactive_message(
                     type(voice_error).__name__,
                 )
 
+    followup_gate = False
     # Optional social outreach respects durable preferences even if the policy
     # changed while the model/TTS was running. Required reminders and business
     # confirmations keep their existing separate delivery policy.
@@ -144,6 +146,8 @@ async def emit_proactive_message(
             workspace_id=workspace_id or "", now=datetime.now(timezone.utc), database=db)
         _, removed = guard_optional_questions([message], policy, fallback=None)
         metadata.setdefault("response_diagnostics", {}).setdefault("temporal_context", {}).update(policy.diagnostics())
+        from app.services.time_domain.followup_decision import may_be_event_followup
+        followup_gate = bool(workspace_id) and may_be_event_followup(message)
         if removed:
             if prepared_voice is not None:
                 from app.services.speech_output.delivery import discard_prepared_voice_output
@@ -224,6 +228,51 @@ async def emit_proactive_message(
                 if isinstance(row, dict)
                 else row.created_at
             )
+        elif followup_gate:
+            # Decide and insert under one per-workspace lock: two workers, a
+            # concurrent reply, or a takeover cannot slip past a stale decision.
+            from app.services.time_domain.followup_decision import checked_proactive_insert
+
+            from app.services.time_domain.followup_decision import summarize
+
+            try:
+                created_id, created_at, decision = await checked_proactive_insert(
+                    db,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    message=message,
+                    metadata=metadata,
+                    since=abort_if_user_replied_since,
+                    now=datetime.now(timezone.utc),
+                )
+            except Exception as gate_error:
+                # Unknown eligibility stops only this optional outreach.
+                logger.warning("[PROACTIVE-EMIT] follow-up eligibility unavailable: %s",
+                               type(gate_error).__name__)
+                created_id, created_at = None, None
+                decision = summarize([], status="unavailable")
+            metadata.setdefault("response_diagnostics", {}).setdefault(
+                "temporal_context", {})["followup_decision"] = decision
+            if not created_id:
+                # A reply during generation keeps the reason every other path logs.
+                reason = ("user_replied_during_generation" if decision.get("aborted") == "user_replied"
+                          else "followup_" + decision["aborted"] if decision.get("aborted")
+                          else "followup_decision_" + decision["status"]
+                          if decision["status"] != "checked" else "followup_repeat_suppressed")
+                if skip_reasons is not None:
+                    skip_reasons.append(reason)
+                logger.info(
+                    "[PROACTIVE-EMIT] optional follow-up not sent trigger=%s reason=%s",
+                    trigger_type, reason,
+                )
+                if prepared_voice is not None:
+                    from app.services.speech_output.delivery import (
+                        discard_prepared_voice_output,
+                    )
+
+                    await discard_prepared_voice_output(prepared_voice)
+                return ""
         elif abort_if_user_replied_since is not None:
             created_id, created_at = await _insert_unless_user_replied(
                 conversation_id=conversation_id,

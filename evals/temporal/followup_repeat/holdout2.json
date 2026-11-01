@@ -1,0 +1,271 @@
+{
+ "version": 1,
+ "frozen": true,
+ "cases": [
+  {
+   "id": "k01",
+   "template_family": "synonym_unanswered",
+   "history": [
+    [
+     1640,
+     "user",
+     "周五要去医院做手术"
+    ],
+    [
+     1440,
+     "assistant",
+     "手术安排好了吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "住院的事定下来没？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "k02",
+   "template_family": "different_instance",
+   "history": [
+    [
+     2880,
+     "user",
+     "下周有两场面试"
+    ],
+    [
+     1440,
+     "assistant",
+     "第一场面试怎么样？"
+    ],
+    [
+     1430,
+     "user",
+     "还行"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "第二场面试顺利吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "k03",
+   "template_family": "answered_resolved",
+   "history": [
+    [
+     360,
+     "user",
+     "今天去面签"
+    ],
+    [
+     300,
+     "assistant",
+     "面签顺利吗？"
+    ],
+    [
+     297,
+     "user",
+     "过了！"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "签证下来了吗？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "k04",
+   "template_family": "answered_pending_recent",
+   "history": [
+    [
+     180,
+     "user",
+     "刚考完期末"
+    ],
+    [
+     120,
+     "assistant",
+     "成绩什么时候出？"
+    ],
+    [
+     118,
+     "user",
+     "不知道呢"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "成绩出来没？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "k05",
+   "template_family": "user_reopen",
+   "history": [
+    [
+     4320,
+     "user",
+     "在准备述职"
+    ],
+    [
+     2880,
+     "assistant",
+     "述职准备得怎么样？"
+    ],
+    [
+     1440,
+     "assistant",
+     "述职顺利吗？"
+    ]
+   ],
+   "current_user_message": "述职总算结束了",
+   "question": "领导怎么评价的？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "k06",
+   "template_family": "stale_no_user_mention",
+   "history": [
+    [
+     12960,
+     "user",
+     "下个月出差"
+    ],
+    [
+     8640,
+     "assistant",
+     "出差的事定了吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "出差有消息了吗？",
+   "expected": "suppress",
+   "note": "用户提及已出观察窗"
+  },
+  {
+   "id": "k07",
+   "template_family": "generic_care",
+   "history": [
+    [
+     60,
+     "user",
+     "最近面试好多"
+    ],
+    [
+     30,
+     "assistant",
+     "面试累不累？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "今天过得怎么样？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "k08",
+   "template_family": "first_ask_from_context",
+   "history": [
+    [
+     30,
+     "user",
+     "我刚面完一家"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "感觉面试官怎么样？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "k09",
+   "template_family": "deictic_unanswered",
+   "history": [
+    [
+     600,
+     "user",
+     "上午去做了体检"
+    ],
+    [
+     480,
+     "assistant",
+     "体检还顺利吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "后来报告怎么说？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "k10",
+   "template_family": "different_family",
+   "history": [
+    [
+     600,
+     "user",
+     "上午体检，下午还要答辩"
+    ],
+    [
+     480,
+     "assistant",
+     "体检还顺利吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "答辩准备好了吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "k11",
+   "template_family": "illness_pending",
+   "history": [
+    [
+     2880,
+     "user",
+     "发烧了"
+    ],
+    [
+     2850,
+     "assistant",
+     "退烧了吗？"
+    ],
+    [
+     2840,
+     "user",
+     "还没退"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "身体好点了吗？",
+   "expected": "allow",
+   "note": "答复后已过冷却"
+  },
+  {
+   "id": "k12",
+   "template_family": "two_unanswered",
+   "history": [
+    [
+     5760,
+     "user",
+     "在申请奖学金"
+    ],
+    [
+     4320,
+     "assistant",
+     "申请交上去了吗？"
+    ],
+    [
+     2880,
+     "assistant",
+     "申请有结果了吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "奖学金批下来没？",
+   "expected": "suppress",
+   "note": ""
+  }
+ ]
+}

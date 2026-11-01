@@ -1282,9 +1282,26 @@ async def normalize_reply(ctx):
         ctx.replies, suppressed = guard_optional_questions(
             ctx.replies, ctx.followup_policy
         )
+        from app.services.time_domain.followup_decision import guard_reply_followups
+
+        before_followup_guard = list(ctx.replies)
+        ctx.replies, followup_decision = await guard_reply_followups(
+            ctx.replies,
+            user_id=ctx.user_id,
+            workspace_id=ctx.workspace_id,
+            now=ctx.turn_clock.now,
+            current_user_message=ctx.user_message,
+        )
+        suppressed += followup_decision["suppressed_count"]
+        if ctx.replies != before_followup_guard:
+            # Emotion/sticker must follow the text actually sent.
+            ctx.reply_emotion_pre = None
         ctx.response_diagnostics["temporal_context"][
             "suppressed_question_count"
         ] = suppressed
+        ctx.response_diagnostics["temporal_context"][
+            "followup_decision"
+        ] = followup_decision
     ctx.full_response = " ".join(ctx.replies)
     if ctx.reply_emotion_pre is not None:
         reply_emotion = ctx.reply_emotion_pre

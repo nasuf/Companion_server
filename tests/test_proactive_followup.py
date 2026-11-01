@@ -436,3 +436,31 @@ async def test_load_recent_turns_drops_noise_and_keeps_order(monkeypatch):
     monkeypatch.setattr(followup.db, "query_raw", AsyncMock(return_value=rows))
     turns = await followup._load_recent_turns("c-1")
     assert [t.id for t in turns] == ["u", "a"]
+
+
+@pytest.mark.parametrize("decision", [
+    {"status": "checked", "suppressed_count": 1, "decision": {"reason": "unanswered_cooldown"}},
+    {"status": "unavailable", "suppressed_count": 1, "decision": None},
+])
+async def test_suppressed_outcome_followup_is_not_sent_or_trimmed(monkeypatch, decision):
+    """A B message built around a repeated outcome question is skipped whole."""
+    from app.services.time_domain import followup_decision, topic_store
+    monkeypatch.setattr(topic_store, "load_snapshot", AsyncMock(return_value=topic_store.TopicSnapshot("no_active_restrictions")))
+    monkeypatch.setattr(followup, "render_prompt", AsyncMock(return_value="面试结果出来了吗？"))
+    monkeypatch.setattr(
+        followup, "db", SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(
+            return_value=SimpleNamespace(mbti=None, currentMbti=None),
+        ))),
+    )
+    monkeypatch.setattr(followup, "render_temporal_context", AsyncMock(return_value=""))
+    monkeypatch.setattr(followup_decision, "guard_reply_followups",
+                        AsyncMock(return_value=([""], {**decision, "version": 1})))
+    log = AsyncMock()
+    monkeypatch.setattr(followup, "_log", log)
+    diagnostics: dict = {}
+    text = await followup.generate_followup_message(
+        _state(), _stamped_turns(), datetime(2026, 9, 29, 4, 0, tzinfo=UTC), diagnostics=diagnostics)
+    assert text is None
+    assert diagnostics["temporal_context"]["followup_decision"]["status"] == decision["status"]
+    assert log.await_args.args[1:] == ("followup_skipped", {
+        "reason": "followup_decision", "decision": decision["decision"], "status": decision["status"]})

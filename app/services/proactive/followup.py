@@ -270,6 +270,23 @@ async def generate_followup_message(
     if message and repeats_recent_question(message, policy):
         await _log(state, "followup_skipped", {"reason": "repeated_question"})
         return None
+    if message:
+        from app.services.time_domain.followup_decision import guard_reply_followups
+
+        kept, decision = await guard_reply_followups(
+            [message], user_id=state.user_id, workspace_id=state.workspace_id,
+            now=now, current_user_message="", fallback="")
+        if diagnostics is not None:
+            diagnostics["temporal_context"]["followup_decision"] = decision
+        if decision["suppressed_count"] or decision["status"] in {"unavailable", "scope_unavailable"}:
+            # A proactive message built around a suppressed question is not
+            # sent with the question cut out; it is not sent at all.
+            await _log(state, "followup_skipped", {
+                "reason": "followup_decision",
+                "decision": decision.get("decision"),
+                "status": decision["status"],
+            })
+            return None
     return message
 
 

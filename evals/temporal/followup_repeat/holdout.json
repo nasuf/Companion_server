@@ -1,0 +1,441 @@
+{
+ "version": 1,
+ "frozen": true,
+ "cases": [
+  {
+   "id": "h01",
+   "template_family": "synonym_unanswered",
+   "history": [
+    [
+     1560,
+     "user",
+     "今天下午去医院做胃镜检查"
+    ],
+    [
+     1440,
+     "assistant",
+     "检查结果出来了吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "报告单拿到了没？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "h02",
+   "template_family": "synonym_unanswered",
+   "history": [
+    [
+     1470,
+     "user",
+     "刚投了三家公司的简历"
+    ],
+    [
+     1440,
+     "assistant",
+     "有公司回复你吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "投递有进展吗？",
+   "expected": "suppress",
+   "note": "第一问未命中家族词，第二问命中；属于边界"
+  },
+  {
+   "id": "h03",
+   "template_family": "synonym_same_session",
+   "history": [
+    [
+     90,
+     "user",
+     "下午要去面签"
+    ],
+    [
+     30,
+     "assistant",
+     "面签顺利吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "签证过了没？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "h04",
+   "template_family": "different_instance",
+   "history": [
+    [
+     4320,
+     "user",
+     "一面过了"
+    ],
+    [
+     2880,
+     "assistant",
+     "二面安排了吗？"
+    ],
+    [
+     2875,
+     "user",
+     "安排了，就是明天"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "三面的通知来了吗？",
+   "expected": "allow",
+   "note": "不同轮次"
+  },
+  {
+   "id": "h05",
+   "template_family": "different_instance",
+   "history": [
+    [
+     1440,
+     "user",
+     "昨天考了科目一"
+    ],
+    [
+     1410,
+     "assistant",
+     "科目一过了吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "科目二什么时候考？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "h06",
+   "template_family": "generic_word",
+   "history": [
+    [
+     60,
+     "user",
+     "工作上的事情有点烦"
+    ],
+    [
+     40,
+     "assistant",
+     "是什么事情让你烦呀？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "工作的事情后来解决了吗？",
+   "expected": "allow",
+   "note": "通用词不构成事件身份"
+  },
+  {
+   "id": "h07",
+   "template_family": "answered_resolved",
+   "history": [
+    [
+     300,
+     "user",
+     "今天去拔牙"
+    ],
+    [
+     240,
+     "assistant",
+     "拔牙疼不疼？"
+    ],
+    [
+     235,
+     "user",
+     "拔完了，搞定了"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "牙医那边怎么样了？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "h08",
+   "template_family": "answered_resolved",
+   "history": [
+    [
+     2880,
+     "user",
+     "要搬家了"
+    ],
+    [
+     2820,
+     "assistant",
+     "搬家顺利吗？"
+    ],
+    [
+     2810,
+     "user",
+     "搬完了"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "新家收拾好了吗？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "h09",
+   "template_family": "answered_pending_recent",
+   "history": [
+    [
+     120,
+     "user",
+     "在等期末成绩"
+    ],
+    [
+     60,
+     "assistant",
+     "成绩出来没？"
+    ],
+    [
+     55,
+     "user",
+     "还没出"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "分数公布了吗？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "h10",
+   "template_family": "answered_pending_elapsed",
+   "history": [
+    [
+     4320,
+     "user",
+     "在等期末成绩"
+    ],
+    [
+     4260,
+     "assistant",
+     "成绩出来没？"
+    ],
+    [
+     4255,
+     "user",
+     "还没出"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "分数公布了吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "h11",
+   "template_family": "two_unanswered_silence",
+   "history": [
+    [
+     5760,
+     "user",
+     "下个月出差去上海"
+    ],
+    [
+     4320,
+     "assistant",
+     "出差的行程定了吗？"
+    ],
+    [
+     2880,
+     "assistant",
+     "出差准备得怎么样啦？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "上海的出差顺利吗？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "h12",
+   "template_family": "user_reopen",
+   "history": [
+    [
+     5760,
+     "user",
+     "下个月出差去上海"
+    ],
+    [
+     4320,
+     "assistant",
+     "出差的行程定了吗？"
+    ],
+    [
+     2880,
+     "assistant",
+     "出差准备得怎么样啦？"
+    ]
+   ],
+   "current_user_message": "出差的机票刚订好",
+   "question": "出差住哪里呀？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "h13",
+   "template_family": "first_ask",
+   "history": [
+    [
+     30,
+     "user",
+     "明天有个汇报"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "汇报准备好了吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "h14",
+   "template_family": "non_event_question",
+   "history": [
+    [
+     20,
+     "user",
+     "今晚看了部电影"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "电影好看吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "h15",
+   "template_family": "unanswered_cooldown_recent",
+   "history": [
+    [
+     600,
+     "user",
+     "周末相亲"
+    ],
+    [
+     480,
+     "assistant",
+     "相亲感觉怎么样？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "那个人聊得来吗？",
+   "expected": "suppress",
+   "note": "未答 8 小时，冷却中"
+  },
+  {
+   "id": "h16",
+   "template_family": "unanswered_cooldown_elapsed",
+   "history": [
+    [
+     4320,
+     "user",
+     "周末相亲"
+    ],
+    [
+     4260,
+     "assistant",
+     "相亲感觉怎么样？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "相亲后来还有联系吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "h17",
+   "template_family": "deictic_unanswered",
+   "history": [
+    [
+     300,
+     "user",
+     "下午有个比赛"
+    ],
+    [
+     180,
+     "assistant",
+     "比赛结果如何？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "那件事后来怎么样了？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "h18",
+   "template_family": "different_family_same_day",
+   "history": [
+    [
+     300,
+     "user",
+     "上午答辩，下午还要去看病"
+    ],
+    [
+     180,
+     "assistant",
+     "答辩顺利吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "看医生怎么说？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "h19",
+   "template_family": "one_answer_many_questions",
+   "history": [
+    [
+     200,
+     "user",
+     "今天体检了"
+    ],
+    [
+     100,
+     "assistant",
+     "体检累不累？报告什么时候出？"
+    ],
+    [
+     95,
+     "user",
+     "还好，不累"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "体检报告出来了吗？",
+   "expected": "suppress",
+   "note": "答了一部分，冷却中"
+  },
+  {
+   "id": "h20",
+   "template_family": "illness_resolved",
+   "history": [
+    [
+     2880,
+     "user",
+     "感冒了"
+    ],
+    [
+     2820,
+     "assistant",
+     "感冒好些了吗？"
+    ],
+    [
+     2815,
+     "user",
+     "病好了"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "咳嗽还严重吗？",
+   "expected": "suppress",
+   "note": ""
+  }
+ ]
+}

@@ -1,0 +1,331 @@
+{
+ "version": 1,
+ "frozen": true,
+ "cases": [
+  {
+   "id": "d01",
+   "template_family": "synonym_unanswered",
+   "history": [
+    [
+     1500,
+     "user",
+     "我明天下午有个面试"
+    ],
+    [
+     1440,
+     "assistant",
+     "面试结果出来了吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "后来收到录用通知了吗？",
+   "expected": "suppress",
+   "note": "昨天问过未答，换说法"
+  },
+  {
+   "id": "d02",
+   "template_family": "synonym_same_session",
+   "history": [
+    [
+     50,
+     "user",
+     "刚考完试，好累"
+    ],
+    [
+     40,
+     "assistant",
+     "考得怎么样呀？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "成绩出来了没？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "d03",
+   "template_family": "different_instance",
+   "history": [
+    [
+     1500,
+     "user",
+     "周一有个面试"
+    ],
+    [
+     1440,
+     "assistant",
+     "面试有结果了吗？"
+    ],
+    [
+     1430,
+     "user",
+     "还没呢"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "今天的新面试顺利吗？",
+   "expected": "allow",
+   "note": "新面试是另一事件"
+  },
+  {
+   "id": "d04",
+   "template_family": "generic_word",
+   "history": [
+    [
+     120,
+     "user",
+     "最近工作好忙"
+    ],
+    [
+     100,
+     "assistant",
+     "工作上还顺利吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "体检报告出来了吗？",
+   "expected": "allow",
+   "note": "不同家族"
+  },
+  {
+   "id": "d05",
+   "template_family": "answered_resolved",
+   "history": [
+    [
+     300,
+     "user",
+     "下午去复查"
+    ],
+    [
+     200,
+     "assistant",
+     "复查结果怎么样？"
+    ],
+    [
+     190,
+     "user",
+     "结果出来了，一切正常"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "检查结果怎么样了？",
+   "expected": "suppress",
+   "note": ""
+  },
+  {
+   "id": "d06",
+   "template_family": "answered_pending_recent",
+   "history": [
+    [
+     300,
+     "user",
+     "交了签证材料"
+    ],
+    [
+     200,
+     "assistant",
+     "签证有消息吗？"
+    ],
+    [
+     190,
+     "user",
+     "还没消息，在等"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "签证批下来了吗？",
+   "expected": "suppress",
+   "note": "刚答过，冷却中"
+  },
+  {
+   "id": "d07",
+   "template_family": "answered_pending_elapsed",
+   "history": [
+    [
+     2880,
+     "user",
+     "交了签证材料"
+    ],
+    [
+     2820,
+     "assistant",
+     "签证有消息吗？"
+    ],
+    [
+     2810,
+     "user",
+     "还没消息，在等"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "签证批下来了吗？",
+   "expected": "allow",
+   "note": "答复后已过冷却"
+  },
+  {
+   "id": "d08",
+   "template_family": "two_unanswered_silence",
+   "history": [
+    [
+     4320,
+     "user",
+     "下周要答辩"
+    ],
+    [
+     2880,
+     "assistant",
+     "答辩准备得怎么样？"
+    ],
+    [
+     1440,
+     "assistant",
+     "答辩顺利吗？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "答辩结束了吗？",
+   "expected": "suppress",
+   "note": "两次未答进入静默"
+  },
+  {
+   "id": "d09",
+   "template_family": "user_reopen",
+   "history": [
+    [
+     2880,
+     "user",
+     "下周要答辩"
+    ],
+    [
+     1500,
+     "assistant",
+     "答辩准备得怎么样？"
+    ],
+    [
+     1440,
+     "assistant",
+     "答辩顺利吗？"
+    ]
+   ],
+   "current_user_message": "答辩今天终于结束了",
+   "question": "答辩老师问了什么？",
+   "expected": "allow",
+   "note": "用户主动重开"
+  },
+  {
+   "id": "d10",
+   "template_family": "first_ask",
+   "history": [
+    [
+     60,
+     "user",
+     "明早去搬家"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "搬家累不累？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "d11",
+   "template_family": "non_event_question",
+   "history": [
+    [
+     30,
+     "user",
+     "今天吃了火锅"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "火锅好吃吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "d12",
+   "template_family": "unanswered_cooldown_elapsed",
+   "history": [
+    [
+     2880,
+     "user",
+     "最近在准备比赛"
+    ],
+    [
+     2850,
+     "assistant",
+     "比赛什么时候呀？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "比赛准备得怎么样了？",
+   "expected": "allow",
+   "note": "一次未答且已过 24h"
+  },
+  {
+   "id": "d13",
+   "template_family": "deictic_unanswered",
+   "history": [
+    [
+     200,
+     "user",
+     "上午面了一家公司"
+    ],
+    [
+     100,
+     "assistant",
+     "面试感觉怎么样？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "后来有结果没？",
+   "expected": "suppress",
+   "note": "指代追问同一事件"
+  },
+  {
+   "id": "d14",
+   "template_family": "different_family_same_day",
+   "history": [
+    [
+     200,
+     "user",
+     "上午面了一家公司，下午还要体检"
+    ],
+    [
+     100,
+     "assistant",
+     "面试感觉怎么样？"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "体检顺利吗？",
+   "expected": "allow",
+   "note": ""
+  },
+  {
+   "id": "d15",
+   "template_family": "illness_resolved",
+   "history": [
+    [
+     1440,
+     "user",
+     "有点发烧"
+    ],
+    [
+     1380,
+     "assistant",
+     "烧退了吗？"
+    ],
+    [
+     1370,
+     "user",
+     "已经好了"
+    ]
+   ],
+   "current_user_message": "",
+   "question": "身体好点了吗？",
+   "expected": "suppress",
+   "note": ""
+  }
+ ]
+}
