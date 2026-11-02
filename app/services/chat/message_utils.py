@@ -271,10 +271,24 @@ def collapse_turn_fragments(
     Only affects the reply prompt — the memory pipeline still reads the original
     per-row messages (its watermark tracks message ids individually).
 
-    No-op when there is 0/1 fragment or nothing combined to inject.
+    A message sent while the previous reply was still being generated is older
+    than that reply; left in time order, the prompt ends with the AI's own reply
+    and the model answers the previous user turn again (2026-11-02: 9.8% of such
+    turns restated it). Such a turn moves to the end, after those AI rows; its
+    time prefix is then earlier than the reply above it, which the
+    「上一轮已经说过」section explains. Only AI rows may follow it: a later user
+    message (already saved) or a synthetic current row (sub-intent fragment) means
+    the order is not this race, and moving would put the wrong message last.
     """
     if len(turn_message_ids) <= 1 or not combined_text.strip():
-        return messages
+        current = [m for m in messages if m.get("id") in turn_message_ids]
+        if not current or messages[-len(current):] == current:
+            return messages
+        first = next(i for i, m in enumerate(messages) if m.get("id") in turn_message_ids)
+        after = [m for m in messages[first:] if m.get("id") not in turn_message_ids]
+        if any(m.get("role") != "assistant" or m.get("synthetic_current") for m in after):
+            return messages
+        return [m for m in messages if m.get("id") not in turn_message_ids] + current
 
     kept = [m for m in messages if m.get("id") not in turn_message_ids]
     if len(kept) == len(messages):

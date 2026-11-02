@@ -98,6 +98,9 @@ from app.services.prompting.defaults import (
     WEB_SEARCH_RECENT_TITLES_PROMPT,
     WEB_SEARCH_USAGE_PROMPT,
     CHAT_REPETITION_GUARD_PROMPT,
+    CHAT_PREVIOUS_REPLY_ACK_PROMPT,
+    CHAT_PREVIOUS_REPLY_OVERLAP_PROMPT,
+    CHAT_PREVIOUS_REPLY_RETRY_PROMPT,
     LIFE_OVERVIEW_PROMPT,
     LIGHT_ATTACK_REPLY_PROMPT,
     LOW_PATIENCE_REPLY_PROMPT,
@@ -1428,6 +1431,26 @@ PROMPT_DEFINITIONS = [
         "还忙吗」结尾). 代码在最近 6 次 AI 回复里检出出现 ≥2 次的句子 "
         "(chat/repetition_guard), 有才注入, 放在本轮 system 段. 占位符 {phrases}.",
         CHAT_REPETITION_GUARD_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.previous_reply_ack_section", "刚说过的话（对方附和）", "聊天热路径", "聊天",
+        "【工程补丁】对方只回了「是呀/嗯/好」这类附和时, 主回复常把上一轮换个说法再说一遍 "
+        "(2026-11-02 生产 7 天: 5.2%, 其余轮次 1.8%). 代码判定附和才注入, 放在本轮 system "
+        "段末尾. 占位符 {previous} = 上一轮回复原文.",
+        CHAT_PREVIOUS_REPLY_ACK_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.previous_reply_overlap_section", "刚说过的话（上一轮在这句之后）", "聊天热路径", "聊天",
+        "【工程补丁】对方连发两句, 第二句到时第一句的回复正在生成: 上一轮回复排在当前消息之后, "
+        "可能已顺带接过它 (2026-11-02 生产 7 天: 9.8% 复述上一轮). 代码检出才注入. "
+        "占位符 {previous} = 上一轮回复原文.",
+        CHAT_PREVIOUS_REPLY_OVERLAP_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.previous_reply_retry", "复述上一轮时重写", "聊天热路径", "聊天",
+        "【工程补丁】主回复的每一条都是上一轮的复述时 (按相邻两字重合度判定), 回复发出前带着这段"
+        "再生成一次, 作为最后一条 system 追加在主 prompt 末尾. 占位符 {previous} = 上一轮回复原文.",
+        CHAT_PREVIOUS_REPLY_RETRY_PROMPT,
     ),
     PromptDefinition(
         "chat.web_search_decision", "联网搜索判定", "日常交流", "意图",

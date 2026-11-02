@@ -8,7 +8,14 @@ It deliberately has no checkpoint or replay implementation.
 from __future__ import annotations
 
 from app.services.chat.memory_usage import submit_memory_usage
-from app.services.chat.repetition_guard import find_repeated_ai_phrases
+from app.services.chat.repetition_guard import (
+    drop_restated_bubbles,
+    find_repeated_ai_phrases,
+    previous_ai_turn,
+    previous_reply_situation,
+    restated_overlap,
+    restated_retry_note,
+)
 from app.services.time_domain.query import resolve_temporal_query
 from app.services.time_domain.context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
 from app.services.time_domain.followup import guard_optional_questions
@@ -1037,6 +1044,9 @@ async def prepare_reply(ctx):
             location_context=ctx.location_context,
             last_reply_count=ctx.last_reply_count,
             repeated_phrases=find_repeated_ai_phrases(ctx.messages_dicts),
+            previous_reply=previous_reply_situation(
+                ctx.messages_dicts, ctx.current_turn_ids, ctx.user_message
+            ),
             needs_web_search=ctx.needs_web_search,
             discussed_titles=services.extract_discussed_titles(
                 ctx.messages_dicts, current_message=ctx.user_message
@@ -1168,6 +1178,36 @@ def _previous_user_text(ctx) -> str | None:
     return None
 
 
+async def _rewrite_if_restated(ctx, services, generate_kwargs) -> None:
+    """每一条都是上一轮的复述时, 回复发出前带着提示重写一次。"""
+    if ctx.reply_is_fallback or ctx.contradiction_inquiry or ctx.crisis_care_turn:
+        return
+    # 只在容易复述的两种情形 (对方附和 / 上一轮回复晚于本条消息) 里判, 其余轮次不动
+    if previous_reply_situation(ctx.messages_dicts, ctx.current_turn_ids, ctx.user_message) is None:
+        return
+    previous, _ = previous_ai_turn(ctx.messages_dicts, ctx.current_turn_ids)
+    if not drop_restated_bubbles(ctx.replies, previous, ctx.user_message)[2]:
+        return
+    note = await restated_retry_note(previous)
+    if note is None:
+        ctx.response_diagnostics["restated_retry"] = "disabled"
+        return
+    build = ctx._build_main_chat_messages
+
+    async def with_note():
+        return [*await build(), {"role": "system", "content": note}]
+
+    retry = await services._generate_reply(
+        **{**generate_kwargs, "chat_messages_factory": with_note, "force_main_prompt": True}
+    )
+    replies, _raw, is_fallback, emotion = retry
+    if is_fallback or drop_restated_bubbles(replies, previous, ctx.user_message)[2]:
+        ctx.response_diagnostics["restated_retry"] = "still_restated"
+        return
+    ctx.replies, ctx.reply_emotion_pre = replies, emotion
+    ctx.response_diagnostics["restated_retry"] = "rewritten"
+
+
 async def generate_reply(ctx):
     services = ctx.services
     # New assertions are consumed by the source-checked historical route.
@@ -1211,12 +1251,7 @@ async def generate_reply(ctx):
             "truncated": len(ctx.classified_memories or []) > 500,
             "complete_history": False,
         }
-    (
-        ctx.replies,
-        _raw_response,
-        ctx.reply_is_fallback,
-        ctx.reply_emotion_pre,
-    ) = await services._generate_reply(
+    generate_kwargs = dict(
         user_id=ctx.user_id,
         workspace_id=ctx.workspace_id,
         contradiction_inquiry=ctx.contradiction_inquiry,
@@ -1264,6 +1299,13 @@ async def generate_reply(ctx):
         diagnostics=ctx.response_diagnostics,
         exclude_message_ids=ctx.current_turn_ids,
     )
+    (
+        ctx.replies,
+        _raw_response,
+        ctx.reply_is_fallback,
+        ctx.reply_emotion_pre,
+    ) = await services._generate_reply(**generate_kwargs)
+    await _rewrite_if_restated(ctx, services, generate_kwargs)
     if getattr(ctx, "temporal_validity_records", None):
         from app.services.time_domain.validity_context import assertions_still_available
 
@@ -1401,6 +1443,32 @@ async def normalize_reply(ctx):
         ctx.response_diagnostics["temporal_context"][
             "followup_decision"
         ] = followup_decision
+    situation = None
+    if not (ctx.crisis_care_turn or ctx.reply_is_fallback or ctx.contradiction_inquiry
+            or historical_answer):
+        situation = previous_reply_situation(
+            ctx.messages_dicts, ctx.current_turn_ids, ctx.user_message
+        )
+    if situation is not None:
+        # 兜底: 和上一轮基本是同一句话的气泡不发。话题承接句本来就是回到上一轮的
+        # 话题, 不参与判断; 全是复述时不动 (generate_reply 已经重写过一次)。
+        previous, _ = previous_ai_turn(ctx.messages_dicts, ctx.current_turn_ids)
+        lead = list(ctx.continuation_lines or [])
+        lead = lead if ctx.replies[: len(lead)] == lead else []
+        body, dropped, all_restated = drop_restated_bubbles(
+            ctx.replies[len(lead):], previous, ctx.user_message
+        )
+        if dropped:
+            ctx.replies = [*lead, *body]
+            ctx.reply_emotion_pre = None  # 情绪/贴纸要跟实际发出的文字走
+        ctx.response_diagnostics["restated_bubbles"] = {
+            "situation": situation[0],
+            "previous_bubbles": len(previous),
+            "dropped": dropped,
+            "all_restated": all_restated,
+            "max_overlap": round(max(
+                (restated_overlap(r, previous) for r in body), default=0.0), 2),
+        }
     ctx.full_response = " ".join(ctx.replies)
     if ctx.reply_emotion_pre is not None:
         reply_emotion = ctx.reply_emotion_pre

@@ -743,6 +743,9 @@ async def build_system_prompt(
     last_reply_count: int | None = None,
     # 最近几次回复里已出现 ≥2 次的句子 (chat/repetition_guard), 注入「避免重复」段.
     repeated_phrases: list[str] | None = None,
+    # ("ack" | "overlap", 上一轮原话) (chat/repetition_guard.previous_reply_situation),
+    # 注入「刚说过的话」/「上一轮已经说过」段, 防止把上一轮换个说法再说一遍.
+    previous_reply: tuple[str, str] | None = None,
     # True → 本轮主回复走联网搜索, 追加「联网结果使用」段纠正播报腔与重复.
     needs_web_search: bool = False,
     # 最近几轮出现过的作品名, 仅联网轮使用 (见 llm/web_search_gate).
@@ -1201,6 +1204,18 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "避免重复")
 
+    situation, previous_text = previous_reply or (None, "")
+    for kind, title, key in (("ack", "刚说过的话", "chat.previous_reply_ack_section"),
+                             ("overlap", "上一轮已经说过", "chat.previous_reply_overlap_section")):
+        tpl = await _get_optional_prompt(key) if situation == kind else None
+        if tpl is not None:
+            _append_section(
+                sections, components, title,
+                _render_section(tpl, {"previous": previous_text}), prompt_key=key,
+            )
+        else:
+            _record_skipped_section(diagnostics, title)
+
     # 联网结果使用规则: 只在本轮真的会联网时注入. 搜索结果由 provider 作为工具
     # 输出追加在上下文最末尾, 显著性压过对话历史和记忆 — 实测模型会照榜单念、
     # 重复端出刚聊过的片子、每轮宣告"刚搜了下". 本段同样放末尾争显著性.
@@ -1608,7 +1623,8 @@ def build_chat_messages(
 
 
 # 本轮段里紧贴生成位置的输出格式要求; 其余本轮参考信息放在当前用户消息之前.
-_TURN_TAIL_TITLES = ("条数变化", "避免重复", "联网结果使用", "刚聊过的作品", "情绪标记")
+_TURN_TAIL_TITLES = ("条数变化", "避免重复", "刚说过的话", "上一轮已经说过", "联网结果使用", "刚聊过的作品",
+                     "情绪标记")
 
 
 def _place_turn_system(result: list[dict], turn: str) -> None:
