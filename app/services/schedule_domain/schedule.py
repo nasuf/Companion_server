@@ -316,9 +316,9 @@ def _log_routine_outcome(agent_id: str, date: datetime, meta: dict) -> None:
     logger.info(
         "[SCHEDULE-ROUTINE] agent=%s date=%s routine=%s conformance=%s",
         agent_id[:8], date.date(), meta.get("routine"), meta.get("conformance"),
-        extra={"event": EVT_SCHEDULE_ROUTINE, "routine": meta.get("routine"),
-               "conformance": meta.get("conformance"),
-               "violation_count": len(meta.get("first_violations") or [])},
+        # 只用已有的 Axiom 列名 (数据集有 257 列上限, 新列名会让整批日志被拒)。
+        extra={"event": EVT_SCHEDULE_ROUTINE, "outcome": meta.get("conformance"),
+               "reason": meta.get("routine")},
     )
 
 
