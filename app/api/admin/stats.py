@@ -689,6 +689,23 @@ async def media_usage(
     text_by_user = {str(r["user_id"]): r for r in text_user_rows}
     tts_total = tts_totals_rows[0] if tts_totals_rows else {}
     tts_milliseconds = int(tts_total.get("total_milliseconds", 0) or 0)
+    media_user_ids = {
+        str(r.get("user_id"))
+        for r in (*user_rows, *tts_user_rows)
+        if r.get("user_id")
+    }
+    if media_user_ids:
+        from app.services.user_profile import admin_user_labels_for_ids
+
+        media_labels = await admin_user_labels_for_ids(list(media_user_ids))
+        for row in user_rows:
+            uid = str(row.get("user_id") or "")
+            if uid in media_labels:
+                row["username"] = media_labels[uid]
+        for row in tts_user_rows:
+            uid = str(row.get("user_id") or "")
+            if uid in media_labels:
+                row["username"] = media_labels[uid]
     return {
         "window": {
             "start": start.isoformat() if start else None,
@@ -1320,6 +1337,13 @@ async def online_users(
                 "email": getattr(user, "email", None),
                 "methods": _login_methods(user, idents_by_user.get(uid, [])),
             })
+        from app.services.user_profile import admin_user_labels_for_ids
+
+        labels = await admin_user_labels_for_ids(page_ids)
+        for item in items:
+            uid = item.get("user_id")
+            if uid and uid in labels:
+                item["username"] = labels[uid]
 
     return {
         "total": total,
@@ -1581,6 +1605,16 @@ async def _compute_monitoring(days: int, cohort: Literal["external", "all"] = "e
         }
         for r in cost_rows
     ]
+    if cost_top_users:
+        from app.services.user_profile import admin_user_labels_for_ids
+
+        labels = await admin_user_labels_for_ids(
+            [row["user_id"] for row in cost_top_users if row.get("user_id")]
+        )
+        for row in cost_top_users:
+            uid = row.get("user_id")
+            if uid and uid in labels:
+                row["username"] = labels[uid]
 
     activity_row = activity_rows[0] if activity_rows else {
         "dau": 0, "wau": 0, "mau": 0, "active_5min": 0,

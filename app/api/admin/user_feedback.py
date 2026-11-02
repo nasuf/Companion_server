@@ -17,12 +17,19 @@ router = APIRouter(prefix="/admin-api/user-feedback", tags=["admin-user-feedback
 _ALLOWED_STATUSES = {"open", "read", "resolved"}
 
 
-def _serialize(row, *, admin_media: bool = True) -> UserFeedbackItem:
+def _serialize(
+    row,
+    *,
+    admin_media: bool = True,
+    display_label: str | None = None,
+) -> UserFeedbackItem:
     user = getattr(row, "user", None)
     username = getattr(user, "username", None) if user else None
-    display_name = getattr(user, "displayName", None) if user else None
-    if isinstance(display_name, str):
-        display_name = display_name.strip() or None
+    display_name = display_label
+    if display_name is None and user is not None:
+        raw = getattr(user, "displayName", None)
+        if isinstance(raw, str):
+            display_name = raw.strip() or None
     image_keys = list(getattr(row, "imageKeys", None) or [])
     return UserFeedbackItem(
         id=row.id,
@@ -64,8 +71,15 @@ async def list_user_feedback(
         skip=offset,
         take=limit,
     )
+    from app.services.user_profile import admin_user_labels_for_ids
+
+    user_ids = [row.userId for row in rows if row.userId]
+    labels = await admin_user_labels_for_ids(user_ids)
     return UserFeedbackListResponse(
-        items=[_serialize(row) for row in rows],
+        items=[
+            _serialize(row, display_label=labels.get(row.userId))
+            for row in rows
+        ],
         total=total,
     )
 

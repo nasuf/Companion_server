@@ -294,7 +294,7 @@ async def read_costs(
     coverage = await fact_coverage(start, end)
     rows = await db.query_raw(
         f"""SELECT f.local_date::text AS day,f.user_id,f.agent_id,f.category,f.scope,f.data,
-       COALESCE(u.display_name,u.username,'系统任务') AS username,COALESCE(a.name,'未关联 Agent') AS agent_name
+       u.username,COALESCE(a.name,'未关联 Agent') AS agent_name
        FROM stats_cost_daily f LEFT JOIN users u ON u.id=f.user_id LEFT JOIN ai_agents a ON a.id=f.agent_id
        WHERE f.local_date BETWEEN $1::date AND $2::date AND f.definition_version=$3
          AND ($4='' OR f.agent_id=$4) AND (f.user_id IS NULL OR u.status<>'deleting')
@@ -360,6 +360,14 @@ async def read_costs(
     total = blank()
     for data in categories.values():
         accumulate(total, data)
+    from app.services.user_profile import admin_user_labels_for_ids
+
+    label_ids = list(
+        set(identities.keys()) | set(media_users.keys()) | set(users.keys())
+    )
+    labels = await admin_user_labels_for_ids(label_ids)
+    for uid, label in labels.items():
+        identities[uid] = label
     return {
         "start": str(start),
         "end": str(end),

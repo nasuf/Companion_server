@@ -466,3 +466,44 @@ class TestResolveDisplayIdentity:
         await up.resolve_display_identity(user)
 
         assert find_many.await_count == 1
+
+
+class TestResolveAdminUserLabel:
+    @staticmethod
+    def _idents(*, wechat: dict | None = None, phone: str | None = None):
+        identities = []
+        if wechat is not None:
+            identities.append(
+                SimpleNamespace(
+                    provider="wechat", rawProfile=wechat, updatedAt="2026-01-01T00:00:00"
+                )
+            )
+        if phone is not None:
+            identities.append(
+                SimpleNamespace(
+                    provider="phone", providerAccountId=phone, updatedAt="2026-01-01T00:00:00"
+                )
+            )
+        return identities
+
+    def test_custom_name_wins(self):
+        user = SimpleNamespace(id="u1", displayName="露露", username="wx_abc")
+        assert up.resolve_admin_user_label(user, []) == "露露"
+
+    def test_wechat_then_phone_then_username(self):
+        user = SimpleNamespace(id="u1", displayName=None, username="wx_abc")
+        assert (
+            up.resolve_admin_user_label(
+                user, self._idents(wechat={"nickname": "河豚"}, phone="13812345678")
+            )
+            == "河豚"
+        )
+
+        user2 = SimpleNamespace(id="u2", displayName=None, username="u2")
+        assert (
+            up.resolve_admin_user_label(user2, self._idents(phone="13812345678"))
+            == "138****5678"
+        )
+
+        user3 = SimpleNamespace(id="u3", displayName=None, username="wx_only")
+        assert up.resolve_admin_user_label(user3, []) == "wx_only"

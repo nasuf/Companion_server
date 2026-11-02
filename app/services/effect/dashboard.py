@@ -334,7 +334,7 @@ async def users(
         status,
     ]
     cte = f"""WITH base AS (
-      SELECT u.id, COALESCE(NULLIF(u.display_name,''),u.username) AS username, u.created_at AS registered_at, u.signup_platform AS platform,
+      SELECT u.id, u.username, u.created_at AS registered_at, u.signup_platform AS platform,
         {defs.internal_user_sql("u")} AS internal,
         MAX(f.local_date) FILTER(WHERE f.chatted) AS last_chat_day,
         MAX(f.local_date) FILTER(WHERE f.chatted OR f.opened) AS last_active_day,
@@ -385,6 +385,12 @@ async def users(
                 "cost_cny",
             ):
                 row[field] = None
+    if rows:
+        from app.services.user_profile import admin_user_labels_for_ids
+
+        labels = await admin_user_labels_for_ids([row["id"] for row in rows])
+        for row in rows:
+            row["username"] = labels.get(row["id"], row.get("username") or row["id"])
     return {
         "coverage": coverage,
         "items": rows,
@@ -432,12 +438,17 @@ async def journey(user_id: str, start: date, end: date) -> dict | None:
     from app.db import db
 
     identity = await db.query_raw(
-        f"SELECT id,COALESCE(NULLIF(display_name,''),username) AS username,{defs.internal_user_sql('u')} AS internal FROM users u "
+        f"SELECT id, username, {defs.internal_user_sql('u')} AS internal FROM users u "
         "WHERE id=$1 AND status <> 'deleting'",
         user_id,
     )
     if not identity:
         return None
+    from app.services.user_profile import admin_user_labels_for_ids
+
+    user_row = identity[0]
+    labels = await admin_user_labels_for_ids([user_id])
+    user_row = {**user_row, "username": labels.get(user_id, user_row["username"])}
     rows = await db.query_raw(
         """SELECT local_date::text AS day, opened,chatted,user_messages,turns,sessions,
            proactive_received,proactive_answered,feedback_count,cost_cny::float8,spontaneous,first_message_at,
@@ -505,7 +516,7 @@ async def journey(user_id: str, start: date, end: date) -> dict | None:
                 }
             )
     return {
-        "user": identity[0],
+        "user": user_row,
         "items": items,
         "coverage": coverage,
         "start": str(start),

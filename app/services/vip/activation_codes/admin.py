@@ -224,6 +224,10 @@ async def list_redemptions(
         """,
         *args,
     )
+    user_ids = [str(_field(r, "user_id")) for r in rows if _field(r, "user_id")]
+    from app.services.user_profile import admin_user_labels_for_ids
+
+    user_labels = await admin_user_labels_for_ids(user_ids)
     items = [
         {
             "id": str(_field(r, "id")),
@@ -231,7 +235,10 @@ async def list_redemptions(
             "code": format_code_display(str(_field(r, "code"))),
             "code_preview": _mask_code(str(_field(r, "code"))),
             "user_id": str(_field(r, "user_id")),
-            "user_display_name": _field(r, "user_display_name"),
+            "user_display_name": user_labels.get(
+                str(_field(r, "user_id")),
+                _field(r, "user_display_name"),
+            ),
             "user_email": _field(r, "user_email"),
             "duration_days": int(_field(r, "duration_days") or 0),
             "status": str(_field(r, "status")),

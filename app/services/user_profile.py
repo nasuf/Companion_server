@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import unicodedata
 
 from fastapi import HTTPException
@@ -61,6 +62,44 @@ def visible_text_or_none(value: object) -> str | None:
             continue
         return trimmed
     return None
+
+
+def mask_phone_for_admin(phone: str | None) -> str | None:
+    if not phone or len(phone) != 11 or not phone.isdigit():
+        return phone
+    return f"{phone[:3]}****{phone[-4:]}"
+
+
+def resolve_admin_user_label(user, identities: list) -> str:
+    """Admin/console label: custom display name → WeChat nickname → masked phone → username."""
+    local_name = visible_text_or_none(getattr(user, "displayName", None))
+    if local_name:
+        return local_name
+    wechat_name, _ = _wechat_identity_profile(identities)
+    if wechat_name:
+        return wechat_name
+    phone = _phone_number(identities)
+    if phone:
+        return mask_phone_for_admin(phone) or phone
+    username = visible_text_or_none(getattr(user, "username", None))
+    return username or getattr(user, "id", "") or "(未知用户)"
+
+
+async def admin_user_labels_for_ids(user_ids: list[str]) -> dict[str, str]:
+    if not user_ids:
+        return {}
+    unique = list(dict.fromkeys(user_ids))
+    users, identities = await asyncio.gather(
+        db.user.find_many(where={"id": {"in": unique}}),
+        db.authidentity.find_many(where={"userId": {"in": unique}}),
+    )
+    by_user: dict[str, list] = {}
+    for identity in identities:
+        by_user.setdefault(identity.userId, []).append(identity)
+    labels: dict[str, str] = {}
+    for user in users:
+        labels[user.id] = resolve_admin_user_label(user, by_user.get(user.id, []))
+    return labels
 
 
 async def resolve_display_identity(user) -> tuple[str | None, str | None]:
