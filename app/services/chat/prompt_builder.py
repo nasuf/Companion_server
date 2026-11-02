@@ -721,6 +721,8 @@ async def build_system_prompt(
     time_memories: list[str] | None = None,
     # 聚合类时间问题的事件时间线 (hybrid_retrieve 命中聚合特征时才产出)
     timeline: str | None = None,
+    # TIME08 次数/先后/间隔的程序计算结果 (time_domain/compute.render_plan)
+    temporal_computation: str = "",
     l3_memories: list[str] | None = None,
     ai_status: dict | None = None,
     memory_relevance: str = "medium",
@@ -1147,6 +1149,19 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "事件时间线")
+
+    # TIME08: 次数/先后/间隔由程序算好, 紧跟时间线 (同一类问题, 每问都不同)。
+    computation_tpl = (
+        await _get_optional_prompt("chat.temporal_computation_section") if temporal_computation else None
+    )
+    if temporal_computation and computation_tpl is not None:
+        _append_section(
+            sections, components, "时间计算结果",
+            _render_section(computation_tpl, {"facts": temporal_computation}),
+            prompt_key="chat.temporal_computation_section",
+        )
+    else:
+        _record_skipped_section(diagnostics, "时间计算结果")
 
     # Spec §3.2 step 3: L3 distant memories (awakened only when relevant)
     l3_tpl = await _get_optional_prompt("chat.l3_memory_section") if l3_memories else None

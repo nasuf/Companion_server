@@ -58,6 +58,7 @@ _MAIN_PROMPT_SECTION_COMPONENTS = [
     ("## 回合时间与追问边界", "chat.temporal_context"),
     ("## 事件日期证据", "chat.temporal_evidence"),
     ("## 事件时间线", "chat.timeline_section"),
+    ("## 时间计算结果", "chat.temporal_computation_section"),
     ("## 你的隐性状态约束", "chat.ai_state_constraint"),
     ("## 你的作息", "chat.agent_routine_section"),
     ("## 联网结果使用", "chat.web_search_usage"),
@@ -94,6 +95,7 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "chat.ai_state_constraint",
     # TIME12 固定作息段 (主回复 section) 与每日作息生成的追加约束段
     "chat.agent_routine_section",
+    "chat.temporal_computation_section",
     "schedule.routine_constraints",
     "schedule.routine_retry",
     # 时间核验判定无依据时直接发出的那一句, 不进任何 LLM prompt

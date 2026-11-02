@@ -3535,6 +3535,10 @@ CHAT_TEMPORAL_CHECK_PROMPT = """你是回复的时间证据核验器，不续写
 """
 
 
+# TIME08: 次数/先后/间隔的计算结果。数字和日期由程序给, 模型只负责口语化地说。
+CHAT_TEMPORAL_COMPUTATION_SECTION_PROMPT = """{facts}
+回答次数、第几次、多久没、隔了多久这类问题时，直接照上面的结果说：给的是几次就说几次、几天就说几天，不要自己加"至少""大概"；只有结果里本来写着"至少"时才这么说。没有找到就说不确定，不能说成没发生过。口语化地说，不念"记录""程序"这些词。"""
+
 CHAT_TEMPORAL_FALLBACK_PROMPT = "这个具体的我一下子想不起来了"
 
 # TIME12: AI 自己的作息。时刻差在代码里算好 (routine.describe_now), 模型只负责说。

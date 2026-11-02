@@ -12,6 +12,7 @@ from app.services.prompting.defaults import (
     CHAT_TEMPORAL_EVIDENCE_PROMPT,
     CHAT_TEMPORAL_CHECK_PROMPT,
     CHAT_TEMPORAL_FALLBACK_PROMPT,
+    CHAT_TEMPORAL_COMPUTATION_SECTION_PROMPT,
     CHAT_AGENT_ROUTINE_SECTION_PROMPT,
     PERSONA_GROUNDING_CONTEXT_PROMPT,
     PERSONA_GROUNDING_CHECK_PROMPT,
@@ -256,6 +257,12 @@ PROMPT_DEFINITIONS = [
         "chat.temporal_check", "回复事件时间核验", "聊天热路径", "聊天",
         "【工程】仅在日期查询存在证据缺口时核验具体事件断言。占位符 {date}/{question}/{evidence}/{reply}。",
         CHAT_TEMPORAL_CHECK_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.temporal_computation_section", "时间计算结果段落", "聊天热路径", "聊天",
+        "【工程】TIME08 次数/先后/间隔问句: 程序按天去重算出的结果及其完整性。占位符 {facts}。"
+        "只在命中这类问句且算出结果时出现。",
+        CHAT_TEMPORAL_COMPUTATION_SECTION_PROMPT,
     ),
     PromptDefinition(
         "chat.temporal_fallback", "时间核验兜底回复", "聊天热路径", "聊天",

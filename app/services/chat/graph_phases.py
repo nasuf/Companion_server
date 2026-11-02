@@ -694,6 +694,7 @@ async def prepare_context(ctx):
         temporal_query=ctx.temporal_query,
     )
     ctx.temporal_evidence = await render_event_scope(ctx.response_diagnostics)
+    ctx.temporal_computation = "" if ctx.crisis_care_turn else await _temporal_computation(ctx)
     ctx.prompt_user_emotion = ctx.fetched.user_emotion
     ctx.portrait = ctx.fetched.portrait
     ctx.schedule = ctx.fetched.schedule
@@ -1006,6 +1007,7 @@ async def prepare_reply(ctx):
             temporal_evidence=ctx.temporal_evidence,
             time_memories=ctx.time_memories or None,
             timeline=getattr(ctx.fetched, "timeline", None),
+            temporal_computation=getattr(ctx, "temporal_computation", ""),
             l3_memories=ctx.l3_memories or None,
             memory_relevance=ctx.memory_relevance,
             reengagement_gap_seconds=ctx.reengagement_gap_seconds,
@@ -1101,6 +1103,31 @@ async def prepare_reply(ctx):
 
 
 _FOLLOWUP_CONTEXT_SECONDS = 600
+
+
+_COMPUTE_TIMEOUT_SECONDS = 1.5
+
+
+async def _temporal_computation(ctx) -> str:
+    """次数/先后/间隔问句: 程序算好的结果 (TIME08)。失败或超时只是没有这段。"""
+    import asyncio
+    from app.services.time_domain.compute import plan_for_question, render_plan
+
+    diagnostics = ctx.response_diagnostics.setdefault("temporal_context", {})
+    try:
+        plan = await asyncio.wait_for(plan_for_question(
+            ctx.user_message, ctx.temporal_query, user_id=ctx.user_id,
+            workspace_id=ctx.workspace_id, now=ctx.turn_clock.now,
+        ), timeout=_COMPUTE_TIMEOUT_SECONDS)
+    except Exception as exc:  # 超时也在这里: 只是少一段, 不影响回复
+        diagnostics["computation"] = {"version": 1, "status": "unavailable",
+                                      "reason": type(exc).__name__}
+        return ""
+    if plan is None:
+        diagnostics["computation"] = {"version": 1, "status": "not_requested"}
+        return ""
+    diagnostics["computation"] = plan.diagnostics()
+    return render_plan(plan)
 
 
 def _previous_user_text(ctx) -> str | None:
@@ -1217,6 +1244,7 @@ async def generate_reply(ctx):
         # 问到双方在哪时必须走带「你们各自在哪」段的主 prompt, tier 轻量 prompt 没有它
         force_main_prompt=bool(ctx.offering_context)
         or bool(ctx.continuation_lines)
+        or bool(getattr(ctx, "temporal_computation", ""))
         or services.asks_about_user_location(ctx.user_message),
         diagnostics=ctx.response_diagnostics,
         exclude_message_ids=ctx.current_turn_ids,
@@ -1313,6 +1341,8 @@ async def normalize_reply(ctx):
                     *[format_memory_time(m) for m in (ctx.classified_memories or [])],
                     *(ctx.time_memories or []),
                     *(ctx.l3_memories or []),
+                    # TIME08 全量扫描算出的提及日子也是证据, 不能被 top-k 检索的缺口否掉
+                    getattr(ctx, "temporal_computation", "") or "",
                 ]
             ),
             diagnostics=ctx.response_diagnostics,
@@ -1322,6 +1352,11 @@ async def normalize_reply(ctx):
         if temporal_checked != " ".join(ctx.replies):
             ctx.replies = [temporal_checked]
             ctx.reply_emotion_pre = None
+    computation = ctx.response_diagnostics.get("temporal_context", {}).get("computation")
+    if isinstance(computation, dict) and computation.get("status") == "computed":
+        from app.services.time_domain.compute import check_reply
+
+        computation["reply_check"] = check_reply(computation, " ".join(ctx.replies or []))
     if (
         ctx.followup_policy is not None
         and not ctx.crisis_care_turn
