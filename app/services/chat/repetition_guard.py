@@ -41,12 +41,19 @@ _ACK = re.compile(
     re.IGNORECASE,
 )
 _QUESTION = re.compile(r"[?？]|吗|么|啥|什么|哪|几|谁|怎么|来着")
+# 对方这句是在问 (重复回答是对的): 问号 / 吗 / 句末的疑问词。"没啥朋友" 不是在问
+_USER_QUESTION = re.compile(
+    r"[?？]|吗|(?:么|呢)\s*$|(?:什么|啥|哪|哪儿|几|谁|怎么|干嘛|多少|多久)(?:呀|啊|呢|嘛|来着)?\s*$"
+)
 # 对方让你再说一遍时, 复述是对的
 _ASKED_TO_REPEAT = re.compile(r"再说一遍|再说一次|刚才|刚刚|说啥|什么意思|啥意思|没看清|没听清|来着")
 # 删掉之后剩下的开头是连接词 / 只剩问句, 读起来就断了, 不删
 _DANGLING_START = re.compile(r"^(?:而且|所以|然后|但是|不过|还有|并且|因为|就是)")
 # 一条气泡和上一轮某一条的重合度 (按相邻两字计) 到这个比例就算复述; 太短的气泡不判
 _RESTATE_OVERLAP = 0.6
+# 其他轮次只拦几乎原样的句子 (2026-10-30「我刚还在跟导演走位呢」连续两轮原样出现;
+# 14 天生产 1294 轮里 22 轮有这种气泡)
+VERBATIM_OVERLAP = 0.8
 _RESTATE_MIN_CHARS = 8
 _PREVIOUS_MAX_CHARS = 120
 
@@ -125,20 +132,22 @@ def restated_overlap(reply: str, previous: list[str]) -> float:
     return max((len(grams & _bigrams(p)) / len(grams) for p in previous), default=0.0)
 
 
-def drop_restated_bubbles(replies: list[str], previous: list[str],
-                          user_message: str = "") -> tuple[list[str], int, bool]:
+def drop_restated_bubbles(replies: list[str], previous: list[str], user_message: str = "",
+                          *, threshold: float = _RESTATE_OVERLAP,
+                          whole_turn: bool = True) -> tuple[list[str], int, bool]:
     """去掉和上一轮基本是同一句话的气泡: (保留的, 去掉几条, 是否全是复述)。
 
     全都是复述时不动 (不能发空回复), 只报告出来; 删完剩下的读不通 (开头是连接词、
-    只剩问句) 也不动。对方在问 / 让你再说一遍时不判。
+    只剩问句) 也不动。对方在问 / 让你再说一遍时不判。whole_turn=False 时只按单条
+    气泡判 (普通轮次: 一条新内容加一条照抄, 整段比会把照抄的那条也放过)。
     """
     if not replies or not previous or _ASKED_TO_REPEAT.search(user_message or "") \
-            or _QUESTION.search(user_message or ""):
+            or _USER_QUESTION.search(user_message or ""):
         return replies, 0, False
     # 整轮复述按整段比 (短气泡单独看都不够长, 合起来就是上一轮原话)
-    whole = restated_overlap("".join(replies), ["".join(previous)])
-    kept = [r for r in replies if restated_overlap(r, previous) < _RESTATE_OVERLAP]
-    if whole >= _RESTATE_OVERLAP or not kept:
+    whole = restated_overlap("".join(replies), ["".join(previous)]) if whole_turn else 0.0
+    kept = [r for r in replies if restated_overlap(r, previous) < threshold]
+    if whole >= threshold or not kept:
         return replies, 0, True
     if len(kept) == len(replies):
         return replies, 0, False

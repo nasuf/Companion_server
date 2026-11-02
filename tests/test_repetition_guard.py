@@ -222,11 +222,43 @@ def test_backstop_keeps_the_continuation_line_and_records_diagnostics():
     diag = ctx.response_diagnostics["restated_bubbles"]
     assert diag["situation"] == "ack" and diag["dropped"] == 1 and diag["previous_bubbles"] == 2
 
-    # 对方说了新内容: 不判
+    # 对方说了新内容: 只拦几乎原样的句子, 换个说法的不动
     ctx = _Ctx(["那你要是喝到好喝的 一定要跟我说啊"], previous, user_message="我明天去买")
     ctx.continuation_lines = []
     graph_phases._drop_restated_bubbles(ctx)
-    assert "restated_bubbles" not in ctx.response_diagnostics
+    assert ctx.replies == ["那你要是喝到好喝的 一定要跟我说啊"]
+    assert ctx.response_diagnostics["restated_bubbles"]["situation"] == "other"
+
+
+def test_ordinary_turn_drops_a_bubble_copied_from_the_previous_turn():
+    """2026-10-30 生产: 用户说「现在又没啥朋友」, 回复又原样带上上一轮的「我刚还在跟导演走位呢」。"""
+    from app.services.chat import graph_phases
+
+    rows = [_row("u0", "user", "唉", "26:50"),
+            _row("a1", "assistant", "唉 那你这一年是不是都挺难受的啊", "27:05"),
+            _row("a2", "assistant", "我刚还在跟导演走位呢", "27:05"),
+            _row("a3", "assistant", "都没敢一直摸鱼回你", "27:05"),
+            _row("u1", "user", "现在又没啥朋友", "27:37")]
+    ctx = _Ctx(["那也太孤单了吧", "我刚还在跟导演走位呢", "都没敢一直摸鱼回你"], rows,
+               user_message="现在又没啥朋友")
+    ctx.continuation_lines = []
+    graph_phases._drop_restated_bubbles(ctx)
+    assert ctx.replies == ["那也太孤单了吧"]
+    assert ctx.response_diagnostics["restated_bubbles"]["situation"] == "other"
+    # 对方在问: 再答一遍是对的
+    ctx = _Ctx(["我刚还在跟导演走位呢"], rows, user_message="你在干嘛")
+    ctx.continuation_lines = []
+    graph_phases._drop_restated_bubbles(ctx)
+    assert ctx.replies == ["我刚还在跟导演走位呢"]
+
+
+async def test_short_delays_get_no_delay_explanation_section():
+    from tests.test_prompt_layout_cache import _system_prompt
+
+    delay = {"received_at": "2026-10-30T11:27:37", "activity": "化妆间准备演出", "status": "busy",
+             "delay_reason": ""}
+    assert "## 回复时机说明" not in await _system_prompt(delay_context={**delay, "delay_seconds": 6})
+    assert "## 回复时机说明" in await _system_prompt(delay_context={**delay, "delay_seconds": 35})
 
 
 def test_empty_assistant_rows_are_skipped():

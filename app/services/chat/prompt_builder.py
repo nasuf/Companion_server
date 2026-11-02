@@ -530,6 +530,14 @@ async def _build_gift_section(
     return _PromptBody(body, "chat.gift_reply")
 
 
+# 延迟不到这么多秒时不给「回复时机说明」: 连续聊天里几秒就回, 不需要解释在忙什么。
+# 2026-10-30 生产: 6-10 秒的回复也带着这段, 模型每轮都补一句「刚在跟导演走位」,
+# 下一轮再从历史里原样抄一遍。同一轮重放 10 次: 带这段 10/10 提到在忙、8/10 原样
+# 照抄上一轮那句; 不带 4/10、1/10。AI 当前在做什么仍由「你的隐性状态约束」交代。
+# 只影响这段是否渲染, delay_context 本身 (含 tier 路由判断) 不变。
+DELAY_EXPLANATION_MIN_SECONDS = 20
+
+
 async def _build_delay_context_section(
     delay_context: dict[str, Any] | None,
 ) -> _PromptBody | None:
@@ -540,6 +548,8 @@ async def _build_delay_context_section(
     那会让该段脱离 registry/trace 编辑, 违背"所有 section 走 registry"不变量.
     """
     if not delay_context:
+        return None
+    if (delay_context.get("delay_seconds") or 0) < DELAY_EXPLANATION_MIN_SECONDS:
         return None
     tpl = await _get_optional_prompt("chat.delay_context_section")
     if tpl is None:

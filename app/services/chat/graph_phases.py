@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.services.chat.memory_usage import submit_memory_usage
 from app.services.chat.repetition_guard import (
+    VERBATIM_OVERLAP,
     drop_restated_bubbles,
     find_repeated_ai_phrases,
     previous_ai_turn,
@@ -1179,7 +1180,7 @@ def _previous_user_text(ctx) -> str | None:
 
 
 def _drop_restated_bubbles(ctx) -> None:
-    """兜底: 对方附和 / 上一轮回复晚于本条消息时, 和上一轮基本是同一句话的气泡不发。
+    """兜底: 和上一轮基本是同一句话的气泡不发 (附和 / 上一轮晚于本条时从宽, 其他轮次只拦原样照抄)。
 
     话题承接句本来就是回到上一轮的话题, 不参与判断; 全是复述时不动 (generate_reply
     已经重写过一次)。
@@ -1187,19 +1188,21 @@ def _drop_restated_bubbles(ctx) -> None:
     if ctx.crisis_care_turn or ctx.reply_is_fallback or ctx.contradiction_inquiry:
         return
     situation = previous_reply_situation(ctx.messages_dicts, ctx.current_turn_ids, ctx.user_message)
-    if situation is None:
-        return
     previous, _ = previous_ai_turn(ctx.messages_dicts, ctx.current_turn_ids)
+    if not previous:
+        return
     lead = list(ctx.continuation_lines or [])
     lead = lead if ctx.replies[: len(lead)] == lead else []
+    # 附和 / 上一轮晚于本条: 换个说法也算复述; 其他轮次只拦几乎原样的句子
+    strict = {} if situation else {"threshold": VERBATIM_OVERLAP, "whole_turn": False}
     body, dropped, all_restated = drop_restated_bubbles(
-        ctx.replies[len(lead):], previous, ctx.user_message
+        ctx.replies[len(lead):], previous, ctx.user_message, **strict
     )
     if dropped:
         ctx.replies = [*lead, *body]
         ctx.reply_emotion_pre = None  # 情绪/贴纸要跟实际发出的文字走
     ctx.response_diagnostics["restated_bubbles"] = {
-        "situation": situation[0],
+        "situation": situation[0] if situation else "other",
         "previous_bubbles": len(previous),
         "dropped": dropped,
         "all_restated": all_restated,
