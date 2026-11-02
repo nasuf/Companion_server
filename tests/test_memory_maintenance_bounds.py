@@ -24,6 +24,15 @@ async def test_fifty_thousand_rows_do_not_load_into_application(memory_flow):
     assert (await f.db.query_raw("SELECT count(*)::int n FROM memories_user WHERE user_id=$1 AND value_updated_at < NOW()-INTERVAL '30 days'",f.ids["owner"]))[0]["n"]==49000
     assert peak < 20*1024*1024
     print(json.dumps({"synthetic_rows":50000,"scanned":1000,"peak_python_bytes":peak,"duration_seconds":round(time.monotonic()-started,3)}))
+    # 5 万行在夹具收尾时由一次级联删除清掉, 行级触发器 (时间版本) 让这一条语句在慢
+    # CI 上超过查询引擎的 HTTP 超时 (2026-11-02 连续两次 teardown ReadTimeout)。
+    # 这里分批删掉, 每批一次独立请求。
+    for _ in range(20):
+        left = await f.db.execute_raw(
+            "DELETE FROM memories_user WHERE id IN (SELECT id FROM memories_user WHERE user_id=$1 LIMIT 5000)",
+            f.ids["owner"])
+        if not left:
+            break
 
 
 async def test_scheduler_decay_failure_cannot_emit_success(monkeypatch):
