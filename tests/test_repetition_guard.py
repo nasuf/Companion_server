@@ -172,3 +172,64 @@ async def test_fully_restated_draft_is_rewritten_once(monkeypatch):
 
 async def _async(value):
     return value
+
+
+async def test_retry_outcomes_disabled_and_still_restated(monkeypatch):
+    from app.services.chat import graph_phases
+
+    draft = ["嫩江都下雪了", "我这边还二十度左右呢", "温差也太大了"]
+    # 后台停用重写提示: 不重写, 记录下来
+    monkeypatch.setattr(graph_phases, "restated_retry_note", lambda previous: _async(None))
+    ctx = _Ctx(list(draft), SNOW)
+    await graph_phases._rewrite_if_restated(ctx, object(), {})
+    assert ctx.replies == draft and ctx.response_diagnostics["restated_retry"] == "disabled"
+
+    # 重写后还是复述: 保留第一版
+    async def same_again(**kwargs):
+        return list(draft), "", False, None
+
+    monkeypatch.setattr(graph_phases, "restated_retry_note", lambda previous: _async("重写"))
+    services = type("S", (), {"_generate_reply": staticmethod(same_again)})
+    ctx = _Ctx(list(draft), SNOW)
+    await graph_phases._rewrite_if_restated(ctx, services, {})
+    assert ctx.replies == draft and ctx.response_diagnostics["restated_retry"] == "still_restated"
+
+
+async def test_retry_note_quotes_the_recent_end_of_the_previous_turn(monkeypatch):
+    from app.services.chat import prompt_builder, repetition_guard
+
+    monkeypatch.setattr(prompt_builder, "_get_optional_prompt", lambda key: _async("上一轮：「{previous}」"))
+    note = await repetition_guard.restated_retry_note(["前面" * 80, "最后一句"])
+    assert note.startswith("上一轮：「…") and note.endswith("最后一句」")
+    monkeypatch.setattr(prompt_builder, "_get_optional_prompt", lambda key: _async(None))
+    assert await repetition_guard.restated_retry_note(["随便"]) is None
+
+
+def test_backstop_keeps_the_continuation_line_and_records_diagnostics():
+    from app.services.chat import graph_phases
+
+    previous = [_row("u0", "user", "我明天面试", "00:00"),
+                _row("a1", "assistant", "你那个面试准备得怎么样了", "01:00"),
+                _row("a2", "assistant", "那你要是喝到好喝的 记得跟我说一声啊", "01:00"),
+                _row("u1", "user", "好", "02:00")]
+    ctx = _Ctx(["对了 面试准备得怎么样了呀", "哈哈 那说定了", "那你要是喝到好喝的 一定要跟我说啊"],
+               previous, user_message="好")
+    ctx.continuation_lines = ["对了 面试准备得怎么样了呀"]
+    ctx.reply_emotion_pre = {"emotion": "高兴"}
+    graph_phases._drop_restated_bubbles(ctx)
+    assert ctx.replies == ["对了 面试准备得怎么样了呀", "哈哈 那说定了"]
+    assert ctx.reply_emotion_pre is None
+    diag = ctx.response_diagnostics["restated_bubbles"]
+    assert diag["situation"] == "ack" and diag["dropped"] == 1 and diag["previous_bubbles"] == 2
+
+    # 对方说了新内容: 不判
+    ctx = _Ctx(["那你要是喝到好喝的 一定要跟我说啊"], previous, user_message="我明天去买")
+    ctx.continuation_lines = []
+    graph_phases._drop_restated_bubbles(ctx)
+    assert "restated_bubbles" not in ctx.response_diagnostics
+
+
+def test_empty_assistant_rows_are_skipped():
+    rows = [_row("a1", "assistant", "收到啦", "00:00"), _row("a2", "assistant", "", "00:01"),
+            _row("u1", "user", "嗯", "01:00")]
+    assert previous_ai_turn(rows, {"u1"})[0] == ["收到啦"]

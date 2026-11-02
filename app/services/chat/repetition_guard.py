@@ -98,14 +98,18 @@ def previous_reply_situation(messages: list[dict], current_turn_ids: set[str],
     bubbles, after = previous_ai_turn(messages, current_turn_ids)
     if not bubbles:
         return None
-    previous = "，".join(bubbles)
-    if len(previous) > _PREVIOUS_MAX_CHARS:
-        previous = "…" + previous[-_PREVIOUS_MAX_CHARS:]  # 留离这句最近的部分
+    previous = quote_previous(bubbles)
     if after:
         return "overlap", previous
     if is_acknowledgement(user_message):
         return "ack", previous
     return None
+
+
+def quote_previous(bubbles: list[str]) -> str:
+    """提示里引用的上一轮原话; 太长时留离这句最近的部分。"""
+    text = "，".join(bubbles)
+    return text if len(text) <= _PREVIOUS_MAX_CHARS else "…" + text[-_PREVIOUS_MAX_CHARS:]
 
 
 def _bigrams(text: str) -> set[str]:
@@ -132,10 +136,9 @@ def drop_restated_bubbles(replies: list[str], previous: list[str],
             or _QUESTION.search(user_message or ""):
         return replies, 0, False
     # 整轮复述按整段比 (短气泡单独看都不够长, 合起来就是上一轮原话)
-    if restated_overlap("".join(replies), ["".join(previous)]) >= _RESTATE_OVERLAP:
-        return replies, 0, True
+    whole = restated_overlap("".join(replies), ["".join(previous)])
     kept = [r for r in replies if restated_overlap(r, previous) < _RESTATE_OVERLAP]
-    if not kept:
+    if whole >= _RESTATE_OVERLAP or not kept:
         return replies, 0, True
     if len(kept) == len(replies):
         return replies, 0, False
@@ -151,10 +154,7 @@ async def restated_retry_note(previous: list[str]) -> str | None:
     template = await _get_optional_prompt("chat.previous_reply_retry")
     if template is None:
         return None
-    text = "，".join(previous)
-    if len(text) > _PREVIOUS_MAX_CHARS:
-        text = text[:_PREVIOUS_MAX_CHARS] + "…"
-    return _render_section(template, {"previous": text})
+    return _render_section(template, {"previous": quote_previous(previous)})
 
 
 def find_repeated_ai_phrases(messages: list[dict]) -> list[str]:

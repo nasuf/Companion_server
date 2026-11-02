@@ -1178,6 +1178,35 @@ def _previous_user_text(ctx) -> str | None:
     return None
 
 
+def _drop_restated_bubbles(ctx) -> None:
+    """兜底: 对方附和 / 上一轮回复晚于本条消息时, 和上一轮基本是同一句话的气泡不发。
+
+    话题承接句本来就是回到上一轮的话题, 不参与判断; 全是复述时不动 (generate_reply
+    已经重写过一次)。
+    """
+    if ctx.crisis_care_turn or ctx.reply_is_fallback or ctx.contradiction_inquiry:
+        return
+    situation = previous_reply_situation(ctx.messages_dicts, ctx.current_turn_ids, ctx.user_message)
+    if situation is None:
+        return
+    previous, _ = previous_ai_turn(ctx.messages_dicts, ctx.current_turn_ids)
+    lead = list(ctx.continuation_lines or [])
+    lead = lead if ctx.replies[: len(lead)] == lead else []
+    body, dropped, all_restated = drop_restated_bubbles(
+        ctx.replies[len(lead):], previous, ctx.user_message
+    )
+    if dropped:
+        ctx.replies = [*lead, *body]
+        ctx.reply_emotion_pre = None  # 情绪/贴纸要跟实际发出的文字走
+    ctx.response_diagnostics["restated_bubbles"] = {
+        "situation": situation[0],
+        "previous_bubbles": len(previous),
+        "dropped": dropped,
+        "all_restated": all_restated,
+        "max_overlap": round(max((restated_overlap(r, previous) for r in body), default=0.0), 2),
+    }
+
+
 async def _rewrite_if_restated(ctx, services, generate_kwargs) -> None:
     """每一条都是上一轮的复述时, 回复发出前带着提示重写一次。"""
     if ctx.reply_is_fallback or ctx.contradiction_inquiry or ctx.crisis_care_turn:
@@ -1443,32 +1472,8 @@ async def normalize_reply(ctx):
         ctx.response_diagnostics["temporal_context"][
             "followup_decision"
         ] = followup_decision
-    situation = None
-    if not (ctx.crisis_care_turn or ctx.reply_is_fallback or ctx.contradiction_inquiry
-            or historical_answer):
-        situation = previous_reply_situation(
-            ctx.messages_dicts, ctx.current_turn_ids, ctx.user_message
-        )
-    if situation is not None:
-        # 兜底: 和上一轮基本是同一句话的气泡不发。话题承接句本来就是回到上一轮的
-        # 话题, 不参与判断; 全是复述时不动 (generate_reply 已经重写过一次)。
-        previous, _ = previous_ai_turn(ctx.messages_dicts, ctx.current_turn_ids)
-        lead = list(ctx.continuation_lines or [])
-        lead = lead if ctx.replies[: len(lead)] == lead else []
-        body, dropped, all_restated = drop_restated_bubbles(
-            ctx.replies[len(lead):], previous, ctx.user_message
-        )
-        if dropped:
-            ctx.replies = [*lead, *body]
-            ctx.reply_emotion_pre = None  # 情绪/贴纸要跟实际发出的文字走
-        ctx.response_diagnostics["restated_bubbles"] = {
-            "situation": situation[0],
-            "previous_bubbles": len(previous),
-            "dropped": dropped,
-            "all_restated": all_restated,
-            "max_overlap": round(max(
-                (restated_overlap(r, previous) for r in body), default=0.0), 2),
-        }
+    if not historical_answer:
+        _drop_restated_bubbles(ctx)
     ctx.full_response = " ".join(ctx.replies)
     if ctx.reply_emotion_pre is not None:
         reply_emotion = ctx.reply_emotion_pre

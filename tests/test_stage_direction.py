@@ -38,3 +38,9 @@ def test_other_parentheses_are_kept(text):
 def test_a_bubble_that_is_only_a_stage_direction_is_dropped():
     replies = split_and_validate_replies("那我唱啦 别嫌难听哦✨||（清唱了一段温柔的小情歌）")
     assert replies == ["那我唱啦 别嫌难听哦✨"]
+
+
+def test_empty_text_is_returned_as_is():
+    from app.services.chat.reply_formatting import strip_stage_direction
+
+    assert strip_stage_direction("") == ""
