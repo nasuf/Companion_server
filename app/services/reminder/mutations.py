@@ -286,6 +286,30 @@ async def claim_due_reminder(database, trigger, now):
     return bool(rows)
 
 
+async def reminder_still_valid(database, trigger) -> bool:
+    """claim_due_reminder 里"这条提醒还能发"的同一组条件, 只读 (TIME10 补发/过期用)。
+
+    提醒记忆已删、工作区/agent/账号已停用时, 补发会被 claim 拒掉; 先查一下, 免得
+    每 15 秒对它跑一次预检模型, 也免得过期时把它续活成下一期。
+    """
+    data = trigger.actionData or {}
+    side = data.get("memory_side") or "user"
+    if side not in {"user", "ai"} or not isinstance(data.get("memory_id"), str):
+        return False
+    table = "memories_user" if side == "user" else "memories_ai"
+    rows = await database.query_raw(
+        f"""SELECT 1 FROM {table} m JOIN chat_workspaces w ON w.id=m.workspace_id
+            JOIN ai_agents a ON a.id=w.agent_id JOIN users u ON u.id=w.user_id
+            WHERE m.id=$1 AND m.user_id=$2 AND w.user_id=$2 AND w.agent_id=$3
+              AND NOT m.is_archived AND m.sub_category='提醒' AND w.status='active'
+              AND a.status='active' AND u.status='active' AND w.archived_at IS NULL
+              AND a.archived_at IS NULL AND u.archived_at IS NULL
+            LIMIT 1""",
+        data["memory_id"], trigger.userId, trigger.aiAgentId,
+    )
+    return bool(rows)
+
+
 async def retry_claimed_reminder(
     database, trigger, *, claimed_at, retry_at, retry_count
 ):

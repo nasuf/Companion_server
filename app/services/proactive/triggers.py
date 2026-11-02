@@ -132,6 +132,84 @@ def _next_habit_weekday_occurrence(
     return current + timedelta(weeks=1)
 
 
+REMINDER_CATCHUP = timedelta(minutes=30)
+_CATCHUP_BATCH = 50
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+async def _expire_missed_reminders(now: datetime) -> int:
+    """错过超过 30 分钟、一次都没发过的提醒: 标成错过, 不补发 (TIME10)。
+
+    一次性的直接失活并记下错过多久; 周期性的续到下一个还没过的周期。
+    "明早 7 点叫我" 在中午才发出去比不发更糟; 错过记录留在 actionData 里供后台查看。
+    先用 CAS 失活这一行, 成功了才续期 —— 续期后失活失败会在下一轮再续一次。
+    已经失效的提醒 (记忆已删、账号停用) 只失活, 不续期。
+    """
+    from prisma import Json
+    from app.services.reminder.mutations import reminder_still_valid
+
+    stale = await db.timetrigger.find_many(
+        where={
+            "isActive": True,
+            "actionType": "reminder",
+            "lastFired": None,
+            "triggerTime": {"lt": now - REMINDER_CATCHUP},
+        },
+        order={"triggerTime": "asc"},
+        take=_CATCHUP_BATCH,
+    )
+    for trig in stale:
+        data = dict(trig.actionData or {})
+        due = _aware(trig.triggerTime)
+        recurrence = data.get("recurrence") or "once"
+        valid = await reminder_still_valid(db, trig)
+        created_after_due = recurrence != "once" and _created_after_due(trig)
+        marker = dict(data)
+        marker.update(missed_at=now.isoformat(), missed_by_seconds=int((now - due).total_seconds()),
+                      missed_reason=("created_after_due" if created_after_due
+                                     else "missed" if valid else "no_longer_valid"))
+        updated = await db.timetrigger.update_many(
+            where={"id": trig.id, "isActive": True, "lastFired": None},
+            data={"isActive": False, "actionData": Json(marker)},
+        )
+        if not updated:
+            continue  # 期间已被处理
+        if recurrence != "once" and valid:
+            nxt = _next_future_occurrence(due, now, recurrence, data)
+            if nxt is not None:
+                from app.services.reminder.scheduling import renew_periodic_trigger
+                await renew_periodic_trigger(user_id=trig.userId, agent_id=trig.aiAgentId,
+                                             next_trigger_time=nxt, action_data=data)
+        logger.info(
+            "[REMINDER-MISSED] %s missed by %ss recurrence=%s reason=%s", trig.id[:8],
+            marker["missed_by_seconds"], recurrence, marker["missed_reason"],
+            extra={"event": EVT_REMINDER_HANDLED, "outcome": "missed", "trigger_id": trig.id,
+                   "recurrence": recurrence, "reason": marker["missed_reason"]},
+        )
+    return len(stale)
+
+
+def _created_after_due(trig) -> bool:
+    """"每天 8 点提醒我" 在 8:20 才设: 第一期的时刻在创建之前, 不是错过, 从下一期开始。"""
+    created = getattr(trig, "createdAt", None)
+    return created is not None and _aware(created) > _aware(trig.triggerTime)
+
+
+def _next_future_occurrence(due: datetime, now: datetime, recurrence: str, data: dict) -> datetime | None:
+    habit_weekdays = _normalize_habit_weekdays(data.get("habit_weekdays"))
+    nxt = due
+    for _ in range(800):  # 最多跨两年的日周期
+        nxt = (_next_habit_weekday_occurrence(nxt, habit_weekdays)
+               if recurrence == "weekly" and habit_weekdays
+               else _next_occurrence(nxt, recurrence))
+        if nxt is None or _aware(nxt) > now:
+            return nxt
+    return None
+
+
 async def scan_triggers() -> None:
     """每 15 秒扫描到期触发器，检查规则后执行。"""
     now = datetime.now(_TZ)
@@ -144,6 +222,35 @@ async def scan_triggers() -> None:
             "triggerTime": {"gte": window_start, "lt": window_end},
         },
     )
+    # TIME10: 重启/部署期间到点的提醒不能因为错过 ±1min 窗口就永远不响。
+    # 30 分钟内的照常补发 (claim 的 CAS 仍保证只发一次); 更早的标成错过, 不补发。
+    try:
+        from app.services.reminder.mutations import reminder_still_valid
+
+        late = await db.timetrigger.find_many(
+            where={
+                "isActive": True,
+                "actionType": "reminder",
+                "lastFired": None,
+                "triggerTime": {"gte": now - REMINDER_CATCHUP, "lt": window_start},
+            },
+            order={"triggerTime": "asc"},
+            take=_CATCHUP_BATCH,
+        )
+        seen = {t.id for t in triggers}
+        for trig in late:
+            if trig.id in seen or _created_after_due(trig):
+                continue
+            if await reminder_still_valid(db, trig):
+                logger.info(
+                    "[REMINDER-CATCHUP] %s late by %ss", trig.id[:8],
+                    int((now - _aware(trig.triggerTime)).total_seconds()),
+                    extra={"event": EVT_REMINDER_HANDLED, "outcome": "catch_up", "trigger_id": trig.id},
+                )
+                triggers.append(trig)
+        await _expire_missed_reminders(now)
+    except Exception as e:
+        logger.warning("Reminder catch-up scan failed: %s", type(e).__name__)
 
     if not triggers:
         return
