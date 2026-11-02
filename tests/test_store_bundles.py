@@ -249,8 +249,10 @@ async def test_activate_vip_trial_is_once_per_account(monkeypatch):
     result = await store_bundles.activate_vip_trial("user-1")
     assert result["wallet"]["ticket_balance"] == 0
     assert result["vip_until"]
-    stored_until = fake_db.fake_tx.query_calls[1][1][1]
-    assert stored_until.tzinfo is None
+    sql, params = fake_db.fake_tx.query_calls[1][0], fake_db.fake_tx.query_calls[1][1]
+    # 传带时区的 ISO 文本, SQL 里显式转成 UTC (真实库验证见 test_admin_vip_set_postgres)
+    assert "$2::timestamptz AT TIME ZONE 'UTC'" in sql
+    assert datetime.fromisoformat(params[1]).utcoffset() == timedelta(0)
 
 
 @pytest.mark.asyncio

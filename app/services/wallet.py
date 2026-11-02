@@ -877,13 +877,15 @@ async def admin_set_vip_until(
     rows = await db.query_raw(
         """
         UPDATE user_wallets
-        SET vip_until = $2,
+        SET vip_until = $2::timestamptz AT TIME ZONE 'UTC',
             updated_at = CURRENT_TIMESTAMP
         WHERE user_id = $1
         RETURNING vip_until
         """,
         user_id,
-        vip_until,
+        # query_raw 把 datetime 当文本传, 列是 timestamp without time zone (存 UTC):
+        # 显式转换, 不能靠隐式类型推断
+        vip_until.isoformat() if vip_until is not None else None,
     )
     row = rows[0]
     return {

@@ -59,13 +59,13 @@ async def activate_vip_trial(user_id: str) -> dict[str, Any]:
         if not wallet.vip_trial_available_from_row(row):
             raise ValueError("vip_trial_used")
         until = datetime.now(timezone.utc) + timedelta(days=VIP_TRIAL_DAYS)
-        # TIMESTAMP WITHOUT TIME ZONE stores the wall clock as-is; keep UTC
-        # numbers so session TimeZone cannot shift the 30-day window.
-        until_store = until.replace(tzinfo=None)
+        # TIMESTAMP WITHOUT TIME ZONE 存 UTC; query_raw 把 datetime 当文本传,
+        # 必须显式转换 (隐式推断会报 "expression is of type text")
+        until_store = until.isoformat()
         updated = await tx.query_raw(
             """
             UPDATE user_wallets
-            SET vip_until = $2,
+            SET vip_until = $2::timestamptz AT TIME ZONE 'UTC',
                 vip_trial_used = TRUE,
                 updated_at = CURRENT_TIMESTAMP
             WHERE user_id = $1
