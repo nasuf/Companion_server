@@ -1254,17 +1254,11 @@ async def online(_: dict = Depends(require_admin_jwt)):
     }
 
 
-def _mask_phone(phone: str | None) -> str | None:
-    if not phone or len(phone) != 11:
-        return phone
-    return f"{phone[:3]}****{phone[-4:]}"
-
-
 def _login_methods(user, identities: list) -> list[dict]:
     """Derive login methods + human-readable identifier from a user's identities.
 
     - wechat: auth_identities(provider=wechat), identifier = 昵称 (rawProfile) → openid
-    - phone:  auth_identities(provider=phone), identifier = 掩码手机号
+    - phone:  auth_identities(provider=phone), identifier = 手机号
     - password/email: user.hashedPassword 存在, identifier = email → username
     一个账号可能同时有多种绑定, 全部列出.
     """
@@ -1284,7 +1278,7 @@ def _login_methods(user, identities: list) -> list[dict]:
             methods.append({
                 "type": "phone",
                 "label": "手机号",
-                "identifier": _mask_phone(getattr(ident, "providerAccountId", None)) or "—",
+                "identifier": getattr(ident, "providerAccountId", None) or "—",
             })
     if getattr(user, "hashedPassword", None):
         methods.append({

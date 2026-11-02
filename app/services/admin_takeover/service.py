@@ -493,7 +493,7 @@ async def _masked_phone(user_id: str) -> str | None:
     digits = "".join(ch for ch in phone if ch.isdigit())
     if len(digits) < 7:
         return None
-    return f"{digits[:3]}****{digits[-4:]}"
+    return phone.strip()
 
 
 async def dismiss_takeover(takeover_id: str, admin_id: str) -> bool:

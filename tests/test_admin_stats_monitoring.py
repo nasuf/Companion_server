@@ -351,7 +351,7 @@ def test_online_users_endpoint_paginates_with_login_methods(api_client):
 
         ph = data["items"][1]
         assert ph["methods"][0]["type"] == "phone"
-        assert ph["methods"][0]["identifier"] == "138****5678"  # masked
+        assert ph["methods"][0]["identifier"] == "13812345678"
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
 

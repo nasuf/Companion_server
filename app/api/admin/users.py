@@ -124,9 +124,8 @@ def _serialize_phone_identity(identity) -> dict | None:
 
 
 def _mask_phone(phone: str | None) -> str | None:
-    if not phone or len(phone) != 11:
-        return phone
-    return f"{phone[:3]}****{phone[-4:]}"
+    # Admin console shows full phone numbers (field name kept for API compat).
+    return phone
 
 
 def _serialize_password_method(user) -> dict | None:
@@ -176,7 +175,7 @@ def _serialize_auth_methods(user, identities: list[object]) -> list[dict]:
             {
                 "type": "phone",
                 "label": "手机号",
-                "identifier": phone.get("phone_masked") or phone.get("phone"),
+                "identifier": phone.get("phone") or phone.get("phone_masked"),
                 "phone": phone.get("phone"),
                 "phone_masked": phone.get("phone_masked"),
                 "last_login_at": phone.get("last_login_at"),

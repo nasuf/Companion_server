@@ -71,7 +71,7 @@ def mask_phone_for_admin(phone: str | None) -> str | None:
 
 
 def resolve_admin_user_label(user, identities: list) -> str:
-    """Admin/console label: custom display name → WeChat nickname → masked phone → username."""
+    """Admin/console label: custom display name → WeChat nickname → phone → username."""
     local_name = visible_text_or_none(getattr(user, "displayName", None))
     if local_name:
         return local_name
@@ -80,7 +80,7 @@ def resolve_admin_user_label(user, identities: list) -> str:
         return wechat_name
     phone = _phone_number(identities)
     if phone:
-        return mask_phone_for_admin(phone) or phone
+        return phone
     username = visible_text_or_none(getattr(user, "username", None))
     return username or getattr(user, "id", "") or "(未知用户)"
 

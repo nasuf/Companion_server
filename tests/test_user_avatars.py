@@ -502,7 +502,7 @@ class TestResolveAdminUserLabel:
         user2 = SimpleNamespace(id="u2", displayName=None, username="u2")
         assert (
             up.resolve_admin_user_label(user2, self._idents(phone="13812345678"))
-            == "138****5678"
+            == "13812345678"
         )
 
         user3 = SimpleNamespace(id="u3", displayName=None, username="wx_only")

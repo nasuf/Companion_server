@@ -80,7 +80,7 @@ def test_serialize_phone_identity_exposes_admin_phone_fields():
         "provider": "phone",
         "provider_account_id": "13812345678",
         "phone": "13812345678",
-        "phone_masked": "138****5678",
+        "phone_masked": "13812345678",
         "last_login_at": "2026-06-02 08:30:00+00:00",
         "created_at": "2026-05-21 10:00:00+00:00",
         "updated_at": "2026-06-02 08:31:00+00:00",
@@ -119,7 +119,7 @@ def test_serialize_admin_user_includes_login_methods_and_contact_fields():
     assert payload["display_name"] == "爱丽丝"
     assert payload["email"] == "alice@example.com"
     assert payload["phone"]["phone"] == "13812345678"
-    assert payload["phone"]["phone_masked"] == "138****5678"
+    assert payload["phone"]["phone_masked"] == "13812345678"
     assert payload["auth_methods"] == [
         {
             "type": "password",
@@ -132,9 +132,9 @@ def test_serialize_admin_user_includes_login_methods_and_contact_fields():
         {
             "type": "phone",
             "label": "手机号",
-            "identifier": "138****5678",
+            "identifier": "13812345678",
             "phone": "13812345678",
-            "phone_masked": "138****5678",
+            "phone_masked": "13812345678",
             "last_login_at": "2026-06-02 08:30:00+00:00",
         },
     ]

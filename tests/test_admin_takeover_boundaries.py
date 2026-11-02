@@ -78,7 +78,7 @@ async def test_flags_fallback_database_and_cache_write_failures(monkeypatch):
     assert not await service.is_user_taken_over('u')
 
 
-@pytest.mark.parametrize('phone,expected',[('',None),('123',None),('+86 13800138000','861****8000')])
+@pytest.mark.parametrize('phone,expected',[('',None),('123',None),('+86 13800138000','+86 13800138000')])
 async def test_phone_is_masked_or_unavailable(monkeypatch,phone,expected):
     monkeypatch.setattr(service.db,'query_raw',AsyncMock(return_value=[{'phone':phone}] if phone else []))
     assert await service._masked_phone('u')==expected
