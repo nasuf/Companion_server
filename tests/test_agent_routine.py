@@ -432,6 +432,20 @@ def test_short_work_on_rest_day_and_flexible_jobs_are_allowed():
     ("中午12点午睡一会儿", {}),
     ("下午3点左右会休息半小时，吃点水果", {}),
     ("每天8点提醒自己喝水", {}),
+    # 盲测补充: 说法多样的作息, 以及讲某一次 / 不固定的分句
+    ("朝九晚五，偶尔加班", {"work_start": "09:00", "work_end": "17:00"}),
+    ("公司早十晚七", {"work_start": "10:00", "work_end": "19:00"}),
+    ("花店早八点开门，晚六点关门", {"work_start": "08:00", "work_end": "18:00"}),
+    ("晚上8点开播，直播到晚上11点", {"work_start": "20:00", "work_end": "23:00"}),
+    ("白班早上8点到下午4点", {"work_start": "08:00", "work_end": "16:00"}),
+    ("上午9点上班，中午11点半到下午2点午休，下午5点半下班", {"work_start": "09:00", "work_end": "17:30"}),
+    ("白天睡到下午两点才起", {"wake": "14:00"}),
+    ("有一次通宵到凌晨四点才睡，平时晚上十点半睡", {"sleep": "22:30"}),
+    ("没有固定作息，偶尔晚上十一点前会睡", {}),
+    ("五点四十起床", {"wake": "05:40"}),
+    ("每天早上9点起营业到晚上10点", {"work_start": "09:00", "work_end": "22:00"}),
+    ("每天7点起床偶尔赖床", {"wake": "07:00"}),
+    ("早上7点起床（偶尔会睡到8点）", {"wake": "07:00"}),
 ])
 def test_review_counterexamples(line, expected):
     assert {k: fmt_clock(v) for k, v in parse_routine_lines([line]).values.items()} == expected

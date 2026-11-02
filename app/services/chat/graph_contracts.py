@@ -34,6 +34,8 @@ CONTRACTS = {
     "prepare_context": NodeContract(
         ("detected_intent",), ("fetched", "memory_relevance")
     ),
+    # TIME09: 次数/先后/间隔的确定性计算作为独立节点, 读完上下文后、选路由前执行
+    "temporal_reasoning": NodeContract(("fetched", "temporal_query"), ("temporal_computation",)),
     "special_route": NodeContract(("fetched", "sc_ctx"), ()),
     "prepare_reply": NodeContract(
         ("fetched",), ("reply_count", "_build_main_chat_messages")

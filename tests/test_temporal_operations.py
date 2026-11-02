@@ -131,3 +131,33 @@ async def test_reply_contract_preserves_date_scope_and_keeps_operation_in_trace(
     assert operation["type"] == "count"
     assert operation["execution"] == "not_executed"
     assert "complete_scope" in operation["requirements"]
+
+
+def test_since_last_time_is_a_duration_question():
+    from app.services.time_domain.operations import classify_temporal_operation
+    assert classify_temporal_operation("距离我上次打羽毛球过去几天了").type == "duration"
+    assert classify_temporal_operation("上次健身到现在几天了").type == "duration"
+
+
+def test_questions_about_the_agent_are_not_user_plans():
+    from datetime import datetime
+    from app.services.time_domain.query import resolve_temporal_query
+    now = datetime.fromisoformat("2026-11-02T10:00:00+08:00")
+    ask = lambda t: resolve_temporal_query(t, anchor=now, anchor_source="persisted_message",
+                                    bare_months=True).operation.type
+    assert ask("你下个月打算去哪") != "planned"
+    assert ask("我下个月打算去哪") == "planned"
+    assert ask("上半年那会儿我是不是还没换工作") == "as_of"
+
+
+def test_event_and_plan_questions_are_not_states():
+    from datetime import datetime
+    from app.services.time_domain.query import resolve_temporal_query
+    now = datetime.fromisoformat("2026-11-02T10:00:00+08:00")
+    ask = lambda t: resolve_temporal_query(t, anchor=now, anchor_source="persisted_message",
+                                           bare_months=True).operation.type
+    assert ask("这周我是不是还有个面试？") != "current"
+    assert ask("今天是不是在下雨") != "current"
+    assert ask("我这周是不是在休假") == "current"
+    assert ask("我明天干嘛") == "planned" and ask("明天我有啥安排") == "planned"
+    assert ask("明天天气怎么样") != "planned" and ask("我下周要去面试了，好紧张") != "planned"

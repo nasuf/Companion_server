@@ -93,6 +93,46 @@ async def discard_pending_states_for_crisis(conversation_id: str) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 
+async def resolve_reminder_pause(
+    user_message: str,
+    ctx: PreflightCtx,
+) -> AsyncGenerator[dict, None]:
+    """"先别提醒了" / "恢复提醒" (TIME10): 整句只说暂停或恢复全部提醒时直接处理。
+
+    排在撤回之前: "恢复提醒" 也是撤回关键词, 有暂停中的提醒时这里先接走。没有暂停
+    中的提醒就不接, 交给撤回 (恢复刚才取消的) 和正常流程。正在等用户补充提醒信息
+    (pending) 时 "先别提醒了" 是在回那个问题, 也不接。
+    """
+    from app.services.chat.intent_handlers import _pause_or_resume_reply, classify_pause_resume
+
+    action = classify_pause_resume(user_message)
+    if action is None or not ctx.user_id or not ctx.agent_id:
+        return
+    try:
+        if action == "pause" and await load_pending_action(ctx.conversation_id):
+            return
+        if action == "resume":
+            from app.services.reminder.scheduling import find_paused_reminder_triggers
+            if not await find_paused_reminder_triggers(user_id=ctx.user_id, agent_id=ctx.agent_id):
+                return
+    except Exception as e:
+        logger.warning(f"[PREFLIGHT-PAUSE] lookup failed: {type(e).__name__}")
+        return
+    reply = await _pause_or_resume_reply(action, ctx)
+    ctx.last_short_circuit_reply = reply
+    for evt in await ctx.short_circuit_fn(
+        reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+        trace_id=ctx.tracer.safe_trace_id,
+    ):
+        yield evt
+    ctx.tracer.close()
+    ctx.stopped = True
+    logger.info(
+        f"[PREFLIGHT-PAUSE] {action}",
+        extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": f"reminder_{action}"},
+    )
+
+
 async def resolve_recent_undo(
     user_message: str,
     ctx: PreflightCtx,
@@ -138,6 +178,11 @@ async def resolve_recent_undo(
         return
 
     # 否则检查 cancel reminder undo state
+    from app.services.reminder.scheduling import load_cancel_undo
+    undo = await load_cancel_undo(ctx.conversation_id) or {}
+    # 暂停期间取消的, 撤回后回到暂停状态, 不会响
+    still_paused = sum(1 for t in undo.get("triggers") or []
+                       if (t.get("action_data") or {}).get("paused_at"))
     n = await _undo_recent_cancel(conversation_id=ctx.conversation_id)
     if n > 0:
         from app.services.reminder.scheduling import notify_reminder_changed
@@ -146,6 +191,8 @@ async def resolve_recent_undo(
             f"嗯, 已经把刚才取消的 {n} 个提醒都恢复啦~ "
             "如果还想取消, 跟我说一声哈."
         )
+        if still_paused:
+            reply += f" 其中 {min(still_paused, n)} 个还在暂停中, 想让它们响就说「恢复提醒」."
         ctx.last_short_circuit_reply = reply
         for evt in await ctx.short_circuit_fn(
             reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,

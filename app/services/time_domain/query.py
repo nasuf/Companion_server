@@ -19,6 +19,8 @@ from app.services.time_domain.operations import (
     TemporalOperation,
     classify_temporal_operation,
     is_elliptical_followup,
+    is_now_followup,
+    asks_own_plan,
     is_state_question,
 )
 from app.services.time_domain.binding import (
@@ -189,6 +191,10 @@ def _past_state_question(text, context_text, parsed, end, stamp, zone) -> bool:
     today_start = stamp.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
     if end > today_start:
         return False
+    return _state_question_or_followup(text, context_text, parsed)
+
+
+def _state_question_or_followup(text, context_text, parsed) -> bool:
     if is_state_question(text):
         return True
     spans = [(i, i + len(p.original_text)) for p in parsed if (i := text.find(p.original_text)) >= 0]
@@ -232,6 +238,9 @@ def resolve_temporal_query(
         "unbound_reference" if _REFERENCE_CLOCK.search(text) else "event_candidate"
     )
     base["operation"] = classify_temporal_operation(text)
+    if (base["operation"].type == "unspecified" and context_text
+            and is_now_followup(text) and is_state_question(context_text)):
+        base["operation"] = TemporalOperation("current", inferred=True)
     try:
         zone = ZoneInfo(zone_name)
     except (ValueError, ZoneInfoNotFoundError):
@@ -497,10 +506,16 @@ def resolve_temporal_query(
     expression = TemporalExpression(start, end, precision, parsed[0].type, end_boundary)
     if base["operation"].type == "unspecified":
         if start > stamp:
-            base["operation"] = TemporalOperation("planned")
+            # 只有问自己的安排才查计划记忆: 问 AI 的、问天气的、陈述句都不算
+            own = asks_own_plan(text) or _state_question_or_followup(text, context_text, parsed)
+            base["operation"] = TemporalOperation("planned" if own else "range")
         elif _past_state_question(text, context_text, parsed, exclusive_end(end, end_boundary), stamp, zone):
             # 过去某段时间的状态 ("上个月我在哪上班") 按有效期回答, 不按事件日期筛。
             base["operation"] = TemporalOperation("as_of", inferred=True)
+        elif exclusive_end(end, end_boundary) > stamp and _state_question_or_followup(
+                text, context_text, parsed):
+            # 包含现在的一段时间问状态 ("我这周是不是在休假" / 问完去年再问 "那今年呢")
+            base["operation"] = TemporalOperation("current", inferred=True)
         else:
             base["operation"] = TemporalOperation("range")
     return TemporalQuery(

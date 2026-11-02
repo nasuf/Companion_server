@@ -68,6 +68,13 @@ _BARE_MONTH_PAT = re.compile(
     r"(?![\d一二三四五六七八九十两]|\s*[日号天大是不])"
 )
 _LUNAR_PREFIX = re.compile(r"(?:农历|阴历|旧历)\s*$")
+# 只给聊天读路径的年份说法: "明年三月" "2024年" "今年上半年"。写路径 (提醒等) 不认,
+# 免得"明年生日提醒我"被当成整年的一个时段去建提醒。
+_READ_YEAR_PAT = re.compile(
+    r"(明年|后年|今年|去年|前年|(?<!\d)\d{4}\s*年)\s*(上半年|下半年)?"
+    r"(?:\s*(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])\s*月份?)?(?!\s*\d{1,2}\s*[日号])"
+)
+_HALF_ONLY_PAT = re.compile(r"(?<![年\d])(上半年|下半年)")
 # 还没到的月份算今年还是去年: 问句里明说了打算/计划才算今年 (整词, 不按单字)。
 _FUTURE_PLAN_WORDS = re.compile(r"打算|计划|准备|安排|要去|要搬|要换|会去|将要")
 _YEAR_MONTH_PAT = re.compile(r"(\d{4})\s*年\s*(1[0-2]|0?[1-9])\s*月份?(?!\s*\d{1,2}\s*[日号])")
@@ -86,6 +93,7 @@ _QUICK_TIME_PAT = re.compile(
     r"|\d{1,2}\s*月\s*\d{1,2}\s*[日号]|\d{1,2}[点时]"
     r"|去年|前年|今年|大[前后]天"
     r"|\d{1,2}\s*月份?|[一二三四五六七八九十]{1,2}月份"  # 月份, 与 _YEAR_MONTH_PAT/_BARE_MONTH_PAT 同步
+    r"|明年|后年|上半年|下半年|\d{4}\s*年"
     r"|早上|上午|中午|下午|晚上|凌晨"
     # 必须与 _REL_OFFSET_PAT 保持同步 —— 这是 has_explicit_time 的快速闸门,
     # 它漏了的表达连解析都不会被调用。
@@ -404,6 +412,33 @@ def parse_time_expressions(
         _add(m.group(), s, e, "absolute", 0.9, m.span())
 
     # --- 5. 去年/前年/今年 + 可选月份 ---
+    for m in (_READ_YEAR_PAT.finditer(message) if bare_months else ()):
+        word, half, month_word = m.group(1), m.group(2), m.group(3)
+        if not (half or month_word or word.endswith("年") and word[0].isdigit() or word in ("明年", "后年")):
+            continue  # 今年/去年 整年由原有规则处理
+        offsets = {"明年": 1, "后年": 2, "今年": 0, "去年": -1, "前年": -2}
+        year = today.year + offsets[word] if word in offsets else int(re.sub(r"\D", "", word))
+        if not 1900 <= year <= 2100:
+            continue
+        if month_word:
+            month = int(month_word) if month_word.isdigit() else _parse_cn_number(month_word)
+            if not month or not 1 <= month <= 12:
+                continue
+            first, last = month, month
+        elif half:
+            first, last = (1, 6) if half == "上半年" else (7, 12)
+        else:
+            first, last = 1, 12
+        _, last_day = monthrange(year, last)
+        _add(m.group(), datetime(year, first, 1, tzinfo=zone),
+             datetime(year, last, last_day, 23, 59, 59, tzinfo=zone),
+             "absolute", 0.85, m.span(), end_boundary="inclusive_second")
+    for m in (_HALF_ONLY_PAT.finditer(message) if bare_months else ()):
+        first, last = (1, 6) if m.group(1) == "上半年" else (7, 12)
+        _, last_day = monthrange(today.year, last)
+        _add(m.group(), datetime(today.year, first, 1, tzinfo=zone),
+             datetime(today.year, last, last_day, 23, 59, 59, tzinfo=zone),
+             "absolute", 0.8, m.span(), end_boundary="inclusive_second")
     for m in _YEAR_PAT.finditer(message):
         prefix = m.group(1)
         month_str = m.group(2)

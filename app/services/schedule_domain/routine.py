@@ -30,17 +30,20 @@ _WEEKDAY_CN = "一二三四五六日"
 
 # ── 人设文字解析 ────────────────────────────────────────────────────────
 
-_PERIOD = r"(凌晨|清晨|早上|早晨|上午|中午|下午|傍晚|晚上|每晚|夜里|半夜|深夜)?"
+_PERIOD = r"(凌晨|清晨|早上|早晨|上午|中午|下午|傍晚|晚上|每晚|夜里|半夜|深夜|早|晚)?"
 _NUM = r"(\d{1,2}|[零一二两三四五六七八九十]{1,3})"
 _CLOCK = (
-    _PERIOD + r"\s*(?:(\d{1,2})[:：](\d{2})|" + _NUM + r"\s*[点时](?:\s*(半|一刻|三刻|(\d{1,2})\s*分?))?)"
+    _PERIOD + r"\s*(?:(\d{1,2})[:：](\d{2})|" + _NUM
+    + r"\s*[点时](?:\s*(半|一刻|三刻|(\d{1,2}|[一二三四五]?十[一二三四五六七八九]?|[一二三四五六七八九](?=\s*分))\s*分?))?)"
 )
 _CLOCK_RE = re.compile(_CLOCK)
 # 时刻之后几个字内出现的动作决定它是哪一项。顺序即优先级 (中午的"休息"是午休, 单独排除)。
 _ACTIONS = (
-    ("work_end", re.compile(r"下班|收工|打烊|关店|闭店|离店|结束工作|下课|放学")),
-    ("work_start", re.compile(r"到店|到岗|上班|开门|开店|开工|开始工作|开始营业|出摊|上课|到公司|到工作室")),
-    ("wake", re.compile(r"起床|(?<!提)醒|起来")),
+    ("work_end", re.compile(r"下班|收工|打烊|关店|闭店|关门|离店|结束工作|下课|放学|收摊|下播|交班")),
+    ("work_start", re.compile(r"到店|到岗|上班|开门|开店|开工|开始工作|营业|出摊|上课|到公司|到工作室|"
+                              r"开播|接班|到(?:健身房|医院|学校|单位|门店|店里|工地)|"
+                              r"开始(?:直播|画|上课|营业|干活|接单|做|写|录|练|带|揉面|备料|备菜|上工)")),
+    ("wake", re.compile(r"起床|(?<!提)醒|起来|^\s*(?:左右|多|才|就)?起(?!不来|营业|开始|上班|接单|开门|开工|到)")),
     ("sleep", re.compile(r"(?<![午小])睡|入眠|关灯|上床")),
 )
 _SLEEP_REST_RE = re.compile(r"休息")
@@ -48,13 +51,36 @@ _RANGE_RE = re.compile(
     _CLOCK + r"\s*(?:到|至|-|—|~)\s*" + _CLOCK
     + r"[^，。；]{0,4}?(上班|工作|营业|上课|值班|出摊|开工|做手工|做手作|创作|干活)"
 )
-_REST_WORD_RE = re.compile(r"休息|休|不上班|放假|轮休|调休")
+_REST_WORD_RE = re.compile(r"休息|休|不上班|放假|轮休|调休|歇业|店休")
 _REST_NEGATION_RE = re.compile(r"[不没]\s*(?:休息|休|放假)")
 _WEEKDAY_TOKEN_RE = re.compile(r"(?:周|星期|礼拜)([一二三四五六日天](?:[、和及与]?[一二三四五六日天])*)")
+# "播到晚上七点" "画到晚上十点" "卖到上午十点半": 做事做到几点 = 收工
+_UNTIL_RE = re.compile(r"(?:播|画|干|卖|忙|做|写|练|教|营业|开|上班|工作)到" + _CLOCK)
+_NINE_TO_FIVE_RE = re.compile(r"(?:朝|早)([一二三四五六七八九十]{1,2})晚([一二三四五六七八九十]{1,2})(?![点时])")
+# "睡到下午两点" 是起床时刻; "Wake up 7:15"
+_WAKE_AT_RE = re.compile(r"(?:睡到|wake up\s*)" + _CLOCK, re.IGNORECASE)
+# 说的是某一次或不固定的事, 不是作息: "有一次通宵到凌晨四点" "偶尔十一点前睡"
+_ONE_OFF_RE = re.compile(r"有一次|有次|那次|上次|那天|偶尔|有时候?|没有固定|不固定|想起就")
+# 时间段本身没带"上班"之类的词, 但这句话在讲工作 ("在琴行教课，上午十点到下午五点")
+_WORK_CONTEXT_RE = re.compile(r"上班|教课|上课|工作|营业|出摊|值班|开店|后厨|店里|公司|单位|工作室|直播|接单|干活|坐诊|"
+                              r"[白夜早晚中]班")
+# 后面跟着午休/吃饭的时间段是中间休息, 不是上班时间
+_PLAIN_RANGE_RE = re.compile(_CLOCK + r"\s*(?:到|至|-|—|~)\s*" + _CLOCK
+                             + r"(?!\s*(?:午休|休息|午睡|睡觉|吃饭|午饭|晚饭|健身|运动))")
 _WEEKEND_REST_RE = re.compile(r"周末[^，。；]{0,3}(?:休息|休|不上班|放假|双休)|双休")
-_PM_PERIODS = {"下午", "傍晚", "晚上", "每晚", "夜里", "半夜", "深夜"}
+_PM_PERIODS = {"下午", "傍晚", "晚上", "每晚", "夜里", "半夜", "深夜", "晚"}
 # 只有夜里的"休息"才是睡觉; 下午"休息半小时"是歇一会儿。
-_NIGHT_PERIODS = {"晚上", "每晚", "夜里", "半夜", "深夜"}
+_NIGHT_PERIODS = {"晚上", "每晚", "夜里", "半夜", "深夜", "晚"}
+
+
+def _routine_text(raw) -> str:
+    """去掉讲某一次 / 不固定的分句, 剩下的才是作息。"""
+    kept = []
+    for clause in re.split(r"[，。；,;！!？?（）()]", str(raw or "").strip()):
+        marker = _ONE_OFF_RE.search(clause)
+        # "每天7点起床偶尔赖床": 标记之前的仍是作息
+        kept.append(clause[:marker.start()] if marker else clause)
+    return "，".join(c for c in kept if c)
 
 
 def _clock_minute(groups: tuple, *, kind: str | None = None) -> int | None:
@@ -67,7 +93,8 @@ def _clock_minute(groups: tuple, *, kind: str | None = None) -> int | None:
             return None
         minute = {"半": 30, "一刻": 15, "三刻": 45}.get(frac or "", None)
         if minute is None:
-            minute = int(minute_word) if minute_word else 0
+            minute = (int(minute_word) if minute_word and minute_word.isdigit()
+                      else (_parse_cn_number(minute_word) or 0) if minute_word else 0)
     if hour > 24 or minute >= 60:
         return None
     if period in ("下午", "傍晚") and hour < 12:
@@ -98,6 +125,8 @@ _NOT_CLOCK_AFTER = ("一线", "也", "儿", "都", "点")
 
 def _is_clock(line: str, match: re.Match) -> bool:
     """"早一点睡" "两点一线" "一点也不想起床" 里的"X点"不是钟点。"""
+    if match.group(1) in ("早", "晚") and match.group(4) in ("一", "两", "1"):
+        return False  # "早一点睡" "晚一点再说" 是早些/晚些
     if match.group(1) or match.group(2):  # 带时段词或 HH:MM
         return True
     before = line[match.start() - 1] if match.start() else ""
@@ -131,8 +160,16 @@ def parse_routine_lines(lines: list[str]) -> ParsedRoutine:
     # 一天里分几段干活 ("上午9点到12点做手工，下午2点到6点做手工") 时取最早开始、最晚结束。
     spans: list[tuple[int, int, str]] = []
     for raw in lines:
-        line = str(raw or "").strip()
-        for match in _RANGE_RE.finditer(line):
+        line = _routine_text(raw)
+        idiom = _NINE_TO_FIVE_RE.search(line)
+        if idiom:
+            start_h, end_h = _parse_cn_number(idiom.group(1)), _parse_cn_number(idiom.group(2))
+            if start_h and end_h:
+                spans.append((start_h * 60, (end_h + (12 if end_h <= 12 else 0)) * 60, line))
+        matches = list(_RANGE_RE.finditer(line))
+        if not matches and _WORK_CONTEXT_RE.search(line):
+            matches = list(_PLAIN_RANGE_RE.finditer(line))
+        for match in matches:
             first, second = match.groups()[0:6], match.groups()[6:12]
             start = _clock_minute(first, kind="work_start")
             # "上午8点到11点" 的结束时刻沿用开始时刻的时段词, 不按"下班多在傍晚"去猜。
@@ -146,9 +183,17 @@ def parse_routine_lines(lines: list[str]) -> ParsedRoutine:
         parsed._set("work_start", min(s for s, _, _ in spans), spans[0][2])
         parsed._set("work_end", max(e for _, e, _ in spans), spans[-1][2])
     for raw in lines:
-        line = str(raw or "").strip()
+        line = _routine_text(raw)
         if not line:
             continue
+        for match in _WAKE_AT_RE.finditer(line):
+            minute = _clock_minute(match.groups()[:6], kind="wake")
+            if minute is not None and "wake" not in parsed.values:
+                parsed._set("wake", minute, line)
+        for match in _UNTIL_RE.finditer(line):
+            minute = _clock_minute(match.groups()[:6], kind="work_end")
+            if minute is not None and "work_end" not in parsed.values:
+                parsed._set("work_end", minute, line)
         for match in _CLOCK_RE.finditer(line):
             if not _is_clock(line, match):
                 continue
@@ -721,7 +766,7 @@ async def ensure_agent_routine(agent: Any) -> AgentRoutine | None:
     payload = routine_json_dumps(routine.to_json(derived_at=datetime.now(UTC).isoformat()))
     try:
         await db.execute_raw(
-            "UPDATE ai_agents SET routine = $1::jsonb WHERE id = $2 AND routine IS NULL",
+            "UPDATE ai_agents SET routine = $1::jsonb WHERE id = $2 AND (routine IS NULL OR routine = 'null'::jsonb)",
             payload, agent.id,
         )
     except Exception as exc:

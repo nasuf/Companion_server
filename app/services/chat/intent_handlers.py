@@ -1457,6 +1457,81 @@ def classify_cancel_intent(message: str) -> str:
     return "none"
 
 
+# 暂停/恢复只认"整句就是在说这件事": 去掉语气词后必须正好是下面这些说法。带了时间
+# 或具体事项的 ("明天继续提醒我吃药" "先别提醒我吃药了") 走原来的新建/取消流程。
+_PAUSE_RESUME_FILLER = re.compile(
+    r"[\s，。！？!?~、…,.]|吧|了|呀|啊|哈|嘛|呢|哦|喔|噢|你|帮我|给我|可以|那就|那|好的?|都|全部|所有|"
+    r"的|一下|一阵子?|把|我|再|就|行|麻烦"
+)
+_PAUSE_PHRASES = frozenset({
+    "暂停提醒", "提醒暂停", "先暂停提醒", "提醒先暂停", "提醒先停", "先停提醒", "提醒停", "提醒停掉",
+    "提醒先停掉", "先别提醒", "先不用提醒", "这几天别提醒", "这几天不用提醒", "这几天先别提醒",
+    "暂时别提醒", "暂时不用提醒", "暂时先别提醒", "暂时先不用提醒", "暂停提醒功能", "提醒先关", "先关提醒",
+})
+_RESUME_PHRASES = frozenset({
+    "恢复提醒", "提醒恢复", "继续提醒", "提醒继续", "重新提醒", "重新开始提醒", "提醒重新开始",
+    "打开提醒", "开启提醒", "提醒打开", "提醒开", "恢复暂停提醒", "暂停提醒恢复", "提醒恢复正常",
+})
+
+
+# 必须是在吩咐: "提醒停了" "我的提醒停了" 是在说提醒坏了, 不是让暂停
+_PAUSE_RESUME_IMPERATIVE = re.compile(r"先|暂停|暂时|别|不用|这几天|恢复|继续|重新|打开|开启|吧|一下|麻烦|帮我")
+_PAUSE_RESUME_QUESTION = re.compile(r"[?？]|吗|么|是不是|有没有")
+
+
+def classify_pause_resume(message: str) -> str | None:
+    """"pause" | "resume" | None。只认整句说的就是暂停/恢复全部提醒, 不调模型。"""
+    message = message or ""
+    if _PAUSE_RESUME_QUESTION.search(message) or not _PAUSE_RESUME_IMPERATIVE.search(message):
+        return None
+    core = _PAUSE_RESUME_FILLER.sub("", message)
+    if core in _RESUME_PHRASES:
+        return "resume"
+    if core in _PAUSE_PHRASES:
+        return "pause"
+    return None
+
+
+async def _pause_or_resume_reply(action: str, ctx) -> str:
+    from app.services.reminder.scheduling import (
+        notify_reminder_changed, pause_reminders, resume_reminders,
+    )
+
+    now = get_current_time().now
+    try:
+        if action == "pause":
+            n = await pause_reminders(user_id=ctx.user_id, agent_id=ctx.agent_id, now=now)
+            if ctx.response_diagnostics is not None:
+                ctx.response_diagnostics["reminder_pause"] = {"action": "pause", "count": n}
+            if not n:
+                return "现在没有在等着响的提醒呀"
+            await notify_reminder_changed(ctx.conversation_id, kind="paused")
+            return f"好，{n}个提醒先停了，想恢复跟我说一声就行"
+        resumed, expired = await resume_reminders(user_id=ctx.user_id, agent_id=ctx.agent_id, now=now)
+        if ctx.response_diagnostics is not None:
+            ctx.response_diagnostics["reminder_pause"] = {"action": "resume", "count": resumed,
+                                                          "expired": expired}
+        if not resumed and not expired:
+            return "没有暂停中的提醒哦"
+        await notify_reminder_changed(ctx.conversation_id, kind="resumed")
+        tail = f"，暂停那几天错过的{expired}个就不补啦" if expired else ""
+        return f"好，{resumed}个提醒恢复了{tail}" if resumed else f"暂停期间那{expired}个提醒都过点了，就不补啦"
+    except Exception as exc:
+        logger.warning("[REMINDER-PAUSE] %s failed: %s", action, type(exc).__name__)
+        return "这边没弄好，你再跟我说一次吧"
+
+
+async def _paused_reminders(*, user_id: str, agent_id: str | None) -> list:
+    if not agent_id:
+        return []
+    from app.services.reminder.scheduling import find_paused_reminder_triggers
+    try:
+        return await find_paused_reminder_triggers(user_id=user_id, agent_id=agent_id)
+    except Exception as e:
+        logger.warning(f"[REMINDER-CANCEL] paused lookup failed: {type(e).__name__}")
+        return []
+
+
 # 向后兼容 alias — preflight._handle_pending_set_reminder 仍 import 这个名字.
 # 仅判 "明确取消" 用; pending set_reminder 反问场景下用户回复歧义不会误删 trigger
 # (因为 pending 还没建 trigger). 故只看 high.
@@ -1497,7 +1572,7 @@ def _topic_overlap(user_message: str, reminder_summary: str) -> bool:
 
 
 async def _list_active_reminders_with_meta(
-    *, user_id: str, agent_id: str | None,
+    *, user_id: str, agent_id: str | None, include_paused: bool = False,
 ) -> list[dict]:
     """查 (user, agent) 的所有 active reminder, 返回带 trigger_id/summary/when_text/memory_id 的 list.
 
@@ -1506,16 +1581,17 @@ async def _list_active_reminders_with_meta(
     from app.services.reminder.scheduling import (
         find_active_reminder_triggers, format_when_text,
     )
+    paused = await _paused_reminders(user_id=user_id, agent_id=agent_id) if include_paused else []
     triggers = await find_active_reminder_triggers(
         user_id=user_id, agent_id=agent_id,
-    )
+    ) + paused
     items = []
     for t in triggers:
         action = t.actionData or {}
         items.append({
             "trigger_id": t.id,
             "summary": (action.get("summary") or "")[:80],
-            "when_text": format_when_text(t.triggerTime),
+            "when_text": format_when_text(t.triggerTime) + ("，暂停中" if t in paused else ""),
             "trigger_time": t.triggerTime.isoformat() if t.triggerTime else None,
             "memory_id": action.get("memory_id"),
             "recurrence": action.get("recurrence", "once"),
@@ -1552,23 +1628,32 @@ async def _cancel_active_reminders(
     all_active = await find_active_reminder_triggers(
         user_id=user_id, agent_id=agent_id,
     )
+    # 暂停中的也能取消, 否则取消后一句 "恢复提醒" 又会把它带回来
+    all_paused = await _paused_reminders(user_id=user_id, agent_id=agent_id)
     if trigger_ids is not None:
-        target = [t for t in all_active if t.id in set(trigger_ids)]
+        target = [t for t in all_active + all_paused if t.id in set(trigger_ids)]
     else:
-        target = all_active
+        target = all_active + all_paused
+    paused_target = [t for t in target if t in all_paused]
 
     if not target:
         return 0
 
     # 真删 (其实是 isActive=False soft delete)
-    if trigger_ids is not None:
+    n_paused = 0
+    if paused_target:
+        from app.services.reminder.scheduling import cancel_paused_reminder_triggers
+        n_paused = await cancel_paused_reminder_triggers(paused_target, now=get_current_time().now)
+    if trigger_ids is not None and len(paused_target) == len(target):
+        n = 0
+    elif trigger_ids is not None:
         # 只删指定的: 用 update_many with id in [...]
         try:
             result = await db.timetrigger.update_many(
-                where={"id": {"in": [t.id for t in target]}, "isActive": True},
+                where={"id": {"in": [t.id for t in target if t not in all_paused]}, "isActive": True},
                 data={"isActive": False},
             )
-            n = int(result) if result is not None else len(target)
+            n = int(result) if result is not None else len(target) - len(paused_target)
         except Exception as e:
             logger.warning(f"[REMINDER-CANCEL] selective deactivate failed: {e}")
             return 0
@@ -1577,6 +1662,7 @@ async def _cancel_active_reminders(
         n = await deactivate_reminder_triggers(
             user_id=user_id, agent_id=agent_id,
         )
+    n += n_paused
 
     # audit log: 每条 trigger 一条 changelog
     for t in target:
@@ -1783,8 +1869,9 @@ async def _handle_cancel_intent(
     # save_pending_action 已在模块顶部 import (跟 deletion handler 共享 pending Redis key)
     from app.services.reminder.scheduling import notify_reminder_changed
 
+    # 明确说取消时暂停中的也算 (否则取消后 "恢复提醒" 又把它带回来); 口语猜测只看会响的
     items = await _list_active_reminders_with_meta(
-        user_id=ctx.user_id, agent_id=ctx.agent_id,
+        user_id=ctx.user_id, agent_id=ctx.agent_id, include_paused=cancel_level == "high",
     )
 
     # === LOW + 无 reminder OR 多 reminder → 不打扰用户 ===
@@ -1891,6 +1978,16 @@ async def handle_record_request(
     try:
         # 撤回语义已统一到 preflight.resolve_recent_undo (在主流程之前运行,
         # 同时处理 cancel_reminder 和 delete undo). 不在这里重复处理.
+
+        # 暂停 / 恢复 (TIME10) 先于取消判断: "先别提醒了" 是暂停, 不是删掉
+        # 预处理阶段只接整条消息; 多意图拆出来的 "先别提醒了" 在这里接, 别当成取消
+        pause_action = classify_pause_resume(user_message)
+        if pause_action and ctx.user_id and ctx.agent_id:
+            ctx.consumed_full_message = True
+            return True, ctx.finalize(
+                await _pause_or_resume_reply(pause_action, ctx),
+                kind=f"record_request_{pause_action}",
+            )
 
         # 取消语义分级判定
         cancel_level = classify_cancel_intent(user_message)

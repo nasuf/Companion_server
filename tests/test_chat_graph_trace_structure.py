@@ -34,7 +34,7 @@ async def test_named_routes_keep_the_same_graph_path_and_one_terminal_event(monk
     expected = list(main_graph.PHASES) + ["fragments", "finish_turn"]
     assert [name for name in names if name in expected] == expected
     assert "Unnamed" not in names
-    assert names.count("route_next") == 14
+    assert names.count("route_next") == len(main_graph.PHASES) + 1
     assert routes == list(zip(expected[:-1], expected[1:]))
     io.db.message.create.assert_awaited_once()
     chat._save_replies.assert_awaited_once()

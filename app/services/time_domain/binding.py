@@ -84,7 +84,8 @@ def binding_uncertainty(text: str) -> str | None:
     """Conservative gates, not a claim to resolve negation or quoted speakers."""
     if _QUOTES.search(text):
         return "quoted_expression"
-    if _NONFACTUAL.search(re.sub(r"有没有", "有无", text)):
+    # "有没有" "是不是" 是问句形式, 不是否定 ("明年我是不是要去深圳")。
+    if _NONFACTUAL.search(re.sub(r"有没有|是不是", "有无", text)):
         return "nonfactual_or_corrected"
     return None
 

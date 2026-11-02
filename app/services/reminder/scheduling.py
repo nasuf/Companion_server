@@ -211,7 +211,8 @@ async def renew_periodic_trigger(
             "userId": user_id,
             "triggerTime": next_trigger_time,
             "actionType": REMINDER_ACTION_TYPE,
-            "actionData": Json(dict(action_data)),
+            # 下一期是新的一行, 不继承暂停标记 (否则它被取消后会像"暂停中"被恢复)
+            "actionData": Json({k: v for k, v in action_data.items() if k != "paused_at"}),
             "lastFired": None,  # fresh row, lastFired 守门 (2min 窗口) 不应误拦
         })
         return created.id
@@ -290,15 +291,27 @@ async def reactivate_reminder_triggers(triggers: list[dict]) -> int:
     """
     if not triggers:
         return 0
-    trigger_ids = [t.get("trigger_id") for t in triggers if t.get("trigger_id")]
-    if not trigger_ids:
+    # 暂停期间被取消的, 撤回后回到暂停状态 (带回 paused_at), 不直接启用
+    paused = [t for t in triggers if t.get("trigger_id") and (t.get("action_data") or {}).get("paused_at")]
+    trigger_ids = [t.get("trigger_id") for t in triggers if t.get("trigger_id") and t not in paused]
+    if not trigger_ids and not paused:
         return 0
     try:
-        result = await db.timetrigger.update_many(
-            where={"id": {"in": trigger_ids}, "isActive": False},
-            data={"isActive": True},
-        )
-        n = int(result) if result is not None else len(trigger_ids)
+        from prisma import Json
+
+        n = 0
+        for t in paused:
+            n += int(await db.timetrigger.update_many(
+                where={"id": t["trigger_id"], "isActive": False, "lastFired": None},
+                data={"actionData": Json(t["action_data"])},
+            ) or 0)
+        if trigger_ids:
+            result = await db.timetrigger.update_many(
+                where={"id": {"in": trigger_ids}, "isActive": False},
+                data={"isActive": True},
+            )
+            n += int(result) if result is not None else len(trigger_ids)
+        trigger_ids = [*trigger_ids, *(t["trigger_id"] for t in paused)]
         logger.info(
             f"[REMINDER] reactivated {n}/{len(trigger_ids)} trigger(s) from undo"
         )
@@ -550,3 +563,117 @@ async def create_user_reminder(
     )
     # A stored memory without a trigger is not a scheduled reminder.
     return memory_id if trigger_id else None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 暂停 / 恢复 (TIME10)
+# ═══════════════════════════════════════════════════════════════════
+
+PAUSE_LIMIT = 200
+
+# 暂停中的提醒: 停用但没响过, 带 paused_at, 也没被记成错过。按 SQL 筛, 不能先取
+# "停用且没响过" 再在 Python 里挑 —— 用户取消过的行会越积越多, 把暂停的挤出窗口。
+_PAUSED_SQL = """SELECT id FROM time_triggers
+  WHERE user_id=$1 AND ai_agent_id=$2 AND action_type=$3 AND NOT is_active
+    AND last_fired IS NULL AND action_data ? 'paused_at'
+    AND NOT action_data ?| array['missed_at','deleted_at','completed_at','cancelled_at']
+  ORDER BY trigger_time ASC LIMIT $4"""
+# 暂停之后又被删除/完成/取消的, 都不算暂停中 (与上面 SQL 同一口径)
+PAUSE_TERMINAL_KEYS = ("missed_at", "deleted_at", "completed_at", "cancelled_at")
+
+
+def is_paused_trigger(trigger) -> bool:
+    data = trigger.actionData or {}
+    return bool(not trigger.isActive and trigger.lastFired is None and data.get("paused_at")
+                and not any(data.get(k) for k in PAUSE_TERMINAL_KEYS))
+
+# 一行一条的比较交换: 读出来之后被别处改过 (刚触发、改期、重试) 就不动它。
+_CAS_SQL = """UPDATE time_triggers SET is_active=$5, action_data=$6::jsonb,
+    trigger_time=COALESCE($7::timestamptz AT TIME ZONE 'UTC', trigger_time)
+  WHERE id=$1 AND is_active=$2 AND last_fired IS NULL
+    AND action_data IS NOT DISTINCT FROM $3::jsonb
+    AND trigger_time=$4::timestamptz AT TIME ZONE 'UTC'
+  RETURNING id"""
+
+
+def _jsonb(value) -> str | None:
+    import json
+    return None if value is None else json.dumps(value)
+
+
+async def _cas_trigger(row, *, active: bool, data: dict, trigger_time: datetime | None = None) -> bool:
+    rows = await db.query_raw(
+        _CAS_SQL, row.id, row.isActive, _jsonb(row.actionData), row.triggerTime.isoformat(),
+        active, _jsonb(data), trigger_time.isoformat() if trigger_time else None,
+    )
+    return bool(rows)
+
+
+async def find_paused_reminder_triggers(*, user_id: str, agent_id: str) -> list[Any]:
+    """暂停中的提醒 (最多 PAUSE_LIMIT 条), 按触发时间升序。"""
+    rows = await db.query_raw(_PAUSED_SQL, user_id, agent_id, REMINDER_ACTION_TYPE, PAUSE_LIMIT)
+    ids = [r["id"] for r in rows]
+    if not ids:
+        return []
+    return await db.timetrigger.find_many(
+        where={"id": {"in": ids}, "isActive": False, "lastFired": None},
+        order={"triggerTime": "asc"},
+    )
+
+
+async def pause_reminders(*, user_id: str, agent_id: str, now: datetime) -> int:
+    """"先别提醒了 / 暂停提醒": 停用当前所有有效提醒并打上暂停标记 (不删记忆)。
+
+    逐行比较交换, 期间刚好触发、改期或重试的行不受影响。返回暂停条数。
+    """
+    rows = await db.timetrigger.find_many(
+        where={"userId": user_id, "aiAgentId": agent_id, "actionType": REMINDER_ACTION_TYPE,
+               "isActive": True, "lastFired": None},
+        take=PAUSE_LIMIT,
+    )
+    paused = 0
+    for row in rows:
+        data = {**(row.actionData or {}), "paused_at": now.isoformat()}
+        paused += await _cas_trigger(row, active=False, data=data)
+    return paused
+
+
+async def resume_reminders(*, user_id: str, agent_id: str, now: datetime) -> tuple[int, int]:
+    """"恢复提醒": 只恢复被暂停的提醒。返回 (恢复条数, 已过期不补的条数)。
+
+    一次性提醒在暂停期间已经过了点的不补发, 记成错过; 周期提醒挪到下一个还没到的
+    时刻再启用 (暂停期间错过的几期不补)。
+    """
+    from app.services.proactive.triggers import _aware, _next_future_occurrence
+    from app.services.reminder.mutations import reminder_still_valid
+
+    resumed = expired = 0
+    for row in await find_paused_reminder_triggers(user_id=user_id, agent_id=agent_id):
+        data = {k: v for k, v in (row.actionData or {}).items() if k != "paused_at"}
+        if not await reminder_still_valid(db, row):
+            # 暂停期间提醒记忆被删了: 去掉暂停标记, 不恢复也不计数
+            await _cas_trigger(row, active=False, data={**data, "dropped_while_paused_at": now.isoformat()})
+            continue
+        due = _aware(row.triggerTime)
+        recurrence = data.get("recurrence") or "once"
+        if due > now:
+            resumed += await _cas_trigger(row, active=True, data=data)
+        elif recurrence == "once":
+            data.update(missed_at=now.isoformat(), missed_by_seconds=int((now - due).total_seconds()),
+                        missed_reason="paused")
+            expired += await _cas_trigger(row, active=False, data=data)
+        else:
+            nxt = _next_future_occurrence(due, now, recurrence, data)
+            if nxt is not None:
+                resumed += await _cas_trigger(row, active=True, data=data, trigger_time=nxt)
+    return resumed, expired
+
+
+async def cancel_paused_reminder_triggers(rows: list[Any], *, now: datetime) -> int:
+    """取消暂停中的提醒: 去掉暂停标记, 之后 "恢复提醒" 不会再把它带回来。"""
+    cancelled = 0
+    for row in rows:
+        data = {k: v for k, v in (row.actionData or {}).items() if k != "paused_at"}
+        data["cancelled_while_paused_at"] = now.isoformat()
+        cancelled += await _cas_trigger(row, active=False, data=data)
+    return cancelled

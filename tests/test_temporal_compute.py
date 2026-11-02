@@ -148,13 +148,13 @@ async def test_plan_for_question_routes_and_degrades(monkeypatch):
         return await compute.plan_for_question(text, _q(text), user_id="u", workspace_id="w", now=NOW)
 
     done = await plan("这个月我去了几次健身房")
-    assert done.status == "computed" and load.await_args.kwargs["term"] == "健身"
+    assert done.status == "computed" and load.await_args.kwargs["term"][:3] == ("健身", "撸铁", "举铁")
     assert await plan("今天好累") is None
     assert await plan("我减肥多久了") is None            # 持续时长, 不是距上次多久
     recent = await plan("我最近一次去健身房是哪天")      # "最近一次" 不是时间范围
     assert recent.status == "computed"
     await plan("我多久没吃火锅了")
-    assert load.await_args.kwargs["term"] == "火锅"      # 动宾事件按宾语匹配
+    assert load.await_args.kwargs["term"][0] == "火锅"   # 动宾事件按宾语匹配
     assert (await plan("我跟她吃饭看电影几次了")).status == "topic_unclear"
     unclear = await plan("这个月和上个月我去了几次健身房")
     assert unclear.status == "topic_unclear" and unclear.reasons == ["range_unclear"]
@@ -177,7 +177,8 @@ async def test_scan_query_is_bounded_excludes_reminders_and_escapes_like():
     assert truncated and len(rows) == compute.SCAN_LIMIT
     sql, args = calls[0]
     assert "'提醒'" in sql and "memory_evidence_links" in sql
-    assert args[2] == "%100\\%\\_跑%" and args[3] == compute.SCAN_LIMIT + 1
+    assert args[2] == ["%100\\%\\_跑%"] and args[3] == compute.SCAN_LIMIT + 1
+    assert "ILIKE ANY" in sql
 
 
 @pytest.mark.parametrize("reply, verdict", [
@@ -195,3 +196,74 @@ def test_reply_count_check(reply, verdict):
     diag = {"status": "computed", "operation": "count", "value": {"at_least_days": 3}}
     assert compute.check_reply(diag, reply) == verdict
     assert compute.check_reply({"status": "no_events", "operation": "count"}, reply) is None
+
+
+@pytest.mark.parametrize("reply, verdict", [
+    ("你上次跟我提起健身是四天前", "consistent"),
+    ("10月29号那次呀", "consistent"),
+    ("十月二十九日去的", "consistent"),
+    ("你上次是五天前跟我说的", "mismatch"),
+    ("10月28号那次", "mismatch"),
+    ("好像挺久没去了", "consistent"),
+])
+def test_reply_date_check(reply, verdict):
+    order = {"status": "computed", "operation": "order",
+             "value": {"which": "last", "n": 1, "date": "2026-10-29", "days_ago": 4}}
+    duration = {"status": "computed", "operation": "duration",
+                "value": {"since_last_days": 4, "last_date": "2026-10-29"}}
+    assert compute.check_reply(order, reply) == verdict
+    assert compute.check_reply(duration, reply) == verdict
+
+
+def test_synonym_mentions_count_once_per_day():
+    rows = [_row(1, "用户今天去撸铁了", "2026-10-20"), _row(2, "用户去健身房练腿", "2026-10-20"),
+            _row(3, "用户练背好累", "2026-10-25"), _row(4, "用户今天没撸铁", "2026-10-27")]
+    plan = compute_plan("count", "我去了几次健身房", rows, now=NOW, zone=_TZ)
+    assert plan.value == {"at_least_days": 2} and plan.skipped == 1
+    assert compute.search_terms("健身")[0] == "健身" and "撸铁" in compute.search_terms("健身")
+    assert compute.search_terms("钢琴") == ("钢琴",)
+    # 只从泛称往下展开: 问得具体就只数具体的
+    assert compute.search_terms("体检") == ("体检",) and compute.search_terms("夜跑") == ("夜跑",)
+    assert "打球" not in compute.search_terms("羽毛球") and "口腔" not in compute.search_terms("看牙")
+
+
+@pytest.mark.parametrize("reply, verdict", [
+    ("10月3日前后那阵子，10月29号去的", "consistent"),   # "3日前" 不是天数
+    ("国庆10月1日之后，最近一次是10月29号", "consistent"),  # 顺带提到别的日子
+    ("最近两次隔了5天，上次是四天前", "consistent"),        # 隔了几天是间隔
+])
+def test_reply_date_check_ignores_unrelated_dates(reply, verdict):
+    order = {"status": "computed", "operation": "order",
+             "value": {"which": "last", "n": 1, "date": "2026-10-29", "days_ago": 4}}
+    assert compute.check_reply(order, reply) == verdict
+
+
+def test_thoughts_are_not_plans():
+    assert not compute._not_occurred("用户想起今天去健身了", "健身")
+    assert compute._not_occurred("用户想去健身", "健身")
+
+
+@pytest.mark.parametrize("text", [
+    "用户和朋友约了下周去看电影", "用户预约了下周看牙医", "用户说车脏了，该洗车了",
+    "用户抢到了演唱会门票", "用户说他同事周三去了咖啡店", "用户给儿子报了游泳班",
+    "用户想去迪士尼过圣诞",
+])
+def test_plans_tickets_and_other_people_are_not_occurrences(text):
+    term = next(t for t in ("电影", "牙医", "洗车", "演唱会", "咖啡", "游泳", "迪士尼") if t in text)
+    assert compute._not_occurred(text, term)
+
+
+@pytest.mark.parametrize("text, term", [
+    ("用户和同事打羽毛球", "羽毛球"), ("用户带孩子去游泳", "游泳"), ("用户打算去健身结果练完了", "健身"),
+    ("用户和男朋友去看电影了", "电影"), ("她陪用户去医院看病", "看病"), ("他请用户吃了火锅", "火锅"),
+    ("用户带着孩子去游泳了", "游泳"), ("下班后同事叫上用户一起吃火锅", "火锅"),
+    ("用户昨天应该是去健身了", "健身"), ("用户记得去健身了", "健身"),
+])
+def test_doing_it_with_others_or_after_planning_still_counts(text, term):
+    assert not compute._not_occurred(text, term)
+
+
+def test_vague_topics_are_not_guessed():
+    assert compute.topic_term("我上次那个是什么时候来着") == ""
+    assert compute.topic_term("这个月我做了几次") == ""
+    assert compute.topic_term("我上个月看了几场电影") == "电影"

@@ -168,6 +168,7 @@ from app.services.chat.preflight import (
     resolve_pending_contradiction,
     resolve_pending_deletion,
     resolve_recent_undo,
+    resolve_reminder_pause,
 )
 from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
 from app.services.chat.data_fetch_phase import (

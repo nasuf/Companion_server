@@ -30,6 +30,7 @@ from app.services.reminder.scheduling import (
     RecurrenceKind,
     archive_reminder_memory,
     create_user_reminder,
+    is_paused_trigger,
     notify_reminder_changed,
 )
 from app.services.proactive.triggers import _DLQ_KEY
@@ -55,6 +56,8 @@ class ReminderItem(BaseModel):
     habit_weekdays: list[int] = Field(default_factory=list)
     completed_dates: list[str] = Field(default_factory=list)
     sent_to_ai: bool = False
+    # 用户在聊天里说"先别提醒了"暂停的: status 仍按 cancelled (不响), 说"恢复提醒"会回来
+    paused: bool = False
     agent_id: str
     created_at: str  # ISO
 
@@ -157,6 +160,7 @@ def _to_item(trigger) -> ReminderItem:
         habit_weekdays=habit_weekdays,
         completed_dates=completed_dates,
         sent_to_ai=bool(data.get("sent_to_ai") or False),
+        paused=is_paused_trigger(trigger),
         agent_id=trigger.aiAgentId,
         created_at=trigger.createdAt.isoformat(),
     )
@@ -487,6 +491,7 @@ async def update_reminder_for_user(
         if trigger_time <= datetime.now(UTC):
             raise HTTPException(status_code=400, detail="提醒时间必须在未来")
         update_data.update(triggerTime=trigger_time, isActive=True, lastFired=None)
+        action_data.pop("paused_at", None)  # 改了时间就是重新启用, 不再算暂停中
         action_data.pop("retry_count", None)
         action_data.pop("precheck_state", None)
         action_data.pop("precheck_observed_at", None)

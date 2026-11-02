@@ -22,6 +22,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from app.services.time_domain.operations import OTHER_SUBJECT
 from app.services.time_domain.timestamps import exclusive_end, parse_time
 
 logger = logging.getLogger(__name__)
@@ -31,21 +32,20 @@ _OPERATIONS = {"count", "order", "duration"}
 
 # 问句里不属于"事件"的部分: 时间词、疑问词、虚词。剩下的连续中文就是事件词。
 _STRIP = re.compile(
-    r"几次|多少次|多少回|几回|次数|一共|总共|加起来|"
+    r"几次|多少次|多少回|几回|几场|多少场|几趟|次数|一共|总共|加起来|"
     r"最近一次|上一次|上上次|上次|最后一次|倒数第[一二三四五六七八九十\d]+次|第[一二三四五六七八九十\d]+次|"
     r"多久|多长时间|多少天|几天|几个月|隔了|间隔|距离|离现在|到现在|以来|"
     r"什么时候|啥时候|哪天|几号|是不是|有没有|"
     r"这个月|上个月|下个月|今年|去年|前年|本周|这周|上周|这礼拜|上礼拜|最近|今天|昨天|前天|"
     r"[0-9一二三四五六七八九十]+月份?|[0-9]+年|"
-    r"我|了|过|的|去|是|在|呢|吗|啊|呀|没有|没|还|都|又|再|跟|和|一下|"
+    # 指代词: "上次那个" 说不清是哪件事 (排在 "这个月" 之后)
+    r"那个|这个|那件事|这件事|那事|这事|"
+    r"我|了|过|的|去|是|在|呢|吗|啊|呀|来着|没有|没|还|都|又|再|跟|和|一下|过去|"
     r"[，。！？?!,\s]"
 )
 _TERM = re.compile(r"[一-鿿A-Za-z]{2,8}")
 # 问的不是用户本人做的事: AI ("你去过几次" 且没有"我")、"我们"、家人朋友。
-_OTHER_SUBJECT = re.compile(
-    r"我们|咱们|我妈|妈妈|我爸|爸爸|爷爷|奶奶|外公|外婆|男朋友|女朋友|对象|老公|老婆|朋友(?!圈)|"
-    r"同事|同学|闺蜜|哥哥|姐姐|弟弟|妹妹|孩子|儿子|女儿|宝宝|她|(?<![其吉])他|聊天"
-)
+_OTHER_SUBJECT = OTHER_SUBJECT
 # 动宾事件词的动词: 记忆里常写成"吃了火锅""看了场电影", 只按宾语匹配。
 _LEADING_VERB = re.compile(r"^[吃喝看打玩做上逛买听踢唱跑]")
 # 地点后缀: 问"健身房", 记忆里多半是"去健身了"。
@@ -54,10 +54,22 @@ _PLACE_SUFFIX = re.compile(r"(?<=..)[房馆院店场厅]$")
 # "好久没健身了今天终于去了" 是去了; "今天没健身" 是没去。
 _NEGATION_BEFORE = r"(?:(?:没有?|不|没能|忘了|不想|懒得|去不了)[^，。！？,]{0,2}|取消了?[^，。！？,]{0,6})"
 _NEGATION_AFTER = r"[^，。！？,]{0,3}(?:不了|没成|取消|泡汤|改天)"
-_PLAN_BEFORE = r"(?:打算|计划着|准备|想去|想要|要去|将要|下次|明天|下周|改天)[^，。！？,]{0,3}"
-_DONE = re.compile(r"了|完|过")
+_PLAN_BEFORE = (r"(?:打算|计划着|准备|想(?![到起法通])|要去|将要|下次|明天|下周|下个月|改天|"
+                r"约了|预约了?|约好|报了|报名了?)[^，。！？,]{0,5}")
+# "该洗车了" "应该去趟医院": 还没做, 带 "了" 也不算做了
+_SHOULD_BEFORE = r"(?:应该(?!是|已经|也)|(?<!应)该(?!死)|(?<![记觉懂舍])得去)[^，。！？,]{0,3}"
+# 计划之后真的做了: 事件词后面跟着 "了/完" ("打算去健身, 结果练完了")
+_DONE_AFTER = r"[^，。！？,]{0,4}(?:了|完)"
+# 提到了事件词, 说的却是票、名额之类 ("抢到了演唱会门票")
+_NOT_EVENT_AFTER = r"(?:门票|票|名额)"
+# 做这件事的是别人 ("他同事去了咖啡店" "给儿子报了游泳班"); "和同事打球" 是一起做的
+_ACTORS = (r"(?:他|她|同事|男朋友|女朋友|朋友|闺蜜|室友|我妈|妈妈|我爸|爸爸|哥哥|姐姐|弟弟|妹妹|"
+           r"孩子|儿子|女儿|老公|老婆|对象)")
+_OTHER_ACTOR = re.compile(_ACTORS)
+# "和男朋友" "带着孩子" "陪她": 一起做的, 先去掉
+_WITH_ACTOR = re.compile(r"(?:和|跟|陪|与|同|带)着?" + _ACTORS)
 _FINALLY_DONE = re.compile(r"终于|总算|又去了|还是去了")
-_DURATION_SINCE = re.compile(r"多久没|多长时间没|多少天没|几天没|隔了多久|间隔多久|距离上次|距上次|离上次")
+_DURATION_SINCE = re.compile(r"多久没|多长时间没|多少天没|几天没|隔了多久|间隔多久|距离(?:我)?上次|距(?:我)?上次|离(?:我)?上次|过去几天")
 # 问了时间范围 ("这个月" "上周" "九月份")。"最近" 不算范围 (模糊词, 解析不出区间), 按不限范围算。
 _TIME_HINT = re.compile(r"这个月|上个月|今年|去年|前年|这周|本周|上周|这礼拜|上礼拜|月份?|号|今天|昨天|前天")
 _ORDINAL = re.compile(r"(倒数)?第([一二三四五六七八九十\d]{1,3})次")
@@ -137,9 +149,39 @@ def search_term(term: str) -> str:
     return term[1:] if len(term) >= 3 and _LEADING_VERB.match(term) else term
 
 
+# 同一件事的常见说法。问"健身", 记忆里可能写的是"撸铁"。每族两组: 同义说法互通;
+# 更具体的说法只在问泛称时算进来 (问"健身"算"练腿", 问"练腿"不算别的健身)。
+# 只放含义明确、不会把别的事算进来的词; 族内按天去重。
+_SYNONYM_FAMILIES = (
+    (("健身", "撸铁", "举铁", "力量训练"), ("练腿", "练背", "练胸", "练肩", "私教课")),
+    (("跑步",), ("夜跑", "晨跑", "慢跑", "长跑")),
+    (("游泳", "游了泳"), ()),
+    # 问"去医院"算上看病; 问"看病"不算 "在医院值班" 这类只是人在医院的说法
+    (("医院",), ("看病", "看医生", "就诊", "门诊", "挂号", "体检")),
+    (("看病", "看医生", "就诊"), ("门诊", "挂号")),
+    (("面试",), ("复试", "终面")),
+    (("吵架", "吵了一架"), ("闹别扭",)),
+    (("喝酒", "喝了点酒", "小酌"), ()),
+    (("火锅", "涮锅"), ()),
+    (("电影", "影院"), ()),
+    (("约会",), ("见网友",)),
+    (("看牙", "牙医", "牙科"), ("补牙", "洗牙", "拔牙", "正畸")),
+    (("看展", "展览", "看了个展"), ("画展", "摄影展", "美术馆")),
+)
+
+
+def search_terms(term: str) -> tuple[str, ...]:
+    """扫描用的一组词: 问的词所在的同义说法; 问的是泛称时再加上更具体的说法。"""
+    base = search_term(term)
+    for same, narrower in _SYNONYM_FAMILIES:
+        if base in same:
+            return tuple(dict.fromkeys((base, *same, *narrower)))
+    return (base,)
+
+
 def _not_occurred(text: str, term: str) -> bool:
     """这条说法里, 事件词附近是否是否定 / 计划 (没做成或还没做)。"""
-    t = re.escape(search_term(term))
+    t = "(?:" + "|".join(re.escape(x) for x in search_terms(term)) + ")"
     for clause in re.split(r"[，。！？,!?；;]", text):
         if not re.search(t, clause):
             continue
@@ -147,7 +189,18 @@ def _not_occurred(text: str, term: str) -> bool:
             continue  # "好久没健身了今天终于去了": 最后是做了
         if re.search(_NEGATION_BEFORE + t, clause) or re.search(t + _NEGATION_AFTER, clause):
             return True
-        if re.search(_PLAN_BEFORE + t, clause) and not _DONE.search(clause):
+        if re.search(t + _NOT_EVENT_AFTER, clause) or re.search(_SHOULD_BEFORE + t, clause):
+            return True
+        if re.search(_PLAN_BEFORE + t, clause) and not re.search(t + _DONE_AFTER, clause):
+            return True
+        head = _WITH_ACTOR.sub("", re.split(t, clause, maxsplit=1)[0])
+        actor = None
+        for actor in _OTHER_ACTOR.finditer(head):
+            pass
+        # 别人是主语, 且之后没再出现用户 ("她陪用户去医院" "同事叫上用户" 是一起做的)
+        if actor and "用户" not in head[actor.end():]:
+            return True
+        if re.search(r"给[^，。！？,]{0,3}(?:儿子|女儿|孩子|老公|老婆)", head):
             return True
     return False
 
@@ -167,7 +220,10 @@ def compute_plan(operation: str, question: str, rows: list[EventRow], *, now: da
         plan.period_label = f"{_local_day(start, zone).isoformat()} 到 {_local_day(end, zone).isoformat()} 之前"
     today = _local_day(now, zone)
     days: set[date] = set()
+    terms = search_terms(plan.topic) if plan.topic else ()
     for row in rows:
+        if terms and not any(t in row.text for t in terms):
+            continue  # 扫描是子串匹配, 这里再确认一遍说的就是这件事
         if _not_occurred(row.text, plan.topic or question):
             plan.skipped += 1
             continue
@@ -260,13 +316,14 @@ def render_plan(plan: TemporalAnswerPlan) -> str:
     return "\n".join(lines)
 
 
-async def load_event_rows(*, user_id: str, workspace_id: str, term: str,
+async def load_event_rows(*, user_id: str, workspace_id: str, term: str | tuple[str, ...],
                           database=None) -> tuple[list[EventRow], bool]:
-    """按事件词扫描用户自己的生活/情绪记忆 (不含提醒; 上限 SCAN_LIMIT, 超过即截断)。"""
+    """按事件词 (及同义说法) 扫描用户自己的生活/情绪记忆 (不含提醒; 上限 SCAN_LIMIT)。"""
     from app.db import db as default_db
 
     client = database or default_db
-    pattern = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    terms = (term,) if isinstance(term, str) else tuple(term)
+    patterns = ["%" + t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for t in terms]
     rows = await client.query_raw(
         """SELECT m.id, m.content, m.occur_time, m.statement_time, m.mention_count,
                   COALESCE((SELECT array_agg(DISTINCT l.source_statement_time)
@@ -276,10 +333,10 @@ async def load_event_rows(*, user_id: str, workspace_id: str, term: str,
            FROM memories_user m
            WHERE m.user_id = $1 AND m.workspace_id = $2 AND m.is_archived = false
              AND m.main_category IN ('生活', '情绪') AND m.sub_category IS DISTINCT FROM '提醒'
-             AND m.content ILIKE $3
+             AND m.content ILIKE ANY($3::text[])
            ORDER BY COALESCE(m.occur_time, m.statement_time, m.created_at) DESC, m.id
            LIMIT $4""",
-        user_id, workspace_id, pattern, SCAN_LIMIT + 1,
+        user_id, workspace_id, patterns, SCAN_LIMIT + 1,
     )
     truncated = len(rows) > SCAN_LIMIT
 
@@ -318,7 +375,7 @@ async def plan_for_question(question: str, temporal_query, *, user_id: str | Non
     period = expressions[0] if len(expressions) == 1 else None
     try:
         rows, truncated = await load_event_rows(user_id=user_id, workspace_id=workspace_id,
-                                                term=search_term(term))
+                                                term=search_terms(term))
     except Exception as exc:
         logger.warning("[TEMPORAL-COMPUTE] scan unavailable: %s", type(exc).__name__)
         return TemporalAnswerPlan(operation=operation, status="unavailable", topic=term)
@@ -337,7 +394,11 @@ def check_reply(plan_diag: dict | None, reply: str) -> str | None:
     """
     from app.services.time_domain.parser import _parse_cn_number
 
-    if not plan_diag or plan_diag.get("status") != "computed" or plan_diag.get("operation") != "count":
+    if not plan_diag or plan_diag.get("status") != "computed":
+        return None
+    if plan_diag.get("operation") in ("order", "duration"):
+        return _check_dates(plan_diag.get("value") or {}, reply or "")
+    if plan_diag.get("operation") != "count":
         return None
     expected = (plan_diag.get("value") or {}).get("at_least_days")
     if not isinstance(expected, int):
@@ -356,4 +417,34 @@ def check_reply(plan_diag: dict | None, reply: str) -> str | None:
             return "overclaimed"
         if n < expected:
             return "mismatch"
+    return "consistent"
+
+
+_REPLY_DATE = re.compile(r"(\d{1,2}|[一二三四五六七八九十]{1,3})\s*月\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[日号]")
+# "10月3日前后" 的 "3日前" 不是天数; "隔了5天" 是两次之间的间隔, 不是距今多久
+_REPLY_DAYS = re.compile(r"(?<![月隔间])(?<!隔了)(\d{1,3}|[一二两三四五六七八九十]{1,3})\s*天(?:前|了|没|之前)")
+
+
+def _check_dates(value: dict, reply: str) -> str:
+    """先后/间隔: 回复里说的"X月Y日""N天前/N天了"要和算好的一致 (TIME09)。
+
+    mismatch: 说了别的日子或天数; consistent: 一致或没说具体日子。只用于 Trace。
+    """
+    from datetime import date as date_cls
+    from app.services.time_domain.parser import _parse_cn_number
+
+    target = value.get("date") or value.get("last_date")
+    days = value.get("days_ago") if "days_ago" in value else value.get("since_last_days")
+    try:
+        expected_date = date_cls.fromisoformat(target) if target else None
+    except ValueError:
+        expected_date = None
+    # 回复里可能顺带提到别的日子 ("国庆10月1日之后…"), 说到的日子里有算好的那个就算一致
+    said_dates = {(_parse_cn_number(m.group(1)), _parse_cn_number(m.group(2)))
+                  for m in _REPLY_DATE.finditer(reply)}
+    if expected_date and said_dates and (expected_date.month, expected_date.day) not in said_dates:
+        return "mismatch"
+    said_days = {_parse_cn_number(m.group(1)) for m in _REPLY_DAYS.finditer(reply)} - {None}
+    if isinstance(days, int) and said_days and days not in said_days:
+        return "mismatch"
     return "consistent"

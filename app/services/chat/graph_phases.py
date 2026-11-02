@@ -170,6 +170,12 @@ async def pending(ctx):
                 workspace_id=ctx.workspace_id,
             ),
         )
+        async for evt in services.resolve_reminder_pause(
+            ctx.user_message, ctx.preflight_ctx
+        ):
+            yield evt
+        if ctx.preflight_ctx.stopped:
+            return
         async for evt in services.resolve_recent_undo(
             ctx.user_message, ctx.preflight_ctx
         ):
@@ -694,7 +700,6 @@ async def prepare_context(ctx):
         temporal_query=ctx.temporal_query,
     )
     ctx.temporal_evidence = await render_event_scope(ctx.response_diagnostics)
-    ctx.temporal_computation = "" if ctx.crisis_care_turn else await _temporal_computation(ctx)
     ctx.prompt_user_emotion = ctx.fetched.user_emotion
     ctx.portrait = ctx.fetched.portrait
     ctx.schedule = ctx.fetched.schedule
@@ -754,6 +759,16 @@ async def prepare_context(ctx):
     ctx.time_context = services.build_time_context()
     ctx.intimacy_stage = services.get_relationship_stage(ctx.topic_intimacy)
     yield ctx.completed("prepare_context")
+
+
+async def temporal_reasoning(ctx):
+    """TIME09 独立节点: 次数/先后/间隔问句的程序计算 (time_domain/compute)。
+
+    放在取完上下文之后、选回复路由之前: 结果决定主回复要不要带「时间计算结果」段,
+    以及能不能走轻量 tier。危机照护轮不算。失败只是这段为空, 不影响回复。
+    """
+    ctx.temporal_computation = "" if ctx.crisis_care_turn else await _temporal_computation(ctx)
+    yield ctx.completed("temporal_reasoning")
 
 
 async def special_route(ctx):

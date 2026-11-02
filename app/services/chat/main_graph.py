@@ -29,6 +29,7 @@ PHASES = (
     "prepare_routes",
     "early_route",
     "prepare_context",
+    "temporal_reasoning",
     "special_route",
     "prepare_reply",
     "generate_reply",

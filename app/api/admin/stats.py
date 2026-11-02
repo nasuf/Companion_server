@@ -2155,3 +2155,114 @@ async def stats_message_distribution(days:int=Query(7,ge=1,le=92),end:str|None=N
         return await message_distribution(start,stop,cohort)
     except ValueError as exc:
         raise HTTPException(status_code=422,detail=str(exc)) from None
+
+
+# ── 时间感知汇总 (TIME11) ─────────────────────────────────────────────────
+
+_TA_MESSAGE_CAP = 5000
+
+
+@router.get("/time-awareness")
+async def time_awareness_summary(
+    days: int = Query(7, ge=1, le=30),
+    _admin: dict = Depends(require_admin_jwt),
+):
+    """最近 N 天 AI 回复里时间感知各环节的分布, 以及固定作息 / 提醒的现状。
+
+    只读、有上限: 回复按时间倒序最多取 5000 条 (超过即 truncated=true, 分母是实际读到的
+    条数); 只统计诊断字段, 不读消息正文。字段缺失 (历史消息、短路回复) 计入 not_collected,
+    不当成 0 或成功。
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return await _time_awareness(since, days)
+
+
+# 各项分布取自同一批回复样本 (最近 _TA_MESSAGE_CAP 条), 分母一致。每项第三列是它所在
+# 的诊断块: 块都没有 = 未采集 (旧消息/短路回复); 块在但这项为空 = 不适用 (none)。
+_TA_DIMENSIONS = (
+    ("agent_routine_status", "d->'agent_routine'->>'status'", "agent_routine"),
+    ("agent_routine_phase", "d->'agent_routine'->>'phase'", "agent_routine"),
+    ("event_check_status", "d->'temporal_context'->>'event_check_status'", "temporal_context"),
+    ("query_operation", "d->'temporal_context'->'query'->'operation'->>'type'", "temporal_context"),
+    # 历史/当前状态问法里, 按问法推断的和用户明说 (当时/现在) 的分开
+    ("inferred_as_of", "CASE WHEN d->'temporal_context'->'query'->'operation'->>'type' IN ('as_of', 'current') "
+                       "THEN (d->'temporal_context'->'query'->'operation'->>'type') || CASE WHEN "
+                       "d->'temporal_context'->'query'->'operation'->>'inferred' = 'true' "
+                       "THEN '_inferred' ELSE '_explicit' END END", "temporal_context"),
+    ("computation_status", "d->'temporal_context'->'computation'->>'status'", "temporal_context"),
+    ("computation_reply_check", "d->'temporal_context'->'computation'->>'reply_check'", "temporal_context"),
+    ("historical_recall_fallthrough", "d->>'historical_recall_fallthrough'", "temporal_context"),
+)
+
+
+async def _time_awareness(since: datetime, days: int) -> dict:
+    since_iso = since.isoformat()
+    dims = "\n              UNION ALL ".join(
+        f"SELECT '{name}' AS dim, COALESCE({expr}, CASE WHEN d ? '{block}' THEN 'none' END) AS k FROM recent"
+        for name, expr, block in _TA_DIMENSIONS
+    )
+    try:
+        total = (await db.query_raw(
+            """SELECT count(*)::int AS n FROM (
+                 SELECT 1 FROM messages WHERE role = 'assistant'
+                   AND created_at >= $1::timestamptz AT TIME ZONE 'UTC'
+                   AND metadata->'response_diagnostics' IS NOT NULL LIMIT $2) t""",
+            since_iso, _TA_MESSAGE_CAP + 1,
+        ))[0]["n"]
+        rows = await db.query_raw(
+            f"""WITH recent AS MATERIALIZED (
+                  SELECT metadata->'response_diagnostics' AS d FROM messages
+                  WHERE role = 'assistant' AND created_at >= $1::timestamptz AT TIME ZONE 'UTC'
+                    AND metadata->'response_diagnostics' IS NOT NULL
+                  ORDER BY created_at DESC LIMIT {_TA_MESSAGE_CAP}),
+                dims AS ({dims})
+                SELECT dim, COALESCE(k, 'not_collected') AS k, count(*)::int AS n
+                FROM dims GROUP BY 1, 2 ORDER BY 1, 3 DESC""",
+            since_iso,
+        )
+        agents = (await db.query_raw(
+            """SELECT count(*) FILTER (WHERE routine IS NOT NULL)::int AS with_routine,
+                      count(*)::int AS active FROM ai_agents WHERE status = 'active'""",
+        ))[0]
+        schedules = await db.query_raw(
+            """SELECT COALESCE(generation_meta->>'conformance', 'not_collected') AS conformance,
+                      COALESCE(generation_meta->>'routine', 'not_collected') AS routine,
+                      count(*)::int AS n FROM ai_daily_schedules
+               WHERE date >= ($1::timestamptz AT TIME ZONE 'Asia/Shanghai')::date
+               GROUP BY 1, 2""",
+            since_iso,
+        )
+        # 时间戳先过格式检查再转换: 一条坏数据不能让整张卡片 503
+        reminders = (await db.query_raw(
+            r"""SELECT
+                 count(*) FILTER (WHERE CASE WHEN action_data->>'missed_at'
+                     ~ '^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])[T ]([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d+)?)?([+-]\d{2}:?\d{2}|Z)?$'
+                   THEN (action_data->>'missed_at')::timestamptz >= $1::timestamptz ELSE false END)::int AS missed,
+                 count(*) FILTER (WHERE action_data ? 'paused_at' AND last_fired IS NULL
+                   AND NOT action_data ?| array['missed_at','deleted_at','completed_at','cancelled_at'])::int AS paused
+               FROM time_triggers WHERE action_type = 'reminder' AND NOT is_active""",
+            since_iso,
+        ))[0]
+    except Exception:
+        raise HTTPException(status_code=503, detail="时间感知指标暂不可用") from None
+    dist: dict[str, dict[str, int]] = {name: {} for name, _, _ in _TA_DIMENSIONS}
+    for r in rows:
+        dist[str(r["dim"])][str(r["k"])] = int(r["n"])
+    conformance: dict[str, int] = {}
+    routine_used: dict[str, int] = {}
+    for r in schedules:
+        conformance[str(r["conformance"])] = conformance.get(str(r["conformance"]), 0) + int(r["n"])
+        routine_used[str(r["routine"])] = routine_used.get(str(r["routine"]), 0) + int(r["n"])
+    return {
+        "version": 1,
+        "window_days": days,
+        "since": since_iso,
+        "sampled_at": datetime.now(timezone.utc).isoformat(),
+        "replies": {"count": min(total, _TA_MESSAGE_CAP), "cap": _TA_MESSAGE_CAP,
+                    "truncated": total > _TA_MESSAGE_CAP},
+        **dist,
+        "routine_coverage": {"with_routine": agents["with_routine"], "active_agents": agents["active"]},
+        "schedule_conformance": conformance,
+        "schedule_routine": routine_used,
+        "reminders": {"missed_in_window": reminders["missed"], "paused_now": reminders["paused"]},
+    }
