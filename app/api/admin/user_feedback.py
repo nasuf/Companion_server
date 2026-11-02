@@ -74,7 +74,7 @@ async def list_user_feedback(
     from app.services.user_profile import admin_user_labels_for_ids
 
     user_ids = [row.userId for row in rows if row.userId]
-    labels = await admin_user_labels_for_ids(user_ids)
+    labels = await admin_user_labels_for_ids(user_ids, database=db)
     return UserFeedbackListResponse(
         items=[
             _serialize(row, display_label=labels.get(row.userId))

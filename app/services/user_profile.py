@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import unicodedata
 
 from fastapi import HTTPException
@@ -34,6 +35,8 @@ from app.db import db
 from app.services.runtime import user_erasure
 from app.models.user import MAX_DISPLAY_NAME_LENGTH
 from app.services.user_avatars import build_avatar_url, delete_avatar, save_avatar
+
+logger = logging.getLogger(__name__)
 
 _WECHAT_PROVIDER = "wechat"
 _PHONE_PROVIDER = "phone"
@@ -85,14 +88,24 @@ def resolve_admin_user_label(user, identities: list) -> str:
     return username or getattr(user, "id", "") or "(未知用户)"
 
 
-async def admin_user_labels_for_ids(user_ids: list[str]) -> dict[str, str]:
+async def admin_user_labels_for_ids(user_ids: list[str], *, database=None) -> dict[str, str]:
+    """后台展示用的用户名标签; 查不到就返回空, 调用方保留原来的 username。
+
+    标签只是展示增强, 读失败不能让整个统计/列表接口 500。database 传调用方
+    自己的客户端 (同一事务或测试里替换过的那个), 缺省用全局 db。
+    """
     if not user_ids:
         return {}
+    client = database if database is not None else db
     unique = list(dict.fromkeys(user_ids))
-    users, identities = await asyncio.gather(
-        db.user.find_many(where={"id": {"in": unique}}),
-        db.authidentity.find_many(where={"userId": {"in": unique}}),
-    )
+    try:
+        users, identities = await asyncio.gather(
+            client.user.find_many(where={"id": {"in": unique}}),
+            client.authidentity.find_many(where={"userId": {"in": unique}}),
+        )
+    except Exception as exc:
+        logger.warning("[ADMIN-LABELS] lookup unavailable: %s", type(exc).__name__)
+        return {}
     by_user: dict[str, list] = {}
     for identity in identities:
         by_user.setdefault(identity.userId, []).append(identity)

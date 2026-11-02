@@ -345,11 +345,13 @@ def test_online_users_endpoint_paginates_with_login_methods(api_client):
         assert len(data["items"]) == 2
 
         wx = data["items"][0]
-        assert wx["username"] == "wx_abc"
+        # 4f2ba844 起后台统一显示用户名标签 (微信昵称 / 手机号), 不再是内部 username
+        assert wx["username"] == "小明"
         assert wx["methods"][0]["type"] == "wechat"
         assert wx["methods"][0]["identifier"] == "小明"
 
         ph = data["items"][1]
+        assert ph["username"] == "13812345678"
         assert ph["methods"][0]["type"] == "phone"
         assert ph["methods"][0]["identifier"] == "13812345678"
     finally:

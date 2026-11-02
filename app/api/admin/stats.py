@@ -697,7 +697,7 @@ async def media_usage(
     if media_user_ids:
         from app.services.user_profile import admin_user_labels_for_ids
 
-        media_labels = await admin_user_labels_for_ids(list(media_user_ids))
+        media_labels = await admin_user_labels_for_ids(list(media_user_ids), database=db)
         for row in user_rows:
             uid = str(row.get("user_id") or "")
             if uid in media_labels:
@@ -1333,7 +1333,7 @@ async def online_users(
             })
         from app.services.user_profile import admin_user_labels_for_ids
 
-        labels = await admin_user_labels_for_ids(page_ids)
+        labels = await admin_user_labels_for_ids(page_ids, database=db)
         for item in items:
             uid = item.get("user_id")
             if uid and uid in labels:
@@ -1603,7 +1603,8 @@ async def _compute_monitoring(days: int, cohort: Literal["external", "all"] = "e
         from app.services.user_profile import admin_user_labels_for_ids
 
         labels = await admin_user_labels_for_ids(
-            [row["user_id"] for row in cost_top_users if row.get("user_id")]
+            [row["user_id"] for row in cost_top_users if row.get("user_id")],
+            database=db,
         )
         for row in cost_top_users:
             uid = row.get("user_id")

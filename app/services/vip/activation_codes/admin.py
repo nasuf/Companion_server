@@ -227,7 +227,7 @@ async def list_redemptions(
     user_ids = [str(_field(r, "user_id")) for r in rows if _field(r, "user_id")]
     from app.services.user_profile import admin_user_labels_for_ids
 
-    user_labels = await admin_user_labels_for_ids(user_ids)
+    user_labels = await admin_user_labels_for_ids(user_ids, database=db)
     items = [
         {
             "id": str(_field(r, "id")),
