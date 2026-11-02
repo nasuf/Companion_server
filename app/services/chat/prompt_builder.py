@@ -183,6 +183,30 @@ def _record_skipped_section(diagnostics: dict[str, Any] | None, title: str) -> N
         skipped.append(title)
 
 
+# 会变、又只有一个取值的身份属性。姓名/生日/出生地这类不会"变", 说法不同只是措辞。
+_CHANGEABLE_SINGLETON_SUBS = frozenset({"现居地"})
+
+
+def _older_singleton_ids(memories: list[ClassifiedMemory] | None) -> set[str]:
+    from app.services.time_domain.timestamps import parse_time
+
+    groups: dict[str, list[tuple[Any, ClassifiedMemory]]] = {}
+    for m in memories or []:
+        if (m.source == "ai" or not m.id or m.main_category != "身份"
+                or m.sub_category not in _CHANGEABLE_SINGLETON_SUBS):
+            continue
+        said = parse_time(m.statement_time)
+        if said is not None:  # 没有说话时间 (合并/整合产物) 的不参与比较
+            groups.setdefault(m.sub_category, []).append((said, m))
+    older: set[str] = set()
+    for items in groups.values():
+        if len({m.text.strip() for _, m in items}) < 2:
+            continue
+        items.sort(key=lambda pair: pair[0], reverse=True)
+        older.update(m.id for _, m in items[1:])
+    return older
+
+
 async def _get_optional_prompt(key: str) -> str | None:
     """Fetch a section template; admin 停用 → None (该段从最终输入中彻底移除)."""
     try:
@@ -353,8 +377,14 @@ async def _build_memory_section(
             return None
         return _PromptBody(str(anchor), "chat.memory_empty_anchor")
 
+    # 同一个单值身份属性 (现居地/年龄…) 出现了不同说法时, 只有最新提及的那条是
+    # 现在的; 较早的明确标出来, 不让模型把"以前住苏州"当成现在 (TIME07)。
+    superseded_ids = _older_singleton_ids(memories)
+
     def _format_memory(m: ClassifiedMemory) -> str:
         tags: list[str] = []
+        if m.id and m.id in superseded_ids:
+            tags.append("较早的说法，可能已经变了")
         if m.importance >= 0.85:
             tags.append("重要")
         if m.mention_count >= 3:

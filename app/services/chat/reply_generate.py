@@ -329,6 +329,12 @@ async def generate_reply(
     # The main model can otherwise ignore an outside interval or turn a plan
     # into an accomplished fact. Reuse the existing bounded, checked answer
     # route; crisis/contradiction paths never supply these assertion records.
+    operation = (
+        (diagnostics or {}).get("temporal_context", {}).get("query", {}).get("operation", {})
+    )
+    # 按"问的是过去的状态"推断出的历史问答, 查不到依据时回到原来的回复路径;
+    # 用户明说了"当时/截至"的才坚持用兜底句, 不让未经核对的答案出去。
+    inferred_scope = operation.get("inferred") is True
     historical_recall = bool(
         temporal_validity_records is not None
         and diagnostics is not None
@@ -417,14 +423,16 @@ async def generate_reply(
                     validity_records=temporal_validity_records,
                 )
                 temporal_recall_selected = tier_reply_text is not None
-            if historical_recall and not temporal_recall_selected:
+            if historical_recall and not temporal_recall_selected and not inferred_scope:
                 from app.services.time_domain.recall import _FALLBACK
 
                 # Disabled/oversized evidence cannot fall through to an
                 # unchecked main answer about the same historical facts.
                 tier_reply_text = _FALLBACK
                 temporal_recall_selected = True
-            if not temporal_recall_selected:
+            if historical_recall and not temporal_recall_selected and diagnostics is not None:
+                diagnostics["historical_recall_fallthrough"] = "inferred_scope_without_answer"
+            if not temporal_recall_selected and tier_eligible:
                 tier_reply_text = await tier_fn(**base_params, **extra)
         except Exception as e:
             logger.warning(
@@ -433,7 +441,7 @@ async def generate_reply(
             tier_reply_text = None
             if diagnostics is not None:
                 diagnostics["tier_error"] = type(e).__name__
-            if historical_recall:
+            if historical_recall and not inferred_scope:
                 from app.services.time_domain.recall import _FALLBACK
 
                 tier_reply_text = _FALLBACK

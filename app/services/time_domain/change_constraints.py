@@ -43,4 +43,10 @@ def historical_change_filter(memory_id, period, changes):
             observed = parse_time(semantics.get("statement_at"))
             if observed and period.start >= observed:
                 return False, "old_fact_after_confirmed_change_observation", identities
+        else:
+            # 边界未知的新事实: 旧说法被说出时它显然还没成立, 所问时段整个在那之前
+            # 就不能拿新事实回答 (TIME07)。
+            old_observed = parse_time(row.get("old_statement_at"))
+            if old_observed and requested_end <= old_observed:
+                return False, "new_fact_before_old_statement", identities
     return True, "compatible_with_change", identities

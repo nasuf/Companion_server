@@ -111,7 +111,11 @@ def _occur_recency_factor(memory: dict[str, Any]) -> float | None:
         return None
     if raw.tzinfo is None:
         raw = raw.replace(tzinfo=timezone.utc)
-    age_days = max(0.0, (datetime.now(timezone.utc) - raw).total_seconds() / 86400.0)
+    age_days = (datetime.now(timezone.utc) - raw).total_seconds() / 86400.0
+    if age_days < 0:
+        # 还没发生的计划不是"最近发生的事"; 原来按 0 天算, 反而拿到最大加成,
+        # "我现在在哪上班" 会把"下个月要去C公司"排到最前 (TIME07)。
+        return None
     return 0.5 ** (age_days / _RECENCY_HALFLIFE_DAYS)
 
 

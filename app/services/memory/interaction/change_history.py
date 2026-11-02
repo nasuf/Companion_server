@@ -123,6 +123,7 @@ async def _read_change_rows(
     rows = await database.query_raw(
         """SELECT f.id,f.old_memory_id,f.new_memory_id,f.kind,f.semantics,f.recorded_at,
           f.old_version_id,f.new_version_id,
+          (o.statement_time AT TIME ZONE 'UTC') AS old_statement_at,
           (jsonb_array_length(i.payload_text::jsonb->'input'->'sources') BETWEEN 1 AND 80
            AND NOT EXISTS (
             SELECT 1 FROM jsonb_array_elements(i.payload_text::jsonb->'input'->'sources') s

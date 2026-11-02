@@ -208,6 +208,10 @@ async def render_temporal_context(clock: TurnClock, policy: str,
         # and ambiguity here; diagnostics below retain the complete operation.
         query_context = {key: value for key, value in temporal_query.prompt_context().items()
                          if key in {"status", "timezone", "ranges", "reason"}}
+        # 问的是现在、过去某时段还是将来的计划 (TIME07): 只说问法, 不说答案在哪。
+        scope = _QUESTION_SCOPE.get(temporal_query.operation.type)
+        if scope:
+            query_context["question_scope"] = scope
     last_dialogue = local_clock(clock.last_dialogue_at)
     if clock.last_dialogue_at is not None:
         # The model should not divide seconds itself: it copied the prompt's
@@ -263,6 +267,13 @@ async def prepare_reply_time(messages: list[dict], *, exclude_ids: set[str],
                                        "query": query.diagnostics(),
                                        "suppressed_question_count": 0, "out_of_window_event_count": 0, "event_check_status": "not_requested"}
     return clock, policy, instructions
+
+
+_QUESTION_SCOPE = {
+    "current": "问的是现在的状态：用最新的说法，较早的说法不算现在",
+    "as_of": "问的是过去那段时间的状态：只用覆盖那段时间的说法，后来的变化不能倒推回去",
+    "planned": "问的是将来的计划：只能说成打算或安排，不能说成已经发生",
+}
 
 
 def scope_event_memories(memories, query: str, *, now: datetime, diagnostics: dict,

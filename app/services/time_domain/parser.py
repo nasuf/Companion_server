@@ -60,7 +60,17 @@ _DATE_PAT = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
 # 必须在 _DATE_PAT 之前解析并注册 span, _add 的 span 去重会自动挡掉 _DATE_PAT
 # 对 "8月9日" 子串的重复匹配 (那会用错年份)。
 _ISO_DATE_PAT = re.compile(r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*[日号]?")
-_YEAR_PAT = re.compile(r"(去年|前年|今年)(?:(\d{1,2})月)?")
+_YEAR_PAT = re.compile(r"(去年|前年|今年)(?:(\d{1,2}|十[一二]?|[一二三四五六七八九])月)?")
+# 不带年份的月份: "九月份" "9月" "十二月"。排除 "个月" "第3月" "这一月" "二十一月" 等,
+# 也排除后面紧跟数字/天/大的说法 ("三月三" "八月十五" "五月天" "6月18大促") 和农历月份。
+_BARE_MONTH_PAT = re.compile(
+    r"(?<![\d年个第十两零这每一二三四五六七八九])(1[0-2]|[1-9]|十[一二]?|[一二三四五六七八九])\s*月份?"
+    r"(?![\d一二三四五六七八九十两]|\s*[日号天大是不])"
+)
+_LUNAR_PREFIX = re.compile(r"(?:农历|阴历|旧历)\s*$")
+# 还没到的月份算今年还是去年: 问句里明说了打算/计划才算今年 (整词, 不按单字)。
+_FUTURE_PLAN_WORDS = re.compile(r"打算|计划|准备|安排|要去|要搬|要换|会去|将要")
+_YEAR_MONTH_PAT = re.compile(r"(\d{4})\s*年\s*(1[0-2]|0?[1-9])\s*月份?(?!\s*\d{1,2}\s*[日号])")
 _HOUR_PAT = re.compile(r"(?:(早上|上午|中午|下午|晚上|凌晨))?(\d{1,2})[点时](?:(\d{1,2})分?)?")
 # 相对偏移: "3天后 / 2小时前 / 15分钟之后 / 两个月前 / 半年前 / 十五天前"
 #
@@ -75,6 +85,7 @@ _QUICK_TIME_PAT = re.compile(
     r"|\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}"  # ISO/带年份日期, 与 _ISO_DATE_PAT 同步
     r"|\d{1,2}\s*月\s*\d{1,2}\s*[日号]|\d{1,2}[点时]"
     r"|去年|前年|今年|大[前后]天"
+    r"|\d{1,2}\s*月份?|[一二三四五六七八九十]{1,2}月份"  # 月份, 与 _YEAR_MONTH_PAT/_BARE_MONTH_PAT 同步
     r"|早上|上午|中午|下午|晚上|凌晨"
     # 必须与 _REL_OFFSET_PAT 保持同步 —— 这是 has_explicit_time 的快速闸门,
     # 它漏了的表达连解析都不会被调用。
@@ -184,9 +195,12 @@ def parse_time_expressions(
     message: str,
     now: datetime | None = None,
     *, calendar_timezone=None, all_occurrences: bool = False,
-    max_results: int | None = None,
+    max_results: int | None = None, bare_months: bool = False,
 ) -> list[ParsedTime]:
-    """解析消息中的显式时间表述；超过可选预算时中止，不返回截断结果。"""
+    """解析消息中的显式时间表述；超过可选预算时中止，不返回截断结果。
+
+    bare_months: 认不带年份的月份 ("九月份")。只有聊天读路径的问句用; 提醒、录入
+    这些写路径不认 (年份靠猜, 猜错就是一条错的提醒或错的事件时间)。"""
     now = now or _now_corrected()
     zone = calendar_timezone or _TZ
     if calendar_timezone is not None:
@@ -393,6 +407,8 @@ def parse_time_expressions(
     for m in _YEAR_PAT.finditer(message):
         prefix = m.group(1)
         month_str = m.group(2)
+        if month_str and not month_str.isdigit():
+            month_str = str(_parse_cn_number(month_str))
         year = today.year
         if prefix == "去年":
             year -= 1
@@ -407,6 +423,28 @@ def parse_time_expressions(
             s = datetime(year, 1, 1, tzinfo=zone)
             e = datetime(year, 12, 31, 23, 59, 59, tzinfo=zone)
         _add(m.group(), s, e, "absolute", 0.85, m.span(), end_boundary="inclusive_second")
+
+    # --- 5b. 带年份 / 不带年份的月份 ---
+    # 不带年份: 已过去或就是本月 → 今年; 还没到的月份, 问句明说打算/计划才是今年,
+    # 否则多半在说去年 ("十二月份我在哪上班" 在十一月问的是去年十二月)。
+    for m in _YEAR_MONTH_PAT.finditer(message):
+        year, month = int(m.group(1)), int(m.group(2))
+        if 1900 <= year <= 2100:
+            _, last_day = monthrange(year, month)
+            _add(m.group(), datetime(year, month, 1, tzinfo=zone),
+                 datetime(year, month, last_day, 23, 59, 59, tzinfo=zone),
+                 "absolute", 0.85, m.span(), end_boundary="inclusive_second")
+    for m in (_BARE_MONTH_PAT.finditer(message) if bare_months else ()):
+        month = _parse_cn_number(m.group(1))
+        if month is None or not 1 <= month <= 12 or _LUNAR_PREFIX.search(message[:m.start()]):
+            continue
+        year = today.year
+        if month > today.month and not _FUTURE_PLAN_WORDS.search(message):
+            year -= 1
+        _, last_day = monthrange(year, month)
+        s = datetime(year, month, 1, tzinfo=zone)
+        e = datetime(year, month, last_day, 23, 59, 59, tzinfo=zone)
+        _add(m.group(), s, e, "absolute", 0.8, m.span(), end_boundary="inclusive_second")
 
     # --- 6. 时间点 X点/时 ---
     for m in _HOUR_PAT.finditer(message):

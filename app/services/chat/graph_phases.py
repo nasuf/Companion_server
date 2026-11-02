@@ -260,7 +260,8 @@ async def prepare_reads(ctx):
         else None,
     }
     ctx.temporal_query = resolve_temporal_query(ctx.user_message, anchor=ctx.turn_clock.statement_at,
-        anchor_source=ctx.turn_clock.anchor_source, anchor_end=ctx.turn_clock.statement_end_at)
+        anchor_source=ctx.turn_clock.anchor_source, anchor_end=ctx.turn_clock.statement_end_at,
+        context_text=_previous_user_text(ctx), bare_months=True)
     ctx.turn_clock, ctx.followup_policy, ctx.temporal_instructions = await prepare_reply_time(
         ctx.messages_dicts, exclude_ids=ctx.current_turn_ids,
         current_message=ctx.user_message, diagnostics=ctx.response_diagnostics,
@@ -1097,6 +1098,32 @@ async def prepare_reply(ctx):
         )
         ctx.reply_count = min(ctx.reply_count, ctx.max_reply_count)
     yield ctx.completed("prepare_reply")
+
+
+_FOLLOWUP_CONTEXT_SECONDS = 600
+
+
+def _previous_user_text(ctx) -> str | None:
+    """上一条用户消息 (不含本轮, 10 分钟内), 给 "那上个月呢" 这类追问补谓语。
+
+    卡片/系统通知这类行不算; 太久以前的问题不再是"这句追问"的上下文。
+    """
+    from app.services.time_domain.timestamps import parse_time
+
+    for message in reversed(ctx.messages_dicts or []):
+        if message.get("id") in ctx.current_turn_ids:
+            continue
+        if message.get("role") != "user":
+            continue
+        metadata = message.get("metadata") or {}
+        if isinstance(metadata, dict) and ("component_card" in metadata or metadata.get("system_notice")):
+            return None
+        said = parse_time(message.get("createdAt"))
+        now = ctx.turn_clock.statement_at or ctx.turn_clock.now
+        if said is None or now is None or (now - said).total_seconds() > _FOLLOWUP_CONTEXT_SECONDS:
+            return None
+        return str(message.get("content") or "")[:200]
+    return None
 
 
 async def generate_reply(ctx):

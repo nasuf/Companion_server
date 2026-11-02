@@ -15,7 +15,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.config import settings
 from app.services.time_domain.timestamps import EndBoundary, exclusive_end, parse_time
-from app.services.time_domain.operations import TemporalOperation, classify_temporal_operation
+from app.services.time_domain.operations import (
+    TemporalOperation,
+    classify_temporal_operation,
+    is_elliptical_followup,
+    is_state_question,
+)
 from app.services.time_domain.binding import (
     SourceText, binding_diagnostics, binding_uncertainty, locate_parts,
     RANGE_CONNECTOR, is_range_connector,
@@ -179,6 +184,17 @@ class TemporalQuery:
         ]
 
 
+def _past_state_question(text, context_text, parsed, end, stamp, zone) -> bool:
+    """整段时间都在今天之前, 且问的是用户自己当时的状态 (或省略追问上一句这样问)。"""
+    today_start = stamp.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+    if end > today_start:
+        return False
+    if is_state_question(text):
+        return True
+    spans = [(i, i + len(p.original_text)) for p in parsed if (i := text.find(p.original_text)) >= 0]
+    return bool(context_text) and is_elliptical_followup(text, spans) and is_state_question(context_text)
+
+
 def resolve_temporal_query(
     text: str,
     *,
@@ -186,7 +202,14 @@ def resolve_temporal_query(
     anchor_source: str,
     timezone_name: str | None = None,
     anchor_end: object = None,
+    context_text: str | None = None,
+    bare_months: bool = False,
 ) -> TemporalQuery:
+    """context_text: 省略式追问 ("那上个月呢") 的上一句用户消息, 只用来判断问的是
+    不是状态; 时间仍只从 text 里解析。
+
+    bare_months: 认 "九月份" 这类不带年份的月份。只给聊天读路径用 —— 提醒、作息、
+    录入等写路径照旧不认, 免得 "提醒我12月续费" 静默建出一条午夜提醒。"""
     from app.services.time_domain.parser import (
         TimeExpressionLimitExceeded,
         parse_time_expressions,
@@ -349,6 +372,7 @@ def resolve_temporal_query(
             calendar_timezone=zone,
             all_occurrences=True,
             max_results=MAX_EXPRESSIONS,
+            bare_months=bare_months,
         )
     except TimeExpressionLimitExceeded:
         base["date_basis"] = "unbound_expression"
@@ -472,7 +496,13 @@ def resolve_temporal_query(
         return TemporalQuery(**base, status="unresolved", reason="invalid_expression")
     expression = TemporalExpression(start, end, precision, parsed[0].type, end_boundary)
     if base["operation"].type == "unspecified":
-        base["operation"] = TemporalOperation("planned" if start > stamp else "range")
+        if start > stamp:
+            base["operation"] = TemporalOperation("planned")
+        elif _past_state_question(text, context_text, parsed, exclusive_end(end, end_boundary), stamp, zone):
+            # 过去某段时间的状态 ("上个月我在哪上班") 按有效期回答, 不按事件日期筛。
+            base["operation"] = TemporalOperation("as_of", inferred=True)
+        else:
+            base["operation"] = TemporalOperation("range")
     return TemporalQuery(
         **base,
         status="resolved",

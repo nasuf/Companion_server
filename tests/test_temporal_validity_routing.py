@@ -189,3 +189,30 @@ async def test_ordinary_chat_never_repeats_historical_sources(
     assert "来源有效期" not in json.dumps(
         io.main_calls + io.tier_calls, ensure_ascii=False, default=str
     )
+
+
+async def test_inferred_past_state_question_without_answer_falls_back_to_normal_reply(monkeypatch):
+    """TIME07: "九月份我在哪上班" 是推断出的历史问答; 查不到依据时照常回复, 不换成兜底句。"""
+    io = configure_pair(monkeypatch)
+    io.now = datetime(2026, 11, 2, 2, tzinfo=timezone.utc)
+    io.db.message.find_many = AsyncMock(return_value=[])
+    fetched = chat.fetch_parallel_context.return_value
+    fetched.classified_memories = [
+        ClassifiedMemory(id="m", text="用户在B公司上班", source="user", relevance="strong", score=1)
+    ]
+    fetched.memory_relevance = "strong"
+    fetched.timeline = "synthetic date evidence forces the existing main path"
+    monkeypatch.setattr(validity_context, "load_validity_context",
+                        AsyncMock(return_value=("", {}, {"version": 1, "status": "not_collected"})))
+    recall_call = AsyncMock(return_value=None)
+    monkeypatch.setattr(temporal_recall, "answer_temporal_recall", recall_call)
+    events = [
+        e async for e in chat.stream_chat_response(
+            "c-1", "九月份我在哪上班？", io.agent, "u-1",
+            forced_intent=IntentType.NONE, reply_context={"received_at": io.now.isoformat()},
+        )
+    ]
+    recall_call.assert_awaited_once()
+    texts = [json.loads(e["data"])["text"] for e in events if e["event"] == "reply"]
+    assert texts and temporal_recall._FALLBACK not in texts
+    assert io.main_calls or io.tier_calls

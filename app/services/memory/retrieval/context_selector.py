@@ -47,11 +47,19 @@ class ClassifiedMemory:
     source: MemorySource = "user"  # 上游 vector_search 必填
 
 
-def format_memory_time(memory: ClassifiedMemory) -> str:
-    """Keep event time separate from statement/storage/access clocks."""
+def format_memory_time(memory: ClassifiedMemory, *, now: datetime | None = None) -> str:
+    """Keep event time separate from statement/storage/access clocks.
+
+    事件时间在将来的是计划, 明确标出来, 不让模型自己拿日期去比 (TIME07)。
+    """
+    from datetime import timezone
     from app.services.time_domain.timestamps import local_clock, parse_time
 
-    if parse_time(memory.occur_time) is not None:
+    event = parse_time(memory.occur_time)
+    current = now or datetime.now(timezone.utc)
+    if event is not None and event > current:
+        label = f"计划/未来 {local_clock(memory.occur_time)}，尚未发生"
+    elif event is not None:
         label = f"事件时间 {local_clock(memory.occur_time)}"
     elif parse_time(memory.statement_time) is not None:
         label = f"提及时间 {local_clock(memory.statement_time)}；事件时间未知"
