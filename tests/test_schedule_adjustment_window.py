@@ -98,7 +98,7 @@ class TestLlmSchedule:
 
         window = [slot for slot in updated if slot.get("source") == "user_adjustment"]
         assert window == [{
-            "event": "聊天", "activity": "聊天", "status": "空闲", "type": "leisure",
+            "event": "聊天", "activity": "聊天", "status": "空闲", "type": "leisure", "kind": "社交",
             "start": "22:40", "end": "00:30", "source": "user_adjustment",
         }]
         assert _stored(store, "2026-10-15") == updated

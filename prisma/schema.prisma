@@ -205,6 +205,10 @@ model AiAgent {
   background               String?
   values                   Json?
   lifeOverview             String?                         @map("life_overview")
+  // TIME12 固定作息 {version, wake, work_start, work_end, sleep, rest_weekdays,
+  // holiday_off, sources, evidence, conflicts, derived_at}; 由 schedule_domain/routine.py
+  // 推导并以 raw SQL 读写。NULL = 尚未推导 (下次生成作息时补)。
+  routine                  Json?
   age                      Int?
   occupation               String?
   city                     String?
@@ -1733,6 +1737,8 @@ model AiDailySchedule {
   agent        AiAgent  @relation(fields: [agentId], references: [id])
   date         DateTime @db.Date
   scheduleData Json     @map("schedule_data")
+  // TIME12 生成结果是否服从固定作息: {routine, conformance, first_violations, retry_violations}
+  generationMeta Json?  @map("generation_meta")
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@unique([agentId, date])

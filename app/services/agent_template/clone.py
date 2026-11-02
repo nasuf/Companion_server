@@ -101,6 +101,9 @@ def _clone_persona_data(template, user_id: str) -> dict[str, Any]:
         data["currentMbti"] = Json(template.currentMbti)
     if template.values is not None:
         data["values"] = Json(template.values)
+    # 同一模板的克隆共用模板已定好的固定作息 (TIME12), 不各自再推导一遍。
+    if getattr(template, "routine", None) is not None:
+        data["routine"] = Json(template.routine)
     return data
 
 

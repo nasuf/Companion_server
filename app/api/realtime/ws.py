@@ -38,6 +38,7 @@ from app.services.schedule_domain.schedule import (
     get_cached_schedule,
     get_current_status,
     get_life_overview,
+    needs_routine_refresh,
 )
 from app.services.mbti import get_mbti
 from app.services.notifications.presence import record_ws_online, remove_ws_online
@@ -838,11 +839,13 @@ async def _warm_daily_schedule(agent, user_id: str) -> None:
     影响连接本身。
     """
     try:
-        if await get_cached_schedule(agent.id):
+        cached = await get_cached_schedule(agent.id)
+        refresh = bool(cached) and await needs_routine_refresh(agent, cached)
+        if cached and not refresh:
             return
         await generate_daily_schedule(
             agent.id, agent.name, get_mbti(agent), user_id=user_id,
-            life_overview=await get_life_overview(agent.id),
+            life_overview=await get_life_overview(agent.id), refresh=refresh,
         )
     except Exception as e:
         logger.warning(f"schedule warmup failed agent={str(agent.id)[:8]}: {e}")

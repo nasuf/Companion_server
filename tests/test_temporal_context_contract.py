@@ -314,7 +314,7 @@ async def test_actual_date_guard_rejects_unbacked_today_claim(monkeypatch, execu
     check=AsyncMock(return_value={"grounded":False});monkeypatch.setattr(temporal_guard, "invoke_json", check)
     events=[e async for e in chat.stream_chat_response("c-1", "你今天中午吃了什么", io.agent, "u-1", reply_context={"received_at": NOW.isoformat()})]
     answer=" ".join(json.loads(e["data"]).get("text", "") for e in events if e["event"]=="reply")
-    assert "牛肉面" not in answer and "记不太清" in answer
+    assert "牛肉面" not in answer and temporal_guard._FALLBACK in answer
     check.assert_awaited_once()
     assert sum(e["event"]=="done" for e in events)==1
 

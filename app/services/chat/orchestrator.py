@@ -75,6 +75,7 @@ from app.services.time_domain.parser import parse_time_expressions, has_explicit
 from app.services.schedule_domain.schedule import (
     format_schedule_context,
     get_cached_schedule,
+    current_status_with_routine,
     get_current_status,
 )
 from app.services.interaction.boundary import (

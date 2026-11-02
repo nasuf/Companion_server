@@ -56,6 +56,7 @@ from app.services.rules.chat_keywords import (
 from app.services.schedule_domain.schedule import (
     format_schedule_context,
     get_cached_schedule,
+    current_status_with_routine,
     get_current_status,
 )
 from app.services.time_domain.parser import has_explicit_time
@@ -556,7 +557,7 @@ async def fetch_parallel_context(
     """
     # Schedule 提前 (Redis 缓存)，供状态类短路和 prompt 自洽性约束复用。
     schedule = await _load_schedule(agent_id)
-    ai_status = get_current_status(schedule) if schedule else None
+    ai_status = await current_status_with_routine(agent_id, schedule) if schedule else None
     schedule_context = format_schedule_context(ai_status) if ai_status else None
     # The relevance / web-search prompts carry the current message in {message};
     # leaving it in {context} too showed it twice and cost a window slot.

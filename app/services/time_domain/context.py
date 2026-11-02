@@ -277,9 +277,11 @@ def scope_event_memories(memories, query: str, *, now: datetime, diagnostics: di
 
     diagnostic = diagnostics.setdefault("temporal_context", {})
     diagnostic["out_of_window_event_count"] = 0
+    diagnostic["out_of_window_ai_event_count"] = 0
     if not memories or not re.search(r"[?？]|什么|哪|吗|有没有|记得|记不记得", query):
         return memories
-    if re.search(r"相比|比较|以前|过去|上次|一直|长期|每天|持续|以来", query):
+    # 习惯/平时的问法问的是常态, 不是某一天发生的事 ("平时没这么晚, 你呢?")。
+    if re.search(r"相比|比较|以前|过去|上次|一直|长期|每天|每晚|每周|持续|以来|平时|平常|通常|往常", query):
         return memories
     resolved = temporal_query or resolve_temporal_query(query, anchor=now, anchor_source="server_received")
     periods = resolved.parsed_times()
@@ -302,6 +304,9 @@ def scope_event_memories(memories, query: str, *, now: datetime, diagnostics: di
         if (memory.main_category in {"生活", "情绪"} and event is not None
                 and not duration and event.astimezone(zone).date() != target):
             diagnostic["out_of_window_event_count"] += 1
+            # AI 自己那天在做什么另有作息表为证 (guard 会带上), 单独计数。
+            if getattr(memory, "source", "user") == "ai":
+                diagnostic["out_of_window_ai_event_count"] += 1
         else:
             kept.append(memory)
     diagnostic["in_window_event_count"] = sum(

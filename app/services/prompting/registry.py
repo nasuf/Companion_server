@@ -11,6 +11,8 @@ from app.services.prompting.defaults import (
     CHAT_TEMPORAL_CONTEXT_PROMPT,
     CHAT_TEMPORAL_EVIDENCE_PROMPT,
     CHAT_TEMPORAL_CHECK_PROMPT,
+    CHAT_TEMPORAL_FALLBACK_PROMPT,
+    CHAT_AGENT_ROUTINE_SECTION_PROMPT,
     PERSONA_GROUNDING_CONTEXT_PROMPT,
     PERSONA_GROUNDING_CHECK_PROMPT,
     AI_REPLY_EMOTION_PROMPT,
@@ -195,6 +197,9 @@ from app.services.prompting.defaults import (
     RESPONSE_INSTRUCTION_PROMPT,
     SCHEDULE_MISSING_CONTEXT_PROMPT,
     DAILY_SCHEDULE_WITH_USER_MEMORY_PROMPT,
+    SCHEDULE_ROUTINE_DERIVE_PROMPT,
+    SCHEDULE_ROUTINE_CONSTRAINTS_PROMPT,
+    SCHEDULE_ROUTINE_RETRY_PROMPT,
     MEMORY_JUDGEMENT_AI_PROMPT,
     MEMORY_JUDGEMENT_USER_PROMPT,
     SCHEDULE_ADJUST_REPLY_PROMPT,
@@ -251,6 +256,18 @@ PROMPT_DEFINITIONS = [
         "chat.temporal_check", "回复事件时间核验", "聊天热路径", "聊天",
         "【工程】仅在日期查询存在证据缺口时核验具体事件断言。占位符 {date}/{question}/{evidence}/{reply}。",
         CHAT_TEMPORAL_CHECK_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.temporal_fallback", "时间核验兜底回复", "聊天热路径", "聊天",
+        "【工程】回复事件时间核验判定无依据或核验不可用时，代替原回复发出的一句短话。无占位符；"
+        "按人设口吻写，不带句号。",
+        CHAT_TEMPORAL_FALLBACK_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.agent_routine_section", "你的作息段落", "聊天热路径", "聊天",
+        "【工程】TIME12 AI 自己的固定作息与此刻所处阶段，时刻差由代码算好。占位符 "
+        "{usual}（平时作息）/{today}（今天上不上班、上班时段）/{now_line}（现在几点、离上下班多久）。",
+        CHAT_AGENT_ROUTINE_SECTION_PROMPT,
     ),
     PromptDefinition(
         "chat.temporal_evidence", "事件日期证据约束", "聊天热路径", "聊天",
@@ -931,6 +948,24 @@ PROMPT_DEFINITIONS = [
         "schedule.daily_schedule", "每日作息生成", "作息系统", "作息",
         "《终稿·第一部分》§2.1: 70% 概率使用, 生成当天作息 (空闲 / 忙碌 / 很忙碌 / 睡眠 4 状态).",
         DAILY_SCHEDULE_PROMPT,
+    ),
+    PromptDefinition(
+        "schedule.routine_derive", "固定作息补全", "作息系统", "作息",
+        "【工程】TIME12 人设没写明的起床/上下班/睡觉/休息日按职业补全一次，存到 agent 档案。占位符 "
+        "{occupation}/{age}/{city}/{overview}/{known}/{persona_lines}；输出 JSON。",
+        SCHEDULE_ROUTINE_DERIVE_PROMPT,
+    ),
+    PromptDefinition(
+        "schedule.routine_constraints", "每日作息固定作息约束", "作息系统", "作息",
+        "【工程】TIME12 追加在每日作息生成指令之后，要求服从固定作息并给每段标 kind。占位符 "
+        "{rules}（今天的上下班与起床睡觉要求）/{kinds}（kind 取值）。",
+        SCHEDULE_ROUTINE_CONSTRAINTS_PROMPT,
+    ),
+    PromptDefinition(
+        "schedule.routine_retry", "每日作息偏差重试", "作息系统", "作息",
+        "【工程】TIME12 生成的作息不符合固定作息时追加在原指令之后重试一次。占位符 "
+        "{violations}（偏差列表，如 work_end 19:30≠21:00）。",
+        SCHEDULE_ROUTINE_RETRY_PROMPT,
     ),
     PromptDefinition(
         "schedule.daily_schedule_with_memory", "每日作息生成(带用户记忆)", "作息系统", "作息",

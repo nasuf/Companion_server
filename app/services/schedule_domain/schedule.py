@@ -21,13 +21,14 @@ from prisma import Json
 
 from app.config import settings
 from app.db import db
-from app.observability.events import EVT_SCHEDULE_GROUNDING
+from app.observability.events import EVT_SCHEDULE_GROUNDING, EVT_SCHEDULE_ROUTINE
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
 from app.services.time_domain.clock import classify_day_kind, is_holiday, is_workday_swap
 from app.services.time_domain.parser import ParsedTime, _parse_cn_number, has_explicit_time, parse_time_expressions
 from app.services.mbti import get_mbti, signal as mbti_signal
+from app.services.schedule_domain import routine as routine_mod
 
 _WEEKDAY_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
@@ -132,8 +133,12 @@ async def generate_daily_schedule(
     age: int | None = None,
     occupation: str | None = None,
     city: str | None = None,
+    refresh: bool = False,
 ) -> list[dict]:
     """生成每日作息表。基于生活画像+模板+个性化。节日强制LLM路径。
+
+    refresh=True 是对当天已有作息的重排 (needs_routine_refresh): 生成期间用户要求
+    了作息调整时不覆盖。
 
     Spec Part 1 §2.1 要求 prompt 注入:
         姓名 / 年龄 / 职业 / 性格(MBTI) / 生活画像 / 日期属性 [+ 用户记忆]
@@ -167,6 +172,22 @@ async def generate_daily_schedule(
         logger.debug("Agent profile lookup failed: %s", type(e).__name__)
 
     personality_brief = _mbti_brief(mbti)
+
+    # TIME12: 每日作息服从固定作息。拿不到 (补全失败) 时退回原行为, 下次再补。
+    day = None
+    routine = None
+    try:
+        routine = await routine_mod.ensure_agent_routine(
+            agent_row if agent_row is not None else _AgentRef(agent_id, occupation, age, city, life_overview),
+        )
+    except Exception as e:
+        logger.warning("Routine unavailable for %s: %s", agent_id, type(e).__name__)
+    if routine is not None:
+        day = routine_mod.day_plan(routine, date.date(), holiday=holiday, workday_swap=workday_swap)
+    constraints = await _routine_constraints(routine, day) if day else ""
+    meta: dict = {"routine": "applied" if day else "unavailable"}
+    if refresh:
+        meta["refresh"] = True
 
     base_fmt = {
         "name": name,
@@ -206,26 +227,99 @@ async def generate_daily_schedule(
                 prompt_key = "schedule.daily_schedule"
                 prompt = (await get_prompt_text(prompt_key)).format(**base_fmt)
 
+            if constraints:
+                prompt = _join_prompt(prompt, constraints)
             model = get_utility_model()
             schedule = await invoke_json(model, prompt)
             if isinstance(schedule, list) and len(schedule) >= 5:
                 if not all(isinstance(slot, dict) for slot in schedule):
                     raise ValueError("Schedule entries must be objects")
+                if day is not None:
+                    schedule = await _conform_to_routine(model, prompt, schedule, day, meta)
                 if agent_row is None:
                     from types import SimpleNamespace
                     agent_row = SimpleNamespace(name=name, city=city, age=age, occupation=occupation)
                 schedule = await _apply_carried_adjustment(agent_id, date, schedule)
-                schedule = await _ground_and_cache_new_schedule(agent_id, date, agent_row, schedule)
+                schedule = await _ground_and_cache_new_schedule(agent_id, date, agent_row, schedule, meta=meta)
+                _log_routine_outcome(agent_id, date, meta)
                 logger.info(f"[SCHEDULE] {agent_id} {date.date()} gen via {prompt_key}")
                 return schedule
         except Exception as e:
             logger.warning(f"LLM schedule generation failed, falling back to template: {e}")
 
-    # 兜底: 无 life_overview 或 LLM 失败时用模板
-    schedule = _personalize_template(mbti, date, holiday=holiday, workday_swap=workday_swap)
+    # 兜底: 无 life_overview 或 LLM 失败时用模板; 有固定作息就按固定作息排。
+    if day is not None:
+        schedule = routine_mod.template_schedule(day)
+        meta["conformance"] = "template_no_llm"
+    else:
+        schedule = _personalize_template(mbti, date, holiday=holiday, workday_swap=workday_swap)
     schedule = await _apply_carried_adjustment(agent_id, date, schedule)
-    await _cache_schedule(agent_id, date, schedule)
+    await _cache_schedule(agent_id, date, schedule, meta=meta)
+    _log_routine_outcome(agent_id, date, meta)
     return schedule
+
+
+@dataclass
+class _AgentRef:
+    """没有 agent 行时给固定作息补全用的最小档案。"""
+    id: str
+    occupation: str | None
+    age: int | None
+    city: str | None
+    lifeOverview: str | None
+
+
+_KINDS_TEXT = "/".join(routine_mod.KINDS)
+
+
+def _join_prompt(*parts: str) -> str:
+    return "\n\n".join(p for p in parts if p)
+
+
+async def _routine_constraints(routine, day) -> str:
+    try:
+        template = await get_prompt_text("schedule.routine_constraints")
+    except Exception as e:
+        logger.warning("Routine constraint prompt unavailable: %s", type(e).__name__)
+        return ""
+    if not template:
+        return ""
+    return template.format(rules=routine_mod.render_constraint_rules(day, routine), kinds=_KINDS_TEXT)
+
+
+async def _conform_to_routine(model, prompt: str, schedule: list[dict], day, meta: dict) -> list[dict]:
+    """生成结果不符合固定作息时带着偏差重试一次; 仍不符合就按固定作息排兜底作息。"""
+    violations = routine_mod.check_conformance(schedule, day)
+    if not violations:
+        meta["conformance"] = "ok"
+        return schedule
+    meta["first_violations"] = violations[:6]
+    try:
+        feedback = await get_prompt_text("schedule.routine_retry")
+        retry_prompt = _join_prompt(prompt, feedback.format(violations="；".join(violations[:6])))
+        retried = await invoke_json(model, retry_prompt)
+    except Exception as e:
+        logger.warning("Routine retry failed: %s", type(e).__name__)
+        retried = None
+    if (isinstance(retried, list) and len(retried) >= 5
+            and all(isinstance(slot, dict) for slot in retried)):
+        again = routine_mod.check_conformance(retried, day)
+        if not again:
+            meta["conformance"] = "retried"
+            return retried
+        meta["retry_violations"] = again[:6]
+    meta["conformance"] = "template"
+    return routine_mod.template_schedule(day)
+
+
+def _log_routine_outcome(agent_id: str, date: datetime, meta: dict) -> None:
+    logger.info(
+        "[SCHEDULE-ROUTINE] agent=%s date=%s routine=%s conformance=%s",
+        agent_id[:8], date.date(), meta.get("routine"), meta.get("conformance"),
+        extra={"event": EVT_SCHEDULE_ROUTINE, "routine": meta.get("routine"),
+               "conformance": meta.get("conformance"),
+               "violation_count": len(meta.get("first_violations") or [])},
+    )
 
 
 def _personalize_template(
@@ -411,7 +505,7 @@ def _grounded_cache_key(
 
 
 async def _ground_and_cache_new_schedule(
-    agent_id: str, date: datetime, agent: Any, schedule: list[dict],
+    agent_id: str, date: datetime, agent: Any, schedule: list[dict], *, meta: dict | None = None,
 ) -> list[dict]:
     """核验新生成的作息并落库, 同时把结论按读路径同一把指纹记下来。
 
@@ -423,12 +517,13 @@ async def _ground_and_cache_new_schedule(
         policy = await _grounding_policy(schedule)
     except Exception:
         clean = await _ground_schedule(agent, schedule)
-        await _cache_schedule(agent_id, date, clean)
+        await _cache_schedule(agent_id, date, clean, meta=meta)
         return clean
     clean, _ = await _ground_schedule_result(
         agent, schedule, policy_template=policy or None, timeout=_GENERATION_GROUNDING_TIMEOUT,
     )
-    await _cache_schedule(agent_id, date, clean)
+    if not await _cache_schedule(agent_id, date, clean, meta=meta):
+        return clean
     # 留下的送检段都已被放行, 被拒或无法核验的已换成中性说法 (不再触发送检), 所以
     # clean 本身就是这份档案和策略下核验过的结果, 失败批也不例外 —— 它们的原文已经
     # 不在 clean 里了。读路径只在还有送检段时读策略, 指纹跟着同样算。
@@ -444,9 +539,17 @@ async def _ground_and_cache_new_schedule(
     return clean
 
 
-async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -> None:
-    """缓存当日作息到Redis并持久化到DB。"""
+async def _cache_schedule(
+    agent_id: str, date: datetime, schedule: list[dict], *, meta: dict | None = None,
+) -> bool:
+    """缓存当日作息到Redis并持久化到DB。
+
+    meta 只在生成时给 (固定作息校验结果); 作息调整改写当天作息时不动它。
+    """
     redis = await get_redis()
+    if meta and meta.get("refresh") and await redis.get(_adj_key(agent_id)):
+        logger.info("[SCHEDULE-ROUTINE] refresh for %s skipped: adjusted during generation", agent_id[:8])
+        return False
     await redis.set(_schedule_key(agent_id, date), json.dumps(schedule, ensure_ascii=False), ex=86400 * 2)
 
     # 持久化到 DB（用于历史查询）
@@ -478,6 +581,16 @@ async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -
         )
     except Exception as e:
         logger.warning(f"Failed to persist schedule to DB for {agent_id}: {e}")
+        return True
+    if meta is not None:
+        try:
+            await db.execute_raw(
+                "UPDATE ai_daily_schedules SET generation_meta = $1::jsonb WHERE agent_id = $2 AND date = $3::date",
+                json.dumps(meta, ensure_ascii=False), agent_id, date_only.date().isoformat(),
+            )
+        except Exception as e:
+            logger.warning("Failed to persist schedule meta for %s: %s", agent_id, type(e).__name__)
+    return True
 
 
 async def save_life_overview(agent_id: str, description: str) -> None:
@@ -526,6 +639,35 @@ def _schedule_key(agent_id: str, date: datetime) -> str:
 
 def _adj_key(agent_id: str) -> str:
     return f"schedule_adj:{agent_id}:{_local_now().strftime('%Y%m%d')}"
+
+
+async def needs_routine_refresh(agent: Any, schedule: list[dict] | None) -> bool:
+    """TIME12 上线前生成的当天作息没按固定作息排 (没有 kind), 允许重排一次。
+
+    - 固定作息还没有时先试着推导 (每个 agent 每天最多试一次); 推导不出就不重排,
+      否则推导失败的 agent 每天都会白白重排一遍。
+    - 当天有作息调整就留着, 否则会冲掉用户刚要求的改动 (写入前还会再查一次,
+      见 _cache_schedule 的 refresh)。
+    - 重排会让 AI 当天下午的安排和上午说过的不一样; 这是一次性的迁移代价。
+    """
+    if not schedule or routine_mod.has_kinds(schedule):
+        return False
+    agent_id = str(agent.id)
+    try:
+        redis = await get_redis()
+        if await redis.get(_adj_key(agent_id)):
+            return False
+        day = _local_now().strftime('%Y%m%d')
+        if await routine_mod.get_agent_routine(agent_id) is None:
+            if not await redis.set(f"routine_derive_attempt:{agent_id}:{day}", "1", ex=86400 * 2, nx=True):
+                return False
+            if await routine_mod.ensure_agent_routine(agent) is None:
+                return False
+        claimed = await redis.set(f"schedule_routine_refresh:{agent_id}:{day}", "1", ex=86400 * 2, nx=True)
+        return bool(claimed)
+    except Exception as e:
+        logger.warning("Routine refresh check failed for %s: %s", agent_id, type(e).__name__)
+        return False
 
 
 async def has_cached_schedule(agent_id: str, date: datetime | None = None) -> bool:
@@ -599,6 +741,89 @@ def get_current_status(schedule: list[dict], now: datetime | None = None) -> dic
     # 的推断挪走, 否则陪聊结束后的整个后半夜都成了「空档 = 空闲」。
     planned = [(span, slot) for span, slot in spans if not _is_adjustment(slot)]
     return {**_unscheduled_status(planned, minute), "upcoming": upcoming}
+
+
+async def current_status_with_routine(
+    agent_id: str | None, schedule: list[dict], now: datetime | None = None,
+) -> dict:
+    """get_current_status 加上固定作息的"平时 / 今天 / 此刻" (TIME12)。
+
+    固定作息还没推导出来或读不到时只返回原状态, 主回复照旧没有作息段。
+    """
+    now = now or _local_now()
+    status = get_current_status(schedule, now)
+    if not agent_id:
+        return status
+    try:
+        routine = await routine_mod.get_agent_routine(agent_id)
+        if routine is not None:
+            yesterday = now.date() - timedelta(days=1)
+            status["routine"] = routine_mod.describe_now(
+                routine, schedule, now,
+                holiday=is_holiday(now.date()), workday_swap=is_workday_swap(now.date()),
+                yesterday_holiday=is_holiday(yesterday), yesterday_swap=is_workday_swap(yesterday),
+            )
+    except Exception as e:
+        logger.warning("Routine view unavailable for %s: %s", agent_id, type(e).__name__)
+    return status
+
+
+_EVIDENCE_LOOKBACK_DAYS = 60
+
+
+async def schedule_for_date(agent_id: str, day) -> list[dict] | None:
+    """某一天已生成的作息 (只读; 不生成)。今天走缓存, 过去的日子读库。"""
+    from datetime import date as date_cls
+    today = _local_now().date()
+    if not isinstance(day, date_cls) or day > today or (today - day).days > _EVIDENCE_LOOKBACK_DAYS:
+        return None
+    if day == today:
+        return await get_cached_schedule(agent_id)
+    try:
+        rows = await db.query_raw(
+            "SELECT schedule_data FROM ai_daily_schedules WHERE agent_id = $1 AND date = $2::date",
+            agent_id, day.isoformat(),
+        )
+    except Exception as e:
+        logger.warning("Schedule history unavailable for %s: %s", agent_id, type(e).__name__)
+        return None
+    data = rows[0].get("schedule_data") if rows else None
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            return None
+    if not isinstance(data, list) or not all(isinstance(s, dict) for s in data):
+        return None
+    return data
+
+
+async def agent_day_evidence(
+    agent_id: str | None, *, routine_view: dict | None, target_date: str | None,
+    today_schedule: list[dict] | None = None,
+) -> str:
+    """给时间核验的"AI 自己"证据: 固定作息 + 所问那天的安排。没有就返回空串。"""
+    from datetime import date as date_cls
+    lines = []
+    if isinstance(routine_view, dict) and routine_view.get("usual"):
+        lines.append(f"平时：{routine_view['usual']}")
+    if agent_id and target_date:
+        try:
+            day = date_cls.fromisoformat(target_date)
+        except ValueError:
+            day = None
+        if day is not None:
+            schedule = (today_schedule if day == _local_now().date() and today_schedule
+                        else await schedule_for_date(agent_id, day))
+            if schedule:
+                slots = []
+                for slot in schedule[:_GROUNDING_MAX_SLOTS]:
+                    event = str(slot.get("event") or slot.get("activity") or "").strip()
+                    if event:
+                        slots.append(f"{slot.get('start', '?')}-{slot.get('end', '?')} {event[:40]}")
+                if slots:
+                    lines.append(f"{target_date} 你的安排：" + "；".join(slots))
+    return "\n".join(lines)
 
 
 _DAY_MINUTES = 24 * 60
@@ -969,7 +1194,19 @@ def format_upcoming(slots: list[dict]) -> str:
 
 
 def format_schedule_context(status: dict) -> str:
-    """格式化当前状态供Prompt注入。"""
+    """格式化当前状态供Prompt注入。
+
+    带着固定作息 (TIME12) 时补一句平时/今天/此刻, 状态回复、作息查询、作息调整
+    这些短路回复也就和主回复同一个口径。
+    """
+    text = _format_status_sentence(status)
+    routine = status.get("routine")
+    if isinstance(routine, dict) and routine.get("usual"):
+        text += f"（平时{routine['usual']}。{routine.get('today', '')}；{routine.get('now_line', '')}。）"
+    return text
+
+
+def _format_status_sentence(status: dict) -> str:
     s = status.get("status", "idle")
     activity = (
         str(status.get("activity") or status.get("event") or "").strip()
@@ -1092,8 +1329,8 @@ _ADJUSTMENT_SOURCE = "user_adjustment"
 # 写进去的段同时带 spec 字段 (event/status) 和旧字段 (type/activity): 状态读前者,
 # 还在按 type 判空闲的旧调用方 (主动消息顺延) 读后者, 两边得一致。不写「和用户
 # 聊天」: activity 会原样显示在 App 顶部, 也会拼进提示词「你现在在{activity}」。
-_AWAKE_FILL = {"event": "聊天", "activity": "聊天", "status": "空闲", "type": "leisure"}
-_SLEEP_FILL = {"event": "睡觉", "activity": "睡觉", "status": "睡眠", "type": "sleep"}
+_AWAKE_FILL = {"event": "聊天", "activity": "聊天", "status": "空闲", "type": "leisure", "kind": "社交"}
+_SLEEP_FILL = {"event": "睡觉", "activity": "睡觉", "status": "睡眠", "type": "sleep", "kind": "睡眠"}
 
 _ADJUST_TARGET_RE = re.compile(
     r"调整为|调整成|调整到|改为|改成|改到|推迟到|延后到|延迟到|推到|提前到|变成|换成"
@@ -1363,7 +1600,11 @@ def format_full_schedule_for_query(
 
     current = ""
     if query_type == "current" and status:
-        current = f"\n当前状态：{format_schedule_context(status)}"
+        # 不带"现在几点、离下班多久": 这段同时用作重复查询的指纹, 不能每分钟都变。
+        current = f"\n当前状态：{_format_status_sentence(status)}"
+    routine = status.get("routine") if isinstance(status, dict) else None
+    if isinstance(routine, dict) and routine.get("usual"):
+        current += f"\n你平时的作息：{routine['usual']}"
 
     if query_type == "current":
         instruction = "用户在问你现在在干什么。自然地描述你当前的状态和活动。"

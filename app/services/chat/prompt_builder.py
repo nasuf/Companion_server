@@ -947,6 +947,33 @@ async def build_system_prompt(
         _append_section(sections, components, "事件日期证据", temporal_evidence,
                         prompt_key="chat.temporal_evidence")
 
+    # TIME12 固定作息: 平时几点上下班 + 今天 + 此刻离上下班多久 (代码算好)。
+    # 带着当前分钟, 每轮都变, 所以放在轮级快变区。
+    # 2026-10-30 生产: 人设写 21:00 下班、当天作息 19:30 已回家, 模型在 19:55 自己
+    # 圆出"提前溜了十分钟"。这里只放一个口径, 时间差不交给模型算。
+    routine_view = ai_status.get("routine") if isinstance(ai_status, dict) else None
+    routine_diag: dict = {"status": "not_derived"}
+    if isinstance(routine_view, dict):
+        tpl = await _get_optional_prompt("chat.agent_routine_section")
+        routine_diag = {
+            "status": "injected" if tpl is not None else "disabled",
+            **{k: routine_view.get(k) for k in ("phase", "day_reason", "work_window", "work_window_source")},
+        }
+        if tpl is not None:
+            _append_section(
+                sections, components, "你的作息",
+                _render_section(tpl, {
+                    "usual": routine_view.get("usual", ""),
+                    "today": routine_view.get("today", ""),
+                    "now_line": routine_view.get("now_line", ""),
+                }),
+                prompt_key="chat.agent_routine_section",
+            )
+    if routine_diag["status"] != "injected":
+        _record_skipped_section(diagnostics, "你的作息")
+    if diagnostics is not None:
+        diagnostics["agent_routine"] = routine_diag
+
 
     # W4 AI 情绪连续性: 上一轮情绪衰减后的"当下心情", 驱动语气/话量
     mood_section = await _build_ai_mood_section(ai_mood_text)

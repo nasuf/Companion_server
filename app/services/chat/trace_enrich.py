@@ -59,6 +59,7 @@ _MAIN_PROMPT_SECTION_COMPONENTS = [
     ("## 事件日期证据", "chat.temporal_evidence"),
     ("## 事件时间线", "chat.timeline_section"),
     ("## 你的隐性状态约束", "chat.ai_state_constraint"),
+    ("## 你的作息", "chat.agent_routine_section"),
     ("## 联网结果使用", "chat.web_search_usage"),
     ("## 刚聊过的作品", "chat.web_search_recent_titles"),
     ("## 避免重复", "chat.repetition_guard_section"),
@@ -91,6 +92,12 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "boundary.patience_instruction_medium",
     "boundary.persona_lock",
     "chat.ai_state_constraint",
+    # TIME12 固定作息段 (主回复 section) 与每日作息生成的追加约束段
+    "chat.agent_routine_section",
+    "schedule.routine_constraints",
+    "schedule.routine_retry",
+    # 时间核验判定无依据时直接发出的那一句, 不进任何 LLM prompt
+    "chat.temporal_fallback",
     "chat.anti_hallucination_hard_rule",
     "chat.consistency_rules",
     # W1b 情绪标记指令 — 仅作为主回复 system prompt 的收尾 section 出现
@@ -578,6 +585,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("schedule.life_overview", "生活画像生成", "data", _label_reply_text),
     ("schedule.daily_schedule_with_memory", "每日作息生成(带记忆)", "data", _label_schedule_items),
     ("schedule.daily_schedule", "每日作息生成", "data", _label_schedule_items),
+    ("schedule.routine_derive", "固定作息补全", "data", _label_passthrough),
     ("schedule.daily_summary", "昨日生活总结", "data", _label_reply_text),
     ("schedule.daily_summary_memories", "昨日总结记忆拆分", "data", _label_extraction),
     ("portrait.generation", "用户画像生成", "data", _label_reply_text),

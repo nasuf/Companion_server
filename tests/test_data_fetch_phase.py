@@ -100,7 +100,8 @@ async def test_fetch_parallel_context_happy_path():
         get_cached_schedule=AsyncMock(return_value=[{"start": "09:00", "activity": "工作"}]),
         get_topic_intimacy=AsyncMock(return_value=65.0),
     ), patch(
-        "app.services.chat.data_fetch_phase.get_current_status", return_value=_BUSY_STATUS,
+        "app.services.chat.data_fetch_phase.current_status_with_routine",
+        AsyncMock(return_value=_BUSY_STATUS),
     ), patch(
         "app.services.chat.data_fetch_phase.format_schedule_context", return_value="(工作中)",
     ):

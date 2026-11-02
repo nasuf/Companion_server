@@ -30,6 +30,7 @@ from app.services.life_story import (
     set_progress,
 )
 from app.services.runtime.data_reset import hard_delete_agent_data
+from app.services.schedule_domain.routine import get_agent_routine, public_routine
 from app.services.schedule_domain.schedule import (
     generate_daily_schedule,
     get_cached_schedule,
@@ -443,10 +444,14 @@ async def get_schedule_history(
         where={"agentId": agent_id, "date": {"gte": since}},
         order={"date": "desc"},
     )
+    routine = await get_agent_routine(agent_id)
     return {
         "life_overview": agent.lifeOverview,
+        # TIME12 固定作息 (尚未推导时为 null); 人设原句不外露, 只给时刻与来源。
+        "routine": public_routine(routine),
         "schedules": [
-            {"date": str(r.date.date()), "schedule": r.scheduleData}
+            {"date": str(r.date.date()), "schedule": r.scheduleData,
+             "generation_meta": getattr(r, "generationMeta", None)}
             for r in records
         ],
     }

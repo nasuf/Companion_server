@@ -649,7 +649,8 @@ async def prepare_context(ctx):
             await services.get_cached_schedule(ctx.agent_id) if ctx.agent_id else None
         )
         ctx.ai_status = (
-            services.get_current_status(ctx.schedule) if ctx.schedule else None
+            await services.current_status_with_routine(ctx.agent_id, ctx.schedule)
+            if ctx.schedule else None
         )
         ctx.schedule_context = (
             services.format_schedule_context(ctx.ai_status) if ctx.ai_status else None
@@ -1256,7 +1257,26 @@ async def normalize_reply(ctx):
     ):
         from app.services.time_domain.guard import guard_temporal_reply
         from app.services.memory.retrieval.context_selector import format_memory_time
+        from app.services.schedule_domain.schedule import agent_day_evidence
 
+        temporal_state = ctx.response_diagnostics.get("temporal_context", {})
+        agent_evidence = ""
+        agent_day_in_prompt = False
+        if temporal_state.get("out_of_window_event_count") and not temporal_state.get("in_window_event_count"):
+            target_date = temporal_state.get("requested_event_date")
+            agent_day_in_prompt = (
+                ctx.response_diagnostics.get("agent_routine", {}).get("status") == "injected"
+                and target_date == ctx.turn_clock.now.date().isoformat()
+            )
+            try:
+                agent_evidence = await agent_day_evidence(
+                    ctx.agent_id,
+                    routine_view=(ctx.ai_status or {}).get("routine") if isinstance(ctx.ai_status, dict) else None,
+                    target_date=target_date,
+                    today_schedule=ctx.schedule,
+                )
+            except Exception as exc:  # 证据只是补充, 读不到照常核验
+                services.logger.warning("[TEMPORAL] agent evidence unavailable: %s", type(exc).__name__)
         temporal_checked = await guard_temporal_reply(
             " ".join(ctx.replies),
             question=ctx.user_message,
@@ -1269,6 +1289,8 @@ async def normalize_reply(ctx):
                 ]
             ),
             diagnostics=ctx.response_diagnostics,
+            agent_evidence=agent_evidence,
+            agent_day_in_prompt=agent_day_in_prompt,
         )
         if temporal_checked != " ".join(ctx.replies):
             ctx.replies = [temporal_checked]
