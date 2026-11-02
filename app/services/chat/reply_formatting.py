@@ -87,15 +87,42 @@ _ONLY_COUNT_MARKER_RE = re.compile(rf"^\s*(?:{_COUNT_MARKER_TOKEN}\s*)+$")
 _TRAILING_COUNT_MARKER_RE = re.compile(rf"(?:\s*{_COUNT_MARKER_TOKEN})+\s*$")
 
 
+# ── 动作/神态旁白 ──
+#
+# 「（清了清嗓子）」「（突然有点慌）」「*小声*」: 真人打字聊天不会这么写。回复要求里
+# 早有「不许出现括号、星号等动作表情描述」, 但角色模型在被要求唱歌这类表演场景里
+# 仍会写 (2026-10-31~11-01 生产: 主回复 5/2491 条, 全部在开头或独占一条)。
+# 只剥开头那一段 (或整条就是旁白), 且括号里只有中文: 「活动卡片：xx(西津渡店)」
+# 「《No Words (Director's Cut)》」「(・ω・)」这类都不动。
+_STAGE_DIRECTION_RE = re.compile(
+    r"^\s*(?:(?:[（(][一-鿿，、。…\s~～！!？?]{1,30}[)）]|\*[一-鿿，、。…\s~～！!？?]{1,30}\*)\s*)+"
+)
+
+
+def strip_stage_direction(text: str) -> str:
+    """去掉开头的动作/神态旁白; 整条都是旁白时返回空串。"""
+    if not text:
+        return text
+    cleaned = _STAGE_DIRECTION_RE.sub("", text)
+    if cleaned != text:
+        logger.info(
+            "[REPLY-GUARD] stripped stage direction",
+            extra={"event": EVT_REPLY_GUARDRAIL, "action": "strip_stage_direction",
+                   "chars_lost": len(text) - len(cleaned)},
+        )
+    return cleaned
+
+
 def strip_system_markers(text: str) -> str:
     """剥除 LLM 输出中"给系统看"的标记: [EMO:...] 任意位置 + 条数标记
-    ([2]/【1】/[X]) 整条或尾部形态. 返回清理后的文本 (可能为空串)."""
+    ([2]/【1】/[X]) 整条或尾部形态, 以及开头的动作/神态旁白. 返回清理后的
+    文本 (可能为空串)."""
     if not text:
         return text
     cleaned = _EMO_MARKER_ANYWHERE_RE.sub("", text)
     if _ONLY_COUNT_MARKER_RE.match(cleaned):
         return ""
-    return _TRAILING_COUNT_MARKER_RE.sub("", cleaned).strip()
+    return strip_stage_direction(_TRAILING_COUNT_MARKER_RE.sub("", cleaned).strip()).strip()
 
 
 def _clean_reply_part(text: str) -> str:
