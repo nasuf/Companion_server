@@ -289,6 +289,7 @@ from app.api.admin.prompts import router as admin_prompts_router
 from app.api.admin.holidays import router as admin_holidays_router
 from app.api.public.auth import router as auth_router
 from app.api.admin.users import router as admin_users_router
+from app.api.admin.authenticity import router as admin_authenticity_router
 from app.api.admin.career import router as admin_career_router
 from app.api.admin.names import router as admin_names_router
 from app.api.admin.agents import router as admin_agents_router
@@ -363,6 +364,7 @@ app.include_router(admin_takeovers_router)
 app.include_router(admin_prompts_router)
 app.include_router(admin_holidays_router)
 app.include_router(auth_router)
+app.include_router(admin_authenticity_router)
 app.include_router(admin_users_router)
 app.include_router(admin_career_router)
 app.include_router(admin_names_router)

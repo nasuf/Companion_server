@@ -157,3 +157,8 @@ def audit_auth_request_event(
         ip=_client_ip(request),
         outcome=outcome,
     )
+    if outcome == "success" and user_id:
+        from app.services.authenticity.signals import observe_network
+
+        observe_network(user_id, request.headers,
+                        request.client.host if request.client else None, source="login")

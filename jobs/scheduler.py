@@ -750,6 +750,17 @@ def register_scheduler_jobs(scheduler):
         max_instances=1,
     )
 
+    # 真人判定信号 (IP 哈希/归属地、输入耗时) 保留 180 天, 05:20 清理过期行。
+    scheduler.add_job(
+        _run_authenticity_retention,
+        "cron",
+        hour=5,
+        minute=20,
+        id="authenticity_retention",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # 数据不变量巡检: 抓"任务报成功但没干成事"。放在 06:00, 夜里的日任务全部跑完
     # 之后, 这时候查到的缺失才是真缺失。
     scheduler.add_job(
@@ -1515,6 +1526,20 @@ async def _run_trace_retention():
             _job_failed("Trace retention purge", e)
 
     await _run_distributed_job("trace_retention", 3600, _body)
+
+
+async def _run_authenticity_retention():
+    """真人判定信号保留期清理 (user_network_observations / user_input_signals)."""
+    async def _body():
+        from app.services.authenticity.signals import purge_expired
+        try:
+            deleted = await purge_expired()
+            if deleted:
+                logger.info(f"Authenticity signal purge: {deleted} rows deleted")
+        except Exception as e:
+            _job_failed("Authenticity signal purge", e)
+
+    await _run_distributed_job("authenticity_retention", 3600, _body)
 
 
 async def _run_ntp_calibration():

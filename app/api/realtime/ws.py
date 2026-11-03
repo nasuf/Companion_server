@@ -1066,6 +1066,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                         user_name=cached_username,
                         client_supports_voice=client_supports_voice,
                         paid_confirmed=paid_confirmed,
+                        input_metrics=payload.get("input_metrics"),
                     )
 
         except WebSocketDisconnect:
@@ -1367,6 +1368,7 @@ async def _handle_message(
     user_name: str | None = None,
     client_supports_voice: bool = False,
     paid_confirmed: bool = False,
+    input_metrics: object = None,
 ) -> None:
     """处理用户消息：额度闸门 → 聚合检查 → 生成回复 → 推送。"""
     from app.services.interaction.reply_telemetry import utc_now
@@ -1636,6 +1638,10 @@ async def _handle_message(
     else:
         user_message_id = await _persist_user_message(conversation_id, persisted_text,
             metadata=message_metadata, workspace_id=workspace_id, user_id=user_id)
+        from app.services.authenticity.signals import observe_input
+
+        # Admin "真人判定": compose timing only (no text), off the reply path.
+        observe_input(user_message_id, user_id, conversation_id, text, received_at, input_metrics)
     # Cancel a pending activity companion before reply generation. The
     # follow-up clock starts only after this turn's reply is persisted.
     try:

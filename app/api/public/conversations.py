@@ -39,6 +39,12 @@ async def post_user_typing(
     user: dict = Depends(require_user),
 ):
     from app.services.admin_takeover.service import publish_user_typing
+    from app.services.authenticity.signals import mark_compose_started
+
+    if body.active:
+        # Admin "真人判定": compose clock only, never draft text. Keyed by the
+        # caller, so a foreign conversation ID only times the caller's own sends.
+        await mark_compose_started(str(user["sub"]), conversation_id)
     # Absence of an active owned claim is a normal no-op, with no resource details.
     await publish_user_typing(
         conversation_id, str(user["sub"]), body.active,

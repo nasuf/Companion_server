@@ -1,7 +1,7 @@
 import json
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from prisma import Json
 from sse_starlette.sse import EventSourceResponse
 
@@ -75,7 +75,8 @@ async def _persist_user_message(
 
 
 @router.post("/{conversation_id}/ws-ticket", dependencies=[Depends(require_redis)])
-async def websocket_ticket(conversation_id: str, response: Response, user: dict = Depends(require_user)):
+async def websocket_ticket(conversation_id: str, request: Request, response: Response,
+                           user: dict = Depends(require_user)):
     from app.services.runtime.ws_auth import (
         TicketInvalid, TicketRateLimited, TicketUnavailable, issue_ticket,
     )
@@ -102,6 +103,12 @@ async def websocket_ticket(conversation_id: str, response: Response, user: dict 
     except TicketUnavailable:
         raise HTTPException(status_code=503, detail="Connection authentication unavailable") from None
     response.headers["Cache-Control"] = "no-store"
+    from app.services.authenticity.signals import observe_network
+
+    # Every chat (re)connection takes a ticket: the app's network is seen here.
+    if user.get("role") != "admin":
+        observe_network(str(user.get("sub")), request.headers,
+                        request.client.host if request.client else None, source="ws_ticket")
     return result
 
 
@@ -228,6 +235,9 @@ async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(req
         workspace_id=getattr(conv, "workspaceId", None),
         user_id=user_id,
     )
+    from app.services.authenticity.signals import observe_input
+
+    observe_input(message_id, user_id, conversation_id, data.message, received_at)
     if plan.should_wait:
         pushed = await enqueue_planned_user_message(plan, message_id=message_id)
         if pushed:

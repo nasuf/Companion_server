@@ -22,6 +22,8 @@ model User {
   statsTokenReconciliation StatsTokenReconciliation[] @ignore
   statsReviewItems StatsReviewItem[] @ignore
   replyRepetitionScores ReplyRepetitionScore[] @ignore
+  networkObservations UserNetworkObservation[] @ignore
+  inputSignals UserInputSignal[] @ignore
   erasureSpeechUsage SpeechUsage[] @relation("ErasureSpeechUsage") @ignore
   erasureTtsUsage TtsUsage[] @relation("ErasureTtsUsage") @ignore
   erasureUserMemory UserMemory[] @relation("ErasureUserMemory") @ignore
@@ -395,6 +397,7 @@ model Message {
   locationMemoryEvent LocationMemoryEvent? @ignore
   messageFollowupEvent MessageFollowupEvent? @ignore
   turnFollowupEvents TurnFollowupEvent[] @ignore
+  inputSignal UserInputSignal? @ignore
 
   @@index([conversationId, createdAt(sort: Desc)])
   // admin 监控聚合 (分时段/每日活跃/句子区间/DAU-WAU-MAU) 都按 role='user' +
@@ -3388,5 +3391,50 @@ model MemorySourceRetraction {
   recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
   @@id([sourceMessageId,sourceVersion,memoryId])
   @@map("memory_source_retractions")
+  @@ignore
+}
+
+/// Admin authenticity view: one row per (user, keyed IP hash). No raw address.
+model UserNetworkObservation {
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  ipHash      String   @map("ip_hash")
+  ipPrefix    String   @map("ip_prefix")
+  country     String?
+  province    String?
+  city        String?
+  isp         String?
+  networkKind String   @map("network_kind")
+  clientKind  String   @map("client_kind")
+  userAgent   String?  @map("user_agent")
+  source      String
+  hits        Int      @default(1)
+  firstSeenAt DateTime @map("first_seen_at")
+  lastSeenAt  DateTime @map("last_seen_at")
+
+  @@id([userId, ipHash])
+  @@index([ipHash, lastSeenAt], map: "user_network_observations_hash_idx")
+  @@index([lastSeenAt], map: "user_network_observations_seen_idx")
+  @@map("user_network_observations")
+  @@ignore
+}
+
+/// Admin authenticity view: compose timing per user message. Never draft text.
+model UserInputSignal {
+  messageId       String   @id @map("message_id")
+  message         Message  @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  userId          String   @map("user_id")
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  createdAt       DateTime @map("created_at")
+  chars           Int
+  serverComposeMs Int?     @map("server_compose_ms")
+  clientComposeMs Int?     @map("client_compose_ms")
+  maxInsertChars  Int?     @map("max_insert_chars")
+  editCount       Int?     @map("edit_count")
+  source          String
+
+  @@index([userId, createdAt], map: "user_input_signals_user_idx")
+  @@index([createdAt], map: "user_input_signals_created_idx")
+  @@map("user_input_signals")
   @@ignore
 }
