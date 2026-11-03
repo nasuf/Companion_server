@@ -1,0 +1,62 @@
+# 主回复重复表述回放评测（CHAT01.10.2）
+
+回答一个问题：某个改动让主回复**更少**复述之前说过的话了吗？代价是不是更常答非所问？
+
+10.1 的线上指标每天出一次数，样本小、受流量和用户构成影响；这里把同一批生产轮次交给两份源码各重新回 5 次，按用例配对比较，能在合并前看出差别。
+
+## 流程
+
+| 步骤 | 命令 | 产物（全部在受控证据目录，不进仓库） |
+|---|---|---|
+| 1. 导出 | 生产容器内经 stdin 运行 `export_windows.py`（只读） | `windows-raw.json` |
+| 2. 建用例 | `cases.build_cases` | `cases-raw.json`、`mapping.json` |
+| 3. 提示词快照 | 生产 `prompt_templates` 的 key / content / is_enabled（只读） | `prompts-snapshot.json` |
+| 4. 回放 | 每组在自己的源码目录里跑 `run_replay`（可分片并行、可断点续跑） | `replay/<组>/rr-*.json` |
+| 5. 打分 | `score`（与 10.1 同一口径，评判结果有缓存） | `scores.json` |
+| 6. 比较 | `compare`（`--gate` 时按门禁退出码） | `report.json` |
+| 7. 脱敏 | `sanitize`（规则 + 模型改写，标“待人工复核”） | `cases-sanitized.json` |
+
+```sh
+# 4. 回放（只传供应商密钥；源码目录不能有 .env）
+cd <源码目录> && PYTHONPATH=. python -m evals.reply_repetition.run_replay --arm current \
+  --cases $EVIDENCE/cases-raw.json --prompt-snapshot $EVIDENCE/prompts-snapshot.json \
+  --output-dir $EVIDENCE/replay --samples 5 --shard 0/8 --max-cost-cny 1 --live
+# 5–6. 打分与比较
+python -m evals.reply_repetition.score --cases $EVIDENCE/cases-raw.json --runs $EVIDENCE/replay \
+  --arms current,nofix --output $EVIDENCE/scores.json
+python -m evals.reply_repetition.compare --cases $EVIDENCE/cases-raw.json --scores $EVIDENCE/scores.json \
+  --candidate current --baseline nofix --output $EVIDENCE/report.json --gate
+```
+
+## 用例
+
+- **来源**：10.1 打分表（`reply_repetition_scores`）。正例为判成原样照抄或换说法复述的主回复轮次，其中附和、交叠两种情形全部收入，其余随机补足。负例为判成合理重复的轮次，加上有候选但判为不重复的高相似轮次（难负例）。每个用户最多 20 例。
+- **窗口**：用户这一句所在的轮次，加上之前 6 轮。另外保留之前 3 轮 AI 回复（不过滤短气泡），作为判断复读的对照，和线上口径一致。
+- **本轮回应的是哪几条**：以落库的 `achievement_turn_id` 为准，也就是生产投递时的 `turn_message_ids`。用户连发两句、第二句在上一轮生成期间才到时，上一轮已经接过第一句，本轮只回应第二句。把两句都当本轮，模型会把第一句再答一遍。`achievement_turn_id` 点名的消息不在导出窗口里时，用例丢弃，不退回到“最后一段用户消息”。没有这个字段的老消息，按最后一段连续的用户消息处理。
+- **原样回放**：每例保留生产的时间戳、行顺序和本轮消息 ID，并按生产投递方式传入（不再存一遍消息、带本轮消息 ID 与收到时间）。“上一轮未回完又收到消息”的顺序和延迟秒数因此都与生产一致。回放器版本（`REPLAY_PROTOCOL`）不够新的源码目录会直接拒跑，免得两组回放方式不同。
+- **不保留的东西**：Agent 人设、记忆、作息、当时在做什么（未落库），都用回放器的合成桩。所以“在忙解释”只能近似复现，人设一致性在本评测里不可比。
+- **标签**：情形（ack / overlap / other）、生产判定（verbatim / paraphrase / legit）、delay_section（延迟 ≥20 秒，会带「回复时机说明」）、topic_continuation（带话题承接句）、after_followup（之前 3 轮里有 B 模式追问）、partial_user_turn（本轮只回应了最后一段用户消息里的一部分）。
+
+## 打分
+
+- **复读**：直接调用 `app/services/effect/repetition.py`（`find_candidates` / `judge_prompt` / `turn_label`），向量相似度 ≥0.60 进候选，再由 qwen3.5-plus 判定。评判看到的“用户这一句”与 10.1 一致：最后一段用户消息以空格相连。评判失败或被拒收的采样不进均值，数量单独报。
+- **回应**：回放器里的评判（qwen3.5-flash）只问一件事：是否回应了用户最后这句。不评价重复。
+- **资源**：气泡数、字数、主回复耗时（只算带 system 段的主回复调用），以及按 Ark 价格（0.8 / 0.16 / 2.0 元每百万 token）算的费用（含回放器里走主模型的辅助调用）。供应商没返回用量时记为未知，不当作 0。
+
+## 统计与门禁
+
+- 每个用例先在组内求各采样平均，再在两组之间配对相减。
+- 95% 区间用按用户聚集的 bootstrap（2000 次，固定种子）。
+- 门禁（供 CHAT01.02 调用）：
+  - 正例复读率差值的上界 ≤ +5 个百分点；
+  - 全部用例回应率差值的下界 ≥ −5 个百分点；
+  - 两组都跑完的用例 ≥95%（正例与全部分别算），且每例两组采样数相同。回放失败的用例按缺失计入覆盖率，不能因为少了难例反而显得更好。
+- ±5 个百分点是先验设定，还没有用 A/A（同一份源码跑两次）标定噪声。接入 CHAT01.02 之前应先做 A/A 标定。
+- 费用上限按组计：同组各分片共用一个输出目录，按目录里已花的合计判断，中断留下的半截文件也算在内。上限可能超出约每个分片一例的费用。
+
+## 数据规范
+
+- 仓库只放代码。原始窗口、映射表、回放与评分结果都存放在受控证据目录，90 天后删除，仅用于离线评测，不用于训练。
+- `sanitize` 产出的脱敏用例标 `pending_human_review`，人工逐条复核通过后才能进入 `evals/reply_repetition/cases.json`。
+- 规则能抓：手机、座机、证件号、银行卡、邮箱、链接、微信/QQ 号、车牌、城市以下的门牌、小区和楼栋。人名、单位、学校、更细的地点交给模型改写。
+- 日期处理：“X月X日”和“2026-10-30”会跟着时间戳整体平移五周；“10/30”这种写法和比分分不开，不改。这些都靠人工复核兜底。

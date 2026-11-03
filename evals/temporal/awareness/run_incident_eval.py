@@ -63,6 +63,11 @@ def configure_time_context(patch, chat, io):
                   lambda *args, **kwargs: build_turn_clock(*args, now=io.now, **kwargs))
 
 
+# 2: history_rows keep their ids; user_message_id / reply_context replay production queue
+#    delivery; runs record the individual reply bubbles. Replay evals assert this.
+REPLAY_PROTOCOL = 2
+
+
 async def run(args, cases=None):
     if (args.source_root / ".env").exists():
         raise ValueError("Use an isolated source checkout without .env")
@@ -191,7 +196,7 @@ async def run(args, cases=None):
                         createdAt=io.now-timedelta(seconds=case["gap"] + (len(case["history"])-i-1)*30))
                         for i, (role, text) in enumerate(case["history"])]
                     if "history_rows" in case:
-                        history = [SimpleNamespace(id=f"history-{i}", role=row["role"], content=row["content"],
+                        history = [SimpleNamespace(id=row.get("id", f"history-{i}"), role=row["role"], content=row["content"],
                             metadata=row.get("metadata", {}), createdAt=datetime.fromisoformat(row["createdAt"]))
                             for i, row in enumerate(case["history_rows"])]
                     if case.get("received_at"):
@@ -217,9 +222,16 @@ async def run(args, cases=None):
                         fixture_hook(patch, chat, io, case)
                     token = store._prompt_snapshot.set(snapshot)
                     try:
+                        # Replayed production turns are already stored: like the production
+                        # delivery path, pass the turn's own message ids and receipt time and
+                        # do not save the message again.
+                        replayed = case.get("user_message_id") is not None
                         events = [e async for e in chat.stream_chat_response(
                             "c-1", case["message"], io.agent, "u-1", forced_intent=intent,
-                            reply_context={"received_at": case.get("received_at", io.now.isoformat())} )]
+                            user_message_id=case.get("user_message_id"),
+                            save_user_message=not replayed, delivered_from_queue=replayed,
+                            reply_context={"received_at": case.get("received_at", io.now.isoformat()),
+                                           **case.get("reply_context", {})} )]
                     finally:
                         store.reset_prompt_snapshot(token)
                     texts = []
@@ -250,7 +262,7 @@ async def run(args, cases=None):
                             assessment = {"pass": None, "reason": "invalid_model_judgement", "raw": judge_raw}
                     except Exception as exc:
                         assessment = {"pass": None, "reason": "judge_unavailable", "error_type": type(exc).__name__}
-                    report["runs"].append({"case": case["id"], "sample": sample, "reply": answer,
+                    report["runs"].append({"case": case["id"], "sample": sample, "reply": answer, "bubbles": texts,
                                            "location_queries": io.location_queries.await_count,
                                            "judge": assessment, "calls": captured, "response_diagnostics": captured_diagnostics})
                     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
