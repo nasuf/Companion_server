@@ -8,9 +8,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  backend-quality:
+  # The full suite took ~28 min serially. Files are split across shards, each
+  # with its own disposable databases and Redis (no shared state between them);
+  # backend-quality then merges the evidence and applies the unchanged gate.
+  backend-tests:
+    name: backend-tests (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     services:
       tts-test-postgres:
         image: postgres:16-alpine
@@ -62,8 +70,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,16 +89,19 @@ jobs:
         run: prisma generate --schema prisma/schema.prisma
 
       - name: Compile Python sources
+        if: matrix.shard == 0
         run: python -m compileall -q app jobs scripts evals tests
 
       - name: Validate agent eval cases
+        if: matrix.shard == 0
         run: |
           python evals/run_local.py --validate-only
-          python evals/long_companion_sim.py --validate-only
+          python evals/long_companion_sim.py --validate-only --results /tmp/long-companion-validation.json
           python evals/persona_grounding/run_eval.py --validate-only --output /tmp/persona-validation.json
           python -m evals.memory_baseline.run_eval --validate-only
 
       - name: Verify context evaluation accounting without live providers
+        if: matrix.shard == 0
         run: python -m pytest -q evals/context_embedding --junitxml=reports/context-eval-tests.xml
 
       - name: Prepare isolated memory evaluation database
@@ -146,7 +155,47 @@ jobs:
         run: python -m playwright install chromium
 
       - name: Run ALL backend tests with real disposable dependencies
-        run: python scripts/run_regression_gate.py --output reports/regression
+        run: python scripts/run_regression_gate.py --output reports/shard-${{ matrix.shard }} --shard ${{ matrix.shard }} --shards ${{ strategy.job-total }}
+
+      - name: Preserve shard evidence and browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-shard-${{ matrix.shard }}-${{ github.sha }}
+          path: reports/
+          retention-days: 7
+
+  backend-quality:
+    needs: backend-tests
+    # Still runs when a shard failed, so the gate report says why.
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c runtime-constraints.txt -e ".[dev]"
+
+      - name: Download shard evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-shard-*-${{ github.sha }}
+          path: reports/shards
+
+      - name: Merge shard evidence (every file exactly once)
+        run: python scripts/run_regression_gate.py --merge reports/shards --output reports/regression
 
       - name: Enforce coverage, inventory, skips and evidence identity
         if: always()
@@ -168,7 +217,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-regression-${{ github.sha }}
-          path: reports/
+          path: reports/regression/
           retention-days: 7
 
   chat-safety-integration:

@@ -115,3 +115,74 @@ def test_missing_artifacts_cli_exits_nonzero_and_writes_diagnostics(tmp_path):
     result = subprocess.run([sys.executable, str(script), "--output", str(tmp_path), "--base", "HEAD"], capture_output=True, text=True)
     assert result.returncode == 1
     assert not json.loads((tmp_path / "gate.json").read_text())["ok"]
+
+
+def test_shards_partition_every_file_once_and_balance():
+    from scripts.run_regression_gate import shard_files
+    files = [f"tests/test_{i}.py" for i in range(40)]
+    seconds = {f: float(i % 7 + 1) for i, f in enumerate(files[:-3])}  # last 3 untimed
+    parts = [shard_files(files, seconds, i, 4) for i in range(4)]
+    assert sorted(f for p in parts for f in p) == sorted(files)
+    assert parts == [shard_files(files, seconds, i, 4) for i in range(4)]  # deterministic
+    loads = [sum(seconds.get(f, 4.0) for f in p) for p in parts]
+    assert max(loads) - min(loads) <= 7
+    with pytest.raises(ValueError):
+        shard_files(files, seconds, 4, 4)
+
+
+def _shard(root, index, shards, files, nodeids, *, hashes=None, exit_code=0):
+    import coverage
+    from scripts.run_regression_gate import SHARD_KEYS
+    d = root / f"backend-shard-{index}" / f"shard-{index}"
+    d.mkdir(parents=True)
+    run = {key: "same" for key in SHARD_KEYS}
+    run.update(schema_version=1, test_files=["tests/test_a.py", "tests/test_b.py"],
+               hashes_after=hashes or {"x": "1"}, hashes_before=hashes or {"x": "1"},
+               shard=index, shards=shards, shard_files=files, collected_nodeids=nodeids,
+               pytest_exit_code=exit_code, network_violations=[],
+               started_at=f"2026-11-03T0{index}:00", finished_at=f"2026-11-03T1{index}:00")
+    (d / "run.json").write_text(json.dumps(run))
+    cases = "".join(f'<testcase classname="{n.split("::")[0][:-3].replace("/", ".")}" name="{n.split("::")[1]}"/>'
+                    for n in nodeids)
+    (d / "junit.xml").write_text(f'<testsuites><testsuite tests="{len(nodeids)}">{cases}</testsuite></testsuites>')
+    data = coverage.CoverageData(basename=str(d / "coverage.data"))
+    data.add_arcs({str(root.parent / "mod.py"): [(-1, 1), (1, 2), (2, 3)] if index else [(-1, 1), (1, 2), (2, -1)]})
+    data.write()
+
+
+def test_merge_combines_shards_into_single_run_evidence(tmp_path, monkeypatch):
+    from scripts.run_regression_gate import merge
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mod.py").write_text("x = 1\nif x:\n    y = 2\n")
+    shards, out = tmp_path / "shards", tmp_path / "out"
+    out.mkdir()
+    _shard(shards, 0, 2, ["tests/test_a.py"], ["tests/test_a.py::test_one"])
+    _shard(shards, 1, 2, ["tests/test_b.py"], ["tests/test_b.py::test_two"])
+    assert merge(shards, out) == 0
+    run = json.loads((out / "run.json").read_text())
+    assert run["collected_nodeids"] == ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
+    assert run["started_at"].endswith("00:00") and run["finished_at"].endswith("11:00")
+    assert len(list(ET.parse(out / "junit.xml").getroot().iter("testcase"))) == 2
+    covered = json.loads((out / "coverage.json").read_text())
+    assert covered["meta"]["branch_coverage"] and covered["totals"]["covered_branches"] == 2
+
+
+@pytest.mark.parametrize("defect", ["missing_shard", "duplicate_shard", "overlap", "hash_mismatch", "failed_shard"])
+def test_merge_rejects_incomplete_or_inconsistent_shards(tmp_path, monkeypatch, defect):
+    from scripts.run_regression_gate import merge
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mod.py").write_text("x = 1\nif x:\n    y = 2\n")
+    shards, out = tmp_path / "shards", tmp_path / "out"
+    out.mkdir()
+    _shard(shards, 0, 2, ["tests/test_a.py"] + (["tests/test_b.py"] if defect == "overlap" else []),
+           ["tests/test_a.py::test_one"])
+    if defect != "missing_shard":
+        index = 0 if defect == "duplicate_shard" else 1
+        _shard(shards / "dup" if defect == "duplicate_shard" else shards, index, 2, ["tests/test_b.py"],
+               ["tests/test_b.py::test_two"], hashes={"x": "2"} if defect == "hash_mismatch" else None,
+               exit_code=1 if defect == "failed_shard" else 0)
+    if defect == "failed_shard":
+        assert merge(shards, out) == 1
+    else:
+        with pytest.raises(ValueError):
+            merge(shards, out)
