@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.chat import prompt_builder as pb
-from app.services.chat.repetition_guard import find_repeated_ai_phrases
+from app.services.chat.reply_repetition.rules import find_repeated_ai_phrases
 from app.services.memory.retrieval.context_selector import estimate_tokens
 
 _T0 = datetime(2026, 10, 15, 7, 0, tzinfo=UTC)

@@ -118,3 +118,18 @@ def test_the_monitor_rides_the_local_redis_job():
     source = inspect.getsource(scheduler._run_redis_health_recheck)
     assert "sample_service_health()" in source and 'event_type="admin_service_health"' in source
     assert "service_health_monitor" not in {j.id for j in scheduler.scheduler_job_definitions()}
+
+
+async def test_reply_rewrite_breaker_alerts_with_counts(monkeypatch):
+    from app.services.chat.reply_repetition import breaker
+
+    monkeypatch.setattr(breaker, "window", AsyncMock(return_value={"turns": 100, "rewrites": 9, "window_seconds": 3600}))
+    reading = await breaker.measure(datetime(2026, 11, 3, tzinfo=UTC), {})
+    assert reading["alerting"] and reading["rate"] == 0.09 and reading["threshold"] == 0.05
+    current = sample()
+    current["checks"]["reply_rewrite"] = {"status": "measured", **reading}
+    title, body = h.message_for("warning", current)
+    assert "复述重写9次/100轮" in body and "已自动停止重写" in body
+    monkeypatch.setattr(breaker, "window", AsyncMock(return_value={"turns": 20, "rewrites": 9, "window_seconds": 3600}))
+    assert not (await breaker.measure(datetime(2026, 11, 3, tzinfo=UTC), {}))["alerting"]  # too few turns
+    assert h.LABELS["reply_rewrite"] == "复述重写熔断"

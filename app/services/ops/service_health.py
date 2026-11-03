@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from app.config import settings
 from app.db import db
 from app.services.notifications.service import enqueue_notification
+from app.services.chat.reply_repetition import breaker as reply_rewrite_breaker
 from app.services.ops import provider_budget, provider_failing, recovery, reply_slow, task_backlog, worker_health
 
 SAMPLE_SECONDS = 120
@@ -49,6 +50,7 @@ LABELS = {
     "task_backlog": "任务积压",
     "worker_exit": "API worker 存活与退出",
     "reply_slow": "回复处理耗时",
+    "reply_rewrite": "复述重写熔断",
 }
 
 
@@ -159,7 +161,7 @@ CHECKS = {"unanswered": _unanswered, "reply_failed": _reply_failed,
           "memory_blocked": _memory_blocked, "cron_failing": _cron_failing,
           "provider_budget": provider_budget.measure, "provider_failing": provider_failing.measure,
           "task_backlog": task_backlog.measure, "worker_exit": worker_health.measure,
-          "reply_slow": reply_slow.measure}
+          "reply_slow": reply_slow.measure, "reply_rewrite": reply_rewrite_breaker.measure}
 
 
 async def collect_metrics(now: datetime | None = None, carry: dict | None = None) -> dict:
@@ -251,6 +253,9 @@ def message_for(level: str, sample: dict) -> tuple[str, str]:
                 parts.append(f"API worker存活{c['count']}/{c['expected']}，近期非正常退出{c['abnormal_exits']}次")
             elif name == "reply_slow":
                 parts.append(f"{c['window_seconds']/60:g}分钟内{c['count']}个回合处理超过{c['slow_after_seconds']}秒；恢复需后续连续{c['recovery_required_turns']}个正常回合")
+            elif name == "reply_rewrite":
+                parts.append(f"最近{c['window_seconds'] // 60}分钟复述重写{c['count']}次/{c['turns']}轮"
+                             f"（{c['rate']:.0%}，界值{c['threshold']:.0%}），已自动停止重写")
             elif name == "provider_budget":
                 incidents = c.get("incidents", [])
                 parts.append("模型调用出现欠费或额度耗尽：" + "、".join(

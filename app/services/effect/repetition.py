@@ -180,7 +180,7 @@ class TurnScore:
 
 def eligible_turns(turns: list[Turn], day_start: datetime, day_end: datetime) -> list[TurnScore]:
     """当天的主回复轮次里, 24 小时内有过 AI 发言的那些 (指标的分母)。"""
-    from app.services.chat.repetition_guard import is_acknowledgement
+    from app.services.chat.reply_repetition import is_acknowledgement
 
     scored = []
     for i, turn in enumerate(turns):

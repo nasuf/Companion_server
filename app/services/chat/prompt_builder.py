@@ -751,9 +751,9 @@ async def build_system_prompt(
     # 双方所在地 (chat/location_context.LocationContext)，注入「你们各自在哪」段。
     location_context: Any = None,
     last_reply_count: int | None = None,
-    # 最近几次回复里已出现 ≥2 次的句子 (chat/repetition_guard), 注入「避免重复」段.
+    # 最近几次回复里已出现 ≥2 次的句子 (chat/reply_repetition), 注入「避免重复」段.
     repeated_phrases: list[str] | None = None,
-    # ("ack" | "overlap" | "other", 上一轮原话) (chat/repetition_guard.previous_reply_for_prompt),
+    # ("ack" | "overlap" | "other", 上一轮原话) (chat/reply_repetition.prompt_inputs),
     # 注入「刚说过的话」/「上一轮已经说过」/「上一轮说过的话」段, 防止把上一轮换个说法再说一遍.
     previous_reply: tuple[str, str] | None = None,
     # True → 本轮主回复走联网搜索, 追加「联网结果使用」段纠正播报腔与重复.
