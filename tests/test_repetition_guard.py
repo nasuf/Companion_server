@@ -7,6 +7,7 @@ from app.services.chat.repetition_guard import (
     drop_restated_bubbles,
     is_acknowledgement,
     previous_ai_turn,
+    previous_reply_for_prompt,
     previous_reply_situation,
 )
 
@@ -40,6 +41,18 @@ def test_acknowledgement_gets_the_previous_reply():
     assert previous == "对啊 抬头撞见好看的日落👌，那种感觉特别惊喜吧，像突然收到小礼物似的"
     # 有新内容的消息不注入
     assert previous_reply_situation(SUNSET, {"u1"}, "我也想去转塘看看") is None
+
+
+def test_ordinary_turns_quote_the_previous_reply_in_the_prompt_only():
+    # 对方有新内容: 重写与兜底的判定仍不管 (None), 提示段照样引用上一轮
+    assert previous_reply_situation(SUNSET, {"u1"}, "我也想去转塘看看") is None
+    situation, previous = previous_reply_for_prompt(SUNSET, {"u1"}, "我也想去转塘看看")
+    assert situation == "other" and previous.startswith("对啊 抬头撞见好看的日落")
+    # 附和 / 交叠沿用原来的判定; 没有上一轮 AI 回复时不注入
+    assert previous_reply_for_prompt(SUNSET, {"u1"}, "是呀")[0] == "ack"
+    rows = [_row("a1", "assistant", "早呀", "40:00"), _row("u0", "user", "早", "41:00"),
+            _row("u1", "user", "今天好冷", "42:00")]
+    assert previous_reply_for_prompt(rows, {"u1"}, "今天好冷") is None
 
 
 def test_reply_after_the_current_message_is_an_overlap():
@@ -115,6 +128,13 @@ async def test_previous_reply_section_sits_after_the_current_message():
     _, turn = pb.split_system_prompt(overlap)
     assert "## 上一轮已经说过" in turn and "## 刚说过的话" not in turn
     assert "## 刚说过的话" not in await _system_prompt(previous_reply=None)
+    other = await _system_prompt(previous_reply=("other", "对啊 抬头撞见好看的日落"))
+    _, turn = pb.split_system_prompt(other)
+    assert "## 上一轮说过的话" in turn and "上一轮问过、对方没接的问题也别再问" in turn
+    assert "## 刚说过的话" not in turn and "## 上一轮已经说过" not in turn
+    # 和附和 / 交叠两段一样放在当前消息之后、紧贴生成 (放在消息之前时回放效果不到一半)
+    placed = pb.build_chat_messages(other, SUNSET)
+    assert placed[-2]["role"] == "user" and "## 上一轮说过的话" in placed[-1]["content"]
 
 
 class _Ctx:

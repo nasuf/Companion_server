@@ -13,6 +13,7 @@ from app.services.chat.repetition_guard import (
     drop_restated_bubbles,
     find_repeated_ai_phrases,
     previous_ai_turn,
+    previous_reply_for_prompt,
     previous_reply_situation,
     restated_overlap,
     restated_retry_note,
@@ -1045,7 +1046,7 @@ async def prepare_reply(ctx):
             location_context=ctx.location_context,
             last_reply_count=ctx.last_reply_count,
             repeated_phrases=find_repeated_ai_phrases(ctx.messages_dicts),
-            previous_reply=previous_reply_situation(
+            previous_reply=previous_reply_for_prompt(
                 ctx.messages_dicts, ctx.current_turn_ids, ctx.user_message
             ),
             needs_web_search=ctx.needs_web_search,

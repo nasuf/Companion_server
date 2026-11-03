@@ -113,6 +113,19 @@ def previous_reply_situation(messages: list[dict], current_turn_ids: set[str],
     return None
 
 
+def previous_reply_for_prompt(messages: list[dict], current_turn_ids: set[str],
+                              user_message: str) -> tuple[str, str] | None:
+    """主回复提示里引用上一轮原话的情形: 附和 / 交叠, 其余有上一轮 AI 回复的都算 "other"。
+
+    只管提示段; 重写一次与单条兜底仍按 previous_reply_situation (附和 / 交叠) 判。
+    """
+    situation = previous_reply_situation(messages, current_turn_ids, user_message)
+    if situation is not None:
+        return situation
+    bubbles, _ = previous_ai_turn(messages, current_turn_ids)
+    return ("other", quote_previous(bubbles)) if bubbles else None
+
+
 def quote_previous(bubbles: list[str]) -> str:
     """提示里引用的上一轮原话; 太长时留离这句最近的部分。"""
     text = "，".join(bubbles)

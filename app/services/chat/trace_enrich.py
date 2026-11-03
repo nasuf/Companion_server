@@ -66,6 +66,7 @@ _MAIN_PROMPT_SECTION_COMPONENTS = [
     ("## 避免重复", "chat.repetition_guard_section"),
     ("## 刚说过的话", "chat.previous_reply_ack_section"),
     ("## 上一轮已经说过", "chat.previous_reply_overlap_section"),
+    ("## 上一轮说过的话", "chat.previous_reply_other_section"),
     ("## 回复要求", "chat.response_instruction"),
 ]
 
@@ -113,9 +114,10 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "chat.web_search_recent_titles",
     # 避免重复 — 仅在最近回复出现复读时作为主回复 section 出现
     "chat.repetition_guard_section",
-    # 刚说过的话 — 仅在对方只附和 / 上一轮回复晚于本条消息时出现
+    # 刚说过的话 — 有上一轮 AI 回复时出现 (附和 / 交叠 / 普通轮次各一段)
     "chat.previous_reply_ack_section",
     "chat.previous_reply_overlap_section",
+    "chat.previous_reply_other_section",
     "chat.previous_reply_retry",
     "chat.delay_context_section",
     "chat.l3_memory_section",

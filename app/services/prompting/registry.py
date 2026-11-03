@@ -100,6 +100,7 @@ from app.services.prompting.defaults import (
     CHAT_REPETITION_GUARD_PROMPT,
     CHAT_PREVIOUS_REPLY_ACK_PROMPT,
     CHAT_PREVIOUS_REPLY_OVERLAP_PROMPT,
+    CHAT_PREVIOUS_REPLY_OTHER_PROMPT,
     CHAT_PREVIOUS_REPLY_RETRY_PROMPT,
     LIFE_OVERVIEW_PROMPT,
     LIGHT_ATTACK_REPLY_PROMPT,
@@ -1445,6 +1446,14 @@ PROMPT_DEFINITIONS = [
         "可能已顺带接过它 (2026-11-02 生产 7 天: 9.8% 复述上一轮). 代码检出才注入. "
         "占位符 {previous} = 上一轮回复原文.",
         CHAT_PREVIOUS_REPLY_OVERLAP_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.previous_reply_other_section", "刚说过的话（普通轮次）", "聊天热路径", "聊天",
+        "【工程补丁】对方有新内容 (不是附和、也不是交叠) 时主回复同样常复述上一轮: 2026-10 生产 30 天"
+        "普通轮次的复读 64% 复述紧挨着的上一轮、52% 出现在本轮第一条, 21% 是没被接的问题又问一遍. "
+        "有上一轮 AI 回复即注入, 放在当前用户消息之后、紧挨生成处 (放在消息之前时回放效果不到一半). 回放评测 8×8 次: "
+        "普通轮次复读 -3.1 个百分点 (显著), 回应率不降. 占位符 {previous} = 上一轮回复原文.",
+        CHAT_PREVIOUS_REPLY_OTHER_PROMPT,
     ),
     PromptDefinition(
         "chat.previous_reply_retry", "复述上一轮时重写", "聊天热路径", "聊天",
