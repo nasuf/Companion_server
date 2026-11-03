@@ -755,3 +755,42 @@ async def test_day_only_reminder_recovery_prepares_schedule_once(ledger, monkeyp
     lookup.assert_awaited_once()
     assert await db.timetrigger.count(where={"userId": uid}) == 1
     await db.timetrigger.delete_many(where={"userId": uid})
+
+
+async def test_failed_attempt_logs_the_root_cause_without_text(ledger, monkeypatch, caplog):
+    """The batch row only keeps "processing_failed"; the log names what raised it."""
+    import logging
+
+    db, uid, wid, msg, args, extract = ledger
+
+    def broken(*_a, **_kw):
+        raise TypeError("合成错误文本 must not be logged")
+
+    monkeypatch.setattr(pipeline, "_coerce_importance", broken)
+    with caplog.at_level(logging.WARNING, logger=receipts.__name__):
+        with pytest.raises(pipeline.MemoryExtractionError):
+            await pipeline.process_memory_pipeline(**args)
+    rows = await db.query_raw(
+        "SELECT last_error FROM memory_extraction_batches WHERE user_id=$1", uid)
+    assert [r["last_error"] for r in rows] == ["processing_failed"]
+    [record] = [r for r in caplog.records if getattr(r, "event", None) == "memory.batch_failed"]
+    assert record.reason == "processing_failed" and record.kind == "user" and record.outcome == "retry"
+    assert record.stage == f"TypeError at {__name__}:broken"
+    assert "合成错误文本" not in record.getMessage() and "合成错误文本" not in record.stage
+
+
+def test_failure_origin_follows_the_cause_chain():
+    def inner():
+        raise KeyError("text")
+
+    try:
+        try:
+            inner()
+        except KeyError as exc:
+            raise RuntimeError("wrapped") from exc
+    except RuntimeError as outer:
+        assert receipts.failure_origin(outer) == ("KeyError", f"{__name__}:inner")
+    assert receipts.failure_origin(ValueError("never raised")) == ("ValueError", "unknown")
+    first, second = ValueError("a"), KeyError("b")
+    first.__cause__, second.__cause__ = second, first
+    assert receipts.failure_origin(first)[0] in {"ValueError", "KeyError"}  # terminates

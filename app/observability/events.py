@@ -58,6 +58,7 @@ EVT_MEMORY_L2_ADJUSTED = "memory.l2_adjusted"  # cron 完成统计
 EVT_EMBEDDING_RETRY = "memory.embedding_retry"  # 单次重试 (transient Ollama/PG hiccup)
 EVT_EMBEDDING_FAIL = "memory.embedding_fail"  # 重试用尽, 用户记忆丢失
 EVT_MEMORY_ORPHAN = "memory.orphan_row"  # memory 已写但 embedding 失败 + rollback 也失败
+EVT_MEMORY_BATCH_FAILED = "memory.batch_failed"  # durable batch attempt failed; root exception type + raising function
 
 # Boundary
 EVT_BOUNDARY_PATIENCE = "boundary.patience_delta"

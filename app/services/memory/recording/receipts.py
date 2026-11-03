@@ -7,6 +7,7 @@ The model never chooses identity, scope, receipt keys, or deletion permissions.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -452,6 +453,28 @@ async def _load_batch(bid, scope):
         return batch
 
 
+logger = logging.getLogger(__name__)
+
+
+def failure_origin(exc: BaseException) -> tuple[str, str]:
+    """(root exception class, "module:function" that raised it) — no message text.
+
+    Pipeline errors are re-raised as MemoryExtractionError("processing_failed"),
+    which is all the batch row keeps; the original cause is what explains a
+    batch that fails the same way on every retry.
+    """
+    root = exc
+    for _ in range(20):  # bounded: a cause chain can be made cyclic
+        if root.__cause__ is None:
+            break
+        root = root.__cause__
+    tb = root.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    where = f"{tb.tb_frame.f_globals.get('__name__', '?')}:{tb.tb_frame.f_code.co_name}" if tb else "unknown"
+    return type(root).__name__, where[:120]
+
+
 async def _execute_batch(bid, scope, execute, kwargs):
     batch = await _load_batch(bid, scope)
     side = batch["side"]
@@ -497,6 +520,13 @@ async def _execute_batch(bid, scope, execute, kwargs):
             and exc.reason == "memory_plan_source_changed"
         )
         reason = "source_changed" if permanent else safe_failure_reason(exc)
+        from app.observability.events import EVT_MEMORY_BATCH_FAILED
+
+        error_type, where = failure_origin(exc)
+        # Only existing log columns (the dataset is at its column limit).
+        logger.warning("Memory batch attempt failed", extra={
+            "event": EVT_MEMORY_BATCH_FAILED, "reason": reason, "kind": side,
+            "stage": f"{error_type} at {where}", "outcome": "blocked" if permanent else "retry"})
         await db.execute_raw(
             """UPDATE memory_extraction_batches
             SET last_error=$2,status=CASE WHEN $3 THEN 'blocked' ELSE status END,
