@@ -18,6 +18,21 @@ def _deterministic_typo_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reply_rewrite_breaker_offline(monkeypatch):
+    """The rewrite breaker counts every main reply in Redis. Chat-path unit tests
+    must not open the process-wide Redis client in their own event loop (a later
+    test on another loop then fails with "attached to a different loop"), so
+    counts fail fast here: writes are dropped, reads report "unknown", rewriting
+    stays allowed. Breaker tests install their own fake Redis."""
+    from app.services.chat.reply_repetition import breaker
+
+    async def offline():
+        raise ConnectionError("redis is not used by unit tests")
+
+    monkeypatch.setattr(breaker, "_redis", offline)
+
+
+@pytest.fixture(autouse=True)
 def _trace_backend_off(monkeypatch):
     """trace_backend 生产默认 local, 但单测环境没有真实 DB — LocalTracer 的
     fire-and-forget 写库任务会产生噪音日志 + 跨测试 ContextVar 状态.
