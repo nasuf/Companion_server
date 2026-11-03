@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta
 
 import pytest
@@ -189,15 +190,22 @@ def test_compare_pairs_cases_and_clusters_by_user():
     report = compare.compare(cases, rows, "new", "old")
     diff = report["paired_diff"]["positive_repeated"]
     assert diff["diff"] == -0.5 and diff["cases"] == 6 and diff["users"] == 3
-    assert diff["ci95"] == [-0.5, -0.5]
+    # 每例差值都一样, bootstrap 区间缩成一点; 但每例只有 4 次采样, 采样噪声让真实区间宽得多
+    assert diff["ci95_bootstrap"] == [-0.5, -0.5]
+    # 每例两组合并组内方差 = (0.75 + 0.75) / 6 = 0.25, 差值方差 = 0.25 × (1/4 + 1/4) = 0.125, 6 例平均
+    assert diff["se_sampling"] == pytest.approx(math.sqrt(6 * 0.125) / 6, abs=1e-4)
+    assert diff["ci95"] == pytest.approx([-0.5 - 1.96 * diff["se_sampling"], -0.5 + 1.96 * diff["se_sampling"]], abs=2e-4)
+    assert report["runs"] == {"new": 1, "old": 1} and report["calibration_run_sd"] == {}
     assert report["arms"]["new"]["unjudged_repetition"] == 1
     assert report["arms"]["old"]["positive_repeated"] == 0.75
     assert report["arms"]["new"]["by_tag_repeated"]["ack"]["cases"] == 4
     assert report["coverage"]["positive"] == {"cases": 6, "paired": 6, "ratio": 1.0}
     assert report["coverage"]["unequal_samples"] == ["c0"]  # new 多了一个 (没评到的) 采样
+    assert report["coverage"]["min_samples"] == {"new": 4, "old": 4}
     gated = compare.gate(report)
     assert gated["checks"] == {"repetition_not_worse": True, "responded_not_worse": True,
-                               "coverage": True, "equal_samples": False}
+                               "coverage": True, "equal_samples": False, "enough_runs": True,
+                               "enough_samples": True, "same_calibration": True}
     assert not gated["passed"]
     rows = [r for r in rows if not (r["arm"] == "new" and r["case"] == "c0" and r["repeated"] is None)]
     assert compare.gate(compare.compare(cases, rows, "new", "old"))["passed"]
@@ -209,6 +217,15 @@ def test_compare_pairs_cases_and_clusters_by_user():
     assert report["coverage"]["missing"] == {"new": ["c1"], "old": []}
     assert not compare.gate(report)["checks"]["coverage"]
     assert compare.paired(cases, {}, {}, "repeated", __import__("random").Random(0)) is None
+    # 用 "+" 把两次回放并成一组: 每例采样数相加
+    rows += _scores("old2", "c2", [True, False])
+    pooled = compare.compare(cases, rows, "new", "old+old2")
+    assert pooled["coverage"]["unequal_samples"] == ["c2"] and pooled["arms"]["old+old2"]["samples"] == 34
+    assert pooled["runs"]["old+old2"] == 2
+    # 回放次数按数据计: 重复写同一次回放不算多次, 点名了却没有数据的回放直接报错
+    assert compare.compare(cases, rows, "new+new+new", "old")["runs"]["new+new+new"] == 1
+    with pytest.raises(ValueError, match="No scores"):
+        compare.compare(cases, rows, "new+typo", "old")
 
 
 def test_sanitize_rules_and_shift():
@@ -255,3 +272,130 @@ async def test_sanitize_model_pass_keeps_structure():
 
     with pytest.raises(ValueError):
         await sanitize.model_pass(texts, drops_a_row)
+
+
+def _run_scores(cases, runs):
+    """runs: {run: {case: [repeated…]}}; 回应全为 True, 其余字段补齐。"""
+    rows = []
+    for run, per_case in runs.items():
+        for case, values in per_case.items():
+            rows += [{"arm": run, "case": case, "sample": i, "repeated": v, "verbatim": False, "responded": True,
+                      "chars": 10, "bubble_count": 2, "seconds": 1.0, "cost_cny": 0.001} for i, v in enumerate(values)]
+    return rows
+
+
+def _aa_fixture():
+    cases = [{"id": f"c{i}", "user": f"u{i % 4}", "kind": "positive" if i < 8 else "negative", "tags": []}
+             for i in range(10)]
+    # 同一份源码的 4 次回放: 每次每例 5 个采样, 整体均值在 0.4 与 0.2 之间来回跳
+    patterns = {"r1": [1, 0, 0, 1, 0], "r2": [1, 0, 0, 0, 0], "r3": [0, 1, 1, 0, 0], "r4": [0, 0, 0, 0, 1]}
+    runs = {r: {c["id"]: [bool(x) for x in p] for c in cases} for r, p in patterns.items()}
+    return cases, _run_scores(cases, runs)
+
+
+def test_calibrate_from_whole_runs():
+    cases = [{"id": f"c{i}", "user": f"u{i % 4}", "kind": "positive" if i < 40 else "negative", "tags": []}
+             for i in range(44)]
+    # 同一份源码的 4 次回放, 每次每例 5 个采样; 只有 c0..c3 在各次之间不同, 整体均值 0.01 / 0.005 / 0.01 / 0.005
+    def run(hits):
+        return {c["id"]: [c["id"] in hits] + [False] * 4 for c in cases}
+    runs = {"r1": run({"c0", "c1"}), "r2": run({"c2"}), "r3": run({"c1", "c3"}), "r4": run({"c0"})}
+    cal = compare.calibrate(cases, _run_scores(cases, runs), [["r1", "r2", "r3", "r4"]], runs_per_arm=4)
+    rep = cal["positive_repeated"]
+    assert rep["run_means"] == {"r1": 0.01, "r2": 0.005, "r3": 0.01, "r4": 0.005} and rep["df"] == 3
+    assert rep["run_sd"] == pytest.approx(0.0029, abs=1e-4) and rep["cases"] == 40
+    # 预期半宽: 用例层 (1.96) 与超出采样噪声的整次回放层 (t, 自由度 3) 方差相加; 4 次回放时除以 2
+    extra = math.sqrt(max(2 * rep["run_sd"] ** 2 - rep["se_sampling_one_run_pair"] ** 2, 0))
+    half = math.hypot(1.96 * rep["se_case_one_run_pair"], (compare.t975(3) if extra else 1.96) * extra) / 2
+    assert rep["expected_half_width"] == pytest.approx(half, abs=1e-4)
+    assert rep["margin"] == compare._ceil_half_point(2 * half)
+    assert cal["all_responded"]["run_sd"] == 0.0 and cal["all_responded"]["cases"] == 44
+    with pytest.raises(ValueError):
+        compare.calibrate(cases, _run_scores(cases, runs), [["r1"]], runs_per_arm=4)  # 一组至少两次回放
+    with pytest.raises(ValueError):
+        compare.calibrate(cases, _run_scores(cases, runs), [], runs_per_arm=4)
+    doc = compare.calibration_document(cal, {"runs_per_arm": 4})
+    assert doc["metrics"] is cal and doc["rule"]["factor"] == 2 and doc["runs_per_arm"] == 4
+
+
+def test_calibrate_rejects_noise_too_large():
+    cases, scores = _aa_fixture()  # 4 次回放整体均值在 0.2 与 0.4 之间来回跳
+    with pytest.raises(ValueError, match="too large"):
+        compare.calibrate(cases, scores, [["r1", "r2", "r3", "r4"]], runs_per_arm=4)
+
+
+CAL = {"runs_per_arm": 4, "samples_per_run": 5,
+       "metrics": {"positive_repeated": {"margin": 0.06, "run_sd": 0.02, "df": 4},
+                   "all_responded": {"margin": 0.015, "run_sd": 0.003, "df": 4}}}
+
+
+def _report(rep_ci, resp_ci, runs=4, samples=20, run_sd=None):
+    return {"paired_diff": {"positive_repeated": {"diff": 0.0, "ci95": rep_ci},
+                            "all_responded": {"diff": 0.0, "ci95": resp_ci}},
+            "runs": {"a": runs, "b": runs},
+            "calibration_run_sd": run_sd if run_sd is not None else {"positive_repeated": 0.02, "all_responded": 0.003},
+            "coverage": {"all": {"ratio": 1.0}, "positive": {"ratio": 1.0}, "unequal_samples": [],
+                         "min_samples": {"a": samples, "b": samples}}}
+
+
+def test_t_quantiles_round_down_in_degrees_of_freedom():
+    assert compare.t975(4) == 2.776 and compare.t975(11) == 2.228 and compare.t975(40) == 1.96
+    with pytest.raises(ValueError):
+        compare.t975(0)
+
+
+def test_gate_uses_and_validates_calibration():
+    gated = compare.gate(_report([-0.02, 0.055], [-0.01, 0.01]), CAL)
+    assert gated["passed"] and gated["calibrated"] and gated["thresholds"]["samples_per_case"] == 20
+    assert not compare.gate(_report([0.0, 0.065], [-0.01, 0.01]), CAL)["checks"]["repetition_not_worse"]
+    assert not compare.gate(_report([-0.02, 0.0], [-0.02, 0.01]), CAL)["checks"]["responded_not_worse"]
+    # 回放次数或采样不够 / 比较时没用这份标定: 界值不成立
+    assert not compare.gate(_report([-0.02, 0.0], [-0.01, 0.01], runs=2), CAL)["checks"]["enough_runs"]
+    assert not compare.gate(_report([-0.02, 0.0], [-0.01, 0.01], samples=5), CAL)["checks"]["enough_samples"]
+    assert not compare.gate(_report([-0.02, 0.0], [-0.01, 0.01], run_sd={}), CAL)["checks"]["same_calibration"]
+    # 没有标定: 先验界值, 明确标出未标定
+    assert compare.gate(_report([-0.02, 0.0], [-0.01, 0.01]))["calibrated"] is False
+    # 标定内容有问题直接报错, 不悄悄退回先验值
+    good = {"margin": 0.01, "run_sd": 0.0, "df": 4}
+    for bad in ({}, {"metrics": {}}, {"metrics": {"positive_repeated": good}},
+                {"metrics": {"positive_repeated": {**good, "margin": 0.2}, "all_responded": good}},
+                {"metrics": {"positive_repeated": {**good, "df": 0}, "all_responded": good}},
+                {"metrics": {"positive_repeated": {"margin": 0.05}, "all_responded": good}}):
+        with pytest.raises(ValueError):
+            compare.gate(_report([-0.02, 0.0], [-0.01, 0.01]), bad)
+
+
+def test_compare_adds_run_noise_beyond_sampling():
+    cases, scores = _aa_fixture()
+    plain = compare.compare(cases, scores, "r1+r2", "r3+r4")["paired_diff"]["positive_repeated"]
+    run_sd = 0.3  # 远大于逐例采样噪声: 区间应由整次回放层主导
+    cal = {"metrics": {"positive_repeated": {"margin": 0.06, "run_sd": run_sd, "df": 4},
+                       "all_responded": {"margin": 0.015, "run_sd": 0.0, "df": 4}}}
+    noisy = compare.compare(cases, scores, "r1+r2", "r3+r4", cal)
+    widened = noisy["paired_diff"]["positive_repeated"]
+    run_se = run_sd * math.sqrt(1 / 2 + 1 / 2)
+    case_se = max(plain["se_sampling"], (plain["ci95_bootstrap"][1] - plain["ci95_bootstrap"][0]) / 3.92)
+    half = math.hypot(1.96 * case_se, 2.776 * math.sqrt(run_se ** 2 - widened["se_sampling"] ** 2))
+    assert widened["se_runs"] == pytest.approx(run_se, abs=1e-4)
+    assert widened["ci95"][1] - widened["diff"] == pytest.approx(half, abs=2e-4)
+    assert noisy["calibration_run_sd"] == {"positive_repeated": 0.3, "all_responded": 0.0}
+    # 整次回放的波动比采样噪声小时不再加宽
+    small = {"metrics": {m: {**v, "run_sd": 0.0} for m, v in cal["metrics"].items()}}
+    assert compare.compare(cases, scores, "r1+r2", "r3+r4", small)["paired_diff"]["positive_repeated"]["ci95"] == \
+        plain["ci95"]
+
+
+def test_committed_calibration_matches_its_inputs():
+    repo = json.loads(compare.DEFAULT_CALIBRATION.read_text())
+    assert repo["runs_per_arm"] >= 4 and repo["samples_per_run"] == 5 and repo["rule"]["factor"] == compare.AA_FACTOR
+    for metric, entry in repo["metrics"].items():
+        groups = entry["aa_groups"]
+        ss = sum(sum((entry["run_means"][r] - sum(entry["run_means"][x] for x in g) / len(g)) ** 2 for r in g)
+                 for g in groups)
+        assert entry["df"] == sum(len(g) - 1 for g in groups)
+        assert math.sqrt(ss / entry["df"]) == pytest.approx(entry["run_sd"], abs=2e-4)
+        extra = math.sqrt(max(2 * entry["run_sd"] ** 2 - entry["se_sampling_one_run_pair"] ** 2, 0))
+        half = math.hypot(1.96 * entry["se_case_one_run_pair"],
+                          (compare.t975(entry["df"]) if extra else 1.96) * extra) / math.sqrt(repo["runs_per_arm"])
+        assert half == pytest.approx(entry["expected_half_width"], abs=2e-4)
+        assert entry["margin"] == compare._ceil_half_point(2 * entry["expected_half_width"]) <= compare.MAX_MARGIN
