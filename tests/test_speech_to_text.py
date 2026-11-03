@@ -197,6 +197,8 @@ async def test_fun_asr_calls_native_endpoint_and_parses_both_response_paths(
         "https://dashscope.example/asr",
     )
     monkeypatch.setattr(fun_asr.settings, "dashscope_asr_model", "fun-asr-test")
+    # Don't depend on an earlier test having loaded the DB-backed runtime config.
+    monkeypatch.setattr(fun_asr, "get_effective_asr_model", AsyncMock(return_value="fun-asr-test"))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await fun_asr.transcribe_audio(
             audio=b"audio",
@@ -225,6 +227,8 @@ async def test_fun_asr_maps_provider_rate_limit(monkeypatch):
         "https://dashscope.example/asr",
     )
     monkeypatch.setattr(fun_asr.settings, "dashscope_asr_model", "fun-asr-test")
+    # Don't depend on an earlier test having loaded the DB-backed runtime config.
+    monkeypatch.setattr(fun_asr, "get_effective_asr_model", AsyncMock(return_value="fun-asr-test"))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(fun_asr.SpeechTranscriptionRateLimited):
             await fun_asr.transcribe_audio(
