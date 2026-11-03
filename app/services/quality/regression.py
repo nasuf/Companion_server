@@ -1,7 +1,9 @@
 """Sequential, budgeted scenario replay and exact baseline comparison."""
 
+import asyncio
 import hashlib
 import json
+import re
 from copy import deepcopy
 from datetime import datetime, timedelta
 from app.config import settings
@@ -99,6 +101,69 @@ class LocalSink:
         await jobs.finish(self.job, status, report)
 
 
+# A nightly replay makes ~800 live model calls over 2+ hours; one network blip,
+# provider 5xx, deploy restart of the control API, or a malformed model/judge
+# response used to abort the whole run (5 nightly runs 2026-10-29..11-03 all ended
+# "incomplete" at 179-362 of 781). Those are retried; anything else, or a retry
+# that keeps failing, marks just that scenario unjudged and the run goes on.
+RETRY_DELAYS_SECONDS = (15, 45)
+# Output-validation codes that a fresh attempt usually clears (truncated stream,
+# usage block missing, search not finished, judge JSON missing a field).
+TRANSIENT_CODES = frozenset({
+    "evaluation_response_incomplete", "evaluation_usage_missing", "evaluation_search_incomplete",
+    "missing_judge_categories", "inconsistent_critical_verdict",
+})
+_SAFE_CODE = re.compile(r"[a-z0-9_]{1,64}")
+
+
+def error_code(exc: BaseException) -> str:
+    """Safe identifiers only, never provider text, prompts or replies: the quality
+    modules' own ValueError/RuntimeError codes, the control client's code, else the
+    exception type (third-party messages are free text even when they look safe)."""
+    code = getattr(exc, "code", None)
+    if code is None and type(exc) in (ValueError, RuntimeError) and exc.args:
+        code = exc.args[0]
+    return code if isinstance(code, str) and _SAFE_CODE.fullmatch(code) else type(exc).__name__
+
+
+def is_transient(exc: BaseException) -> bool:
+    import httpx
+
+    if getattr(exc, "transient", False):  # the CI control client's own classification
+        return True
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, httpx.TransportError)):
+        return True
+    status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
+    if isinstance(status, int) and (status >= 500 or status == 429):
+        return True
+    return isinstance(exc, ValueError) and error_code(exc) in TRANSIENT_CODES
+
+
+async def _with_retries(sink, case, repetition, attempt, errored, report):
+    """Run one scenario repetition, retrying transient failures; never abort the run
+    for one scenario. Budget, configuration and lease loss still end the run."""
+    for tries in range(1, len(RETRY_DELAYS_SECONDS) + 2):
+        try:
+            return await attempt()
+        except (budget.BudgetExhausted, transport.NotConfigured, jobs.LostLease):
+            raise
+        except Exception as exc:
+            if is_transient(exc) and tries <= len(RETRY_DELAYS_SECONDS):
+                await asyncio.sleep(RETRY_DELAYS_SECONDS[tries - 1])
+                await sink.renew()
+                continue
+            errored.append(dict(case_id=case["id"], repetition=repetition,
+                                error=error_code(exc), attempts=tries))
+            # First persistent failure keeps the fields earlier reports used.
+            if "error_type" not in report:
+                report["error_type"] = type(exc).__name__
+                report["error_case_id"] = case["id"]
+                if isinstance(exc, replay.RendererError):
+                    report["renderer_diagnostic"] = exc.diagnostic
+            return dict(case_id=case["id"], repetition=repetition, critical=case["critical"],
+                        suite=case["suite"], **{"pass": None}, turns=0)
+
+
 async def run(job, *, cases=None, key_overrides=None, sink=None):
     sink = sink or LocalSink(job)
     cases = cases if cases is not None else await corpus(job)
@@ -124,127 +189,135 @@ async def run(job, *, cases=None, key_overrides=None, sink=None):
     results = []
     route_usage = {}
     terminal = "completed"
+    async def scenario(case, repetition):
+        """One scenario repetition, turn by turn; returns its result row."""
+        history = deepcopy(case["history"])
+        anchor = datetime.fromisoformat(case["now"].replace("Z", "+00:00"))
+        history_rows = deepcopy(case.get("history_rows"))
+        if history_rows is None:
+            history_rows = [
+                dict(
+                    role=role,
+                    content=text,
+                    createdAt=(
+                        anchor
+                        - timedelta(
+                            seconds=case.get("gap", 120)
+                            + (len(history) - i - 1) * 30
+                        )
+                    ).isoformat(),
+                )
+                for i, (role, text) in enumerate(history)
+            ]
+        passes = []
+        for turn, step in enumerate(case["turns"]):
+            await sink.renew()
+            at = (
+                step.get("now")
+                or (anchor + timedelta(minutes=turn)).isoformat()
+            )
+            current = {
+                **case,
+                **step,
+                "history": history,
+                "history_rows": history_rows,
+                "now": at,
+            }
+            # Future user turns/criteria are not evidence for this turn.
+            # Leaking them to the judge falsely rejects correct replies.
+            current.pop("turns", None)
+            current.pop("boundary", None)
+            if case["route"] == "boundary":
+                current["boundary_turn"] = case["boundary"]["turns"][turn]
+            result = await replay.replay_turn(
+                job,
+                current,
+                snapshot["prompts"],
+                case.get("model_route", snapshot["route"]),
+                key_overrides=key_overrides,
+            )
+            for call in result.get("calls", []):
+                key = call.get("route", "chat.completions")
+                metric = route_usage.setdefault(
+                    key,
+                    dict(
+                        calls=0,
+                        input=0,
+                        output=0,
+                        cached_input=0,
+                        max_input=0,
+                        search_calls=0,
+                        cost_cny=0,
+                    ),
+                )
+                metric["calls"] += 1
+                for field in ("input", "output", "cached_input", "cost_cny"):
+                    metric[field] += call.get(field, 0)
+                metric["max_input"] = max(
+                    metric["max_input"], call.get("input", 0)
+                )
+                metric["search_calls"] += call.get("web_search_calls", 0)
+            passes.append(result["judge"]["pass"])
+            history += [
+                ["user", step["message"]],
+                ["assistant", result["reply"]],
+            ]
+            # Preserve earlier statement dates across gaps; never move
+            # the whole history forward to the current turn's clock.
+            history_rows = history_rows + [
+                dict(role="user", content=step["message"], createdAt=at),
+                dict(
+                    role="assistant",
+                    content=result["reply"],
+                    createdAt=(
+                        datetime.fromisoformat(at.replace("Z", "+00:00"))
+                        + timedelta(seconds=1)
+                    ).isoformat(),
+                ),
+            ]
+        row = dict(
+            case_id=case["id"],
+            repetition=repetition,
+            critical=case["critical"],
+            suite=case["suite"],
+            **{"pass": None if any(p is None for p in passes) else all(passes)},
+            turns=len(passes),
+        )
+        if case.get("transcript_scorer") == "long_companion_sim":
+            from evals.long_companion_sim import score_transcript
+
+            scored = score_transcript(
+                [
+                    dict(
+                        day=max(
+                            1,
+                            1
+                            + (
+                                datetime.fromisoformat(
+                                    r["createdAt"].replace("Z", "+00:00")
+                                )
+                                - anchor
+                            ).days,
+                        ),
+                        role=r["role"],
+                        content=r["content"],
+                    )
+                    for r in history_rows
+                ]
+            )
+            if row["pass"] is not None:
+                row["pass"] = row["pass"] and scored["passed"]
+        return row
+
+    errored = []
     try:
         for case in cases:
             for repetition in range(
                 settings.quality_critical_repeats if case["critical"] else 1
             ):
-                history = deepcopy(case["history"])
-                anchor = datetime.fromisoformat(case["now"].replace("Z", "+00:00"))
-                history_rows = deepcopy(case.get("history_rows"))
-                if history_rows is None:
-                    history_rows = [
-                        dict(
-                            role=role,
-                            content=text,
-                            createdAt=(
-                                anchor
-                                - timedelta(
-                                    seconds=case.get("gap", 120)
-                                    + (len(history) - i - 1) * 30
-                                )
-                            ).isoformat(),
-                        )
-                        for i, (role, text) in enumerate(history)
-                    ]
-                passes = []
-                for turn, step in enumerate(case["turns"]):
-                    await sink.renew()
-                    at = (
-                        step.get("now")
-                        or (anchor + timedelta(minutes=turn)).isoformat()
-                    )
-                    current = {
-                        **case,
-                        **step,
-                        "history": history,
-                        "history_rows": history_rows,
-                        "now": at,
-                    }
-                    # Future user turns/criteria are not evidence for this turn.
-                    # Leaking them to the judge falsely rejects correct replies.
-                    current.pop("turns", None)
-                    current.pop("boundary", None)
-                    if case["route"] == "boundary":
-                        current["boundary_turn"] = case["boundary"]["turns"][turn]
-                    result = await replay.replay_turn(
-                        job,
-                        current,
-                        snapshot["prompts"],
-                        case.get("model_route", snapshot["route"]),
-                        key_overrides=key_overrides,
-                    )
-                    for call in result.get("calls", []):
-                        key = call.get("route", "chat.completions")
-                        metric = route_usage.setdefault(
-                            key,
-                            dict(
-                                calls=0,
-                                input=0,
-                                output=0,
-                                cached_input=0,
-                                max_input=0,
-                                search_calls=0,
-                                cost_cny=0,
-                            ),
-                        )
-                        metric["calls"] += 1
-                        for field in ("input", "output", "cached_input", "cost_cny"):
-                            metric[field] += call.get(field, 0)
-                        metric["max_input"] = max(
-                            metric["max_input"], call.get("input", 0)
-                        )
-                        metric["search_calls"] += call.get("web_search_calls", 0)
-                    passes.append(result["judge"]["pass"])
-                    history += [
-                        ["user", step["message"]],
-                        ["assistant", result["reply"]],
-                    ]
-                    # Preserve earlier statement dates across gaps; never move
-                    # the whole history forward to the current turn's clock.
-                    history_rows = history_rows + [
-                        dict(role="user", content=step["message"], createdAt=at),
-                        dict(
-                            role="assistant",
-                            content=result["reply"],
-                            createdAt=(
-                                datetime.fromisoformat(at.replace("Z", "+00:00"))
-                                + timedelta(seconds=1)
-                            ).isoformat(),
-                        ),
-                    ]
-                row = dict(
-                    case_id=case["id"],
-                    repetition=repetition,
-                    critical=case["critical"],
-                    suite=case["suite"],
-                    **{"pass": None if any(p is None for p in passes) else all(passes)},
-                    turns=len(passes),
+                row = await _with_retries(
+                    sink, case, repetition, lambda: scenario(case, repetition), errored, report
                 )
-                if case.get("transcript_scorer") == "long_companion_sim":
-                    from evals.long_companion_sim import score_transcript
-
-                    scored = score_transcript(
-                        [
-                            dict(
-                                day=max(
-                                    1,
-                                    1
-                                    + (
-                                        datetime.fromisoformat(
-                                            r["createdAt"].replace("Z", "+00:00")
-                                        )
-                                        - anchor
-                                    ).days,
-                                ),
-                                role=r["role"],
-                                content=r["content"],
-                            )
-                            for r in history_rows
-                        ]
-                    )
-                    if row["pass"] is not None:
-                        row["pass"] = row["pass"] and scored["passed"]
                 # No raw private conversation/reply/judge reason is retained in
                 # these generic rows. Owned originals stay in quality_samples.
                 await sink.result(row)
@@ -279,6 +352,7 @@ async def run(job, *, cases=None, key_overrides=None, sink=None):
         evaluated=len(results),
         expected=expected,
         route_usage=route_usage,
+        errored_scenarios=errored,
         search_scope="联网评测限定每次一轮、一个关键词、10条结果、公开网页；生产搜索设置不变。超过32k输入不通过。",
     )
     if gate["status"] in {"failed", "incomplete"} and terminal == "completed":

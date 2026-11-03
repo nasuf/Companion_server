@@ -466,3 +466,101 @@ async def test_recorded_model_replay_retains_real_persona_not_synthetic(monkeypa
     assert (await replay.replay_turn({}, case, [], ["ark", "model"]))["judge"][
         "pass"
     ] is None
+
+
+def _regression_case(case_id):
+    return dict(
+        id=case_id,
+        suite="test",
+        critical=False,
+        history=[],
+        route="main",
+        now="2026-10-29T04:00:00Z",
+        turns=[dict(message="你好", criterion="礼貌回应")],
+    )
+
+
+async def _run_regression(database, cases):
+    snap = {
+        "prompts": [{"key": "test", "content": "fixture", "is_enabled": True}],
+        "route": ["ark", "model"],
+    }
+    ident = await jobs.enqueue("routing", uuid4().hex, "v1", snap)
+    job = await jobs.claim(job_id=ident)
+    await regression.run(job, cases=cases)
+    return (
+        await database.query_raw(
+            "SELECT status,report FROM quality_jobs WHERE id=$1", ident
+        )
+    )[0]
+
+
+class _ControlBlip(RuntimeError):
+    transient = True  # mirrors evals.quality.nightly.ControlRequestError
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectTimeout("synthetic"),
+        ValueError("evaluation_response_incomplete"),
+        _ControlBlip("http_error"),
+    ],
+    ids=["network", "truncated_output", "control_5xx"],
+)
+async def test_regression_retries_transient_scenario_errors(
+    quality, monkeypatch, error
+):
+    database, *_ = quality
+    monkeypatch.setattr(regression, "db", database)
+    monkeypatch.setattr(regression, "RETRY_DELAYS_SECONDS", (0, 0))
+    calls = []
+
+    async def flaky(job, current, *args, **kwargs):
+        calls.append(current["id"])
+        if current["id"] == "b" and calls.count("b") == 1:
+            raise error
+        return {"judge": {"pass": True}, "reply": "你好"}
+
+    monkeypatch.setattr(regression.replay, "replay_turn", flaky)
+    result = await _run_regression(database, [_regression_case("a"), _regression_case("b")])
+    report = result["report"]
+    assert calls == ["a", "b", "b"]
+    assert report["evaluated"] == report["expected"] == 2
+    assert report["errored_scenarios"] == []
+    assert report["gate_status"] == "baseline_recorded"
+    assert "error_type" not in report
+
+
+async def test_regression_persistent_scenario_error_does_not_abort_run(
+    quality, monkeypatch
+):
+    database, *_ = quality
+    monkeypatch.setattr(regression, "db", database)
+    monkeypatch.setattr(regression, "RETRY_DELAYS_SECONDS", (0, 0))
+    calls = []
+
+    async def broken(job, current, *args, **kwargs):
+        calls.append(current["id"])
+        if current["id"] == "a":
+            # Unknown validation text must never reach the report verbatim.
+            raise ValueError("模型原文 should not leak")
+        if current["id"] == "b":
+            raise httpx.ConnectTimeout("synthetic")
+        return {"judge": {"pass": True}, "reply": "你好"}
+
+    monkeypatch.setattr(regression.replay, "replay_turn", broken)
+    cases = [_regression_case(c) for c in ("a", "b", "c")]
+    result = await _run_regression(database, cases)
+    report = result["report"]
+    # Non-transient: one attempt. Transient: initial try plus both retries.
+    assert calls == ["a", "b", "b", "b", "c"]
+    assert report["evaluated"] == report["expected"] == 3
+    assert report["errored_scenarios"] == [
+        dict(case_id="a", repetition=0, error="ValueError", attempts=1),
+        dict(case_id="b", repetition=0, error="ConnectTimeout", attempts=3),
+    ]
+    assert report["error_type"] == "ValueError" and report["error_case_id"] == "a"
+    assert report["gate_status"] == "incomplete"
+    assert result["status"] == "failed"
+    assert "模型原文" not in json.dumps(report, ensure_ascii=False)
