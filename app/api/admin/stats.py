@@ -1846,7 +1846,8 @@ _DAILY_DIMENSIONS = {"": None, "trigger_type": ("proactive_events", "proactive_r
                      "scope": ("token_exact_match", "token_missing_usage", "token_unmetered_calls",
                                "token_unpriced_models", "token_unlinked_rows", "token_max_input"),
                      "model": ("token_max_input",),
-                     "reason": ("proactive_logs", "proactive_skip_reasons",)}
+                     "reason": ("proactive_logs", "proactive_skip_reasons",),
+                     "situation": ("reply_repetition_rate", "reply_verbatim_rate")}
 from app.services.effect.proactive_stats import FIELDS as _PROACTIVE_FIELDS
 _DAILY_DIMENSIONS["trigger_type"] += tuple("proactive_"+field for field in _PROACTIVE_FIELDS)
 _DAILY_MAX_DAYS = 92
@@ -1860,7 +1861,8 @@ async def daily_metrics(
     end: str | None = Query(None, description="本地日 YYYY-MM-DD, 默认今天"),
     cohort: Literal["external", "all"] = Query("external"),
     metrics: str | None = Query(None, description="逗号分隔; 默认全部"),
-    dimension: Literal["", "trigger_type", "reply_path", "hour", "bucket", "label", "scope", "model", "reason"] = Query(""),
+    dimension: Literal["", "trigger_type", "reply_path", "hour", "bucket", "label", "scope", "model", "reason",
+                       "situation"] = Query(""),
     summary: bool = Query(False),
     compare: bool = Query(False),
     _: dict = Depends(require_admin_jwt),

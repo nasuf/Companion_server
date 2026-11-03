@@ -356,6 +356,9 @@ METRICS.update({
     "session_ending": {"label":"会话收尾方", "definition":"完整会话最后一条非主动消息的角色；AI 提问由问号或版本化疑问词判定", "denominator":"完整会话", "source":"messages → metrics_daily", "kind":"count", "unit":"次", "settle_after_s":3*_H},
     "session_unknown": {"label":"会话左边界不完整", "definition":"连续 92 天无 3 小时中断、无法在有界回看中确认开始的会话，排除深度与收尾统计", "denominator":"会话", "source":"messages → metrics_daily", "kind":"count", "unit":"次", "settle_after_s":3*_H},
     "feedback_count": {"label":"意见反馈条数", "definition":"App 意见反馈，不是逐句反馈，也不是管理员标注", "denominator":"条", "source":"user_feedback → metrics_daily", "kind":"count", "unit":"条", "settle_after_s":0},
+    # CHAT01.10.1 重复表述 (口径见 effect/repetition.py); 没有当天打分记录时显示"未运行"
+    "reply_repetition_rate": {"label":"主回复重复表述", "definition":"主回复轮次中，至少有一条气泡被判为原样照抄或换说法复述此前 3 轮内 AI 说过的话的比例；先按向量相似度≥0.60 选候选，再由评判模型判定，是下限", "denominator":"24 小时内有过 AI 发言的主回复轮次 (不含评判失败或被模型服务拒收的轮次)", "source":"messages → reply_repetition_scores", "kind":"rate", "unit":"%", "settle_after_s":0, "collected_since":"2026-10-04", "source_job":"reply_repetition_scoring (04:10)"},
+    "reply_verbatim_rate": {"label":"主回复原样照抄", "definition":"主回复轮次中，有气泡被判为几乎逐字重复此前 3 轮内 AI 说过的话的比例", "denominator":"24 小时内有过 AI 发言的主回复轮次 (不含评判失败或被模型服务拒收的轮次)", "source":"messages → reply_repetition_scores", "kind":"rate", "unit":"%", "settle_after_s":0, "collected_since":"2026-10-04", "source_job":"reply_repetition_scoring (04:10)"},
     "admin_bug_labels": {"label":"管理员问题标注", "definition":"管理员多选错误类型按标签计数；同一报告可有多个标签，不等于用户负反馈人数", "denominator":"标签", "source":"bug_reports.error_types → metrics_daily", "kind":"count", "unit":"个", "settle_after_s":0},
 })
 

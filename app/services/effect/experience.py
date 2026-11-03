@@ -16,6 +16,8 @@ REVIEW_KINDS = (
     "feedback",
     "resend_60s",
     "meta_comment",
+    # CHAT01.10.1: 被判为重复表述的主回复轮次, 由 effect/repetition.aggregate 写入
+    "reply_repetition",
 )
 
 

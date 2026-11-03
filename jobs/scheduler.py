@@ -773,6 +773,20 @@ def register_scheduler_jobs(scheduler):
         max_instances=1,
     )
 
+    # 主回复重复表述打分 (CHAT01.10.1): 04:10 给昨天 (及一周内缺的日子) 打分, 赶在
+    # 04:40 统计派生表重算之前, 让昨天的指标和复核清单当晚就有。
+    scheduler.add_job(
+        _run_reply_repetition_scoring,
+        "cron",
+        hour=4,
+        minute=10,
+        id="reply_repetition_scoring",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=6 * 3600,
+    )
+
     # 内测统计派生表 (UXM01.02): 04:40 重算最近 3 个已结束的日子和今天, 顺带修补
     # 90 天内缺失或口径过期的日子。排在夜间记忆任务之后、06:00 不变量巡检之前,
     # 巡检时"昨日统计已定型"才查得到今晚这一轮的结果。
@@ -1474,6 +1488,19 @@ async def _run_daily_facts(health_name: str = "daily_facts"):
             _job_failed("Beta daily facts", e)
 
     await _run_distributed_job("daily_facts", 3600, _body, health_name=health_name)
+
+
+async def _run_reply_repetition_scoring():
+    """主回复重复表述打分: 只读消息、调用 DashScope 向量与评判模型, 写打分表 (不含原文)."""
+    async def _body():
+        from app.services.effect.repetition import run_nightly
+
+        try:
+            await run_nightly()
+        except Exception as e:
+            _job_failed("Reply repetition scoring", e)
+
+    await _run_distributed_job("reply_repetition_scoring", 3600, _body)
 
 
 async def _run_trace_retention():

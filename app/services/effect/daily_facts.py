@@ -403,7 +403,7 @@ async def compute_day(
     # 已提交的结果。REPEATABLE READ 的快照在第一条语句 (就是拿锁那条) 开始时就定了,
     # 排队等锁的那个会用旧快照去删别人刚写的行, 触发冲突或主键重复。
     async with db.tx(max_wait=timedelta(seconds=10), timeout=timedelta(seconds=60)) as tx:
-        lock = f"beta-daily-facts:{day.isoformat()}"
+        lock = day_lock(day)
         if wait_for_lock:
             await tx.execute_raw("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lock)
         else:
@@ -442,6 +442,9 @@ async def compute_day(
         extra_rows.extend(await compute_reconciliation(tx, day, current))
         from app.services.effect.proactive_stats import compute as compute_proactive
         extra_rows.extend(await compute_proactive(tx, day, current))
+        # 在 experience 重建当天复核清单之后: 重复表述的复核项追加进去
+        from app.services.effect.repetition import aggregate as aggregate_repetition
+        extra_rows.extend(await aggregate_repetition(tx, day, current))
         from app.services.effect.details import compute as compute_details
         await tx.execute_raw("DELETE FROM stats_detail_daily WHERE local_date=$1::date", day.isoformat())
         await compute_details(tx, day, current)
@@ -590,9 +593,11 @@ async def read_series(
         for day in days:
             for dimension_value in values:
                 row = by_key.get((metric, day.isoformat(), dimension_value))
-                if row is None and dimension and day.isoformat() in day_rows:
+                total = overall.get((metric, day.isoformat()))
+                # 由另一个任务产出的指标 (source_job), 当天算过不代表它跑过: 要有它自己的总计行
+                ran = total is not None or not METRICS[metric].get("source_job")
+                if row is None and dimension and day.isoformat() in day_rows and ran:
                     computed = day_rows[day.isoformat()]
-                    total = overall.get((metric, day.isoformat()))
                     row = {"value": 0 if METRICS[metric]["kind"] == "count" else None,
                            "numerator": 0, "denominator": 0, "sample_size": 0,
                            # 定型与否跟当天这一指标的总计行一致, 不按现在的时间推断
@@ -665,6 +670,11 @@ async def earliest_data_day() -> date_cls | None:
         """
     )
     return date_cls.fromisoformat(rows[0]["day"]) if rows and rows[0]["day"] else None
+
+
+def day_lock(day: date_cls) -> str:
+    """按天的 advisory lock 名。另起任务写本日表读取的源表时 (重复表述打分) 也拿这把锁。"""
+    return f"beta-daily-facts:{day.isoformat()}"
 
 
 async def compute_days(days: list[date_cls], *, now: datetime | None = None) -> dict[str, Any]:

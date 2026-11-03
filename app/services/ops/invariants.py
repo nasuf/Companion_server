@@ -405,7 +405,7 @@ async def _check_daily_metrics_settled() -> InvariantResult:
     )
     fingerprint = await population_fingerprint()
     by_key = {(r["day"], r["cohort"], r["metric"]): r for r in rows}
-    missing, outdated, unsettled = [], [], []
+    missing, outdated, unsettled, missing_job = [], [], [], []
     for day in days:
         for cohort in COHORTS:
             for metric in METRICS:
@@ -414,7 +414,8 @@ async def _check_daily_metrics_settled() -> InvariantResult:
                 row = by_key.get((day.isoformat(), cohort, metric))
                 label = f"{day.isoformat()}/{cohort}/{metric}"
                 if row is None:
-                    missing.append(label)
+                    # 依赖单独打分任务的指标 (如重复表述): 没出来说明那个任务没跑成
+                    (missing_job if METRICS[metric].get("source_job") else missing).append(label)
                 elif row["definition_version"] != DEFINITION_VERSION or (
                     cohort == "external" and row["population_fingerprint"] != fingerprint
                 ):
@@ -422,12 +423,17 @@ async def _check_daily_metrics_settled() -> InvariantResult:
                 elif is_settled(metric, day, last_nightly) and not row["settled"]:
                     unsettled.append(label)
     observed = {"days": [d.isoformat() for d in days], "missing": len(missing),
+                "missing_source_job": len(missing_job),
                 "outdated": len(outdated), "unsettled": len(unsettled),
-                "samples": (missing + unsettled + outdated)[:5]}
+                "samples": (missing + missing_job + unsettled + outdated)[:5]}
     title = "内测统计定型"
     if missing:
         return InvariantResult("daily_metrics_settled", title, "violated",
                                f"{len(missing)} 项昨日/前日统计没有生成 (04:40 任务未产出)", observed)
+    if missing_job:
+        jobs = sorted({METRICS[label.rsplit("/", 1)[1]]["source_job"] for label in missing_job})
+        return InvariantResult("daily_metrics_settled", title, "violated",
+                               f"{len(missing_job)} 项统计依赖的打分任务没有产出: {', '.join(jobs)}", observed)
     if unsettled:
         return InvariantResult("daily_metrics_settled", title, "violated",
                                f"{len(unsettled)} 项统计窗口已走完仍未定型, 夜间重算没有覆盖到", observed)

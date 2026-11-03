@@ -427,13 +427,53 @@ async def test_read_series_states_dimensions_and_background_heal(pg, monkeypatch
     assert {p["state"] for p in before["series"]["opened_users"]} == {"not_collected"}
 
 
-async def test_invariant_flags_missing_unsettled_and_outdated_days(pg, monkeypatch):
+async def test_invariant_names_a_scoring_job_that_did_not_run(pg, monkeypatch):
+    """重复表述打分没跑: 不能说成 04:40 统计没产出, 要指名是哪个打分任务。"""
     from app.services.ops import invariants as inv
 
-    ids = await _seed(pg)
+    await _seed(pg)
+    await pg.db.execute_raw("DELETE FROM reply_repetition_runs WHERE local_date::text = ANY($1::text[])",
+                            [DAY.isoformat(), NEXT.isoformat()])
     nightly = _now(NEXT + timedelta(days=1), 4, 40)
     for day in (DAY, NEXT):
         await daily_facts.compute_day(day, now=nightly)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            moment = _now(NEXT + timedelta(days=1), 6)
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(inv, "datetime", Clock)
+    result = await inv._check_daily_metrics_settled()
+    assert result.status == "violated" and "reply_repetition_scoring" in result.detail
+    assert result.observed["missing"] == 0 and result.observed["missing_source_job"] == 8
+
+
+async def test_invariant_flags_missing_unsettled_and_outdated_days(pg, monkeypatch):
+    ids = await _seed(pg)
+    nightly = _now(NEXT + timedelta(days=1), 4, 40)
+    from app.services.effect import repetition
+
+    async def embed(texts):
+        return [[1.0] for _ in texts]
+
+    async def judge(prompt):
+        return "not_repeat"
+
+    try:
+        for day in (DAY, NEXT):
+            # 04:10 打分在 04:40 重算之前; 种子数据没有可评估轮次也要留下"已运行"记录
+            await repetition.score_day(day, now=nightly, embedder=embed, judge=judge)
+            await daily_facts.compute_day(day, now=nightly)
+        await _check_invariant_flags(pg, monkeypatch, ids, nightly)
+    finally:
+        await pg.db.execute_raw("DELETE FROM reply_repetition_runs WHERE local_date::text = ANY($1::text[])",
+                                [DAY.isoformat(), NEXT.isoformat()])
+
+
+async def _check_invariant_flags(pg, monkeypatch, ids, nightly):
+    from app.services.ops import invariants as inv
 
     class Clock(datetime):
         @classmethod
