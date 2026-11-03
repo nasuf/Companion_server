@@ -564,3 +564,84 @@ async def test_regression_persistent_scenario_error_does_not_abort_run(
     assert report["gate_status"] == "incomplete"
     assert result["status"] == "failed"
     assert "模型原文" not in json.dumps(report, ensure_ascii=False)
+
+
+async def test_regression_boundary_history_usage_and_transcript_scoring(
+    quality, monkeypatch
+):
+    database, *_ = quality
+    monkeypatch.setattr(regression, "db", database)
+    seen = []
+
+    async def scripted(job, current, *args, **kwargs):
+        seen.append(current)
+        return {
+            "judge": {"pass": True},
+            "reply": "我在呢",
+            "calls": [dict(route="chat.completions", input=120, output=8, cost_cny=0.01),
+                      dict(input=300, web_search_calls=1)],
+        }
+
+    monkeypatch.setattr(regression.replay, "replay_turn", scripted)
+    case = dict(
+        _regression_case("boundary"),
+        route="boundary",
+        boundary={"turns": [{"patience": 40}, {"patience": 20}]},
+        turns=[dict(message="你好", criterion="礼貌"),
+               dict(message="再见", criterion="礼貌", now="2026-10-30T04:00:00Z")],
+        history_rows=[dict(role="user", content="早", createdAt="2026-10-28T04:00:00+00:00")],
+        transcript_scorer="long_companion_sim",
+    )
+    report = (await _run_regression(database, [case]))["report"]
+    assert [c["boundary_turn"] for c in seen] == [{"patience": 40}, {"patience": 20}]
+    assert all("turns" not in c and "boundary" not in c for c in seen)
+    assert seen[1]["now"] == "2026-10-30T04:00:00Z"
+    assert seen[1]["history_rows"][0]["content"] == "早" and len(seen[1]["history_rows"]) == 3
+    usage = report["route_usage"]["chat.completions"]
+    assert usage["calls"] == 4 and usage["input"] == 840 and usage["max_input"] == 300
+    assert usage["search_calls"] == 2
+    assert report["evaluated"] == 1 and report["errored_scenarios"] == []
+
+
+async def test_regression_infrastructure_error_outside_scenarios_fails_run(
+    quality, monkeypatch
+):
+    database, *_ = quality
+    monkeypatch.setattr(regression, "db", database)
+    monkeypatch.setattr(
+        regression.replay, "replay_turn",
+        AsyncMock(return_value={"judge": {"pass": True}, "reply": "你好"}),
+    )
+    monkeypatch.setattr(regression.LocalSink, "result", AsyncMock(side_effect=RuntimeError("sink")))
+    result = await _run_regression(database, [_regression_case("a")])
+    assert result["status"] == "failed"
+    assert result["report"]["error_type"] == "RuntimeError"
+    assert result["report"]["error_case_id"] == "a"
+    assert result["report"]["gate_status"] == "incomplete"
+
+
+@pytest.mark.parametrize(
+    "exc, transient",
+    [
+        (httpx.HTTPStatusError("x", request=httpx.Request("GET", "http://t"),
+                               response=httpx.Response(503)), True),
+        (httpx.HTTPStatusError("x", request=httpx.Request("GET", "http://t"),
+                               response=httpx.Response(429)), True),
+        (httpx.HTTPStatusError("x", request=httpx.Request("GET", "http://t"),
+                               response=httpx.Response(400)), False),
+        (asyncio.TimeoutError(), True),
+        (ValueError("evaluation_usage_out_of_bounds"), False),
+        (KeyError("judge"), False),
+    ],
+)
+def test_transient_classification(exc, transient):
+    assert regression.is_transient(exc) is transient
+
+
+def test_error_codes_never_carry_free_text():
+    control = RuntimeError("http_error")
+    control.code = "transport_error"
+    assert regression.error_code(control) == "transport_error"
+    assert regression.error_code(ValueError("missing_judge_categories")) == "missing_judge_categories"
+    assert regression.error_code(ValueError("Bad Thing: 用户原文")) == "ValueError"
+    assert regression.error_code(KeyError("judge")) == "KeyError"

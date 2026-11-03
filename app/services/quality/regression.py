@@ -142,7 +142,9 @@ def is_transient(exc: BaseException) -> bool:
 async def _with_retries(sink, case, repetition, attempt, errored, report):
     """Run one scenario repetition, retrying transient failures; never abort the run
     for one scenario. Budget, configuration and lease loss still end the run."""
-    for tries in range(1, len(RETRY_DELAYS_SECONDS) + 2):
+    tries = 0
+    while True:
+        tries += 1
         try:
             return await attempt()
         except (budget.BudgetExhausted, transport.NotConfigured, jobs.LostLease):
