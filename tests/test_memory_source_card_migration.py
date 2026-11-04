@@ -77,7 +77,10 @@ async def test_prisma_card_version_upgrade_preserves_legacy_rows(tmp_path):
             await model.create(data={"id": mid, "userId": user.id, "workspaceId": space.id,
                                      "content": "合成原文保持不变", "level": 2, "importance": .61})
         conv=await client.conversation.create(data={"userId":user.id,"agentId":agent.id,"workspaceId":space.id})
-        msg=await client.message.create(data={"conversationId":conv.id,"role":"user","content":"原始音乐描述"})
+        # Historical schema: write only columns that existed then (see users/agents).
+        msg=SimpleNamespace(id=str(uuid4()))
+        await client.execute_raw("INSERT INTO messages (id,conversation_id,role,content) VALUES ($1,$2,'user','原始音乐描述')",
+            msg.id,conv.id)
         async def legacy_bind():
             await client.execute_raw("""INSERT INTO memory_evidence_links
                 (id,memory_id,memory_source,user_memory_id,user_id,workspace_id,agent_id,content_version,
@@ -97,7 +100,7 @@ async def test_prisma_card_version_upgrade_preserves_legacy_rows(tmp_path):
         rows=await client.query_raw("SELECT source_card_version FROM memory_evidence_links")
         assert rows==[{"source_card_version":None}]
         await legacy_bind()  # old SQL contract remains valid after migration
-        assert (await client.message.find_unique(where={"id":msg.id})).content=="原始音乐描述"
+        assert (await client.query_raw("SELECT content FROM messages WHERE id=$1",msg.id))[0]["content"]=="原始音乐描述"
         assert len(await client.query_raw("SELECT id FROM memory_evidence_links"))==2
         result = await client.query_raw("SELECT count(*)::int AS n FROM _prisma_migrations WHERE finished_at IS NOT NULL")
         assert result[0]["n"] == 173

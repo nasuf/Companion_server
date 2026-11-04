@@ -99,6 +99,9 @@ class TestRequiredFieldsContract:
 
         # remote_provider fallback + provider fields 不 1:1, 单独 allowlist:
         NOT_IN_REQUIRED = {"remote_provider"}  # remoteProvider 是, 只是命名有点绕
+        # SQL-only 列 (@ignore, 生成客户端没有该属性): 由 _load_caches_unlocked 用原生
+        # SQL 读进快照, hasattr 守卫查不到它, 列进 required 反而每次启动误报.
+        NOT_IN_REQUIRED |= {"realtime_model"}
         should_be_required = rc_fields - NOT_IN_REQUIRED
         # 每个 ResolvedConfig 字段都应有一个对应的 required column
         # (允许 required 比 rc 多, 因为可能有 "TTL" 类未来字段)

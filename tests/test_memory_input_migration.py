@@ -62,7 +62,11 @@ async def test_input_prisma_upgrade_preserves_old_data_and_recovers_lock_failure
         agent = SimpleNamespace(id=agent_id)
         space=await client.chatworkspace.create(data={'userId':user.id,'agentId':agent.id})
         conv=await client.conversation.create(data={'userId':user.id,'agentId':agent.id,'workspaceId':space.id})
-        msg=await client.message.create(data={'conversationId':conv.id,'role':'user','content':'Synthetic source'})
+        # Same rule as users/agents above: the generated client also writes later
+        # message columns (e.g. hidden_from_timeline) the historical schema lacks.
+        msg=SimpleNamespace(id=str(uuid4()),content='Synthetic source')
+        await client.execute_raw("INSERT INTO messages (id,conversation_id,role,content) VALUES ($1,$2,'user',$3)",
+            msg.id,conv.id,msg.content)
         mid=uuid4().hex
         for model in (client.usermemory,client.aimemory):
             await model.create(data={'id':mid,'userId':user.id,'workspaceId':space.id,'content':'Synthetic unchanged',
