@@ -25,6 +25,7 @@ from app.services.offline.activity_recommendation_message import (
 )
 from app.services.offline.copy_guards import bounded_issues, copy_issues, date_relation, local_now, today_text
 from app.services.offline.evidence_text import mask_quotes
+from app.services.offline.geocode import geocode_address
 from app.services.offline.image_evidence import indexed_image_evidence
 from app.services.offline.prompt_fields import clip_text, filled, parse_text_field
 from app.services.offline.recommendation_content import fallback_detail, fallback_summary, useful_detail
@@ -811,6 +812,7 @@ async def _generate_activity_cards(
     unillustrated = None
     now = datetime.now(UTC)
     seen_places: set[str] = set()
+    unlocatable: set[str] = set()
     # A bounded retry selects another real place if a gallery cannot be verified.
     # This shares the same validation gate for model and deterministic candidates.
     try:
@@ -818,7 +820,7 @@ async def _generate_activity_cards(
             for candidate in candidates:
                 candidate["city"] = _display_city(city)
                 identity = _normalize_fingerprint(candidate.get("location_name") or "")
-                if identity in seen_places:
+                if identity in seen_places or identity in unlocatable:
                     continue
                 if (not _card_has_concrete_place(candidate, city)
                         or not _card_is_source_backed(candidate, fact_sources)
@@ -837,6 +839,14 @@ async def _generate_activity_cards(
                         continue
                 if len(seen_places) >= (3 if limit == 1 else limit):
                     break
+                # Arrival is GPS-verified against these coordinates; a place
+                # that cannot be located is never recommended.
+                coords = await geocode_address(candidate.get("address"), candidate["city"])
+                if not coords:
+                    unlocatable.add(identity)
+                    logger.info("[offline] skipped ungeocodable place=%r", candidate.get("location_name"))
+                    continue
+                candidate["place_lat"], candidate["place_lng"] = coords
                 seen_places.add(identity)
                 # Image availability ranks valid destinations; it must not
                 # erase them. Never retain model-proposed or raw source URLs.

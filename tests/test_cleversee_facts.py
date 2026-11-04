@@ -274,3 +274,57 @@ def test_whitespace_normalization_preserves_quotes_but_ellipsis_is_not_evidence(
         source_url="https://organizer.example/event",
         now=NOW,
     )
+
+
+def _listing_session():
+    """A dated session as stored from a listing page (佛山本地宝 shape)."""
+    day = (datetime.now(timezone(timedelta(hours=8))) + timedelta(days=3)).date()
+    title = "张震岳《跟着感觉走》巡回演唱会—佛山站"
+    venue = "佛山国际体育文化演艺中心"
+    text = (f"{day.year}佛山演唱会排期汇总\n\n⭐{title}\n\n演出时间：{day}\n\n演出场所：{venue}\n\n"
+            "票价：380/580/780/980元\n\n⭐关心妍巡回演唱会—佛山站\n\n演出时间：另行公布")
+    stored = validate_event(dict(
+        title=title, venue_name=venue, city="佛山市", year=day.year,
+        starts_at=f"{day}T00:00:00+08:00", ends_at=f"{day}T23:59:59+08:00",
+        time_precision="date", end_time_known=False, daily_hours=[], status="scheduled",
+        schedule_evidence=f"演出时间：{day}",
+        year_evidence=f"{day.year}佛山演唱会排期汇总 ⭐{title}",
+        identity_evidence=f"⭐{title} 演出时间：{day} 演出场所：{venue}",
+    ), text, city="佛山市", source_url="https://m.fs.bendibao.com/xiuxian/102864.shtm")
+    assert stored
+    activity = dict(city="佛山市", starts_at=stored["starts_at"], ends_at=stored["ends_at"],
+                    discovery_metadata={"kind": "event", "event": stored})
+    return activity, text
+
+
+async def test_refresh_keeps_unchanged_session_without_re_extraction(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services.offline import cleversee_discovery as discovery
+    activity, text = _listing_session()
+    monkeypatch.setattr(discovery.cleversee, "read_page", AsyncMock(return_value=text))
+    extract = AsyncMock(return_value=[])  # Model quotes vary; it must not decide here.
+    monkeypatch.setattr(discovery, "extract_events", extract)
+    refreshed = await discovery.refresh_event(activity)
+    assert refreshed["event"]["title"] == activity["discovery_metadata"]["event"]["title"]
+    assert refreshed["event"]["starts_at"] == activity["starts_at"]
+    assert refreshed["event"]["status"] == "scheduled"
+    extract.assert_not_awaited()
+
+
+@pytest.mark.parametrize("change", ["cancelled", "rescheduled", "removed"])
+async def test_refresh_re_extracts_when_the_page_changed(monkeypatch, change):
+    from unittest.mock import AsyncMock
+    from app.services.offline import cleversee_discovery as discovery
+    activity, text = _listing_session()
+    day = activity["starts_at"][:10]
+    if change == "cancelled":
+        text += "\n\n因故取消"
+    elif change == "rescheduled":
+        text = text.replace(f"演出时间：{day}", "演出时间：另行通知")
+    else:
+        text = text.split("⭐关心妍")[0].replace("张震岳", "")
+    monkeypatch.setattr(discovery.cleversee, "read_page", AsyncMock(return_value=text))
+    extract = AsyncMock(return_value=[])
+    monkeypatch.setattr(discovery, "extract_events", extract)
+    assert await discovery.refresh_event(activity) is None
+    extract.assert_awaited_once()

@@ -137,7 +137,7 @@ async def test_legacy_source_keeps_selected_place_relevance(native, monkeypatch)
         content="镇江市润州区伯先路12号，小岛咖啡(伯先路店)是一家咖啡馆。")
     monkeypatch.setattr(generation, "_search_activity_candidates", AsyncMock(return_value=([source], [source], "镇江市 咖啡")))
     monkeypatch.setattr(generation, "persist_activity_images", AsyncMock(return_value=[]))
-    monkeypatch.setattr(service, "geocode_address", AsyncMock(return_value=None))
+    monkeypatch.setattr(generation, "geocode_address", AsyncMock(return_value=(32.2, 119.45)))
     original = generation.invoke_text
 
     async def select(model, prompt, **_kwargs):

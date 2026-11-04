@@ -224,52 +224,33 @@ async def test_explicit_manual_arrival_is_not_gps_verified(journey):
     service._arrival_guide_text.assert_awaited_once()
 
 
-@pytest.mark.parametrize('reason', [
-    'too_far', 'location_required', 'low_accuracy', 'stale_location', 'no_geocode',
-])
-async def test_location_rejection_can_be_explicitly_confirmed(journey, monkeypatch, reason):
+@pytest.mark.parametrize('reason', ['too_far', 'location_required', 'low_accuracy', 'stale_location'])
+async def test_location_rejection_cannot_be_overridden_by_confirmation(journey, reason):
     j = journey
     a = await j.create()
-    # The geocode policy cannot block an explicit user statement of arrival.
-    monkeypatch.setattr(service.settings, 'offline_arrival_require_geocode', True)
-    payload = {'lat': 23.01, 'lng': 113.75, 'accuracy_m': 10}
+    gps = {'lat': 23.01, 'lng': 113.75, 'accuracy_m': 10}
+    payload = dict(gps)
     if reason == 'too_far':
         payload['lat'] = 24
     elif reason == 'location_required':
         payload = {}
     elif reason == 'low_accuracy':
         payload['accuracy_m'] = 500
-    elif reason == 'stale_location':
-        payload['observed_at'] = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     else:
-        await j.db.execute_raw(
-            'UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',
-            a['id'],
-        )
-    rejected = await post(j, a, 'arrive', payload)
-    assert rejected.status_code == 422, rejected.text
-    assert rejected.json()['detail']['reason'] == reason
+        payload['observed_at'] = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+    for body in (payload, {**payload, 'manual_confirmation': True}):
+        rejected = await post(j, a, 'arrive', body)
+        assert rejected.status_code == 422, rejected.text
+        assert rejected.json()['detail']['reason'] == reason
     assert not (await repo.get_activity(a['id'], j.user))['reached']
     service.insert_user_activity_card.assert_not_awaited()
-    # Ignore even supplied, rejected GPS data on a self-confirmed arrival.
-    confirmed = await post(j, a, 'arrive', {**payload, 'manual_confirmation': True})
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()['reached'] and not confirmed.json()['arrival_verified']
-    row = await j.db.query_raw(
-        'SELECT arrival_lat,arrival_lng FROM offline_activity_recommendations WHERE id=$1', a['id']
-    )
-    assert row[0] == {'arrival_lat': None, 'arrival_lng': None}
-    repeated = await post(j, a, 'arrive', {'manual_confirmation': True})
-    assert repeated.status_code == 200 and repeated.json() == confirmed.json()
-    service._arrival_guide_text.assert_not_awaited()
+    # Only a passing GPS observation completes arrival, flag or not.
+    arrived = await post(j, a, 'arrive', {**gps, 'manual_confirmation': True})
+    assert arrived.status_code == 200, arrived.text
+    assert arrived.json()['reached'] and arrived.json()['arrival_verified']
     first = await j.deliver_arrival(a)
     assert await j.deliver_arrival(a) == first
     service._arrival_guide_text.assert_awaited_once()
-    archived = await post(j, a, 'archive')
-    assert archived.status_code == 200
-    review = (await j.client.get('/offline/activities/' + a['id'] + '/review')).json()
-    assert not review['can_generate_memory_note'] and not review['has_memory_note']
-    assert '还没有留下' in review['story']
 
 
 @pytest.mark.parametrize('status', ['suggested', 'ignored', 'cancelled', 'completed'])
@@ -290,11 +271,11 @@ async def test_confirmation_keeps_ownership_and_single_active_journey(journey):
         json={'manual_confirmation': True},
         headers={'Authorization': 'Bearer ' + create_jwt('other-user', role='user')})
     assert forbidden.status_code == 401
-    results = await asyncio.gather(*(post(j, row, 'arrive', {'manual_confirmation': True}) for row in (a, b)))
+    gps = {'lat': 23.01, 'lng': 113.75, 'accuracy_m': 10}
+    results = await asyncio.gather(*(post(j, row, 'arrive', gps) for row in (a, b)))
     assert sorted(r.status_code for r in results) == [200, 409]
     rows = [await repo.get_activity(row['id'], j.user) for row in (a, b)]
     assert sum(bool(row['reached']) for row in rows) == 1
-    assert all(not row['arrival_verified'] for row in rows)
     winner = next(row for row in rows if row['reached'])
     await j.deliver_arrival(winner)
     loser = next(row for row in rows if not row['reached'])
@@ -305,7 +286,8 @@ async def test_confirmation_keeps_ownership_and_single_active_journey(journey):
 async def test_concurrent_confirmation_is_idempotent(journey):
     j = journey
     a = await j.create()
-    results = await asyncio.gather(*(post(j, a, 'arrive', {'manual_confirmation': True}) for _ in range(3)))
+    gps = {'lat': 23.01, 'lng': 113.75, 'accuracy_m': 10}
+    results = await asyncio.gather(*(post(j, a, 'arrive', gps) for _ in range(3)))
     assert all(r.status_code == 200 and r.json()['reached'] for r in results)
     service._arrival_guide_text.assert_not_awaited()
     first = await j.deliver_arrival(a)
@@ -368,7 +350,7 @@ async def test_recommendation_http_card_detail_share_same_record(journey, monkey
     monkeypatch.setattr(repo,'list_user_tags',AsyncMock(return_value=[]))
     monkeypatch.setattr(repo,'memory_brief',AsyncMock(return_value=''))
     monkeypatch.setattr(offline,'is_activity_enabled',AsyncMock(return_value=True))
-    monkeypatch.setattr(service,'geocode_address',AsyncMock(return_value=wgs84_to_gcj02(23.01,113.75)))
+    monkeypatch.setattr(gen,'geocode_address',AsyncMock(return_value=wgs84_to_gcj02(23.01,113.75)))
     url='https://example.com/park-'+uuid4().hex
     result=SearchResult(title='东莞莲湖公园',url=url,content='东莞桥头镇莲湖路的莲湖公园，可沿湖散步',
                         images=[{'url':'https://image.example/park.jpg'}])
@@ -573,7 +555,7 @@ async def test_recommendation_rejects_collections_but_prefers_photos_without_req
     monkeypatch.setattr(repo, 'list_user_tags', AsyncMock(return_value=[]))
     monkeypatch.setattr(repo, 'memory_brief', AsyncMock(return_value=''))
     monkeypatch.setattr(offline, 'is_activity_enabled', AsyncMock(return_value=True))
-    monkeypatch.setattr(service, 'geocode_address', AsyncMock(return_value=None))
+    monkeypatch.setattr(gen, 'geocode_address', AsyncMock(return_value=wgs84_to_gcj02(32.2, 119.45)))
     article = SearchResult(title='镇江这些咖啡店，藏着整个春天！', url='https://example.com/collection', content='镇江市咖啡店合集')
     cafe = SearchResult(title='库迪咖啡(临湖苑店) - 镇江市', url='https://example.com/cafe', content='镇江市句容市临湖苑商业B2幢110号')
     museum = SearchResult(title='镇江博物馆', url='https://example.com/museum', content='镇江市润州区伯先路85号', raw_content='''# 镇江博物馆

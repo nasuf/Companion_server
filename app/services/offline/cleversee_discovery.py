@@ -6,6 +6,7 @@ import asyncio
 import logging
 import hashlib
 import math
+import re
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
@@ -24,6 +25,8 @@ from app.config import settings
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
+
+_CHANGE_WORDS = re.compile(r"取消|延期|改期|暂停|待定|cancell?ed|postponed", re.I)
 
 
 async def extract_events(
@@ -306,28 +309,47 @@ async def refresh_event(activity: dict) -> dict | None:
     if metadata.get("kind") != "event":
         return None
     old = metadata.get("event") or {}
+
+    def same_session(e: dict) -> bool:
+        return (
+            normalized(e["title"]) == normalized(old.get("title"))
+            and normalized(e["venue_name"]) == normalized(old.get("venue_name"))
+            and all(
+                datetime.fromisoformat(e[k].replace("Z", "+00:00"))
+                == datetime.fromisoformat(activity[k].replace("Z", "+00:00"))
+                for k in ("starts_at", "ends_at")
+            )
+        )
+
     try:
         async with asyncio.timeout(24):
             text = await cleversee.read_page(old.get("official_url", ""), fresh=True)
             if not text:
                 return None
+            # The stored evidence still verbatim on a page with no change
+            # wording proves the session unchanged. Re-extraction is only for
+            # pages that changed: its quotes vary run to run and would reject
+            # an unchanged session.
+            if not _CHANGE_WORDS.search(text):
+                try:
+                    year = datetime.fromisoformat(old["starts_at"]).year
+                    unchanged = validate_event(
+                        {**old, "year": year},
+                        text,
+                        city=activity["city"],
+                        source_url=old["official_url"],
+                    )
+                except (KeyError, TypeError, ValueError):
+                    unchanged = None
+                if unchanged and same_session(unchanged):
+                    return {**metadata, "event": unchanged}
             events = await extract_events(
                 text,
                 city=activity["city"],
                 url=old["official_url"],
                 allow_inactive=True,
             )
-            matching = [
-                e
-                for e in events
-                if normalized(e["title"]) == normalized(old.get("title"))
-                and normalized(e["venue_name"]) == normalized(old.get("venue_name"))
-                and all(
-                    datetime.fromisoformat(e[k].replace("Z", "+00:00"))
-                    == datetime.fromisoformat(activity[k].replace("Z", "+00:00"))
-                    for k in ("starts_at", "ends_at")
-                )
-            ]
+            matching = [e for e in events if same_session(e)]
             if matching:
                 return {**metadata, "event": matching[0]}
     except Exception as exc:

@@ -79,3 +79,74 @@ def test_place_key_stable_and_normalized():
     b = make_place_key("佛山植物园 ", "广东省佛山市禅城区东鄱南路1号", "佛山")
     assert a == b and a is not None
     assert make_place_key(None, None, None) is None
+
+
+async def test_manual_confirmation_cannot_bypass_gps_for_located_place(monkeypatch):
+    from unittest.mock import AsyncMock
+    activity = {"id": "a", "user_id": "u", "status": "accepted", "reached": False,
+                "place_lat": _BASE_LAT, "place_lng": _BASE_LNG}
+    monkeypatch.setattr(activity_service.repo, "get_activity", AsyncMock(return_value=activity))
+    monkeypatch.setattr(activity_service.repo, "find_other_reached_activity", AsyncMock(return_value=None))
+    mark = AsyncMock()
+    monkeypatch.setattr(activity_service.repo, "mark_arrived", mark)
+    with pytest.raises(HTTPException) as exc:
+        await activity_service.arrive_activity("u", "a", manual_confirmation=True)
+    assert exc.value.status_code == 422
+    assert exc.value.detail["reason"] == "location_required"
+    with pytest.raises(HTTPException) as exc:
+        await activity_service.arrive_activity(
+            "u", "a", lat=_lat_offset_by_meters(260), lng=_BASE_LNG, accuracy_m=10,
+            manual_confirmation=True,
+        )
+    assert exc.value.detail["reason"] == "too_far"
+    mark.assert_not_awaited()
+
+
+@pytest.mark.parametrize("source", ["manual", "scheduled"])
+async def test_recommendation_without_coordinates_is_never_created(monkeypatch, source):
+    from unittest.mock import AsyncMock
+    service = activity_service
+    monkeypatch.setattr(service.repo, "resolve_user_context", AsyncMock(return_value={
+        "conversation_id": "c", "agent_id": "ag", "workspace_id": "w",
+        "user_location_city": "镇江市"}))
+    monkeypatch.setattr(service, "generate_activity_card", AsyncMock(return_value={
+        "title": "折光咖啡", "location_name": "折光咖啡", "address": "某路1号", "discovery_metadata": {}}))
+    monkeypatch.setattr(service, "geocode_address", AsyncMock(return_value=None))
+    create = AsyncMock()
+    monkeypatch.setattr(service.repo, "create_activity", create)
+    emit = AsyncMock()
+    monkeypatch.setattr(service, "emit_assistant", emit)
+    if source == "manual":
+        with pytest.raises(HTTPException) as exc:
+            await service.create_recommendation_for_user(user_id="u", workspace_id="w", source=source)
+        assert exc.value.detail["reason"] == "no_suitable_activity"
+    else:
+        assert await service.create_recommendation_for_user(user_id="u", workspace_id="w", source=source) is None
+    create.assert_not_awaited()
+    emit.assert_not_awaited()
+
+
+async def test_generation_skips_ungeocodable_place_for_the_next_candidate(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services.offline import activity_generation as gen
+    from app.services.offline.providers.search import SearchResult
+    monkeypatch.setattr(gen.settings, "offline_search_provider", "tavily")
+    monkeypatch.setattr(gen, "get_chat_model", lambda: object())
+    lost = SearchResult(title="折光咖啡", url="https://example.com/lost", content="镇江市某路1号 折光咖啡")
+    found = SearchResult(title="镇江博物馆", url="https://example.com/museum", content="镇江市润州区伯先路85号 镇江博物馆")
+    monkeypatch.setattr(gen.repo, "list_user_tags", AsyncMock(return_value=[]))
+    monkeypatch.setattr(gen.repo, "memory_brief", AsyncMock(return_value=""))
+    monkeypatch.setattr(gen.repo, "list_recent_activity_fingerprints", AsyncMock(return_value=[]))
+    monkeypatch.setattr(gen, "_search_activity_candidates", AsyncMock(return_value=([lost, found], [lost, found], "q")))
+    monkeypatch.setattr(gen, "get_prompt_text", AsyncMock(return_value="{sources_json} {avoid_text}"))
+    monkeypatch.setattr(gen, "invoke_text", AsyncMock(return_value="{}"))
+    monkeypatch.setattr(gen, "persist_activity_images", AsyncMock(return_value=[]))
+    monkeypatch.setattr(gen, "_recommendation_copy", AsyncMock(return_value=""))
+
+    async def geocode(address, city=None):
+        return (32.21, 119.43) if address == "镇江博物馆" else None
+
+    monkeypatch.setattr(gen, "geocode_address", geocode)
+    card = await gen.generate_activity_card(user_id="u", workspace_id=None, city="镇江市", source="manual")
+    assert card["location_name"] == "镇江博物馆"
+    assert (card["place_lat"], card["place_lng"]) == (32.21, 119.43)

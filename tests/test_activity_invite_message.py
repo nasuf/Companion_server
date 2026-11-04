@@ -162,7 +162,7 @@ async def test_empty_drafts_and_unexpected_errors_keep_the_fallback(invite, monk
 async def test_post_create_path_keeps_reasons_out_of_client_metadata(monkeypatch, merge_fails):
     from app.services.offline import activity_service as service
     card = dict(title="大慈恩寺", summary="可以去大慈恩寺走走。", description="", location_name="大慈恩寺",
-                image_urls=[], discovery_metadata={"kind": "place"})
+                image_urls=[], discovery_metadata={"kind": "place"}, place_lat=34.22, place_lng=108.96)
     created = {**card, "id": "activity-1", "status": "pending", "conversation_id": "conversation-1",
                "discovery_metadata": {"kind": "place"}}
 
