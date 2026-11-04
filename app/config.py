@@ -142,6 +142,23 @@ class Settings(BaseSettings):
     # provider's 10 MB encoded-payload limit.
     chat_voice_max_bytes: int = 2 * 1024 * 1024
 
+    # StepFun bidirectional realtime voice. Blank key disables only the
+    # /ws/voice endpoint; text chat and DashScope ASR/TTS stay unchanged.
+    # Key: https://platform.stepfun.com → API keys. Env: STEPFUN_API_KEY.
+    stepfun_api_key: str = ""
+    stepfun_realtime_url: str = "wss://api.stepfun.com/v1/realtime"
+    stepfun_realtime_model: str = "stepaudio-2.5-realtime"
+    # Voice ids accepted by stepaudio-2.5-realtime. A session locks the voice
+    # after the first audio response, so this is chosen once per call.
+    stepfun_realtime_voice_female: str = "elegantgentle-female"
+    stepfun_realtime_voice_male: str = "soft-spoken-gentleman"
+    # Official realtime demo captures and plays 24 kHz mono PCM16.
+    stepfun_realtime_sample_rate: int = 24000
+    stepfun_realtime_silence_ms: int = 600
+    stepfun_realtime_transcript_timeout_s: float = 2.5
+    stepfun_realtime_retrieval_timeout_s: float = 1.5
+    stepfun_realtime_max_seconds: int = 28 * 60
+
     # DeepSeek direct API (OpenAI-compatible)
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
