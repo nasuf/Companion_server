@@ -23,6 +23,8 @@ dependencies = [
     "python-multipart>=0.0.20",
     "python-dotenv>=1.0.0",
     "httpx[http2]>=0.28.0",
+    # StepFun realtime voice proxy. Also pulled in by uvicorn[standard].
+    "websockets>=13.1",
     # Public link fetch transport uses the qualified HTTPcore network-backend API.
     "httpcore==1.0.9",
     # Keep the same CA bundle used by the qualified HTTPX stack.
