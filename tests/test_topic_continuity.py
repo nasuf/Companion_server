@@ -329,6 +329,35 @@ async def test_new_session_resets_followup_count(redis, max_followups):
     assert state.followups_used == 0 and state.followup_available
 
 
+async def test_transition_budget_counts_and_resets_with_session(redis):
+    await tc.note_user_message("c1", now=NOW)
+    assert (await tc.load_continuity("c1")).transition_available  # 默认每次会话 1 次
+    assert await tc.note_transition("c1") is True
+    assert (await tc.load_continuity("c1")).transition_available is False
+    # 同一会话内用户继续发消息: 次数不清
+    await tc.note_user_message("c1", now=NOW + timedelta(minutes=5))
+    assert (await tc.load_continuity("c1")).transition_count == 1
+    # 隔 3 小时开新会话: 恢复
+    await tc.note_user_message("c1", now=NOW + timedelta(hours=3, minutes=6))
+    assert (await tc.load_continuity("c1")).transition_available
+
+    redis.fail = True
+    assert await tc.note_transition("c1") is False  # 记不上账: 调用方据此不说
+
+
+def test_transition_budget_is_tunable(monkeypatch):
+    def overrides(n):
+        monkeypatch.setattr(
+            "app.services.runtime_config.proactive_policy_overrides",
+            lambda: {"transition_max_per_session": n},
+        )
+    overrides(0)
+    assert _state().transition_available is False  # 0 = 不说过渡句
+    overrides(2)
+    assert _state(transition_count=1).transition_available
+    assert _state(transition_count=2).transition_available is False
+
+
 def test_return_line_gap_is_tunable(monkeypatch):
     monkeypatch.setattr(
         "app.services.runtime_config.proactive_policy_overrides",

@@ -185,8 +185,11 @@ def _load(state):
     return AsyncMock(return_value=state)
 
 
-async def _run(monkeypatch, *, continuity=None, previous=None, replied_minutes_ago=0.0, **kw):
+async def _run(monkeypatch, *, continuity=None, previous=None, replied_minutes_ago=0.0,
+               noted=True, **kw):
     monkeypatch.setattr(tcont, "load_continuity", _load(continuity or _continuity()))
+    note = AsyncMock(return_value=noted)
+    monkeypatch.setattr(tcont, "note_transition", note)
     history = _history()
     params = dict(
         conversation_id="c-1",
@@ -200,7 +203,109 @@ async def _run(monkeypatch, *, continuity=None, previous=None, replied_minutes_a
         patience_low=False,
     )
     params.update(kw)
-    return await build_topic_continuation(**params)
+    result = await build_topic_continuation(**params)
+    _run.note = note
+    return result
+
+
+@pytest.mark.asyncio
+async def test_transition_is_counted_once_said(monkeypatch, llm):
+    result = await _run(monkeypatch)
+    assert result.lines[-1] == "面试的事等会儿再跟我说说"
+    _run.note.assert_awaited_once_with("c-1")
+
+
+@pytest.mark.asyncio
+async def test_transition_quota_used_skips_transition(monkeypatch, llm):
+    result = await _run(monkeypatch, continuity=_continuity(transition_count=1))
+    assert result.lines == ["忙完啦～"]  # 承接短句照常, 过渡句本次会话已说过
+    assert "chat.topic_jump_detect" not in llm.calls  # 不再花一次判定
+    _run.note.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transition_quota_is_tunable(monkeypatch, llm):
+    monkeypatch.setattr(
+        "app.services.runtime_config.proactive_policy_overrides",
+        lambda: {"transition_max_per_session": 2},
+    )
+    result = await _run(monkeypatch, continuity=_continuity(transition_count=1))
+    assert result.lines[-1] == "面试的事等会儿再跟我说说"
+    monkeypatch.setattr(
+        "app.services.runtime_config.proactive_policy_overrides",
+        lambda: {"transition_max_per_session": 0},
+    )
+    llm.calls.clear()
+    result = await _run(monkeypatch, continuity=_continuity())
+    assert result.lines == ["忙完啦～"] and "chat.topic_jump_detect" not in llm.calls
+
+
+@pytest.mark.asyncio
+async def test_transition_not_said_when_count_cannot_be_recorded(monkeypatch, llm):
+    result = await _run(monkeypatch, noted=False)
+    assert result.lines == ["忙完啦～"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stock", [
+    "你这突然换话题 对了还没问你准备看哪科",
+    "还没聊完打奶泡的事呢 突然问这个",
+    "还没聊完打奶泡的事呢 突然问我下班了吗",
+    "哦对了还没问你看啥剧呢 突然换了个话题啦",
+])
+async def test_stock_transition_phrasing_is_dropped(monkeypatch, llm, stock):
+    llm.outputs["chat.topic_continuation_jump"] = stock
+    result = await _run(monkeypatch)
+    assert result.lines == ["忙完啦～"]
+    _run.note.assert_not_awaited()  # 没说出去就不占名额
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("setup", "expected"), [
+    ({}, "said"),
+    ({"continuity": "quota"}, "quota_used"),
+    ({"noted": False}, "unrecorded"),
+    ({"jump": "你这突然换话题啦"}, "stock_dropped"),
+    ({"jump": "怎么才回呀"}, "filtered"),
+    ({"detect": "接续"}, "same_topic"),
+    ({"jump": RuntimeError("llm down")}, "error"),
+])
+async def test_transition_outcome_is_recorded(monkeypatch, llm, setup, expected):
+    """诊断只记结果分类, 不记过渡句原文。"""
+    if "jump" in setup:
+        llm.outputs["chat.topic_continuation_jump"] = setup["jump"]
+    if "detect" in setup:
+        llm.outputs["chat.topic_jump_detect"] = setup["detect"]
+    kw = {"noted": setup.get("noted", True)}
+    if setup.get("continuity") == "quota":
+        kw["continuity"] = _continuity(transition_count=1)
+    result = await _run(monkeypatch, **kw)
+    assert result.transition == expected
+
+
+@pytest.mark.asyncio
+async def test_transition_state_unavailable_is_recorded(monkeypatch, llm):
+    from app.services.interaction import topic_continuity as tcy
+
+    # explain_cue 需要状态才能给出未完结结论; 这里直接验证状态丢失时不说过渡句
+    monkeypatch.setattr(tcont, "load_continuity", AsyncMock(return_value=None))
+    monkeypatch.setattr(tcont, "explain_cue", lambda *_a, **_k: (
+        tcy.ContinuationCue(unfinished=True, return_line=False, gap_seconds=60), "unfinished"))
+    history = _history()
+    result = await build_topic_continuation(
+        conversation_id="c-1", previous_assistant=history[2], replied_at=NOW,
+        user_message="今天吃了火锅", history=history, current_turn_ids={"u-1"},
+        agent=SimpleNamespace(mbti=None, currentMbti=None), offering_turn=False, patience_low=False,
+    )
+    assert result.lines == [] and result.transition == "state_unavailable"
+    assert "chat.topic_jump_detect" not in llm.calls
+
+
+@pytest.mark.asyncio
+async def test_natural_transition_mentioning_sudden_is_kept(monkeypatch, llm):
+    llm.outputs["chat.topic_continuation_jump"] = "火锅先放一边，面试那事突然想起来还没问完"
+    result = await _run(monkeypatch)
+    assert result.lines[-1].startswith("火锅先放一边")
 
 
 @pytest.mark.asyncio
@@ -361,7 +466,7 @@ async def test_await_records_diagnostics():
     assert result.lines == ["忙完啦～"]
     assert diagnostics["topic_continuation"] == {
         "version": 1, "status": "applied", "detail": "unfinished", "unfinished": True,
-        "n_lines": 1, "failed_lines": 0, "gap_seconds": 2400,
+        "n_lines": 1, "failed_lines": 0, "gap_seconds": 2400, "transition": None,
     }
 
 

@@ -69,6 +69,13 @@ class ContinuityState:
     session_closed: bool
     # 本次会话已追问次数 (旧数据只有 followup_sent_at → 按 1 次算)
     followup_count: int = 0
+    # 本次会话已说过的跳话题过渡句次数
+    transition_count: int = 0
+
+    @property
+    def transition_available(self) -> bool:
+        """本次会话还能再说一句跳话题过渡 (默认 1, 后台可调; 0 = 不说)."""
+        return self.transition_count < int(tuning.value("transition_max_per_session"))
 
     @property
     def followups_used(self) -> int:
@@ -206,6 +213,7 @@ def _state_from_hash(raw: dict[str, str]) -> ContinuityState:
         last_user_at=_parse_dt(raw.get("last_user_at")),
         session_closed=raw.get("session_closed") == "1",
         followup_count=_parse_int(raw.get("followup_count")),
+        transition_count=_parse_int(raw.get("transition_count")),
     )
 
 
@@ -285,15 +293,30 @@ async def release_followup(conversation_id: str) -> None:
         logger.warning(f"[CONTINUITY] release followup failed conv={conversation_id[:8]}: {e}")
 
 
+async def note_transition(conversation_id: str) -> bool:
+    """说了一句跳话题过渡: 记一次。写不进去就不说 —— 宁可少一句, 不能记账失败导致反复说."""
+    try:
+        redis = await get_redis()
+        key = _key(conversation_id)
+        pipe = redis.pipeline()
+        pipe.hincrby(key, "transition_count", 1)
+        pipe.expire(key, _TTL_SECONDS)
+        await pipe.execute()
+    except Exception as e:
+        logger.warning(f"[CONTINUITY] note transition failed conv={conversation_id[:8]}: {e}")
+        return False
+    return True
+
+
 async def close_session(conversation_id: str | None) -> None:
     """A 模式新开场 / 告别后调用: 下一条用户消息开新会话。"""
     if conversation_id:
         await _hset(conversation_id, {"session_closed": "1"})
 
 
-# 只重置 B 名额。判定结论不随会话清掉 —— 它靠 anchor 自证有效期, 而「晚安」后
+# 只重置 B 名额与过渡次数。判定结论不随会话清掉 —— 它靠 anchor 自证有效期, 而「晚安」后
 # 隔两小时回来这种跨会话的第一句, 恰恰要靠"上一轮已完结"压掉重逢寒暄。
-_SESSION_FIELDS = ("followup_sent_at", "followup_count", "session_closed")
+_SESSION_FIELDS = ("followup_sent_at", "followup_count", "transition_count", "session_closed")
 
 
 def starts_new_session(state: ContinuityState, now: datetime) -> bool:
