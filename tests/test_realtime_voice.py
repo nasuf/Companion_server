@@ -516,3 +516,98 @@ class TestVoiceEndpoint:
             required_line = deploy.read_text()
             # The key should NOT be in the mandatory check loop
             assert "STEPFUN_API_KEY" not in required_line.split("for key in")[1].split("; do")[0] if "for key in" in required_line else True
+
+
+class _FakeVoiceSocket:
+    def __init__(self):
+        self.scope = {"subprotocols": ["companion.chat.v1", "companion.ticket.x"]}
+        self.headers = {}
+        self.sent: list[dict] = []
+        self.accepted = False
+        self.closed_with: int | None = None
+
+    async def accept(self, subprotocol=None):
+        self.accepted = True
+
+    async def send_json(self, payload):
+        self.sent.append(payload)
+
+    async def close(self, code=1000, reason=None):
+        self.closed_with = code
+
+
+class _FakeProviderConnection:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize(
+    ("gender", "expected"),
+    [("male", "wenrounansheng"), ("female", "elegantgentle-female")],
+)
+async def test_call_uses_official_voice_and_reports_rejection(monkeypatch, gender, expected):
+    """A DashScope ttsVoiceId must never reach StepFun; rejection reaches the client."""
+    from app.api.realtime import voice as endpoint
+    from app.services.realtime_voice.provider import StepfunSetupError
+
+    agent = SimpleNamespace(
+        id="agent-1", userId="user-1", status="active", gender=gender,
+        ttsVoiceId="qwen-audio-3.0-tts-plus-voice-clone",
+    )
+    conv = SimpleNamespace(
+        id="conv-1", userId="user-1", isDeleted=False, agent=agent, workspaceId=None,
+    )
+    principal = SimpleNamespace(role="user", user_id="user-1", expires_at=float("inf"))
+    seen: dict = {}
+    released: list[tuple] = []
+
+    async def find_unique(**_):
+        return conv
+
+    async def consume_ticket(*_):
+        return principal
+
+    async def ok(*_, **__):
+        return True
+
+    async def load_call_context(**_):
+        return SimpleNamespace(name="阿宁"), "instructions", []
+
+    async def acquire_call(_):
+        return "lock-token"
+
+    async def release_call(conversation_id, token):
+        released.append((conversation_id, token))
+
+    async def configure_session(sock, *, voice, **_):
+        seen["voice"] = voice
+        raise StepfunSetupError(f"voice {voice} is not valid")
+
+    monkeypatch.setattr(endpoint, "is_redis_healthy", lambda: True)
+    monkeypatch.setattr(endpoint, "offered_ticket", lambda _: "ticket")
+    monkeypatch.setattr(endpoint, "origin_allowed", lambda _: True)
+    monkeypatch.setattr(endpoint, "consume_ticket", consume_ticket)
+    monkeypatch.setattr(endpoint.db, "conversation", SimpleNamespace(find_unique=find_unique), raising=False)
+    monkeypatch.setattr(endpoint, "get_patience", ok)
+    monkeypatch.setattr(endpoint, "get_patience_zone", lambda _: "normal")
+    monkeypatch.setattr(endpoint, "_accounts_current", ok)
+    monkeypatch.setattr(endpoint.settings, "stepfun_api_key", "sk-test")
+    monkeypatch.setattr(endpoint.settings, "stepfun_realtime_voice_male", "wenrounansheng")
+    monkeypatch.setattr(endpoint.settings, "stepfun_realtime_voice_female", "elegantgentle-female")
+    monkeypatch.setattr(endpoint, "acquire_call", acquire_call)
+    monkeypatch.setattr(endpoint, "release_call", release_call)
+    monkeypatch.setattr(endpoint, "load_call_context", load_call_context)
+    monkeypatch.setattr(endpoint, "connect_stepfun", lambda *_: _FakeProviderConnection())
+    monkeypatch.setattr(endpoint, "configure_session", configure_session)
+
+    ws = _FakeVoiceSocket()
+    await endpoint.voice_websocket(ws, "conv-1")
+
+    assert ws.accepted
+    assert seen["voice"] == expected
+    assert ws.sent == [{"type": "error", "code": "provider_unavailable", "message": "实时语音暂时连不上"}]
+    assert ws.closed_with == 1011
+    assert released == [("conv-1", "lock-token")]
