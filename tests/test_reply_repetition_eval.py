@@ -114,6 +114,48 @@ def test_completed_detail(tmp_path):
     assert run_replay.completed(path)
 
 
+async def test_production_context_reaches_the_real_builders():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from pytest import MonkeyPatch
+
+    from app.services.chat.data_fetch_phase import FetchedContext
+
+    case = {"id": "rr-1", "now": "2026-10-30T11:21:45+00:00", "received_at": "2026-10-30T11:21:31+00:00",
+            "history_rows": [], "message": "好的", "current_ids": ["h1"]}
+    context = {"ai_status": {"activity": "开会", "status": "very_busy", "upcoming": ""},
+               "topic": {"category": "生活", "turns": 3},
+               "delay": {"activity": "开会", "status": "very_busy", "seconds": 28, "reason_text": "在忙。"}}
+    assert run_replay.incident(case, context)["reply_context"]["received_status"] == {
+        "activity": "开会", "status": "very_busy"}
+    assert "received_status" not in run_replay.incident(case, {"topic": context["topic"]})["reply_context"]
+    assert "received_status" not in run_replay.incident(case)["reply_context"]
+
+    chat = SimpleNamespace(fetch_parallel_context=AsyncMock(return_value=FetchedContext(memory_relevance="weak")),
+                           push_topic=None, actual_delay_seconds=None, explain_delay_reason=None,
+                           _fetch_intent_context=None, _generate_reply=AsyncMock(return_value="reply"))
+    from app.services.prompting import store
+
+    with MonkeyPatch.context() as patches:
+        # 回放器 (configure_pair) 先把 store.db 换成内存桩, 钩子再改它的 find_unique
+        patches.setattr(store, "db", SimpleNamespace(prompttemplate=SimpleNamespace(find_unique=None)))
+        hook = run_replay.force_main({}, AsyncMock(), {"rr-1": context})
+        hook(patches, chat, None, case)
+        assert chat.fetch_parallel_context.return_value.ai_status == context["ai_status"]
+        assert await chat.push_topic("c", "好的") == {"category": "生活", "turns": 3}
+        assert chat.actual_delay_seconds({}) == 28
+        assert await chat.explain_delay_reason("schedule_busy") == "在忙。"
+        assert await chat._generate_reply() == "reply"
+    # 没有作息/话题/延迟的用例: 三项保持回放器默认 (不渲染对应段)
+    empty = SimpleNamespace(fetch_parallel_context=AsyncMock(return_value=FetchedContext(memory_relevance="weak")),
+                            push_topic="stub", actual_delay_seconds="stub", explain_delay_reason="stub")
+    with MonkeyPatch.context() as patches:
+        run_replay.apply_production_context(patches, empty, {})
+        assert empty.fetch_parallel_context.return_value.ai_status is None
+        assert (empty.push_topic, empty.actual_delay_seconds, empty.explain_delay_reason) == ("stub",) * 3
+
+
 def _vec(text):
     v = [0.0] * 8
     for ch in text:

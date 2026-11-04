@@ -11,6 +11,11 @@
 主回复路径强制走主 prompt (生产里这些轮次都是 main_llm); 意图、检索、记忆用合成桩, 历史、
 时间与本轮消息 ID 用生产原样 (见 cases.py)。每例一个证据文件, 已完成的跳过, 不覆盖。
 打分在 score.py 里做, 两组共用。
+
+--production-context: 每例当时的 AI 作息状态、话题栈、回复延迟 (从生产 Trace 的主回复 prompt
+解析)。不给时这三项都是空, 「你的隐性状态约束」「话题上下文」「回复时机说明」三段不会渲染 ——
+而生产里前两段几乎每轮都有。给了就按生产原值交给真实的拼装代码, 段落是否出现仍由当前代码判断
+(例如延迟不到 20 秒的「回复时机说明」照样不渲染)。
 """
 from __future__ import annotations
 
@@ -31,14 +36,18 @@ JUDGING_INSTRUCTION = ("审核重放的生产对话，不续写。只评判case.
                        "输出JSON {\"pass\":true或false,\"reason\":\"简短理由\"}。\n")
 
 
-def incident(case: dict) -> dict:
+def incident(case: dict, context: dict | None = None) -> dict:
     """用例 → 事故回放器 (run_incident_eval) 的输入。"""
+    reply_context = {"received_at": case["received_at"], "turn_message_ids": case["current_ids"]}
+    delay = (context or {}).get("delay")
+    if delay:  # 「回复时机说明」里的 "你在…（状态：…）" 取自收到消息时的状态
+        reply_context["received_status"] = {"activity": delay["activity"], "status": delay["status"]}
     return {
         "id": case["id"], "now": case["now"], "gap": 0, "history": [],
         "history_rows": case["history_rows"], "message": case["message"],
         "criterion": CRITERION, "memory": False, "route": "ordinary",
         "user_message_id": case["current_ids"][-1],
-        "reply_context": {"received_at": case["received_at"], "turn_message_ids": case["current_ids"]},
+        "reply_context": reply_context,
     }
 
 
@@ -76,7 +85,19 @@ def shard(cases: list[dict], spec: str) -> list[dict]:
     return [c for i, c in enumerate(cases) if i % total == index]
 
 
-def force_main(snapshot: dict, original_context):
+def apply_production_context(patches, chat_module, context: dict) -> None:
+    """把这一例当时的作息状态 / 话题栈 / 延迟交给真实拼装代码 (回放器默认三者都为空)。"""
+    if context.get("ai_status"):
+        chat_module.fetch_parallel_context.return_value.ai_status = dict(context["ai_status"])
+    if context.get("topic"):
+        patches.setattr(chat_module, "push_topic", AsyncMock(return_value=dict(context["topic"])))
+    delay = context.get("delay")
+    if delay:
+        patches.setattr(chat_module, "actual_delay_seconds", lambda _reply_context: delay["seconds"])
+        patches.setattr(chat_module, "explain_delay_reason", AsyncMock(return_value=delay["reason_text"]))
+
+
+def force_main(snapshot: dict, original_context, contexts: dict | None = None):
     """与 context_embedding 相同: 按快照还原提示词启用状态, 用真实的意图上下文, 主回复强制走主 prompt。"""
     def hook(patches, chat_module, io, current_case):
         from app.services.prompting import store
@@ -84,6 +105,8 @@ def force_main(snapshot: dict, original_context):
             side_effect=lambda **kw: SimpleNamespace(isEnabled=snapshot[kw["where"]["key"]]["is_enabled"])
             if kw["where"]["key"] in snapshot else None))
         patches.setattr(chat_module, "_fetch_intent_context", original_context)
+        if contexts is not None:
+            apply_production_context(patches, chat_module, contexts[current_case["id"]])
         generate = chat_module._generate_reply
 
         async def force_route(**kwargs):
@@ -119,6 +142,9 @@ async def run(args) -> dict:
         raise ValueError("Run each arm from an isolated checkout without .env")
     cases = shard(json.loads(args.cases.read_text()), args.shard)
     snapshot = {p["key"]: p for p in json.loads(args.prompt_snapshot.read_text())}
+    contexts = json.loads(args.production_context.read_text()) if args.production_context else None
+    if contexts is not None and (missing := [c["id"] for c in cases if c["id"] not in contexts]):
+        raise ValueError(f"Production context missing for {len(missing)} cases, e.g. {missing[0]}")
     out = args.output_dir / args.arm
     out.mkdir(parents=True, exist_ok=True)
     summary = {"arm": args.arm, "source_root": str(source_root), "shard": args.shard, "done": 0, "failed": []}
@@ -137,10 +163,11 @@ async def run(args) -> dict:
         runner = SimpleNamespace(
             source_root=source_root, prompt_snapshot=args.prompt_snapshot, model=MODEL,
             judge_model=JUDGE_MODEL, judging_instruction=JUDGING_INSTRUCTION, guard_model="qwen3.5-flash",
-            samples=args.samples, output=detail, fixture_hook=force_main(snapshot, original_context),
+            samples=args.samples, output=detail,
+            fixture_hook=force_main(snapshot, original_context, contexts),
         )
         try:
-            await run_incident(runner, [incident(case)])
+            await run_incident(runner, [incident(case, (contexts or {}).get(case["id"]))])
             summary["done"] += 1
         except Exception as exc:  # 一例失败不拖累其余; 失败原因留在证据文件和汇总里
             summary["failed"].append({"case": case["id"], "error": type(exc).__name__})
@@ -153,6 +180,8 @@ if __name__ == "__main__":
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--prompt-snapshot", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--production-context", type=Path,
+                        help="每例当时的作息状态/话题栈/延迟 (JSON, 键为用例编号); 见模块说明")
     parser.add_argument("--samples", type=int, default=5, choices=range(1, 11))
     parser.add_argument("--shard", default="0/1")
     parser.add_argument("--max-cost-cny", type=float, default=5.0,
