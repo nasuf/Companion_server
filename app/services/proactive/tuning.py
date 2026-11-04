@@ -200,6 +200,10 @@ PARAMS: tuple[Param, ...] = (
           True, "bool"),
     Param("return_line_min_gap_minutes", "b_mode", "回归承接的间隔阈值",
           "话题没聊完、本次会话没追问过时，用户隔多久回来，AI 先说一句承接时间差的话", 10, "minutes", 1, 180),
+    Param("transition_max_per_session", "b_mode", "单次会话最多跳话题过渡次数",
+          "话题没聊完、用户换了新话题时，AI 先轻提一句旧话题；同一次会话里最多说几次（设为 0 即不说）。"
+          "不限次数时同一个用户几天里听到十来次同样的过渡，像复读",
+          1, "count", 0, 3),
 
     Param("active_hour_start", "general", "主动时段开始",
           "每天几点开始允许发主动消息（北京时间）", 8, "hour", 0, 23),
