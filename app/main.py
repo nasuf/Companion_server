@@ -321,10 +321,7 @@ from app.api.admin.activities import router as admin_activities_router
 from app.api.admin.achievement_settings import router as admin_achievement_settings_router
 from app.api.admin.last_wills import router as admin_last_wills_router
 from app.api.admin.proactive import router as admin_proactive_router
-from app.api.admin.tts import (
-    public_router as tts_enrollment_public_router,
-    router as admin_tts_router,
-)
+from app.api.admin.tts import router as admin_tts_router
 
 app.include_router(quality_ci_router)
 app.include_router(health_router)
@@ -399,4 +396,3 @@ app.include_router(admin_achievement_settings_router)
 app.include_router(admin_last_wills_router)
 app.include_router(admin_proactive_router)
 app.include_router(admin_tts_router)
-app.include_router(tts_enrollment_public_router)

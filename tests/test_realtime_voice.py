@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import AsyncMock
 
 from app.services.realtime_voice.bridge import VoiceBridge
 from app.services.realtime_voice.instructions import (
@@ -484,11 +485,12 @@ class TestVoiceEndpoint:
         assert "schedule_end_of_call_extraction" in source
         assert "process_memory_pipeline" not in source
 
-    def test_endpoint_ignores_dashscope_tts_voice(self):
-        """agent.ttsVoiceId is a DashScope clone id that StepFun rejects."""
+    def test_endpoint_resolves_the_shared_agent_voice(self):
+        """Calls use the agent's library voice, with the official gender voice as fallback."""
         source = _VOICE.read_text()
         assert 'getattr(conv.agent, "ttsVoiceId"' not in source
-        assert "voice_for_gender(" in source
+        assert "ensure_agent_voice(conv.agent)" in source
+        assert "fallback_voice=fallback_voice" in source
 
     def test_default_voices_are_realtime_compatible(self):
         """soft-spoken-gentleman is TTS-only and fails session.update."""
@@ -545,11 +547,15 @@ class _FakeProviderConnection:
 
 
 @pytest.mark.parametrize(
-    ("gender", "expected"),
-    [("male", "wenrounansheng"), ("female", "elegantgentle-female")],
+    ("gender", "expected", "lookup"),
+    [
+        ("male", "wenrounansheng", "voice-tone-male"),
+        ("female", "elegantgentle-female", "voice-tone-female"),
+        ("female", "elegantgentle-female", None),
+    ],
 )
-async def test_call_uses_official_voice_and_reports_rejection(monkeypatch, gender, expected):
-    """A DashScope ttsVoiceId must never reach StepFun; rejection reaches the client."""
+async def test_call_uses_agent_voice_with_official_fallback(monkeypatch, gender, expected, lookup):
+    """The agent's library voice is tried first; rejection reaches the client."""
     from app.api.realtime import voice as endpoint
     from app.services.realtime_voice.provider import StepfunSetupError
 
@@ -582,9 +588,15 @@ async def test_call_uses_official_voice_and_reports_rejection(monkeypatch, gende
     async def release_call(conversation_id, token):
         released.append((conversation_id, token))
 
-    async def configure_session(sock, *, voice, **_):
+    async def configure_session(sock, *, voice, fallback_voice, **_):
         seen["voice"] = voice
+        seen["fallback"] = fallback_voice
         raise StepfunSetupError(f"voice {voice} is not valid")
+
+    async def ensure_agent_voice(agent):
+        if lookup is None:
+            raise RuntimeError("database unavailable")
+        return lookup
 
     monkeypatch.setattr(endpoint, "is_redis_healthy", lambda: True)
     monkeypatch.setattr(endpoint, "offered_ticket", lambda _: "ticket")
@@ -602,12 +614,18 @@ async def test_call_uses_official_voice_and_reports_rejection(monkeypatch, gende
     monkeypatch.setattr(endpoint, "load_call_context", load_call_context)
     monkeypatch.setattr(endpoint, "connect_stepfun", lambda *_: _FakeProviderConnection())
     monkeypatch.setattr(endpoint, "configure_session", configure_session)
+    monkeypatch.setattr(endpoint, "ensure_agent_voice", ensure_agent_voice)
+    monkeypatch.setattr(
+        endpoint, "get_effective_realtime_model",
+        AsyncMock(return_value="stepaudio-2.5-realtime"),
+    )
 
     ws = _FakeVoiceSocket()
     await endpoint.voice_websocket(ws, "conv-1")
 
     assert ws.accepted
-    assert seen["voice"] == expected
+    assert seen["voice"] == (lookup or expected)
+    assert seen["fallback"] == expected
     assert ws.sent == [{"type": "error", "code": "provider_unavailable", "message": "实时语音暂时连不上"}]
     assert ws.closed_with == 1011
     assert released == [("conv-1", "lock-token")]
@@ -668,3 +686,257 @@ async def test_search_and_rank_skip_hidden_rows(monkeypatch):
 
     assert find_many.call_args.kwargs["where"]["hiddenFromTimeline"] is False
     assert "NOT m2.hidden_from_timeline" in query_raw.call_args.args[0]
+
+
+class _ScriptedProvider:
+    """StepfunSocket stand-in that replays provider events per session.update."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.sent: list[dict] = []
+        self.inbox = [{"type": "session.created"}]
+
+    async def send_event(self, event):
+        self.sent.append(event)
+        if event.get("type") == "session.update":
+            self.inbox.append(self.replies.pop(0))
+
+    async def recv_event(self):
+        if not self.inbox:
+            await asyncio.sleep(3600)
+        return self.inbox.pop(0)
+
+
+_REJECTED = {"type": "error", "error": {"message": "voice voice-tone-x is not valid"}}
+
+
+async def test_configure_session_retries_a_rejected_voice_once():
+    from app.services.realtime_voice.provider import configure_session
+
+    sock = _ScriptedProvider([_REJECTED, {"type": "session.updated"}])
+    voice = await configure_session(
+        sock, instructions="hi", voice="voice-tone-x", history=[], fallback_voice="wenrounansheng",
+    )
+    assert voice == "wenrounansheng"
+    assert [e["session"]["voice"] for e in sock.sent] == ["voice-tone-x", "wenrounansheng"]
+
+
+async def test_configure_session_keeps_an_accepted_voice():
+    from app.services.realtime_voice.provider import configure_session
+
+    sock = _ScriptedProvider([{"type": "session.updated"}])
+    voice = await configure_session(
+        sock, instructions="hi", voice="voice-tone-x", history=[], fallback_voice="wenrounansheng",
+    )
+    assert voice == "voice-tone-x"
+    assert len(sock.sent) == 1
+
+
+@pytest.mark.parametrize("fallback", [None, "voice-tone-x"])
+async def test_configure_session_without_a_distinct_fallback_raises(fallback):
+    from app.services.realtime_voice.provider import StepfunSetupError, configure_session
+
+    sock = _ScriptedProvider([_REJECTED])
+    with pytest.raises(StepfunSetupError, match="not valid"):
+        await configure_session(
+            sock, instructions="hi", voice="voice-tone-x", history=[], fallback_voice=fallback,
+        )
+
+
+async def test_bridge_sums_provider_usage_across_responses():
+    sent: list[dict] = []
+
+    async def send(event):
+        sent.append(event)
+
+    async def noop(*_, **__):
+        return None
+
+    bridge = VoiceBridge(
+        send_provider=send, send_client=send, retrieve_memories=noop,
+        save_user_line=noop, save_assistant_line=noop,
+    )
+    for usage in (
+        {"input_tokens": 31, "output_tokens": 3, "input_token_details": {"cached_tokens": 10}},
+        {"input_tokens": 50, "output_tokens": 7},
+        None,
+    ):
+        response = {"status": "completed", "output": []}
+        if usage is not None:
+            response["usage"] = usage
+        await bridge.feed_provider_event({"type": "response.done", "response": response})
+
+    assert bridge.usage == {"input": 81, "output": 10, "cached_input": 10, "responses": 2}
+
+
+async def test_call_usage_is_written_as_one_realtime_row(monkeypatch):
+    from app.api.realtime import voice as endpoint
+    from app.services.llm import usage_repo
+
+    written: list[dict] = []
+
+    async def persist(**kwargs):
+        written.append(kwargs)
+
+    monkeypatch.setattr(usage_repo, "persist_usage", persist)
+    await endpoint._record_call_usage(
+        {"input": 81, "output": 10, "cached_input": 10, "responses": 2},
+        model="stepaudio-2.5-realtime", conversation_id="conv-1", agent_id="a1", user_id="u1",
+    )
+    await endpoint._record_call_usage(
+        {"input": 0, "output": 0, "cached_input": 0, "responses": 0},
+        model="stepaudio-2.5-realtime", conversation_id="conv-1", agent_id="a1", user_id="u1",
+    )
+
+    assert len(written) == 1
+    row = written[0]
+    assert row["scope"] == "realtime_voice"
+    assert row["summary"]["tokens_by_model"] == {
+        "stepaudio-2.5-realtime": {"input": 81, "output": 10, "cached_input": 10},
+    }
+    assert row["summary"]["call_count"] == 2
+
+
+def test_realtime_usage_is_its_own_cost_category():
+    from app.services.effect import costs
+
+    assert "realtime" in costs.CATEGORIES
+    assert costs._SCOPE_CATEGORY["realtime_voice"] == "realtime"
+
+
+def test_realtime_model_resolves_from_system_config(monkeypatch):
+    from app.services import runtime_config
+
+    monkeypatch.setattr(runtime_config, "_current_snapshot", runtime_config.ContextVar("s", default=None))
+    monkeypatch.setattr(runtime_config, "_CACHE_LOADED", True)
+    monkeypatch.setattr(runtime_config, "_AGENT_CACHE", {})
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {})
+    assert runtime_config.resolve_config_sync(agent_id=None).realtime_model == "stepaudio-2.5-realtime"
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realtimeModel": "stepaudio-3-realtime"})
+    assert runtime_config.resolve_config_sync(agent_id=None).realtime_model == "stepaudio-3-realtime"
+
+
+def test_realtime_is_a_stepfun_model_kind():
+    from app.api.admin import model_registry
+
+    model_registry._validate_model_metadata("realtime", "per_million_tokens", provider="stepfun")
+    with pytest.raises(Exception) as exc:
+        model_registry._validate_model_metadata("realtime", "per_10k_characters", provider="stepfun")
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
+    """A call that reaches the pumps meters StepFun usage once at hang-up."""
+    from app.api.realtime import voice as endpoint
+
+    agent = SimpleNamespace(id="agent-1", userId="user-1", status="active", gender="female")
+    conv = SimpleNamespace(id="conv-1", userId="user-1", isDeleted=False, agent=agent, workspaceId=None)
+    principal = SimpleNamespace(role="user", user_id="user-1", expires_at=float("inf"))
+    metered: list[dict] = []
+    extracted: list[dict] = []
+
+    class FakeBridge:
+        transcript_pairs = [{"role": "user", "text": "hi"}]
+        usage = {"input": 5, "output": 2, "cached_input": 0, "responses": 1}
+
+        async def aclose(self):
+            pass
+
+    async def ok(*_, **__):
+        return True
+
+    async def none(*_, **__):
+        return None
+
+    async def find_unique(**_):
+        return conv
+
+    async def principal_for(*_):
+        return principal
+
+    async def context(**_):
+        return SimpleNamespace(name="阿宁"), "instructions", []
+
+    async def lock(_):
+        return "lock-token"
+
+    async def configure(sock, *, voice, **_):
+        return voice
+
+    async def record(usage, **kwargs):
+        metered.append({"usage": usage, **kwargs})
+
+    monkeypatch.setattr(endpoint, "is_redis_healthy", lambda: True)
+    monkeypatch.setattr(endpoint, "offered_ticket", lambda _: "ticket")
+    monkeypatch.setattr(endpoint, "origin_allowed", lambda _: True)
+    monkeypatch.setattr(endpoint, "consume_ticket", principal_for)
+    monkeypatch.setattr(endpoint.db, "conversation", SimpleNamespace(find_unique=find_unique), raising=False)
+    monkeypatch.setattr(endpoint, "get_patience", ok)
+    monkeypatch.setattr(endpoint, "get_patience_zone", lambda _: "normal")
+    monkeypatch.setattr(endpoint, "_accounts_current", ok)
+    monkeypatch.setattr(endpoint.settings, "stepfun_api_key", "sk-test")
+    monkeypatch.setattr(endpoint, "acquire_call", lock)
+    monkeypatch.setattr(endpoint, "release_call", none)
+    monkeypatch.setattr(endpoint, "load_call_context", context)
+    monkeypatch.setattr(endpoint, "ensure_agent_voice", AsyncMock(return_value="voice-tone-1"))
+    monkeypatch.setattr(endpoint, "get_effective_realtime_model", AsyncMock(return_value="stepaudio-2.5-realtime"))
+    monkeypatch.setattr(endpoint, "connect_stepfun", lambda *_: _FakeProviderConnection())
+    monkeypatch.setattr(endpoint, "configure_session", configure)
+    monkeypatch.setattr(endpoint, "_bridge", lambda **_: FakeBridge())
+    monkeypatch.setattr(endpoint, "schedule_user_present", lambda _: None)
+    monkeypatch.setattr(endpoint, "_run_pumps", none)
+    monkeypatch.setattr(endpoint, "_record_call_usage", record)
+    monkeypatch.setattr(endpoint, "schedule_end_of_call_extraction", lambda **kw: extracted.append(kw))
+
+    ws = _FakeVoiceSocket()
+    await endpoint.voice_websocket(ws, "conv-1")
+
+    assert ws.sent[0]["type"] == "ready" and ws.sent[0]["voice"] == "voice-tone-1"
+    assert metered == [{
+        "usage": FakeBridge.usage, "model": "stepaudio-2.5-realtime",
+        "conversation_id": "conv-1", "agent_id": "agent-1", "user_id": "user-1",
+    }]
+    assert extracted == [{"user_id": "user-1", "workspace_id": None, "conversation_id": "conv-1"}]
+
+
+async def test_call_usage_metering_failure_is_swallowed(monkeypatch, caplog):
+    from app.api.realtime import voice as endpoint
+    from app.services.llm import usage_repo
+
+    monkeypatch.setattr(usage_repo, "persist_usage", AsyncMock(side_effect=RuntimeError("db down")))
+    await endpoint._record_call_usage(
+        {"input": 1, "output": 1, "cached_input": 0, "responses": 1},
+        model="m", conversation_id="conv-1", agent_id="a1", user_id="u1",
+    )
+    assert "usage metering failed" in caplog.text
+
+
+async def test_configure_session_seeds_history_and_returns_voice():
+    from app.services.realtime_voice.provider import configure_session
+
+    sock = _ScriptedProvider([{"type": "session.updated"}])
+    original_send = sock.send_event
+
+    async def send(event):
+        await original_send(event)
+        if event.get("type") == "conversation.item.create":
+            sock.inbox.append({"type": "conversation.item.created", "item": {"id": event["item"]["id"]}})
+
+    sock.send_event = send
+    voice = await configure_session(
+        sock, instructions="hi", voice="voice-tone-x",
+        history=[{"role": "user", "text": "你好"}], fallback_voice="wenrounansheng",
+    )
+    assert voice == "voice-tone-x"
+    assert [e["type"] for e in sock.sent] == ["session.update", "conversation.item.create"]
+
+
+async def test_effective_realtime_model_reads_runtime_config(monkeypatch):
+    from app.services import runtime_config
+
+    monkeypatch.setattr(runtime_config, "ensure_loaded", AsyncMock())
+    monkeypatch.setattr(runtime_config, "_current_snapshot", runtime_config.ContextVar("s", default=None))
+    monkeypatch.setattr(runtime_config, "_CACHE_LOADED", True)
+    monkeypatch.setattr(runtime_config, "_AGENT_CACHE", {})
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realtimeModel": "stepaudio-3-realtime"})
+    assert await runtime_config.get_effective_realtime_model() == "stepaudio-3-realtime"

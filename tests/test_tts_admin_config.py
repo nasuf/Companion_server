@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import struct
 import wave
 from types import SimpleNamespace
@@ -132,10 +133,25 @@ async def test_model_registry_exposes_multimodal_capabilities(monkeypatch):
 
     result = await model_registry.list_models()
 
-    assert set(result["model_kinds"]) == {"llm", "vision", "asr", "tts"}
+    assert set(result["model_kinds"]) == {"llm", "vision", "asr", "tts", "realtime"}
+    assert result["model_kind_providers"]["realtime"] == ["stepfun"]
     assert result["model_kind_providers"]["vision"] == ["ark"]
     assert result["model_kind_providers"]["asr"] == ["dashscope"]
-    assert result["model_kind_providers"]["tts"] == ["dashscope"]
+    assert result["model_kind_providers"]["tts"] == ["stepfun"]
+    stepfun = next(p for p in result["providers"] if p["id"] == "stepfun")
+    assert stepfun["credential_env"] == "STEPFUN_API_KEY"
+    assert stepfun["local"] is False
+
+
+def test_stepfun_is_a_tts_provider_but_never_an_llm_provider():
+    from app.services.llm.providers import provider_ids
+
+    model_registry._validate_model_metadata("tts", "per_10k_characters", provider="stepfun")
+    model_registry._validate_provider("stepfun")
+    assert "stepfun" not in provider_ids(admin_only=True)
+    with pytest.raises(Exception) as exc:
+        model_registry._validate_model_metadata("tts", "per_10k_characters", provider="dashscope")
+    assert getattr(exc.value, "status_code", None) == 400
 
 
 def test_agent_tts_payload_rejects_provider_parameter_overflow():
@@ -143,164 +159,84 @@ def test_agent_tts_payload_rejects_provider_parameter_overflow():
         tts.AgentTtsPayload(
             voice_profile_id="voice-1",
             rate=2.1,
-            pitch=1,
             volume=50,
-            seed=0,
             emotion_scale=1,
         )
     with pytest.raises(ValidationError):
         tts.AgentTtsPayload(
             voice_profile_id="voice-1",
             rate=1,
-            pitch=1,
             volume=101,
-            seed=0,
             emotion_scale=1,
         )
+    # Older admin clients still send DashScope-only fields; they are ignored.
+    legacy = tts.AgentTtsPayload(
+        voice_profile_id="voice-1", rate=1, volume=50, emotion_scale=1,
+        pitch=0.9, seed=42,
+    )
+    assert not hasattr(legacy, "pitch") and not hasattr(legacy, "seed")
 
 
-def test_instruction_uses_dashscope_weighted_limit():
+def test_instruction_uses_weighted_limit():
     assert tts._validate_instruction("自然一点") == "自然一点"
     with pytest.raises(Exception) as exc:
         tts._validate_instruction("真" * 51)
     assert getattr(exc.value, "status_code", None) == 422
 
 
-def test_signed_enrollment_url_expires_and_rejects_tampering(monkeypatch):
-    monkeypatch.setattr(voice_enrollment.settings, "jwt_secret", "x" * 40)
-    monkeypatch.setattr(
-        voice_enrollment.settings,
-        "tts_voice_enrollment_public_base_url",
-        "https://banshengcomp.com/api",
-    )
-    url = voice_enrollment.signed_enrollment_url(
-        storage_key="tts_enroll_sample.wav",
-        request_base_url="http://localhost:8000",
-    )
-    query = url.split("?", 1)[1]
-    values = dict(part.split("=", 1) for part in query.split("&"))
-    expires = int(values["expires"])
-    signature = values["signature"]
-
-    assert url.startswith(
-        "https://banshengcomp.com/api/admin-api/tts/enrollment-audio/",
-    )
-    assert voice_enrollment.verify_signed_enrollment_url(
-        "tts_enroll_sample.wav",
-        expires,
-        signature,
-    )
-    assert not voice_enrollment.verify_signed_enrollment_url(
-        "tts_enroll_other.wav",
-        expires,
-        signature,
-    )
-
-
-def test_signed_enrollment_url_restores_public_https_behind_proxy(monkeypatch):
-    monkeypatch.setattr(voice_enrollment.settings, "jwt_secret", "x" * 40)
-    monkeypatch.setattr(voice_enrollment.settings, "app_env", "production")
-    monkeypatch.setattr(
-        voice_enrollment.settings,
-        "tts_voice_enrollment_public_base_url",
-        "",
-    )
-
-    url = voice_enrollment.signed_enrollment_url(
-        storage_key="tts_enroll_sample.wav",
-        request_base_url="http://api.example.com/",
-    )
-
-    assert url.startswith(
-        "https://api.example.com/admin-api/tts/enrollment-audio/",
-    )
-
-
 @pytest.mark.asyncio
-async def test_enrollment_audio_deletion_is_delayed_for_provider_refetch(
-    monkeypatch,
-):
-    deleted: list[str] = []
-    sleep = AsyncMock()
-    monkeypatch.setattr(voice_enrollment.asyncio, "sleep", sleep)
-    monkeypatch.setattr(
-        voice_enrollment,
-        "delete_enrollment_audio",
-        deleted.append,
-    )
-
-    await voice_enrollment.delete_enrollment_audio_later(
-        "tts_enroll_sample.m4a",
-    )
-
-    sleep.assert_awaited_once()
-    assert deleted == ["tts_enroll_sample.m4a"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("seconds", [5, 6])
-async def test_enrollment_audio_is_normalized_to_canonical_wav(
-    monkeypatch,
-    tmp_path,
-    seconds,
+@pytest.mark.parametrize("seconds,kept", [(5, 5), (8, 8), (12, 10), (30, 10)])
+async def test_enrollment_audio_is_normalized_and_capped_at_ten_seconds(
+    monkeypatch, seconds, kept,
 ):
     pcm = struct.pack("<h", 5000) * (24_000 * seconds)
     monkeypatch.setattr(
-        voice_enrollment,
-        "_decode_enrollment_pcm",
-        AsyncMock(return_value=pcm),
-    )
-    monkeypatch.setattr(
-        voice_enrollment.media_storage,
-        "storage_path",
-        lambda key: tmp_path / key,
+        voice_enrollment, "_decode_enrollment_pcm", AsyncMock(return_value=pcm),
     )
 
-    storage_key, mime = await voice_enrollment.save_enrollment_audio(
-        blob=b"source-m4a",
-        mime="audio/mp4",
-        filename="voice.m4a",
+    audio = await voice_enrollment.prepare_enrollment_audio(
+        blob=b"source-m4a", mime="audio/mp4", filename="voice.m4a",
     )
 
-    assert storage_key.endswith(".wav")
-    assert mime == "audio/wav"
-    with wave.open(str(tmp_path / storage_key), "rb") as audio:
-        assert audio.getframerate() == 24_000
-        assert audio.getnchannels() == 1
-        assert audio.getsampwidth() == 2
-        assert audio.getnframes() == 24_000 * seconds
+    with wave.open(io.BytesIO(audio), "rb") as output:
+        assert output.getframerate() == 24_000
+        assert output.getnchannels() == 1
+        assert output.getsampwidth() == 2
+        assert output.getnframes() == 24_000 * kept
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("total_ms", "active_ms", "error"),
-    [(4_000, 4_000, "5–30 秒"), (10_000, 4_999, "至少 5 秒有效人声")],
+    ("seconds", "active_ms", "error"),
+    [(4, 4_000, "5–10 秒"), (31, 31_000, "5–10 秒"), (8, 2_999, "人声太少")],
 )
-async def test_enrollment_rejects_short_or_mostly_silent_samples(
-    monkeypatch, tmp_path, total_ms, active_ms, error,
+async def test_enrollment_rejects_bad_length_or_mostly_silent_samples(
+    monkeypatch, seconds, active_ms, error,
 ):
     monkeypatch.setattr(
         voice_enrollment,
         "_decode_enrollment_pcm",
-        AsyncMock(return_value=b"decoded-pcm"),
+        AsyncMock(return_value=b"\x00\x00" * (24_000 * seconds)),
     )
     monkeypatch.setattr(
         voice_enrollment,
         "analyze_pcm16_activity",
-        lambda *args, **kwargs: SimpleNamespace(
-            total_milliseconds=total_ms, active_milliseconds=active_ms,
-        ),
-    )
-    monkeypatch.setattr(
-        voice_enrollment.media_storage, "storage_path", lambda key: tmp_path / key,
+        lambda *args, **kwargs: SimpleNamespace(active_milliseconds=active_ms),
     )
 
     with pytest.raises(ValueError, match=error):
-        await voice_enrollment.save_enrollment_audio(
+        await voice_enrollment.prepare_enrollment_audio(
             blob=b"source-m4a", mime="audio/mp4", filename="voice.m4a",
         )
 
-    assert list(tmp_path.iterdir()) == []
+
+@pytest.mark.asyncio
+async def test_enrollment_rejects_empty_or_oversized_uploads(monkeypatch):
+    with pytest.raises(ValueError, match="empty"):
+        await voice_enrollment.prepare_enrollment_audio(blob=b"", mime="audio/mp4", filename="a.m4a")
+    monkeypatch.setattr(voice_enrollment.settings, "tts_voice_enrollment_max_bytes", 4)
+    with pytest.raises(ValueError, match="too large"):
+        await voice_enrollment.prepare_enrollment_audio(blob=b"12345", mime="audio/mp4", filename="a.m4a")
 
 
 @pytest.mark.asyncio
@@ -311,8 +247,9 @@ async def test_agent_tts_update_persists_every_runtime_parameter(monkeypatch):
                 [
                     {
                         "id": "profile-1",
-                        "voice_id": "longanlingxin",
-                        "model": "qwen-audio-3.0-tts-plus",
+                        "voice_id": "elegantgentle-female",
+                        "provider": "stepfun",
+                        "model": "stepaudio-2.5-tts",
                         "enabled": True,
                     }
                 ],
@@ -322,11 +259,9 @@ async def test_agent_tts_update_persists_every_runtime_parameter(monkeypatch):
                         "name": "小伴",
                         "gender": "female",
                         "user_id": "user-1",
-                        "tts_voice_id": "longanlingxin",
+                        "tts_voice_id": "elegantgentle-female",
                         "tts_rate": 1.2,
-                        "tts_pitch": 0.9,
                         "tts_volume": 60,
-                        "tts_seed": 42,
                         "tts_instruction": "自然一点",
                         "tts_auto_emotion": False,
                         "tts_emotion_scale": 0.8,
@@ -344,9 +279,7 @@ async def test_agent_tts_update_persists_every_runtime_parameter(monkeypatch):
         tts.AgentTtsPayload(
             voice_profile_id="profile-1",
             rate=1.2,
-            pitch=0.9,
             volume=60,
-            seed=42,
             instruction="自然一点",
             auto_emotion=False,
             emotion_scale=0.8,
@@ -354,15 +287,46 @@ async def test_agent_tts_update_persists_every_runtime_parameter(monkeypatch):
     )
 
     update_args = fake_db.execute_raw.await_args.args
-    assert update_args[1:9] == (
-        "longanlingxin",
+    assert update_args[1:8] == (
+        "elegantgentle-female",
         1.2,
-        0.9,
         60,
-        42,
         "自然一点",
         False,
         0.8,
+        "agent-1",
     )
+    assert "tts_pitch" not in update_args[0] and "tts_seed" not in update_args[0]
     assert result["voice_profile_id"] == "profile-1"
     assert result["auto_emotion"] is False
+
+
+@pytest.mark.asyncio
+async def test_voice_profile_from_retired_provider_is_rejected(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(tts, "db", SimpleNamespace(query_raw=AsyncMock(return_value=[{
+        "id": "old", "provider": "dashscope", "model": "qwen-audio-3.0-tts-plus",
+        "voice_id": "qwen-voice", "enabled": True,
+    }])))
+    with pytest.raises(HTTPException) as exc:
+        await tts._voice_profile("old", require_enabled=True)
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_removing_a_clone_only_deletes_the_library_row(monkeypatch):
+    database = SimpleNamespace(
+        query_raw=AsyncMock(side_effect=[
+            [{"id": "p1", "provider": "stepfun", "model": "stepaudio-2.5-tts",
+              "voice_id": "voice-tone-1", "source": "cloned", "enabled": False}],
+            [{"count": 0}],
+        ]),
+        execute_raw=AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(tts, "db", database)
+
+    assert await tts.delete_voice_profile("p1") == {"status": "ok"}
+    database.execute_raw.assert_awaited_once_with(
+        "DELETE FROM tts_voice_profiles WHERE id = $1", "p1",
+    )

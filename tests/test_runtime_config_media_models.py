@@ -39,7 +39,7 @@ def test_resolve_falls_back_to_env_when_unset(loaded_caches):
     resolved = runtime_config.resolve_config_sync(agent_id=None)
     assert resolved.vision_model == settings.doubao_vision_model
     assert resolved.asr_model == settings.dashscope_asr_model
-    assert resolved.tts_model == settings.dashscope_tts_model
+    assert resolved.tts_model == settings.stepfun_tts_model == "stepaudio-2.5-tts"
     assert resolved.tts_output_probability == settings.tts_output_probability
 
 
@@ -149,6 +149,9 @@ async def test_options_group_multimodal_models_by_kind_and_provider(monkeypatch)
             identifier="fun-asr", provider="dashscope", modelKind="asr",
         ),
         SimpleNamespace(
+            identifier="stepaudio-2.5-tts", provider="stepfun", modelKind="tts",
+        ),
+        SimpleNamespace(
             identifier="qwen-tts", provider="dashscope", modelKind="tts",
         ),
     ]
@@ -160,7 +163,7 @@ async def test_options_group_multimodal_models_by_kind_and_provider(monkeypatch)
     )
     monkeypatch.setattr(api_rc.settings, "ark_api_key", "ark-key")
     monkeypatch.setattr(api_rc.settings, "dashscope_api_key", "dash-key")
-    monkeypatch.setattr(api_rc.settings, "dashscope_tts_api_key", "")
+    monkeypatch.setattr(api_rc.settings, "stepfun_api_key", "")
 
     options = await api_rc.list_options()
 
@@ -169,13 +172,14 @@ async def test_options_group_multimodal_models_by_kind_and_provider(monkeypatch)
         "doubao-vision",
     ]
     assert options["media"]["asr"]["by_provider"]["dashscope"] == ["fun-asr"]
-    assert options["media"]["tts"]["by_provider"]["dashscope"] == ["qwen-tts"]
-    assert options["tts"] == ["qwen-tts"]
+    # Retired DashScope TTS rows are no longer selectable.
+    assert options["media"]["tts"]["by_provider"] == {"stepfun": ["stepaudio-2.5-tts"]}
+    assert options["tts"] == ["stepaudio-2.5-tts"]
     assert options["media"]["vision"]["providers"][0]["configured"] is True
     assert options["media"]["tts"]["providers"][0]["configured"] is False
     assert (
         options["media"]["tts"]["providers"][0]["credential_env"]
-        == "DASHSCOPE_TTS_API_KEY"
+        == "STEPFUN_API_KEY"
     )
 
 
@@ -327,13 +331,52 @@ async def test_put_system_config_persists_media_fields(monkeypatch):
         api_rc.db, "systemconfig",
         SimpleNamespace(upsert=fake_upsert), raising=False,
     )
+    execute_raw = AsyncMock(return_value=1)
+    monkeypatch.setattr(api_rc.db, "execute_raw", execute_raw, raising=False)
+    monkeypatch.setattr(
+        api_rc.db, "query_raw",
+        AsyncMock(return_value=[{"realtime_model": "stepaudio-2.5-realtime"}]), raising=False,
+    )
 
     resp = await api_rc.put_system_config(
         ConfigPayload(vision_model="doubao-v3", asr_model="fun-asr-v3"),
     )
+    execute_raw.assert_not_awaited()
+    assert resp["config"]["realtime_model"] == "stepaudio-2.5-realtime"
     assert captured["data"]["update"]["visionModel"] == "doubao-v3"
     assert captured["data"]["update"]["asrModel"] == "fun-asr-v3"
     assert resp["config"]["vision_model"] == "doubao-v3"
     assert resp["config"]["asr_model"] == "fun-asr-v3"
     assert "vision_model" in resp["resolved"]
     assert "asr_model" in resp["resolved"]
+
+
+@pytest.mark.asyncio
+async def test_put_system_config_writes_realtime_model_through_sql(monkeypatch):
+    from app.api.admin import runtime_config as api_rc
+
+    upsert = AsyncMock(return_value=SimpleNamespace(
+        onlineModel=True, remoteProvider=None, remoteChatProvider=None,
+        remoteSmallProvider=None, localChatModel=None, localSmallModel=None,
+        remoteChatModel=None, remoteSmallModel=None,
+    ))
+    execute_raw = AsyncMock(return_value=1)
+    monkeypatch.setattr(api_rc, "_validate_payload_models", AsyncMock())
+    monkeypatch.setattr(api_rc, "load_caches", AsyncMock())
+    monkeypatch.setattr(api_rc, "invalidate_caches", lambda: None)
+    monkeypatch.setattr(api_rc.db, "systemconfig", SimpleNamespace(upsert=upsert), raising=False)
+    monkeypatch.setattr(api_rc.db, "execute_raw", execute_raw, raising=False)
+    monkeypatch.setattr(
+        api_rc.db, "query_raw",
+        AsyncMock(return_value=[{"realtime_model": "stepaudio-3-realtime"}]), raising=False,
+    )
+
+    resp = await api_rc.put_system_config(ConfigPayload(realtime_model=" stepaudio-3-realtime "))
+
+    upsert.assert_awaited_once()
+    assert upsert.await_args.kwargs["data"] == {"create": {"id": 1}, "update": {}}
+    assert execute_raw.await_args.args[1] == "stepaudio-3-realtime"
+    assert resp["config"]["realtime_model"] == "stepaudio-3-realtime"
+
+    await api_rc.put_system_config(ConfigPayload(realtime_model=None))
+    assert execute_raw.await_args.args[1] is None

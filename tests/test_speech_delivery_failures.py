@@ -112,8 +112,8 @@ async def test_cancelled_attachment_creation_removes_file_after_metering(monkeyp
     speech = SimpleNamespace(audio=b"wav", mime="audio/wav", duration_milliseconds=500, request_id="request")
     metered = AsyncMock()
     deleted = []
-    monkeypatch.setattr(delivery, "resolve_agent_tts_model", AsyncMock(return_value=voices.QWEN_AUDIO_TTS_MODEL))
-    monkeypatch.setattr(delivery, "get_agent_tts_settings", AsyncMock(return_value=voices.AgentTtsSettings("voice", 1, 1, 50, 0, None, False, 1)))
+    monkeypatch.setattr(delivery, "resolve_agent_tts_model", AsyncMock(return_value=voices.TTS_MODEL))
+    monkeypatch.setattr(delivery, "get_agent_tts_settings", AsyncMock(return_value=voices.AgentTtsSettings("voice", 1, 50, None, False, 1)))
     monkeypatch.setattr(delivery, "synthesize_speech", AsyncMock(return_value=speech))
     monkeypatch.setattr(delivery, "record_tts_usage", metered)
     monkeypatch.setattr(delivery.media_storage, "save_audio_blob", lambda **kwargs: "voice.wav")

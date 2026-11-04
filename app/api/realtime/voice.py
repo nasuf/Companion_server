@@ -47,6 +47,8 @@ from app.services.realtime_voice.provider import (
     connect_stepfun,
     realtime_url,
 )
+from app.services.runtime_config import get_effective_realtime_model
+from app.services.speech_output.voices import ensure_agent_voice
 from app.services.runtime.ws_auth import (
     CHAT_PROTOCOL,
     TicketInvalid,
@@ -145,25 +147,31 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
             workspace_id=getattr(conv, "workspaceId", None),
             conversation_id=conversation_id,
         )
-        # agent.ttsVoiceId is a DashScope clone id; StepFun rejects it, so
-        # realtime calls always use a StepFun official voice by gender.
-        voice = voice_for_gender(
+        # Same StepFun voice as the agent's voice messages; the official
+        # gender voice covers a missing or rejected clone.
+        fallback_voice = voice_for_gender(
             getattr(conv.agent, "gender", None),
             female=settings.stepfun_realtime_voice_female,
             male=settings.stepfun_realtime_voice_male,
         )
-        logger.info("[realtime-voice] using gender-default voice=%s", voice)
-        model = settings.stepfun_realtime_model.strip() or "stepaudio-2.5-realtime"
+        try:
+            voice = await ensure_agent_voice(conv.agent)
+        except Exception:
+            logger.warning("[realtime-voice] agent voice lookup failed", exc_info=True)
+            voice = fallback_voice
+        logger.info("[realtime-voice] using voice=%s fallback=%s", voice, fallback_voice)
+        model = (await get_effective_realtime_model()) or "stepaudio-2.5-realtime"
         url = realtime_url(settings.stepfun_realtime_url, model)
 
         async with connect_stepfun(url, settings.stepfun_api_key.strip()) as raw:
             sock = StepfunSocket(raw)
-            await configure_session(
+            voice = await configure_session(
                 sock,
                 instructions=instructions,
                 voice=voice,
                 history=history,
                 silence_duration_ms=settings.stepfun_realtime_silence_ms,
+                fallback_voice=fallback_voice,
             )
             bridge = _bridge(
                 sock=sock,
@@ -204,6 +212,13 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 conversation_id[:8], n_pairs,
             )
             await bridge.aclose()
+            await _record_call_usage(
+                bridge.usage,
+                model=model,
+                conversation_id=conversation_id,
+                agent_id=str(conv.agent.id),
+                user_id=conv.userId,
+            )
             # End-of-call: trigger memory extraction via standard pipeline
             try:
                 schedule_end_of_call_extraction(
@@ -218,6 +233,54 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
             await release_call(conversation_id, token)
         except Exception:
             logger.warning("[realtime-voice] call lock release failed")
+
+
+async def _record_call_usage(
+    usage: dict[str, int],
+    *,
+    model: str,
+    conversation_id: str,
+    agent_id: str,
+    user_id: str,
+) -> None:
+    """One llm_usage row per call, priced from the model_registry realtime row."""
+    if not usage.get("responses"):
+        return
+    from app.services.llm.usage_repo import persist_usage
+
+    summary = {
+        "tokens_by_model": {model: {
+            "input": usage["input"],
+            "output": usage["output"],
+            "cached_input": usage["cached_input"],
+        }},
+        "input_tokens": usage["input"],
+        "output_tokens": usage["output"],
+        "cached_input_tokens": usage["cached_input"],
+        "call_count": usage["responses"],
+        "web_search_calls": 0,
+        "latency_ms_total": 0,
+        "latency_count": 0,
+        "failure_count": 0,
+        "fallback_count": 0,
+        "circuit_open_count": 0,
+    }
+    logger.info(
+        "[realtime-voice] usage conv=%s responses=%d input=%d output=%d cached=%d",
+        conversation_id[:8], usage["responses"], usage["input"],
+        usage["output"], usage["cached_input"],
+    )
+    try:
+        await persist_usage(
+            summary=summary,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            trace_id=None,
+            scope="realtime_voice",
+        )
+    except Exception:
+        logger.warning("[realtime-voice] usage metering failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

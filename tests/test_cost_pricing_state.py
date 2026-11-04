@@ -99,3 +99,29 @@ def test_grounding_and_fallback_utility_factories_expose_cache_clear():
 
     assert models.get_grounding_model.cache_clear == models._build_grounding_model.cache_clear
     assert models.get_fallback_utility_model.cache_clear == models._build_fallback_utility_model.cache_clear
+
+
+@pytest.mark.asyncio
+async def test_realtime_voice_usage_is_reported_as_its_own_category():
+    from datetime import date, datetime
+
+    usage = {
+        "user_id": "u1", "agent_id": "a1", "scope": "realtime_voice",
+        "input_tokens": 81, "output_tokens": 10, "cost_cny": 0.00195,
+        "call_count": 2, "tokens_by_model": {"stepaudio-2.5-realtime": bucket(81, 10)},
+        "trace_id": None, "latency_ms_total": 0, "latency_count": 0,
+        "failure_count": 0, "fallback_count": 0, "circuit_open_count": 0,
+    }
+    pricing = [{"provider": "stepfun", "identifier": "stepaudio-2.5-realtime",
+                "input_cost_per_million": 13.0, "output_cost_per_million": 90.0,
+                "cached_input_cost_per_million": 3.0}]
+    tx = SimpleNamespace(
+        query_raw=AsyncMock(side_effect=[pricing, [usage], [], [], [], []]),
+        execute_raw=AsyncMock(return_value=1),
+    )
+    await costs.compute(tx, date(2026, 11, 4), datetime(2026, 11, 5))
+
+    import json as _json
+    records = _json.loads(tx.execute_raw.await_args_list[-1].args[-1])
+    assert [(r["category"], r["scope"]) for r in records] == [("realtime", "realtime_voice")]
+    assert records[0]["data"]["input_tokens"] == 81

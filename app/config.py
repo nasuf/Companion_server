@@ -109,29 +109,22 @@ class Settings(BaseSettings):
     )
     dashscope_asr_model: str = "fun-asr-flash-2026-06-15"
     dashscope_asr_timeout_s: float = 30.0
-    # Assistant text-to-speech uses a dedicated credential so billing and
-    # rotation stay isolated from chat/ASR traffic.
-    dashscope_tts_api_key: str = ""
-    dashscope_tts_endpoint: str = (
-        "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/"
-        "SpeechSynthesizer"
-    )
-    dashscope_tts_model: str = "qwen-audio-3.0-tts-plus"
-    dashscope_tts_timeout_s: float = 60.0
-    dashscope_tts_max_bytes: int = 8 * 1024 * 1024
-    dashscope_tts_max_concurrency: int = 16
-    dashscope_tts_voice_enrollment_endpoint: str = (
-        "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/"
-        "customization"
-    )
-    # Public API origin used only for a short-lived signed enrollment URL.
-    # Example: https://api.example.com
-    tts_voice_enrollment_public_base_url: str = ""
+    # Assistant text-to-speech (voice messages) and voice cloning run on
+    # StepFun with STEPFUN_API_KEY, so a cloned voice is shared with realtime
+    # calls. Cloned voices must come from stepaudio-2.5-tts.
+    stepfun_tts_endpoint: str = "https://api.stepfun.com/v1/audio/speech"
+    stepfun_tts_model: str = "stepaudio-2.5-tts"
+    stepfun_tts_timeout_s: float = 60.0
+    stepfun_tts_max_bytes: int = 8 * 1024 * 1024
+    stepfun_tts_max_concurrency: int = 16
+    stepfun_files_endpoint: str = "https://api.stepfun.com/v1/files"
+    stepfun_voices_endpoint: str = "https://api.stepfun.com/v1/audio/voices"
     tts_voice_enrollment_max_bytes: int = 15 * 1024 * 1024
     # Safe rollout default. The admin SystemConfig value overrides this at
     # runtime and is constrained to 0..100.
     tts_output_probability: int = 0
-    tts_price_cny_per_10k_chars: float = 1.12413
+    # stepaudio-2.5-tts list price: 580 CNY per million characters.
+    tts_price_cny_per_10k_chars: float = 5.8
     chat_voice_min_seconds: float = 0.5
     chat_voice_max_seconds: int = 60
     chat_voice_max_requests_per_minute: int = 20

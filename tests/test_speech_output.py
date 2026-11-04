@@ -31,8 +31,17 @@ def _wav_bytes(*, seconds: float = 0.25, rate: int = 24000) -> bytes:
     return buffer.getvalue()
 
 
-def test_billable_characters_follow_dashscope_rules():
-    assert tts_client.count_billable_characters("你好 A1。") == 2 + 2 + 1 + 1 + 1 + 1
+def test_billable_characters_follow_stepfun_rules():
+    # Han characters count once; every two other characters count once.
+    assert tts_client.count_billable_characters("你好 A1。") == 2 + 2
+    assert tts_client.count_billable_characters("你好A") == 2 + 1
+    assert tts_client.count_billable_characters("") == 0
+
+
+def test_volume_maps_onto_stepfun_range():
+    assert tts_client.provider_volume(50) == 1.0
+    assert tts_client.provider_volume(100) == 2.0
+    assert tts_client.provider_volume(0) == 0.1
 
 
 def test_wav_duration_uses_actual_frames():
@@ -76,9 +85,12 @@ async def test_ineligible_or_unsupported_client_is_always_text():
     )
 
 
-def test_voice_assignment_uses_plus_gender_fallbacks():
-    assert SYSTEM_VOICE_BY_GENDER["female"] == "longanlingxin"
-    assert SYSTEM_VOICE_BY_GENDER["male"] == "longanlufeng"
+def test_voice_assignment_fallbacks_match_realtime_defaults():
+    from app.config import Settings
+
+    fields = Settings.model_fields
+    assert SYSTEM_VOICE_BY_GENDER["female"] == fields["stepfun_realtime_voice_female"].default
+    assert SYSTEM_VOICE_BY_GENDER["male"] == fields["stepfun_realtime_voice_male"].default
 
 
 @pytest.mark.asyncio
@@ -119,9 +131,7 @@ async def test_agent_tts_settings_are_loaded_from_latest_db_row(monkeypatch):
                         "tts_voice_id": "longanlingxin",
                         "gender": "female",
                         "tts_rate": 1.25,
-                        "tts_pitch": 0.9,
                         "tts_volume": 63,
-                        "tts_seed": 12,
                         "tts_instruction": "轻松自然",
                         "tts_auto_emotion": False,
                         "tts_emotion_scale": 0.7,
@@ -137,9 +147,7 @@ async def test_agent_tts_settings_are_loaded_from_latest_db_row(monkeypatch):
 
     assert settings.voice_id == "longanlingxin"
     assert settings.rate == 1.25
-    assert settings.pitch == 0.9
     assert settings.volume == 63
-    assert settings.seed == 12
     assert settings.instruction == "轻松自然"
     assert settings.auto_emotion is False
     assert settings.emotion_scale == 0.7
@@ -159,77 +167,67 @@ def test_style_instruction_prioritizes_natural_conversation():
             enabled=True,
             scale=1.0,
         )
-        == "[angry]别这样。"
+        == "（生气地）别这样。"
     )
 
 
 @pytest.mark.asyncio
-async def test_synthesize_uses_dedicated_key_and_returns_metering(monkeypatch):
+async def test_synthesize_sends_stepfun_payload_and_returns_metering(monkeypatch):
     audio = _wav_bytes(seconds=0.5)
     captured = {}
 
     async def handle(request):
-        if request.method == "POST":
-            captured["endpoint"] = str(request.url)
-            captured["authorization"] = request.headers["Authorization"]
-            captured["payload"] = json.loads(request.content)
-            return httpx.Response(
-                200,
-                headers={"x-request-id": "tts-request-1", "content-type": "text/event-stream"},
-                text="data: " + json.dumps({
-                    "request_id": "tts-request-1",
-                    "output": {"finish_reason": "stop", "audio": {
-                        "url": "http://dashscope-test.oss-cn-beijing.aliyuncs.com/out.wav",
-                    }},
-                    "usage": {"characters": 7},
-                }) + "\n\n",
-            )
-        captured["audio_url"] = str(request.url)
-        assert "authorization" not in request.headers
-        return httpx.Response(200, content=audio)
+        captured["endpoint"] = str(request.url)
+        captured["authorization"] = request.headers["Authorization"]
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            headers={"x-trace-id": "tts-request-1", "content-type": "audio/wav"},
+            content=audio,
+        )
 
-    monkeypatch.setattr(tts_client.settings, "dashscope_tts_api_key", "tts-key")
-    monkeypatch.setattr(tts_client.settings, "dashscope_tts_endpoint", "https://tts.example/api")
-    monkeypatch.setattr(tts_client.settings, "dashscope_tts_max_bytes", 1024 * 1024)
+    monkeypatch.setattr(tts_client.settings, "stepfun_api_key", "tts-key")
+    monkeypatch.setattr(tts_client.settings, "stepfun_tts_endpoint", "https://tts.example/api")
+    monkeypatch.setattr(tts_client.settings, "stepfun_tts_max_bytes", 1024 * 1024)
 
     async def fake_model():
-        return "qwen-tts-test"
+        return "stepaudio-test"
 
     monkeypatch.setattr(tts_client, "get_effective_tts_model", fake_model)
     monkeypatch.setattr(
         tts_client,
         "get_tts_pricing",
         lambda model: {
-            "unit_price_cny": 0.8,
+            "unit_price_cny": 5.8,
             "billing_unit": "per_10k_characters",
         },
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
         result = await tts_client.synthesize_speech(
             text="你好",
-            voice_id="longanlingxin",
+            voice_id="elegantgentle-female",
             instruction="自然表达",
             rate=1.2,
-            pitch=0.9,
             volume=60,
-            seed=42,
             client=http,
         )
 
+    assert captured["endpoint"] == "https://tts.example/api"
     assert captured["authorization"] == "Bearer tts-key"
-    assert captured["payload"]["model"] == "qwen-tts-test"
-    assert captured["payload"]["input"]["voice"] == "longanlingxin"
-    assert captured["payload"]["input"]["rate"] == 1.2
-    assert captured["payload"]["input"]["pitch"] == 0.9
-    assert captured["payload"]["input"]["volume"] == 60
-    assert captured["payload"]["input"]["seed"] == 42
-    assert captured["payload"]["input"]["enable_aigc_tag"] is True
-    assert "optimize_instructions" not in captured["payload"]["input"]
-    assert captured["audio_url"].startswith("https://dashscope-test.")
+    assert captured["payload"] == {
+        "model": "stepaudio-test",
+        "input": "你好",
+        "voice": "elegantgentle-female",
+        "response_format": "wav",
+        "sample_rate": 24000,
+        "speed": 1.2,
+        "volume": 1.2,
+        "instruction": "自然表达",
+    }
     assert result.duration_milliseconds == 500
     assert result.request_id == "tts-request-1"
-    assert result.billable_characters == 7
-    assert result.cost_cny == pytest.approx(7 * 0.8 / 10_000)
+    assert result.billable_characters == 2
+    assert result.cost_cny == pytest.approx(2 * 5.8 / 10_000)
 
 
 @pytest.mark.asyncio

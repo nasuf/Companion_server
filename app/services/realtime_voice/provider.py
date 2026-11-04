@@ -87,19 +87,38 @@ async def configure_session(
     silence_duration_ms: int = 600,
     prefix_padding_ms: int = 500,
     enable_memory_tool: bool = True,
-) -> None:
-    """Wait for session.created, send config, seed conversation history."""
+    fallback_voice: str | None = None,
+) -> str:
+    """Wait for session.created, send config, seed conversation history.
+
+    Returns the voice the session accepted. A rejected voice (e.g. a clone
+    missing from this account) is retried once with fallback_voice: the
+    session stays open after a session.update error, verified 2026-11-04.
+    """
     await _wait_until(sock, "session.created", 8)
-    await sock.send_event(session_update_event(
-        instructions=instructions,
-        voice=voice,
-        silence_duration_ms=silence_duration_ms,
-        prefix_padding_ms=prefix_padding_ms,
-        enable_memory_tool=enable_memory_tool,
-    ))
-    await _wait_until(sock, "session.updated", 8)
+
+    async def update(selected: str) -> None:
+        await sock.send_event(session_update_event(
+            instructions=instructions,
+            voice=selected,
+            silence_duration_ms=silence_duration_ms,
+            prefix_padding_ms=prefix_padding_ms,
+            enable_memory_tool=enable_memory_tool,
+        ))
+        await _wait_until(sock, "session.updated", 8)
+
+    try:
+        await update(voice)
+    except StepfunSetupError as exc:
+        if not fallback_voice or fallback_voice == voice or "voice" not in str(exc):
+            raise
+        logger.warning(
+            "[realtime-voice] voice rejected (%s); retrying with %s", exc, fallback_voice,
+        )
+        voice = fallback_voice
+        await update(voice)
     if not history:
-        return
+        return voice
     pending: list[str] = []
     for index, turn in enumerate(history):
         item_id = f"hist_{index}"
@@ -127,6 +146,7 @@ async def configure_session(
             pending.remove(item_id)
     if pending:
         logger.warning("[realtime-voice] history seed incomplete, remaining=%s", len(pending))
+    return voice
 
 
 async def _wait_until(sock: StepfunSocket, event_type: str, timeout_s: float) -> None:

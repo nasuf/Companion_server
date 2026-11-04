@@ -44,22 +44,12 @@ async def postgres_enrollment(monkeypatch):
             )
             # Consent times must remain UTC even when the session uses another zone.
             await transaction.execute_raw("SET LOCAL TIME ZONE 'Asia/Shanghai'")
-            cleanups = []
-
-            def background(coro):
-                cleanups.append(coro.cr_code.co_name)
-                coro.close()
-
             create = AsyncMock(return_value=EnrollmentResult("cloned-test", "request-test"))
-            delete = AsyncMock()
             monkeypatch.setattr(tts, "db", transaction)
-            monkeypatch.setattr(tts, "save_enrollment_audio", AsyncMock(
-                return_value=("tts_enroll_sample.wav", "audio/wav"),
+            monkeypatch.setattr(tts, "prepare_enrollment_audio", AsyncMock(
+                return_value=b"normalized-wav",
             ))
-            monkeypatch.setattr(tts, "signed_enrollment_url", lambda **_: "https://example.com/sample.wav")
             monkeypatch.setattr(tts, "create_cloned_voice", create)
-            monkeypatch.setattr(tts, "delete_cloned_voice", delete)
-            monkeypatch.setattr(tts, "fire_background", background)
             app = FastAPI()
             app.include_router(tts.router)
             app.dependency_overrides[tts.require_admin_jwt] = lambda: {"sub": "admin-test"}
@@ -67,10 +57,7 @@ async def postgres_enrollment(monkeypatch):
                 transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
                 base_url="http://test",
             ) as client:
-                yield SimpleNamespace(
-                    client=client, db=transaction, create=create, delete=delete,
-                    cleanups=cleanups,
-                )
+                yield SimpleNamespace(client=client, db=transaction, create=create)
     finally:
         await database.disconnect()
 
@@ -80,7 +67,7 @@ async def upload(flow, gender="male"):
         "/admin-api/tts/voices/clone",
         data={
             "display_name": "日常聊天音色", "gender": gender,
-            "prefix": "casual", "consent_confirmed": "true",
+            "consent_confirmed": "true",
         },
         files={"file": ("sample.m4a", b"recorded-audio", "audio/mp4")},
     )
@@ -110,15 +97,14 @@ async def test_clone_persists_consent_timestamp_and_appears_in_library(
     assert len(stored) == 1
     assert stored[0]["consent_type"] == "timestamp without time zone"
     assert stored[0]["id"] == row["id"]
+    assert (stored[0]["provider"], stored[0]["model"]) == ("stepfun", "stepaudio-2.5-tts")
     library = await flow.client.get("/admin-api/tts/voices")
     assert library.status_code == 200
     assert library.json()["voices"][0]["voice_id"] == "cloned-test"
     assert library.json()["voices"][0]["agent_count"] == 0
-    flow.delete.assert_not_awaited()
-    assert flow.cleanups == ["delete_enrollment_audio_later"]
 
 
-async def test_database_rejection_compensates_provider_voice_and_returns_clear_error(
+async def test_database_rejection_reports_the_orphaned_provider_voice(
     postgres_enrollment,
 ):
     flow = postgres_enrollment
@@ -128,6 +114,4 @@ async def test_database_rejection_compensates_provider_voice_and_returns_clear_e
     response = await upload(flow)
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "音色保存失败，本次创建未完成，请稍后重试"
-    flow.delete.assert_awaited_once_with("cloned-test")
-    assert flow.cleanups == ["delete_enrollment_audio_later"]
+    assert "联系管理员登记" in response.json()["detail"]

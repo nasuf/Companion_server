@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from app.db import db
-from app.services.speech_output.client import SynthesizedSpeech
+from app.services.speech_output.client import TTS_PROVIDER, SynthesizedSpeech
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ async def record_tts_usage(
             )
             VALUES (
                 gen_random_uuid(), $1, $2, $3, $4,
-                $5, 'dashscope', $6, $7, $8,
+                $5, $15, $6, $7, $8,
                 $9, $10, $11, $12, $13, $14, NOW()
             )
             ON CONFLICT (request_id) DO NOTHING
@@ -49,6 +49,7 @@ async def record_tts_usage(
             len(speech.audio),
             speech.unit_price_cny,
             speech.cost_cny,
+            TTS_PROVIDER,
         )
     except Exception:
         logger.warning(

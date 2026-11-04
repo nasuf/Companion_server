@@ -23,7 +23,12 @@ from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
-from app.services.llm.providers import provider_ids, public_provider_options
+from app.services.llm.providers import (
+    media_provider_ids,
+    media_provider_options,
+    provider_ids,
+    public_provider_options,
+)
 from app.services.runtime_config import invalidate_caches, load_caches
 
 logger = logging.getLogger(__name__)
@@ -36,13 +41,16 @@ router = APIRouter(
 
 
 _PROVIDERS = provider_ids(admin_only=True)
-_MODEL_KIND_ORDER = ("llm", "vision", "asr", "tts")
+_ALL_PROVIDERS = _PROVIDERS | media_provider_ids()
+_MODEL_KIND_ORDER = ("llm", "vision", "asr", "tts", "realtime")
 _MODEL_KINDS = set(_MODEL_KIND_ORDER)
 _BILLING_UNITS = {"per_million_tokens", "per_10k_characters"}
 _MODEL_KIND_PROVIDERS = {
     "vision": {"ark"},
     "asr": {"dashscope"},
-    "tts": {"dashscope"},
+    "tts": {"stepfun"},
+    # Realtime voice calls, billed per token like an LLM.
+    "realtime": {"stepfun"},
 }
 
 
@@ -98,10 +106,10 @@ def _row_to_dict(row) -> dict[str, Any]:
 
 
 def _validate_provider(provider: str) -> None:
-    if provider not in _PROVIDERS:
+    if provider not in _ALL_PROVIDERS:
         raise HTTPException(
             status_code=400,
-            detail=f"provider 必须是 {sorted(_PROVIDERS)} 之一, 收到 {provider!r}",
+            detail=f"provider 必须是 {sorted(_ALL_PROVIDERS)} 之一, 收到 {provider!r}",
         )
 
 
@@ -150,7 +158,7 @@ async def list_models() -> dict[str, Any]:
     )
     return {
         "models": [_row_to_dict(r) for r in rows],
-        "providers": public_provider_options(),
+        "providers": public_provider_options() + media_provider_options(),
         "model_kinds": list(_MODEL_KIND_ORDER),
         "model_kind_providers": {
             "llm": sorted(_PROVIDERS),

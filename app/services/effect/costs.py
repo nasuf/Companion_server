@@ -13,7 +13,9 @@ import json
 from app.config import settings
 from app.services.effect import definitions as defs
 
-CATEGORIES = ("model", "search", "tts", "asr")
+CATEGORIES = ("model", "search", "tts", "asr", "realtime")
+# llm_usage scopes reported as their own category instead of "model".
+_SCOPE_CATEGORY = {"realtime_voice": "realtime"}
 NUMBERS = (
     "input_tokens",
     "output_tokens",
@@ -126,7 +128,8 @@ async def compute(tx, day: date, now: datetime) -> None:
         end.isoformat(),
     )
     for row in usage:
-        out = groups[(row["user_id"], row["agent_id"], "model", row["scope"])]
+        category = _SCOPE_CATEGORY.get(row["scope"], "model")
+        out = groups[(row["user_id"], row["agent_id"], category, row["scope"])]
         item = {k: row[k] for k in NUMBERS if k in row}
         models = {k: dict(v) for k, v in (row["tokens_by_model"] or {}).items()}
         stored = float(row["cost_cny"] or 0)

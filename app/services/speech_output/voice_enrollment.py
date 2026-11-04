@@ -1,34 +1,29 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import io
-import re
-import time
-from dataclasses import dataclass
-from pathlib import Path
-from urllib.parse import quote
-import uuid
+import json
 import wave
+from dataclasses import dataclass
 
 import httpx
 
 from app.config import settings
-from app.services.chat_media import storage as media_storage
 from app.services.speech_to_text.audio import (
     analyze_pcm16_activity,
     normalize_audio_mime,
 )
 from app.services.speech_output.client import SpeechSynthesisError
-from app.services.speech_output.voices import QWEN_AUDIO_TTS_MODEL
+from app.services.speech_output.voices import TTS_MODEL
 
 
-_PREFIX_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
-_SIGNED_URL_TTL_SECONDS = 10 * 60
-_ORPHAN_RETENTION_SECONDS = 20 * 60
-_DELAYED_DELETE_SECONDS = 12 * 60
 _ENROLLMENT_SAMPLE_RATE = 24_000
+# StepFun clones from a 5–10 s reference. Longer uploads keep their first
+# 10 s, so a recorder that stops a moment late is not rejected.
+_MIN_SAMPLE_SECONDS = 5
+_MAX_SAMPLE_SECONDS = 10
+_MAX_UPLOAD_SECONDS = 30.5
+_MIN_ACTIVE_MILLISECONDS = 3_000
 
 
 @dataclass(frozen=True)
@@ -37,62 +32,28 @@ class EnrollmentResult:
     request_id: str | None
 
 
-def _signature(storage_key: str, expires_at: int) -> str:
-    secret = (
-        settings.jwt_secret.strip()
-        or "companion-development-tts-enrollment-signing-key"
-    )
-    payload = f"{storage_key}:{expires_at}".encode("utf-8")
-    return hmac.new(
-        secret.encode("utf-8"),
-        payload,
-        hashlib.sha256,
-    ).hexdigest()
-
-
-def verify_signed_enrollment_url(
-    storage_key: str,
-    expires_at: int,
-    signature: str,
-) -> bool:
-    if expires_at < int(time.time()):
-        return False
-    return hmac.compare_digest(
-        _signature(storage_key, expires_at),
-        signature,
-    )
-
-
-def enrollment_storage_path(storage_key: str) -> Path:
-    if not storage_key.startswith("tts_enroll_"):
-        raise ValueError("Invalid enrollment storage key")
-    return media_storage.storage_path(storage_key)
-
-
-async def save_enrollment_audio(
+async def prepare_enrollment_audio(
     *,
     blob: bytes,
     mime: str | None,
     filename: str | None,
-) -> tuple[str, str]:
-    cleanup_expired_enrollment_audio()
+) -> bytes:
+    """Decode any supported upload to a 24 kHz mono WAV of at most 10 s."""
     if not blob:
         raise ValueError("Enrollment audio is empty")
     if len(blob) > settings.tts_voice_enrollment_max_bytes:
         raise ValueError("Enrollment audio is too large")
     normalize_audio_mime(mime, filename)
     pcm = await _decode_enrollment_pcm(blob)
-    activity = analyze_pcm16_activity(
-        pcm,
-        sample_rate=_ENROLLMENT_SAMPLE_RATE,
-    )
-    if activity.total_milliseconds <= 0:
+    total_seconds = len(pcm) / 2 / _ENROLLMENT_SAMPLE_RATE
+    if total_seconds <= 0:
         raise ValueError("Enrollment audio could not be decoded")
-    duration_seconds = activity.total_milliseconds / 1000
-    if duration_seconds < 5 or duration_seconds > 30.5:
-        raise ValueError("请录制 5–30 秒清晰人声，建议录制 10–20 秒")
-    if activity.active_milliseconds < 5_000:
-        raise ValueError("录音需要至少 5 秒有效人声，请减少静音后重新录制")
+    if total_seconds < _MIN_SAMPLE_SECONDS or total_seconds > _MAX_UPLOAD_SECONDS:
+        raise ValueError("请录制 5–10 秒清晰人声")
+    pcm = pcm[: _ENROLLMENT_SAMPLE_RATE * 2 * _MAX_SAMPLE_SECONDS]
+    activity = analyze_pcm16_activity(pcm, sample_rate=_ENROLLMENT_SAMPLE_RATE)
+    if activity.active_milliseconds < _MIN_ACTIVE_MILLISECONDS:
+        raise ValueError("录音里的人声太少，请减少静音后重新录制")
 
     wav = io.BytesIO()
     with wave.open(wav, "wb") as output:
@@ -100,12 +61,7 @@ async def save_enrollment_audio(
         output.setsampwidth(2)
         output.setframerate(_ENROLLMENT_SAMPLE_RATE)
         output.writeframes(pcm)
-    normalized_blob = wav.getvalue()
-    storage_key = f"tts_enroll_{uuid.uuid4().hex}.wav"
-    path = enrollment_storage_path(storage_key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(normalized_blob)
-    return storage_key, "audio/wav"
+    return wav.getvalue()
 
 
 async def _decode_enrollment_pcm(blob: bytes) -> bytes:
@@ -149,175 +105,79 @@ async def _decode_enrollment_pcm(blob: bytes) -> bytes:
     return stdout
 
 
-def cleanup_expired_enrollment_audio() -> None:
-    directory = media_storage.storage_path("tts_enroll_probe").parent
-    if not directory.exists():
-        return
-    cutoff = time.time() - _ORPHAN_RETENTION_SECONDS
-    for path in directory.glob("tts_enroll_*"):
-        try:
-            if path.is_file() and path.stat().st_mtime < cutoff:
-                path.unlink()
-        except OSError:
-            continue
-
-
-def signed_enrollment_url(
-    *,
-    storage_key: str,
-    request_base_url: str,
-) -> str:
-    base = (
-        settings.tts_voice_enrollment_public_base_url.strip()
-        or request_base_url.strip()
-    ).rstrip("/")
-    if not base.startswith(("https://", "http://")):
-        raise ValueError("A public API base URL is required for voice enrollment")
-    if settings.is_production and base.startswith("http://"):
-        # TLS commonly terminates at the reverse proxy, so FastAPI may observe
-        # the internal HTTP hop even though the public origin is HTTPS.
-        base = f"https://{base.removeprefix('http://')}"
-    expires_at = int(time.time()) + _SIGNED_URL_TTL_SECONDS
-    signature = _signature(storage_key, expires_at)
-    return (
-        f"{base}/admin-api/tts/enrollment-audio/{quote(storage_key)}"
-        f"?expires={expires_at}&signature={signature}"
-    )
-
-
-def delete_enrollment_audio(storage_key: str) -> None:
+def _provider_error(action: str, response: httpx.Response) -> SpeechSynthesisError:
+    code = f"http_{response.status_code}"
+    message = "request failed"
     try:
-        enrollment_storage_path(storage_key).unlink(missing_ok=True)
-    except (OSError, ValueError):
+        body = response.json()
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict):
+            code = str(error.get("type") or code)
+            message = str(error.get("message") or message)
+    except (ValueError, json.JSONDecodeError):
         pass
+    return SpeechSynthesisError(f"StepFun {action} {code}: {message[:200]}")
 
 
-async def delete_enrollment_audio_later(storage_key: str) -> None:
-    """Keep the signed sample available for provider-side asynchronous fetches."""
-    await asyncio.sleep(_DELAYED_DELETE_SECONDS)
-    delete_enrollment_audio(storage_key)
-
-
-def normalize_voice_prefix(value: str) -> str:
-    prefix = re.sub(r"[^A-Za-z0-9]", "", value or "")[:10]
-    if not _PREFIX_RE.fullmatch(prefix):
-        raise ValueError("Voice prefix must contain 1-10 letters or digits")
-    return prefix
+def _json_object(action: str, response: httpx.Response) -> dict:
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise SpeechSynthesisError(f"StepFun {action} returned invalid JSON") from exc
+    if not isinstance(body, dict):
+        raise SpeechSynthesisError(f"StepFun {action} returned invalid payload")
+    return body
 
 
 async def create_cloned_voice(
     *,
-    prefix: str,
-    audio_url: str,
+    audio: bytes,
     client: httpx.AsyncClient | None = None,
 ) -> EnrollmentResult:
-    api_key = settings.dashscope_tts_api_key.strip()
-    endpoint = settings.dashscope_tts_voice_enrollment_endpoint.strip()
-    if not api_key or not endpoint:
-        raise SpeechSynthesisError("DashScope voice enrollment is not configured")
-    payload = {
-        "model": "voice-enrollment",
-        "input": {
-            "action": "create_voice",
-            "target_model": QWEN_AUDIO_TTS_MODEL,
-            "prefix": normalize_voice_prefix(prefix),
-            "url": audio_url,
-            "language_hints": ["zh"],
-            "max_prompt_audio_length": 30.0,
-            "enable_preprocess": True,
-        },
-    }
+    """Upload the reference WAV, then clone it into the account voice library.
+
+    StepFun has no delete-voice API, so a clone cannot be rolled back. The
+    uploaded reference file stays on StepFun alongside the voice it produced.
+    """
+    api_key = settings.stepfun_api_key.strip()
+    files_endpoint = settings.stepfun_files_endpoint.strip()
+    voices_endpoint = settings.stepfun_voices_endpoint.strip()
+    if not api_key or not files_endpoint or not voices_endpoint:
+        raise SpeechSynthesisError("StepFun voice enrollment is not configured")
+    headers = {"Authorization": f"Bearer {api_key}"}
     owns_client = client is None
-    http = client or httpx.AsyncClient(timeout=settings.dashscope_tts_timeout_s)
+    http = client or httpx.AsyncClient(timeout=settings.stepfun_tts_timeout_s)
     try:
+        upload = await http.post(
+            files_endpoint,
+            headers=headers,
+            data={"purpose": "storage"},
+            files={"file": ("voice_sample.wav", audio, "audio/wav")},
+        )
+        if upload.status_code != 200:
+            raise _provider_error("file upload", upload)
+        file_id = _json_object("file upload", upload).get("id")
+        if not file_id:
+            raise SpeechSynthesisError("StepFun file upload did not return a file id")
+
         response = await http.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
+            voices_endpoint,
+            headers=headers,
+            json={"model": TTS_MODEL, "file_id": file_id},
         )
         if response.status_code != 200:
-            code = f"http_{response.status_code}"
-            message = "request failed"
-            try:
-                error_body = response.json()
-                if isinstance(error_body, dict):
-                    code = str(error_body.get("code") or code)
-                    message = str(error_body.get("message") or message)
-            except ValueError:
-                pass
-            raise SpeechSynthesisError(
-                f"DashScope voice enrollment {code}: {message[:200]}"
-            )
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise SpeechSynthesisError(
-                "DashScope voice enrollment returned invalid JSON"
-            ) from exc
-        output = body.get("output") if isinstance(body, dict) else None
-        voice_id = (
-            output.get("voice_id")
-            if isinstance(output, dict)
-            else None
-        ) or (body.get("voice_id") if isinstance(body, dict) else None)
+            raise _provider_error("voice enrollment", response)
+        voice_id = _json_object("voice enrollment", response).get("id")
         if not voice_id:
-            code = str(body.get("code") or "missing_voice_id")
-            message = str(body.get("message") or "response did not include voice id")
-            raise SpeechSynthesisError(
-                f"DashScope voice enrollment {code}: {message[:200]}"
-            )
-        request_id = (
-            response.headers.get("x-request-id")
-            or response.headers.get("x-dashscope-request-id")
-            or (body.get("request_id") if isinstance(body, dict) else None)
-        )
+            raise SpeechSynthesisError("StepFun voice enrollment did not return a voice id")
+        request_id = response.headers.get("x-trace-id")
         return EnrollmentResult(
             voice_id=str(voice_id),
             request_id=str(request_id) if request_id else None,
         )
     except httpx.HTTPError as exc:
         raise SpeechSynthesisError(
-            "DashScope voice enrollment network request failed"
-        ) from exc
-    finally:
-        if owns_client:
-            await http.aclose()
-
-
-async def delete_cloned_voice(
-    voice_id: str,
-    *,
-    client: httpx.AsyncClient | None = None,
-) -> None:
-    api_key = settings.dashscope_tts_api_key.strip()
-    endpoint = settings.dashscope_tts_voice_enrollment_endpoint.strip()
-    owns_client = client is None
-    http = client or httpx.AsyncClient(timeout=settings.dashscope_tts_timeout_s)
-    try:
-        response = await http.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "voice-enrollment",
-                "input": {
-                    "action": "delete_voice",
-                    "voice_id": voice_id,
-                },
-            },
-        )
-        if response.status_code != 200:
-            raise SpeechSynthesisError(
-                f"DashScope voice deletion failed: http_{response.status_code}"
-            )
-    except httpx.HTTPError as exc:
-        raise SpeechSynthesisError(
-            "DashScope voice deletion network request failed"
+            "StepFun voice enrollment network request failed"
         ) from exc
     finally:
         if owns_client:

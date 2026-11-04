@@ -2403,6 +2403,8 @@ model SystemConfig {
   chatContextPolicy              Json?    @map("chat_context_policy") @ignore
   // SQL-only: chat/reply_repetition overrides, read with chat_context_policy.
   replyRepetitionPolicy          Json?    @map("reply_repetition_policy") @ignore
+  // SQL-only: realtime voice call model (model_registry kind 'realtime').
+  realtimeModel                  String?  @map("realtime_model") @ignore
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String?  @map("default_template_agent_id")

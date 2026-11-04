@@ -26,8 +26,8 @@ async def test_gender_pool_excludes_disabled_voices_and_keeps_existing_binding(m
             await tx.execute_raw("""CREATE TEMP TABLE tts_voice_profiles (
                 voice_id TEXT PRIMARY KEY, gender TEXT, enabled BOOLEAN,
                 display_name TEXT,
-                provider TEXT DEFAULT 'dashscope',
-                model TEXT DEFAULT 'qwen-audio-3.0-tts-plus'
+                provider TEXT DEFAULT 'stepfun',
+                model TEXT DEFAULT 'stepaudio-2.5-tts'
             ) ON COMMIT DROP""")
             await tx.execute_raw("""INSERT INTO tts_voice_profiles
                 (voice_id,gender,enabled) VALUES

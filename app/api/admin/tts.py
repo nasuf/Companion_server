@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import mimetypes
 import uuid
 
 from fastapi import (
@@ -10,16 +9,18 @@ from fastapi import (
     File,
     Form,
     HTTPException,
-    Query,
-    Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
-from app.services.speech_output.client import SpeechSynthesisError, synthesize_speech
+from app.services.speech_output.client import (
+    TTS_PROVIDER,
+    SpeechSynthesisError,
+    synthesize_speech,
+)
 from app.services.speech_output.style import (
     DEFAULT_STYLE_INSTRUCTION,
     MAX_INSTRUCTION_BILLABLE_CHARACTERS,
@@ -30,19 +31,14 @@ from app.services.speech_output.style import (
 from app.services.speech_output.usage import record_tts_usage
 from app.services.speech_output.voice_enrollment import (
     create_cloned_voice,
-    delete_cloned_voice,
-    delete_enrollment_audio_later,
-    enrollment_storage_path,
-    save_enrollment_audio,
-    signed_enrollment_url,
-    verify_signed_enrollment_url,
+    prepare_enrollment_audio,
 )
 from app.services.speech_output.voices import (
     DEFAULT_SPEECH_RATE,
-    QWEN_AUDIO_TTS_MODEL,
+    DEFAULT_VOICE_DISPLAY_NAME,
+    TTS_MODEL,
     resolve_agent_tts_model,
 )
-from app.services.runtime.tasks import fire_background
 
 
 router = APIRouter(
@@ -50,16 +46,15 @@ router = APIRouter(
     tags=["admin", "tts"],
     dependencies=[Depends(require_admin_jwt)],
 )
-public_router = APIRouter(tags=["tts-enrollment"])
 logger = logging.getLogger(__name__)
 
 
 class AgentTtsPayload(BaseModel):
+    # pitch/seed were DashScope-only; extra fields from older clients are
+    # ignored by pydantic's default config.
     voice_profile_id: str
     rate: float = Field(ge=0.5, le=2.0)
-    pitch: float = Field(ge=0.5, le=2.0)
     volume: int = Field(ge=0, le=100)
-    seed: int = Field(ge=0, le=65_535)
     instruction: str | None = None
     auto_emotion: bool = True
     emotion_scale: float = Field(ge=0, le=2.0)
@@ -106,7 +101,7 @@ async def _voice_profile(profile_id: str, *, require_enabled: bool) -> dict:
     row = dict(rows[0])
     if require_enabled and not row.get("enabled"):
         raise HTTPException(status_code=422, detail="该音色已停用")
-    if row.get("model") != QWEN_AUDIO_TTS_MODEL:
+    if row.get("provider") != TTS_PROVIDER or row.get("model") != TTS_MODEL:
         raise HTTPException(status_code=422, detail="音色与当前 TTS 模型不兼容")
     return row
 
@@ -114,8 +109,8 @@ async def _voice_profile(profile_id: str, *, require_enabled: bool) -> dict:
 async def _agent_tts_response(agent_id: str) -> dict:
     rows = await db.query_raw(
         """
-        SELECT id, name, gender, user_id, tts_voice_id, tts_rate, tts_pitch,
-               tts_volume, tts_seed, tts_instruction, tts_auto_emotion,
+        SELECT id, name, gender, user_id, tts_voice_id, tts_rate,
+               tts_volume, tts_instruction, tts_auto_emotion,
                tts_emotion_scale
         FROM ai_agents
         WHERE id = $1
@@ -130,12 +125,13 @@ async def _agent_tts_response(agent_id: str) -> dict:
         """
         SELECT id
         FROM tts_voice_profiles
-        WHERE provider = 'dashscope'
-          AND model = $1
-          AND voice_id = $2
+        WHERE provider = $1
+          AND model = $2
+          AND voice_id = $3
         LIMIT 1
         """,
-        QWEN_AUDIO_TTS_MODEL,
+        TTS_PROVIDER,
+        TTS_MODEL,
         str(row.get("tts_voice_id") or ""),
     )
     return {
@@ -147,13 +143,11 @@ async def _agent_tts_response(agent_id: str) -> dict:
         ),
         "voice_id": row.get("tts_voice_id"),
         "rate": float(row.get("tts_rate") or DEFAULT_SPEECH_RATE),
-        "pitch": float(row.get("tts_pitch") or 1.0),
         "volume": int(
             row.get("tts_volume")
             if row.get("tts_volume") is not None
             else 50
         ),
-        "seed": int(row.get("tts_seed") or 0),
         "instruction": row.get("tts_instruction"),
         "default_instruction": DEFAULT_STYLE_INSTRUCTION,
         "instruction_billable_characters": instruction_billable_characters(
@@ -186,10 +180,11 @@ async def list_voice_profiles() -> dict:
                    WHERE a.tts_voice_id = v.voice_id
                ) AS agent_count
         FROM tts_voice_profiles v
-        WHERE v.model = $1
+        WHERE v.provider = $1 AND v.model = $2
         ORDER BY v.gender, v.source, v.created_at, v.id
         """,
-        QWEN_AUDIO_TTS_MODEL,
+        TTS_PROVIDER,
+        TTS_MODEL,
     )
     return {"voices": [dict(row) for row in rows]}
 
@@ -217,9 +212,11 @@ async def update_voice_profile(
             """
             SELECT COUNT(*)::int AS count
             FROM tts_voice_profiles
-            WHERE model = $1 AND gender = $2 AND enabled = true AND id <> $3
+            WHERE provider = $1 AND model = $2 AND gender = $3
+              AND enabled = true AND id <> $4
             """,
-            QWEN_AUDIO_TTS_MODEL,
+            TTS_PROVIDER,
+            TTS_MODEL,
             current_gender,
             profile_id,
         )
@@ -254,7 +251,7 @@ async def delete_voice_profile(profile_id: str) -> dict[str, str]:
     )
     if int(count_rows[0].get("count") or 0) > 0:
         raise HTTPException(status_code=409, detail="该音色仍被 Agent 使用")
-    await delete_cloned_voice(str(current.get("voice_id") or ""))
+    # StepFun has no delete-voice API: this only removes the library entry.
     await db.execute_raw(
         "DELETE FROM tts_voice_profiles WHERE id = $1",
         profile_id,
@@ -264,11 +261,9 @@ async def delete_voice_profile(profile_id: str) -> dict[str, str]:
 
 @router.post("/voices/clone")
 async def clone_voice_profile(
-    request: Request,
     file: UploadFile = File(...),
     display_name: str = Form(...),
     gender: str = Form(...),
-    prefix: str = Form("voice"),
     consent_confirmed: bool = Form(...),
     admin: dict = Depends(require_admin_jwt),
 ) -> dict:
@@ -281,7 +276,7 @@ async def clone_voice_profile(
         raise HTTPException(status_code=422, detail="音色名称不能为空")
     blob = await file.read()
     try:
-        storage_key, _ = await save_enrollment_audio(
+        audio = await prepare_enrollment_audio(
             blob=blob,
             mime=file.content_type,
             filename=file.filename,
@@ -294,69 +289,54 @@ async def clone_voice_profile(
         len(blob),
     )
     try:
-        try:
-            audio_url = signed_enrollment_url(
-                storage_key=storage_key,
-                request_base_url=str(request.base_url),
+        result = await create_cloned_voice(audio=audio)
+    except SpeechSynthesisError as exc:
+        logger.warning("[TTS-VOICE] provider enrollment failed: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    try:
+        rows = await db.query_raw(
+            """
+            INSERT INTO tts_voice_profiles (
+                id, display_name, provider, model, voice_id, gender, source,
+                enabled, provider_request_id, consent_confirmed_at,
+                consent_confirmed_by, created_at, updated_at
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        try:
-            result = await create_cloned_voice(
-                prefix=prefix,
-                audio_url=audio_url,
+            VALUES (
+                $1, $2, $3, $4, $5, $6, 'cloned',
+                true, $7, timezone('UTC', statement_timestamp()), $8, NOW(), NOW()
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except SpeechSynthesisError as exc:
-            logger.warning("[TTS-VOICE] provider enrollment failed: %s", exc)
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        try:
-            rows = await db.query_raw(
-                """
-                INSERT INTO tts_voice_profiles (
-                    id, display_name, provider, model, voice_id, gender, source,
-                    enabled, provider_request_id, consent_confirmed_at,
-                    consent_confirmed_by, created_at, updated_at
-                )
-                VALUES (
-                    $1, $2, 'dashscope', $3, $4, $5, 'cloned',
-                    true, $6, timezone('UTC', statement_timestamp()), $7, NOW(), NOW()
-                )
-                RETURNING *
-                """,
-                str(uuid.uuid4()),
-                clean_display_name[:80],
-                QWEN_AUDIO_TTS_MODEL,
-                result.voice_id,
-                gender,
-                result.request_id,
-                str(admin.get("sub") or ""),
-            )
-            logger.info(
-                "[TTS-VOICE] enrollment created voice_id=%s",
-                result.voice_id,
-            )
-            return dict(rows[0])
-        except Exception as exc:
-            logger.exception(
-                "[TTS-VOICE] enrollment persistence failed voice_id=%s request_id=%s",
-                result.voice_id,
-                result.request_id,
-            )
-            try:
-                await delete_cloned_voice(result.voice_id)
-            except Exception:
-                logger.exception(
-                    "[TTS-VOICE] provider cleanup failed voice_id=%s",
-                    result.voice_id,
-                )
-            raise HTTPException(
-                status_code=503,
-                detail="音色保存失败，本次创建未完成，请稍后重试",
-            ) from exc
-    finally:
-        fire_background(delete_enrollment_audio_later(storage_key))
+            RETURNING *
+            """,
+            str(uuid.uuid4()),
+            clean_display_name[:80],
+            TTS_PROVIDER,
+            TTS_MODEL,
+            result.voice_id,
+            gender,
+            result.request_id,
+            str(admin.get("sub") or ""),
+        )
+    except Exception as exc:
+        # StepFun cannot delete voices, so the clone (already billed) survives.
+        # Log its id so an operator can register it by hand.
+        logger.exception(
+            "[TTS-VOICE] enrollment persistence failed; orphaned provider voice_id=%s"
+            " gender=%s display_name=%s request_id=%s",
+            result.voice_id,
+            gender,
+            clean_display_name[:80],
+            result.request_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="音色已在 StepFun 创建但保存失败，请联系管理员登记该音色",
+        ) from exc
+    logger.info(
+        "[TTS-VOICE] enrollment created voice_id=%s default=%s",
+        result.voice_id,
+        clean_display_name == DEFAULT_VOICE_DISPLAY_NAME[gender],
+    )
+    return dict(rows[0])
 
 
 @router.get("/agents/{agent_id}")
@@ -379,20 +359,16 @@ async def update_agent_tts_config(
         UPDATE ai_agents
         SET tts_voice_id = $1,
             tts_rate = $2,
-            tts_pitch = $3,
-            tts_volume = $4,
-            tts_seed = $5,
-            tts_instruction = $6,
-            tts_auto_emotion = $7,
-            tts_emotion_scale = $8,
+            tts_volume = $3,
+            tts_instruction = $4,
+            tts_auto_emotion = $5,
+            tts_emotion_scale = $6,
             updated_at = NOW()
-        WHERE id = $9
+        WHERE id = $7
         """,
         str(profile.get("voice_id") or ""),
         payload.rate,
-        payload.pitch,
         payload.volume,
-        payload.seed,
         instruction,
         payload.auto_emotion,
         payload.emotion_scale,
@@ -441,9 +417,7 @@ async def preview_agent_tts(
             voice_id=str(profile.get("voice_id") or ""),
             instruction=plan.instruction,
             rate=payload.rate,
-            pitch=payload.pitch,
             volume=payload.volume,
-            seed=payload.seed,
             model=model,
         )
     except SpeechSynthesisError as exc:
@@ -464,26 +438,4 @@ async def preview_agent_tts(
             "X-TTS-Billable-Characters": str(speech.billable_characters),
             "X-TTS-Cost-CNY": f"{speech.cost_cny:.6f}",
         },
-    )
-
-
-@public_router.get("/admin-api/tts/enrollment-audio/{storage_key}")
-async def get_signed_enrollment_audio(
-    storage_key: str,
-    expires: int = Query(...),
-    signature: str = Query(...),
-):
-    if not verify_signed_enrollment_url(storage_key, expires, signature):
-        raise HTTPException(status_code=403, detail="Invalid or expired signature")
-    try:
-        path = enrollment_storage_path(storage_key)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not path.exists() or not path.is_file():
-        raise HTTPException(status_code=404, detail="Enrollment audio not found")
-    media_type, _ = mimetypes.guess_type(path.name)
-    return FileResponse(
-        path,
-        media_type=media_type or "application/octet-stream",
-        headers={"Cache-Control": "private, no-store"},
     )

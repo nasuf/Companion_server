@@ -31,7 +31,11 @@ from app.api.jwt_auth import require_admin_jwt
 from app.config import settings
 from app.db import db
 from app.redis_client import get_redis
-from app.services.llm.providers import provider_ids, public_provider_options
+from app.services.llm.providers import (
+    media_provider_options,
+    provider_ids,
+    public_provider_options,
+)
 from app.services.memory.config import CALIBRATED_EMBEDDING_MODEL
 from app.services.runtime_config import (
     ResolvedConfig, ensure_loaded, invalidate_caches, load_caches,
@@ -59,7 +63,10 @@ _MEDIA_MODEL_PROVIDERS = {
         "dashscope": ("dashscope_api_key", "DASHSCOPE_API_KEY"),
     },
     "tts": {
-        "dashscope": ("dashscope_tts_api_key", "DASHSCOPE_TTS_API_KEY"),
+        "stepfun": ("stepfun_api_key", "STEPFUN_API_KEY"),
+    },
+    "realtime": {
+        "stepfun": ("stepfun_api_key", "STEPFUN_API_KEY"),
     },
 }
 
@@ -90,6 +97,8 @@ class ConfigPayload(BaseModel):
     asr_model: str | None = None
     tts_model: str | None = None
     tts_output_probability: int | None = Field(default=None, ge=0, le=100)
+    # Realtime voice call model. SQL-only column, written by put_system_config.
+    realtime_model: str | None = None
     # Main-reply web search (Ark Responses API web_search tool, ark provider only).
     web_search_enabled: bool | None = None
     # Proactive trending / hot-news (global-only).
@@ -167,6 +176,7 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
         "asr_model": r.asr_model,
         "tts_model": r.tts_model,
         "tts_output_probability": r.tts_output_probability,
+        "realtime_model": r.realtime_model,
         "web_search_enabled": r.web_search_enabled,
         "proactive_trending_enabled": r.proactive_trending_enabled,
         "proactive_trending_probability": r.proactive_trending_probability,
@@ -310,6 +320,7 @@ def _media_provider_options(model_kind: str) -> list[dict[str, Any]]:
     providers = {
         option["id"]: option
         for option in public_provider_options(include_local=False)
+        + media_provider_options()
     }
     result: list[dict[str, Any]] = []
     for provider_id, (credential_setting, credential_env) in (
@@ -411,6 +422,7 @@ async def _validate_payload_models(
         ("vision_model", "vision"),
         ("asr_model", "asr"),
         ("tts_model", "tts"),
+        ("realtime_model", "realtime"),
     ):
         if field not in explicit:
             continue
@@ -476,13 +488,20 @@ async def list_options() -> dict[str, Any]:
     }
 
 
+async def _system_config_payload(row) -> dict[str, Any]:
+    payload = _row_to_payload(row)
+    rows = await db.query_raw("SELECT realtime_model FROM system_config WHERE id = 1")
+    payload["realtime_model"] = rows[0].get("realtime_model") if rows else None
+    return payload
+
+
 @router.get("")
 async def get_system_config() -> dict[str, Any]:
     """全局 SystemConfig + 当前生效解析值 (null 字段已 fallback 到 env)."""
     await ensure_loaded()
     row = await db.systemconfig.find_unique(where={"id": 1})
     return {
-        "config": _row_to_payload(row),
+        "config": await _system_config_payload(row),
         "resolved": _resolved_to_dict(resolve_config_sync(agent_id=None)),
         "env_gates": {
             "proactive_link_recommendation_enabled": (
@@ -509,9 +528,14 @@ async def put_system_config(
         fallback_remote_small_model=settings.remote_small_model,
     )
     data = _payload_to_update_data(payload, include_global_only=True)
-    if not data:
+    realtime_explicit = "realtime_model" in payload.model_fields_set
+    if not data and not realtime_explicit:
         raise HTTPException(status_code=400, detail="至少需要提供一个配置字段")
-    if "fillerEmojiProbability" in data:
+    if not data:
+        row = await db.systemconfig.upsert(
+            where={"id": 1}, data={"create": {"id": 1}, "update": {}},
+        )
+    elif "fillerEmojiProbability" in data:
         # Lock before reading the old value: simultaneous admin edits must have
         # an exact before/after chain. Configuration and audit commit together.
         async with db.tx() as tx:
@@ -534,6 +558,13 @@ async def put_system_config(
             where={"id": 1},
             data={"create": {"id": 1, **data}, "update": data},
         )
+    if realtime_explicit:
+        # SQL-only column (kept out of the generated Prisma client). The
+        # system_config trigger bumps the revision, so caches reload it.
+        await db.execute_raw(
+            "UPDATE system_config SET realtime_model = $1 WHERE id = 1",
+            (payload.realtime_model or "").strip() or None,
+        )
     # 先 reload caches (原子赋值, 期间 sync 读者读旧值不阻塞), 再清模型 lru_cache.
     # 顺序: DB 写 → reload module-cache → clear lru_cache. 任何时刻读者拿到的
     # 都是有效配置 (旧 cache+旧 lru / 旧 cache+新 lru / 新 cache+新 lru),
@@ -544,9 +575,12 @@ async def put_system_config(
         await _sync_tts_probability(
             resolve_config_sync(agent_id=None).tts_output_probability,
         )
-    logger.info(f"[RUNTIME-CONFIG] system updated: {data}")
+    logger.info(
+        f"[RUNTIME-CONFIG] system updated: {data}"
+        + (f" realtime_model={payload.realtime_model!r}" if realtime_explicit else "")
+    )
     return {
-        "config": _row_to_payload(row),
+        "config": await _system_config_payload(row),
         "resolved": _resolved_to_dict(resolve_config_sync(agent_id=None)),
     }
 

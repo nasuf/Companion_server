@@ -23,7 +23,7 @@ def test_emotion_strength_changes_style_without_overacting():
     assert "带有开心轻快" in medium.instruction
     assert "明显开心轻快" in strong.instruction
     assert weak.text == mild.text == medium.text == "我听着呢。"
-    assert strong.text == "[excited]我听着呢。"
+    assert strong.text == "（开心地）我听着呢。"
     assert all(style.instruction_billable_characters(p.instruction) <= 100 for p in (weak, mild, medium, strong))
 
 
@@ -34,7 +34,7 @@ def test_invalid_emotion_never_crashes_or_adds_controls(intensity, scale):
 
 
 def test_scale_and_switch_are_honored():
-    assert plan(intensity=40, scale=2).text.startswith("[excited]")
+    assert plan(intensity=40, scale=2).text.startswith("（开心地）")
     assert plan(intensity=90, scale=0).instruction == style.DEFAULT_STYLE_INSTRUCTION
     assert plan("哈哈，太棒了！", intensity=90, enabled=False).text == "哈哈，太棒了！"
 
@@ -48,13 +48,13 @@ def test_custom_instruction_is_never_truncated():
 @pytest.mark.parametrize("emotion", ["高兴", "戏谑"])
 def test_laughter_requires_explicit_cue(emotion):
     result = plan("哈哈哈，居然被你猜中了，哈哈！", emotion, 50)
-    assert result.text == "[giggles]居然被你猜中了，哈哈！"
-    assert "[giggles]" not in plan("真开心！", emotion, 90).text
+    assert result.text == "（轻笑）居然被你猜中了，哈哈！"
+    assert "（轻笑）" not in plan("真开心！", emotion, 90).text
     assert plan("哈哈", emotion, 50).text == "哈哈"
 
 
 def test_sigh_and_anxiety_do_not_force_trembling():
-    assert plan("唉，有点担心明天。", "焦虑", 85).text == "[sighing]有点担心明天。"
+    assert plan("唉，有点担心明天。", "焦虑", 85).text == "（叹气）有点担心明天。"
     assert plan("有点担心明天。", "焦虑", 85).text == "有点担心明天。"
     assert plan("唉声叹气也没用。", "悲伤", 50).text == "唉声叹气也没用。"
 
@@ -110,7 +110,7 @@ async def test_emotion_detection_deadline_cancels_slow_classifier(monkeypatch):
 async def test_incompatible_runtime_model_is_rejected_before_synthesis(monkeypatch):
     from app.services import runtime_config
 
-    monkeypatch.setattr(runtime_config, "get_effective_tts_model", AsyncMock(return_value="qwen-audio-3.0-tts-flash"))
+    monkeypatch.setattr(runtime_config, "get_effective_tts_model", AsyncMock(return_value="qwen-audio-3.0-tts-plus"))
     with pytest.raises(RuntimeError, match="不兼容"):
         await voices.resolve_agent_tts_model()
 
@@ -124,8 +124,8 @@ async def test_delivery_preserves_transcript_and_shared_plan(monkeypatch, source
     synthesize = AsyncMock(return_value=speech)
     detect = AsyncMock(return_value={"emotion": "高兴", "intensity": 50})
     monkeypatch.setattr(intent_replies, "ai_reply_emotion", detect)
-    monkeypatch.setattr(delivery, "resolve_agent_tts_model", AsyncMock(return_value=voices.QWEN_AUDIO_TTS_MODEL))
-    monkeypatch.setattr(delivery, "get_agent_tts_settings", AsyncMock(return_value=voices.AgentTtsSettings("voice", 0.9, 1, 50, 42, None, True, 1)))
+    monkeypatch.setattr(delivery, "resolve_agent_tts_model", AsyncMock(return_value=voices.TTS_MODEL))
+    monkeypatch.setattr(delivery, "get_agent_tts_settings", AsyncMock(return_value=voices.AgentTtsSettings("voice", 0.9, 50, None, True, 1)))
     monkeypatch.setattr(delivery, "synthesize_speech", synthesize)
     monkeypatch.setattr(delivery, "record_tts_usage", AsyncMock())
     monkeypatch.setattr(delivery.media_storage, "save_audio_blob", lambda **kw: "key")
@@ -142,9 +142,9 @@ async def test_delivery_preserves_transcript_and_shared_plan(monkeypatch, source
     expected = plan("哈哈，太棒了😊！", "高兴" if should_detect else None, 50 if should_detect else None)
     assert synthesize.await_args.kwargs["text"] == expected.text
     assert synthesize.await_args.kwargs["instruction"] == expected.instruction
-    assert synthesize.await_args.kwargs["seed"] == 42
+    assert synthesize.await_args.kwargs["volume"] == 50
     assert synthesize.await_args.kwargs["rate"] == 0.9
-    assert synthesize.await_args.kwargs["model"] == voices.QWEN_AUDIO_TTS_MODEL
+    assert synthesize.await_args.kwargs["model"] == voices.TTS_MODEL
 
 
 @pytest.mark.asyncio
@@ -152,20 +152,20 @@ async def test_preview_uses_the_same_plan_and_runtime_model(monkeypatch):
     from app.api.admin import tts
 
     payload = tts.AgentTtsPreviewPayload(
-        voice_profile_id="profile", rate=0.9, pitch=1, volume=50, seed=42,
+        voice_profile_id="profile", rate=0.9, volume=50,
         emotion_scale=1, text="哈哈，太棒了😊！", emotion="高兴", intensity=50,
     )
     speech = SimpleNamespace(audio=b"wav", mime="audio/wav", duration_milliseconds=500, billable_characters=10, cost_cny=0.01)
     synthesize = AsyncMock(return_value=speech)
     monkeypatch.setattr(tts, "_voice_profile", AsyncMock(return_value={"voice_id": "voice"}))
     monkeypatch.setattr(tts, "db", SimpleNamespace(query_raw=AsyncMock(return_value=[{"user_id": "user"}])))
-    monkeypatch.setattr(tts, "resolve_agent_tts_model", AsyncMock(return_value=voices.QWEN_AUDIO_TTS_MODEL))
+    monkeypatch.setattr(tts, "resolve_agent_tts_model", AsyncMock(return_value=voices.TTS_MODEL))
     monkeypatch.setattr(tts, "synthesize_speech", synthesize)
     monkeypatch.setattr(tts, "record_tts_usage", AsyncMock())
     response = await tts.preview_agent_tts("agent", payload)
     expected = plan(payload.text, payload.emotion, payload.intensity)
     assert synthesize.await_args.kwargs["text"] == expected.text
     assert synthesize.await_args.kwargs["instruction"] == expected.instruction
-    assert synthesize.await_args.kwargs["model"] == voices.QWEN_AUDIO_TTS_MODEL
+    assert synthesize.await_args.kwargs["model"] == voices.TTS_MODEL
     assert response.body == b"wav"
     assert synthesize.await_args.kwargs["rate"] == 0.9

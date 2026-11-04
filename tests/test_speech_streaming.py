@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import struct
 
@@ -9,10 +8,6 @@ import pytest_asyncio
 
 from app.services.speech_output import client as tts
 from tests.test_speech_output import _wav_bytes
-
-
-def event(output, **extra):
-    return ("data: " + json.dumps({"output": output, **extra}) + "\r\n\r\n").encode()
 
 
 class ByteStream(httpx.AsyncByteStream):
@@ -30,77 +25,89 @@ class ByteStream(httpx.AsyncByteStream):
 
 @pytest_asyncio.fixture(autouse=True)
 async def configured(monkeypatch):
-    monkeypatch.setattr(tts.settings, "dashscope_tts_api_key", "test-key")
-    monkeypatch.setattr(tts.settings, "dashscope_tts_endpoint", "https://tts.example/api")
-    monkeypatch.setattr(tts.settings, "dashscope_tts_max_bytes", 1024 * 1024)
-    monkeypatch.setattr(tts, "get_tts_pricing", lambda model: {"unit_price_cny": 0.8})
+    monkeypatch.setattr(tts.settings, "stepfun_api_key", "test-key")
+    monkeypatch.setattr(tts.settings, "stepfun_tts_endpoint", "https://tts.example/v1/audio/speech")
+    monkeypatch.setattr(tts.settings, "stepfun_tts_max_bytes", 1024 * 1024)
+    monkeypatch.setattr(tts, "get_tts_pricing", lambda model: {"unit_price_cny": 5.8})
     yield
     await tts.close_tts_client()
 
 
-async def synthesize(client=None):
-    return await tts.synthesize_speech(text="你好", voice_id="voice", instruction="自然", model="test", client=client)
+async def synthesize(client=None, text="你好"):
+    return await tts.synthesize_speech(text=text, voice_id="voice", instruction="自然", model="test", client=client)
+
+
+def audio_response(audio, *, stream=None):
+    return httpx.Response(
+        200,
+        headers={"content-type": "audio/wav", "x-trace-id": "trace-1"},
+        stream=stream or ByteStream(audio),
+    )
 
 
 @pytest.mark.asyncio
-async def test_streamed_frames_are_joined_without_extra_download():
+async def test_chunked_wav_is_joined_and_metered_locally():
     audio = _wav_bytes(seconds=0.5)
-    data = b"".join(event({"type": "sentence-synthesis", "audio": {"data": base64.b64encode(part).decode()}}, usage={"characters": 7}, request_id="req") for part in (audio[:44], audio[44:8000], audio[8000:]))
-    stream = ByteStream(data + event({"finish_reason": "stop", "audio": {"url": "https://oss.example/out.wav"}}))
+    stream = ByteStream(audio)
     calls = []
 
     async def handle(request):
         calls.append(request.method)
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+        return audio_response(audio, stream=stream)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        speech = await synthesize(client)
+        speech = await synthesize(client, text="你好 A1。")
     assert calls == ["POST"]
     assert speech.audio == audio
     assert speech.duration_milliseconds == 500
-    assert speech.request_id == "req"
-    assert speech.billable_characters == 7
-    assert speech.cost_cny == pytest.approx(0.00056)
+    assert speech.request_id == "trace-1"
+    # Two Han characters count once each; " A1。" is four other characters.
+    assert speech.billable_characters == 4
+    assert speech.cost_cny == pytest.approx(4 * 5.8 / 10_000)
     assert stream.closed
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("data,match", [
-    (event({"audio": {"url": "https://oss.example/out.wav"}}), "before completion"),
-    (b"data: {broken}\n\n", "invalid JSON"),
-    (b'data: []\n\n', "invalid payload"),
-    (b'data: {"code":"QuotaExceeded","message":"quota"}\n\n', "QuotaExceeded"),
-    (event({"audio": {"data": "not base64!"}}), "invalid audio"),
-    (event({"finish_reason": "stop", "audio": {"data": "dGVzdA=="}}), "invalid WAV"),
-    (event({"finish_reason": "stop"}), "did not include audio"),
-    (event({"finish_reason": "stop", "audio": {"url": "http://untrusted.example/out.wav"}}), "unsafe audio URL"),
+@pytest.mark.parametrize("status,body,match", [
+    (400, {"error": {"type": "voice_id_invalid", "message": "no such voice"}}, "voice_id_invalid: no such voice"),
+    (429, {"error": {"type": "rate_limited"}}, "rate_limited: request failed"),
+    (500, b"<html>oops</html>", "http_500: request failed"),
 ])
-async def test_failed_stream_is_closed_and_never_retried(data, match):
-    stream = ByteStream(data)
+async def test_provider_errors_are_reported_and_never_retried(status, body, match):
     calls = []
 
     async def handle(request):
         calls.append(request.method)
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+        content = body if isinstance(body, bytes) else json.dumps(body).encode()
+        return httpx.Response(status, content=content)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         with pytest.raises(tts.SpeechSynthesisError, match=match):
             await synthesize(client)
-    assert stream.closed
     assert calls == ["POST"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream_audio", [True, False])
-async def test_audio_limits_apply_before_full_download(monkeypatch, stream_audio):
-    monkeypatch.setattr(tts.settings, "dashscope_tts_max_bytes", 64)
-    audio = _wav_bytes()
-    stream = ByteStream(event({"audio": {"data": base64.b64encode(audio).decode()}, "finish_reason": "stop"}) if stream_audio else audio)
+@pytest.mark.parametrize("audio,match", [
+    (b"", "did not include audio"),
+    (b"not a wav", "invalid WAV"),
+])
+async def test_bad_audio_is_rejected(audio, match):
+    async def handle(request):
+        return audio_response(audio)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(tts.SpeechSynthesisError, match=match):
+            await synthesize(client)
+
+
+@pytest.mark.asyncio
+async def test_audio_limit_applies_before_full_download(monkeypatch):
+    monkeypatch.setattr(tts.settings, "stepfun_tts_max_bytes", 64)
+    stream = ByteStream(_wav_bytes())
 
     async def handle(request):
-        if stream_audio or request.method == "GET":
-            return httpx.Response(200, headers={"content-type": "text/event-stream" if stream_audio else "audio/wav"}, stream=stream)
-        return httpx.Response(200, json={"output": {"finish_reason": "stop", "audio": {"url": "https://oss.example/out.wav"}}})
+        return audio_response(b"", stream=stream)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         with pytest.raises(tts.SpeechSynthesisError, match="allowed size"):
@@ -109,21 +116,35 @@ async def test_audio_limits_apply_before_full_download(monkeypatch, stream_audio
 
 
 @pytest.mark.asyncio
-async def test_header_usage_errors_and_zero_price(monkeypatch):
-    audio = _wav_bytes()
-    usage = {"characters": "bad"}
+async def test_input_limit_and_missing_key_fail_before_any_request(monkeypatch):
+    calls = []
 
     async def handle(request):
-        if request.method == "GET":
-            return httpx.Response(200, content=audio)
-        return httpx.Response(200, json={"output": {"audio": {"url": "https://oss.example/out.wav"}}, "usage": usage})
+        calls.append(request.method)
+        return audio_response(_wav_bytes())
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        with pytest.raises(tts.SpeechSynthesisError, match="invalid usage"):
+        with pytest.raises(tts.SpeechSynthesisError, match="input limit"):
+            await synthesize(client, text="好" * 1000)
+        with pytest.raises(tts.SpeechSynthesisError, match="empty"):
+            await synthesize(client, text="   ")
+        monkeypatch.setattr(tts.settings, "stepfun_api_key", " ")
+        with pytest.raises(tts.SpeechSynthesisError, match="not configured"):
             await synthesize(client)
-        usage["characters"] = 4
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_zero_price_and_settings_fallback(monkeypatch):
+    async def handle(request):
+        return audio_response(_wav_bytes())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         monkeypatch.setattr(tts, "get_tts_pricing", lambda model: {"unit_price_cny": 0})
         assert (await synthesize(client)).cost_cny == 0
+        monkeypatch.setattr(tts, "get_tts_pricing", lambda model: None)
+        monkeypatch.setattr(tts.settings, "tts_price_cny_per_10k_chars", 5.8)
+        assert (await synthesize(client)).unit_price_cny == 5.8
 
 
 @pytest.mark.asyncio
@@ -147,7 +168,7 @@ async def test_shared_client_reuses_connections_and_closes(monkeypatch):
     audio = _wav_bytes()
 
     async def handle(request):
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=event({"finish_reason": "stop", "audio": {"data": base64.b64encode(audio).decode()}}))
+        return httpx.Response(200, headers={"content-type": "audio/wav"}, content=audio)
 
     real_client = httpx.AsyncClient
     clients = []
@@ -169,7 +190,7 @@ async def test_shared_client_reuses_connections_and_closes(monkeypatch):
 @pytest.mark.asyncio
 async def test_cancellation_while_queued_does_not_create_client_or_leak_permit():
     transport = tts._tts_transport()
-    for _ in range(tts.settings.dashscope_tts_max_concurrency):
+    for _ in range(tts.settings.stepfun_tts_max_concurrency):
         await transport.semaphore.acquire()
     task = asyncio.create_task(synthesize())
     await asyncio.sleep(0)
@@ -196,7 +217,7 @@ async def test_cancellation_during_stream_closes_response_and_releases_permit():
     stream = WaitingStream(b"")
 
     async def handle(request):
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+        return audio_response(b"", stream=stream)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         task = asyncio.create_task(synthesize(client))
@@ -215,21 +236,41 @@ def test_truncated_wav_is_not_delivered_as_complete():
 
 
 @pytest.mark.asyncio
-async def test_real_dashscope_length_placeholders_keep_aigc_metadata():
+async def test_list_chunk_and_streaming_placeholder_are_finalized():
+    """StepFun prepends a LIST/INFO chunk; a 0xFFFFFFFF data length is fixed."""
     ordinary = _wav_bytes(seconds=0.5)
-    aigc = b"AIGC" + struct.pack("<I", 224) + b"x" * 224
-    audio = bytearray(ordinary[:36] + aigc + ordinary[36:])
-    data_offset = 36 + len(aigc)
-    struct.pack_into("<I", audio, 4, 0x7FFFFFBF)
-    struct.pack_into("<I", audio, data_offset + 4, 0x7FFFFFBF - data_offset)
+    info = b"LIST" + struct.pack("<I", 26) + b"INFOISFT" + struct.pack("<I", 14) + b"Lavf58.76.100\x00"
+    audio = bytearray(ordinary[:36] + info + ordinary[36:])
+    data_offset = 36 + len(info)
+    struct.pack_into("<I", audio, 4, 0xFFFFFFFF)
+    struct.pack_into("<I", audio, data_offset + 4, 0xFFFFFFFF)
 
     async def handle(request):
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=event({"finish_reason": "stop", "audio": {"data": base64.b64encode(audio).decode()}}))
+        return audio_response(bytes(audio))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         speech = await synthesize(client)
     assert speech.duration_milliseconds == 500
     assert struct.unpack_from("<I", speech.audio, 4)[0] == len(audio) - 8
     assert struct.unpack_from("<I", speech.audio, data_offset + 4)[0] == 24000
-    assert speech.audio[36:data_offset] == aigc
+    assert speech.audio[36:data_offset] == info
     assert speech.audio[data_offset + 8:] == ordinary[44:]
+
+
+def test_incomplete_and_empty_wav_frames_are_rejected():
+    import io
+    import wave
+
+    def wav(frames: bytes, channels: int = 2) -> bytes:
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as out:
+            out.setnchannels(channels)
+            out.setsampwidth(2)
+            out.setframerate(24000)
+            out.writeframes(frames)
+        return buffer.getvalue()
+
+    with pytest.raises(tts.SpeechSynthesisError, match="incomplete WAV"):
+        tts.wav_duration_milliseconds(wav(b"\x00\x00"))
+    with pytest.raises(tts.SpeechSynthesisError, match="empty WAV"):
+        tts.wav_duration_milliseconds(wav(b"", channels=1))

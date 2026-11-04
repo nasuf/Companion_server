@@ -167,6 +167,41 @@ def public_provider_options(*, include_local: bool = True) -> list[dict]:
     return result
 
 
+# Providers that serve only media routes (never chat/small). They appear in
+# media dropdowns and the model registry, not in LLM provider lists.
+_MEDIA_ONLY_PROVIDERS: dict[str, dict] = {
+    "stepfun": {
+        "display_name": "阶跃星辰 / StepFun",
+        "description": "StepAudio 语音合成与音色复刻，和实时语音通话共用音色",
+        "api_key_setting": "stepfun_api_key",
+        "credential_env": "STEPFUN_API_KEY",
+    },
+}
+
+
+def media_provider_ids() -> set[str]:
+    return set(_MEDIA_ONLY_PROVIDERS)
+
+
+def media_provider_options() -> list[dict]:
+    """Same shape as public_provider_options, for media-only providers."""
+    return [
+        {
+            "id": provider_id,
+            "display_name": spec["display_name"],
+            "description": spec["description"],
+            "local": False,
+            "configured": bool(str(getattr(settings, spec["api_key_setting"], "")).strip()),
+            "credential_env": spec["credential_env"],
+            "base_url_env": None,
+            "base_url": "",
+            "preferred_chat_models": [],
+            "preferred_small_models": [],
+        }
+        for provider_id, spec in _MEDIA_ONLY_PROVIDERS.items()
+    ]
+
+
 def _is_dashscope_character(model_name: str) -> bool:
     return "character" in model_name.lower()
 

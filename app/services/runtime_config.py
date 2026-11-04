@@ -46,6 +46,8 @@ class ResolvedConfig:
     reply_delay_max_seconds: int
     user_message_aggregation_enabled: bool
     filler_emoji_probability: float = 0.0
+    # Realtime voice calls (global-only, SQL-only column).
+    realtime_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -160,7 +162,8 @@ async def _load_caches_unlocked() -> None:
             prompts = await tx.prompttemplate.find_many()
             revision_rows = await tx.query_raw(
                 "SELECT revision, (SELECT chat_context_policy FROM system_config WHERE id=1) AS chat_context_policy, "
-                "(SELECT reply_repetition_policy FROM system_config WHERE id=1) AS reply_repetition_policy "
+                "(SELECT reply_repetition_policy FROM system_config WHERE id=1) AS reply_repetition_policy, "
+                "(SELECT realtime_model FROM system_config WHERE id=1) AS realtime_model "
                 "FROM configuration_revisions WHERE scope='models'"
             )
         revision = int(revision_rows[0]["revision"])
@@ -168,6 +171,8 @@ async def _load_caches_unlocked() -> None:
         new_global = _row_to_dict(sys_row)
         new_global["chatContextPolicy"] = revision_rows[0].get("chat_context_policy")
         new_global["replyRepetitionPolicy"] = revision_rows[0].get("reply_repetition_policy")
+        if revision_rows[0].get("realtime_model"):
+            new_global["realtimeModel"] = revision_rows[0]["realtime_model"]
         new_agent = {row.agentId: _row_to_dict(row) for row in overrides}
         new_prompts = {row.key: (row.content, row.isEnabled) for row in prompts}
         identifier_counts: dict[str, int] = {}
@@ -233,7 +238,7 @@ async def _seed_system_config_with_env_defaults():
         "localSmallModel": settings.local_small_model,
         "remoteChatModel": settings.remote_chat_model,
         "remoteSmallModel": settings.remote_small_model,
-        "ttsModel": settings.dashscope_tts_model,
+        "ttsModel": settings.stepfun_tts_model,
         "ttsOutputProbability": settings.tts_output_probability,
     }})
 
@@ -416,7 +421,7 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
         remote_small_model=_pick("remoteSmallModel", settings.remote_small_model),
         vision_model=_pick("visionModel", settings.doubao_vision_model),
         asr_model=_pick("asrModel", settings.dashscope_asr_model),
-        tts_model=_pick("ttsModel", settings.dashscope_tts_model),
+        tts_model=_pick("ttsModel", settings.stepfun_tts_model),
         tts_output_probability=max(
             0,
             min(
@@ -467,6 +472,9 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
             ),
         ),
         filler_emoji_probability=float(glob.get("fillerEmojiProbability") or 0.0),
+        realtime_model=str(
+            glob.get("realtimeModel") or settings.stepfun_realtime_model
+        ).strip(),
         reply_delay_enabled=bool(
             _pick("replyDelayEnabled", settings.reply_delay_enabled),
         ),
@@ -504,8 +512,14 @@ async def get_effective_asr_model() -> str:
     return resolve_config_sync(agent_id=None).asr_model
 
 
+async def get_effective_realtime_model() -> str:
+    """Realtime voice call model (admin override → env STEPFUN_REALTIME_MODEL)."""
+    await ensure_loaded()
+    return resolve_config_sync(agent_id=None).realtime_model
+
+
 async def get_effective_tts_model() -> str:
-    """Assistant TTS model id (admin override → env DASHSCOPE_TTS_MODEL)."""
+    """Assistant TTS model id (admin override → env STEPFUN_TTS_MODEL)."""
     await ensure_loaded()
     return resolve_config_sync(agent_id=None).tts_model
 

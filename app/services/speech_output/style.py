@@ -6,28 +6,35 @@ import math
 import re
 from dataclasses import dataclass
 
-from app.services.speech_output.client import count_billable_characters
 
 
 DEFAULT_STYLE_INSTRUCTION = (
     "像随手发的微信语音，吐字松弛，自然连读，语气词轻读，"
     "停顿短，少重音，句尾轻收，保持原文。"
 )
+# Admin-facing budget, kept from the DashScope era (a Han character weighs 2).
+# 100 weighted characters stays well inside StepFun's 200-character
+# instruction limit even after the per-sentence mood clause is appended.
 MAX_INSTRUCTION_BILLABLE_CHARACTERS = 100
 logger = logging.getLogger(__name__)
 
+# stepaudio-2.5-tts treats text inside full-width parentheses as a delivery
+# cue and does not speak it (verified 2026-11-04; half-width parentheses are
+# read aloud).
 _EMOTION_TAGS = {
-    "高兴": "[excited]",
-    "悲伤": "[sad]",
-    "愤怒": "[angry]",
-    "惊讶": "[amazed]",
-    "恐惧": "[trembling]",
-    "厌恶": "[scornful]",
-    "失望": "[sad]",
-    "欣慰": "[empathetic]",
-    "感激": "[empathetic]",
-    "戏谑": "[mischievously]",
+    "高兴": "（开心地）",
+    "悲伤": "（难过地）",
+    "愤怒": "（生气地）",
+    "惊讶": "（惊讶地）",
+    "恐惧": "（害怕地）",
+    "厌恶": "（嫌弃地）",
+    "失望": "（失落地）",
+    "欣慰": "（温柔地）",
+    "感激": "（真诚地）",
+    "戏谑": "（调皮地）",
 }
+_LAUGH_CUE = "（轻笑）"
+_SIGH_CUE = "（叹气）"
 
 _EMOTION_STYLES = {
     "高兴": "开心轻快",
@@ -42,8 +49,8 @@ _EMOTION_STYLES = {
     "感激": "真诚感谢",
     "戏谑": "轻松俏皮",
 }
-# Only the planner may add provider controls; quoted/user text must not inject
-# them into speech. Preserve ordinary square-bracket text (e.g. [项目名]).
+# Strip legacy DashScope control tags the model may still emit; the planner
+# adds its own cues. Preserve ordinary square-bracket text (e.g. [项目名]).
 _CONTROL_RE = re.compile(
     r"\[(?:sad|amazed|deep and loud shouting|trembling|angry|excited|sarcastic|"
     r"curious|like dracula|bored|tired|scornful|shouting|asmr|panicked|"
@@ -127,10 +134,10 @@ def build_speech_plan(
         event = None
         if label in {"高兴", "戏谑"}:
             cue = re.match(r"^哈{2,}[，,。.!！\s]*", clean_text)
-            event = "[giggles]"
+            event = _LAUGH_CUE
         elif label in {"悲伤", "失望", "焦虑"}:
             cue = re.match(r"^唉[，,。…！!\s]+", clean_text)
-            event = "[sighing]"
+            event = _SIGH_CUE
         if cue and clean_text[cue.end():].strip():
             clean_text = f"{event}{clean_text[cue.end():]}"
     return SpeechPlan(
@@ -139,8 +146,15 @@ def build_speech_plan(
     )
 
 
+def _weighted_length(text: str) -> int:
+    return sum(
+        2 if "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff" else 1
+        for char in text
+    )
+
+
 def instruction_billable_characters(value: str | None) -> int:
-    return count_billable_characters((value or "").strip())
+    return _weighted_length((value or "").strip())
 
 
 def resolve_style_instruction(value: str | None) -> str:
@@ -160,7 +174,7 @@ def decorate_text_with_emotion(
     enabled: bool,
     scale: float,
 ) -> str:
-    """Prefix one provider-supported control tag without changing transcript."""
+    """Prefix one delivery cue without changing the displayed transcript."""
     clean_text = (text or "").strip()
     if not clean_text or not enabled:
         return clean_text

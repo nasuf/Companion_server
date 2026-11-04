@@ -4,13 +4,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.db import db
+from app.services.speech_output.client import TTS_PROVIDER
 
 
-QWEN_AUDIO_TTS_MODEL = "qwen-audio-3.0-tts-plus"
+# Voice messages and realtime calls share one StepFun voice per agent; clones
+# made with this model are accepted by both endpoints.
+TTS_MODEL = "stepaudio-2.5-tts"
 DEFAULT_SPEECH_RATE = 0.9
+# Official voices verified against both stepaudio-2.5-tts and
+# stepaudio-2.5-realtime. They also back realtime calls when an agent voice is
+# rejected, so keep them equal to STEPFUN_REALTIME_VOICE_*.
 SYSTEM_VOICE_BY_GENDER = {
-    "female": "longanlingxin",
-    "male": "longanlufeng",
+    "female": "elegantgentle-female",
+    "male": "wenrounansheng",
 }
 # Named clones are the default for every agent of that gender. The system
 # voices above remain only when these profiles are missing or disabled.
@@ -21,13 +27,13 @@ DEFAULT_VOICE_DISPLAY_NAME = {
 
 
 async def resolve_agent_tts_model() -> str:
-    """The current voice library/enrollment targets Plus, including clones."""
+    """The voice library and enrollment target one model, including clones."""
     from app.services.runtime_config import get_effective_tts_model
     from app.services.speech_output.client import SpeechSynthesisError
 
     model = (await get_effective_tts_model()).strip()
-    if model != QWEN_AUDIO_TTS_MODEL:
-        raise SpeechSynthesisError("当前模型与 Plus 音色库不兼容，请配置 qwen-audio-3.0-tts-plus")
+    if model != TTS_MODEL:
+        raise SpeechSynthesisError(f"当前模型与 StepFun 音色库不兼容，请配置 {TTS_MODEL}")
     return model
 
 
@@ -35,9 +41,7 @@ async def resolve_agent_tts_model() -> str:
 class AgentTtsSettings:
     voice_id: str
     rate: float
-    pitch: float
     volume: int
-    seed: int
     instruction: str | None
     auto_emotion: bool
     emotion_scale: float
@@ -57,12 +61,13 @@ async def _voice_exists(voice_id: str) -> bool:
         """
         SELECT 1
         FROM tts_voice_profiles
-        WHERE provider = 'dashscope'
-          AND model = $1
-          AND voice_id = $2
+        WHERE provider = $1
+          AND model = $2
+          AND voice_id = $3
         LIMIT 1
         """,
-        QWEN_AUDIO_TTS_MODEL,
+        TTS_PROVIDER,
+        TTS_MODEL,
         voice_id,
     )
     return bool(rows)
@@ -80,14 +85,15 @@ async def assign_random_voice(
         """
         SELECT voice_id
         FROM tts_voice_profiles
-        WHERE provider = 'dashscope'
-          AND model = $1
-          AND gender = $2
+        WHERE provider = $1
+          AND model = $2
+          AND gender = $3
           AND enabled = true
-          AND display_name = $3
+          AND display_name = $4
         LIMIT 1
         """,
-        QWEN_AUDIO_TTS_MODEL,
+        TTS_PROVIDER,
+        TTS_MODEL,
         gender_key,
         DEFAULT_VOICE_DISPLAY_NAME[gender_key],
     )
@@ -96,14 +102,15 @@ async def assign_random_voice(
             """
             SELECT voice_id
             FROM tts_voice_profiles
-            WHERE provider = 'dashscope'
-              AND model = $1
-              AND gender = $2
+            WHERE provider = $1
+              AND model = $2
+              AND gender = $3
               AND enabled = true
             ORDER BY random()
             LIMIT 1
             """,
-            QWEN_AUDIO_TTS_MODEL,
+            TTS_PROVIDER,
+            TTS_MODEL,
             gender_key,
         )
     voice_id = (
@@ -118,14 +125,15 @@ async def assign_random_voice(
         WHERE id = $2
           AND NOT EXISTS (
               SELECT 1 FROM tts_voice_profiles profile
-              WHERE profile.provider = 'dashscope'
-                AND profile.model = $3
+              WHERE profile.provider = $3
+                AND profile.model = $4
                 AND profile.voice_id = ai_agents.tts_voice_id
           )
         """,
         voice_id,
         agent_id,
-        QWEN_AUDIO_TTS_MODEL,
+        TTS_PROVIDER,
+        TTS_MODEL,
     )
     if not changed:
         current = await db.query_raw(
@@ -141,7 +149,7 @@ async def assign_random_voice(
 
 
 async def ensure_agent_voice(agent: Any) -> str:
-    """Return a Plus-compatible voice, lazily migrating old Qwen assignments."""
+    """Return a library voice, lazily replacing ids from a retired provider."""
     agent_id = str(getattr(agent, "id"))
     rows = await db.query_raw(
         """
@@ -180,9 +188,7 @@ async def get_agent_tts_settings(agent_id: str) -> AgentTtsSettings:
             tts_voice_id,
             gender,
             tts_rate,
-            tts_pitch,
             tts_volume,
-            tts_seed,
             tts_instruction,
             tts_auto_emotion,
             tts_emotion_scale
@@ -204,9 +210,7 @@ async def get_agent_tts_settings(agent_id: str) -> AgentTtsSettings:
     return AgentTtsSettings(
         voice_id=voice_id,
         rate=float(row.get("tts_rate") or DEFAULT_SPEECH_RATE),
-        pitch=float(row.get("tts_pitch") or 1.0),
         volume=int(row.get("tts_volume") if row.get("tts_volume") is not None else 50),
-        seed=int(row.get("tts_seed") or 0),
         instruction=(
             str(row.get("tts_instruction")).strip()
             if row.get("tts_instruction")

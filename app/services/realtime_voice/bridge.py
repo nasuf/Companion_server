@@ -91,6 +91,9 @@ class VoiceBridge:
         # Collected transcripts for end-of-call extraction
         self._transcript_pairs: list[dict] = []
 
+        # Provider token usage, summed over every response.done
+        self._usage = {"input": 0, "output": 0, "cached_input": 0, "responses": 0}
+
     # ------------------------------------------------------------------
     # Public entry points (all acquire lock)
     # ------------------------------------------------------------------
@@ -121,6 +124,11 @@ class VoiceBridge:
     def transcript_pairs(self) -> list[dict]:
         """Collected user/assistant transcript pairs for end-of-call extraction."""
         return list(self._transcript_pairs)
+
+    @property
+    def usage(self) -> dict[str, int]:
+        """Token usage StepFun reported for this call (billed per token)."""
+        return dict(self._usage)
 
     # ------------------------------------------------------------------
     # Audio forwarding (server_vad handles turn detection)
@@ -304,6 +312,7 @@ class VoiceBridge:
         if isinstance(response, dict) and isinstance(response.get("status"), str):
             status = response["status"]
         interrupted = status in {"cancelled", "incomplete"}
+        self._record_usage(response)
 
         if text:
             logger.info(
@@ -323,6 +332,21 @@ class VoiceBridge:
                 })
 
         await self._send_client({"type": "response.done", "interrupted": interrupted})
+
+    def _record_usage(self, response: object) -> None:
+        usage = response.get("usage") if isinstance(response, dict) else None
+        if not isinstance(usage, dict):
+            return
+        details = usage.get("input_token_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else 0
+        for key, value in (
+            ("input", usage.get("input_tokens")),
+            ("output", usage.get("output_tokens")),
+            ("cached_input", cached),
+        ):
+            if isinstance(value, int) and value > 0:
+                self._usage[key] += value
+        self._usage["responses"] += 1
 
     # ------------------------------------------------------------------
     # Audio relay
