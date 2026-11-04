@@ -26,6 +26,7 @@ async def test_gender_pool_excludes_disabled_voices_and_keeps_existing_binding(m
             await tx.execute_raw("""CREATE TEMP TABLE tts_voice_profiles (
                 voice_id TEXT PRIMARY KEY, gender TEXT, enabled BOOLEAN,
                 display_name TEXT,
+                is_default BOOLEAN NOT NULL DEFAULT false,
                 provider TEXT DEFAULT 'stepfun',
                 model TEXT DEFAULT 'stepaudio-2.5-tts'
             ) ON COMMIT DROP""")
@@ -64,5 +65,45 @@ async def test_gender_pool_excludes_disabled_voices_and_keeps_existing_binding(m
                 chosen = await voices.assign_random_voice(agent_id=agent_id, gender='male')
                 assert chosen in {'male-1', 'male-2'}
                 assert await voices.assign_random_voice(agent_id=agent_id, gender='male') == chosen
+    finally:
+        await database.disconnect()
+
+
+async def test_new_agents_bind_to_the_admin_chosen_default(monkeypatch):
+    url = os.getenv("TTS_TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TTS_TEST_DATABASE_URL must point to disposable local PostgreSQL")
+    assert urlsplit(url).hostname in {"localhost", "127.0.0.1", "::1"}
+    database = Prisma(datasource={"url": url}, http={"trust_env": False})
+    await database.connect()
+    try:
+        async with database.tx(timeout=timedelta(seconds=30)) as tx:
+            await tx.execute_raw("""CREATE TEMP TABLE ai_agents (
+                id TEXT PRIMARY KEY, gender TEXT, tts_voice_id TEXT,
+                updated_at TIMESTAMP DEFAULT NOW()
+            ) ON COMMIT DROP""")
+            await tx.execute_raw("""CREATE TEMP TABLE tts_voice_profiles (
+                voice_id TEXT PRIMARY KEY, gender TEXT, enabled BOOLEAN,
+                is_default BOOLEAN NOT NULL DEFAULT false,
+                provider TEXT DEFAULT 'stepfun',
+                model TEXT DEFAULT 'stepaudio-2.5-tts'
+            ) ON COMMIT DROP""")
+            await tx.execute_raw(
+                'CREATE UNIQUE INDEX ON tts_voice_profiles (provider, model, gender) WHERE is_default'
+            )
+            await tx.execute_raw("""INSERT INTO tts_voice_profiles
+                (voice_id,gender,enabled,is_default) VALUES
+                ('male-a','male',true,false), ('male-b','male',true,true),
+                ('female-a','female',true,true)""")
+            monkeypatch.setattr(voices, "db", tx)
+            for index in range(6):
+                await tx.execute_raw("INSERT INTO ai_agents(id,gender) VALUES ($1,'male')", f"m{index}")
+                assert await voices.assign_random_voice(agent_id=f"m{index}", gender="male") == "male-b"
+            assert await voices.default_voice_for_gender("female") == "female-a"
+            # A disabled default no longer counts; draws fall back to the pool.
+            await tx.execute_raw("UPDATE tts_voice_profiles SET enabled=false WHERE voice_id='male-b'")
+            assert await voices.default_voice_for_gender("male") is None
+            await tx.execute_raw("INSERT INTO ai_agents(id,gender) VALUES ('late','male')")
+            assert await voices.assign_random_voice(agent_id="late", gender="male") == "male-a"
     finally:
         await database.disconnect()

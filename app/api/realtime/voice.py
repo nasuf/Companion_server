@@ -31,7 +31,7 @@ from app.redis_client import is_redis_healthy
 from app.services.interaction.boundary import get_patience, get_patience_zone
 from app.services.realtime_voice.bridge import VoiceBridge
 from app.services.realtime_voice.context import load_call_context
-from app.services.realtime_voice.instructions import format_retrieved_memories, voice_for_gender
+from app.services.realtime_voice.instructions import format_retrieved_memories
 from app.services.realtime_voice.lock import acquire_call, refresh_call, release_call
 from app.services.realtime_voice.persist import (
     save_assistant_transcript,
@@ -48,7 +48,7 @@ from app.services.realtime_voice.provider import (
     realtime_url,
 )
 from app.services.runtime_config import get_effective_realtime_model
-from app.services.speech_output.voices import ensure_agent_voice
+from app.services.speech_output.voices import default_voice_for_gender, ensure_agent_voice
 from app.services.runtime.ws_auth import (
     CHAT_PROTOCOL,
     TicketInvalid,
@@ -147,18 +147,18 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
             workspace_id=getattr(conv, "workspaceId", None),
             conversation_id=conversation_id,
         )
-        # Same StepFun voice as the agent's voice messages; the official
-        # gender voice covers a missing or rejected clone.
-        fallback_voice = voice_for_gender(
-            getattr(conv.agent, "gender", None),
-            female=settings.stepfun_realtime_voice_female,
-            male=settings.stepfun_realtime_voice_male,
-        )
+        # Same StepFun voice as the agent's voice messages; the admin-chosen
+        # gender default covers a missing or rejected clone.
+        fallback_voice: str | None = None
         try:
+            fallback_voice = await default_voice_for_gender(getattr(conv.agent, "gender", None))
             voice = await ensure_agent_voice(conv.agent)
         except Exception:
             logger.warning("[realtime-voice] agent voice lookup failed", exc_info=True)
             voice = fallback_voice
+        if not voice:
+            await _fail(websocket, "not_configured", "音色库没有可用音色")
+            return
         logger.info("[realtime-voice] using voice=%s fallback=%s", voice, fallback_voice)
         model = (await get_effective_realtime_model()) or "stepaudio-2.5-realtime"
         url = realtime_url(settings.stepfun_realtime_url, model)

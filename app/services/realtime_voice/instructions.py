@@ -53,13 +53,6 @@ class DynamicContext:
     relation_meta_line: str = ""
 
 
-def voice_for_gender(gender: str | None, *, female: str, male: str) -> str:
-    token = (gender or "").strip().lower()
-    if token in _MALE:
-        return male
-    return female
-
-
 def persona_from_agent(agent) -> PersonaFacts:
     facts = canonical_facts(agent)
     age = facts.get("age")

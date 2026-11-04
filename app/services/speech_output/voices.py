@@ -11,19 +11,6 @@ from app.services.speech_output.client import TTS_PROVIDER
 # made with this model are accepted by both endpoints.
 TTS_MODEL = "stepaudio-2.5-tts"
 DEFAULT_SPEECH_RATE = 0.9
-# Official voices verified against both stepaudio-2.5-tts and
-# stepaudio-2.5-realtime. They also back realtime calls when an agent voice is
-# rejected, so keep them equal to STEPFUN_REALTIME_VOICE_*.
-SYSTEM_VOICE_BY_GENDER = {
-    "female": "elegantgentle-female",
-    "male": "wenrounansheng",
-}
-# Named clones are the default for every agent of that gender. The system
-# voices above remain only when these profiles are missing or disabled.
-DEFAULT_VOICE_DISPLAY_NAME = {
-    "female": "女声-2",
-    "male": "男声-2",
-}
 
 
 async def resolve_agent_tts_model() -> str:
@@ -73,14 +60,12 @@ async def _voice_exists(voice_id: str) -> bool:
     return bool(rows)
 
 
-async def assign_random_voice(
-    *,
-    agent_id: str,
-    gender: str | None,
-    agent: Any | None = None,
-) -> str:
-    """Bind the gender default clone, or a random enabled voice if it is absent."""
-    gender_key = "male" if str(gender or "").lower() == "male" else "female"
+def _gender_key(gender: str | None) -> str:
+    return "male" if str(gender or "").lower() == "male" else "female"
+
+
+async def default_voice_for_gender(gender: str | None) -> str | None:
+    """The admin-chosen default voice (tts_voice_profiles.is_default)."""
     rows = await db.query_raw(
         """
         SELECT voice_id
@@ -89,15 +74,28 @@ async def assign_random_voice(
           AND model = $2
           AND gender = $3
           AND enabled = true
-          AND display_name = $4
+          AND is_default = true
         LIMIT 1
         """,
         TTS_PROVIDER,
         TTS_MODEL,
-        gender_key,
-        DEFAULT_VOICE_DISPLAY_NAME[gender_key],
+        _gender_key(gender),
     )
     if not rows:
+        return None
+    return str(rows[0].get("voice_id") or "") or None
+
+
+async def assign_random_voice(
+    *,
+    agent_id: str,
+    gender: str | None,
+    agent: Any | None = None,
+) -> str:
+    """Bind the gender default voice, or a random enabled one if none is set."""
+    gender_key = _gender_key(gender)
+    voice_id = await default_voice_for_gender(gender_key)
+    if not voice_id:
         rows = await db.query_raw(
             """
             SELECT voice_id
@@ -113,11 +111,9 @@ async def assign_random_voice(
             TTS_MODEL,
             gender_key,
         )
-    voice_id = (
-        str(rows[0].get("voice_id") or "")
-        if rows
-        else SYSTEM_VOICE_BY_GENDER[gender_key]
-    )
+        if not rows or not rows[0].get("voice_id"):
+            raise LookupError(f"No enabled {gender_key} voice in the library")
+        voice_id = str(rows[0]["voice_id"])
     changed = await db.execute_raw(
         """
         UPDATE ai_agents

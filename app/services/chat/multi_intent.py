@@ -145,6 +145,7 @@ async def short_circuit_reply(
             client_supports_voice=bool(
                 (reply_context or {}).get("client_supports_voice")
             ),
+            agent_id=getattr(agent, "id", None),
         ):
             try:
                 from app.services.speech_output.delivery import prepare_voice_output

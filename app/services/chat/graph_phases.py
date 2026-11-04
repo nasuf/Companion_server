@@ -1437,7 +1437,9 @@ async def normalize_reply(ctx):
     else:
         voice_context = VoiceContext.NORMAL_CHAT
     if not ctx.reply_is_fallback and await should_generate_voice(
-        context=voice_context, client_supports_voice=client_supports_voice
+        context=voice_context,
+        client_supports_voice=client_supports_voice,
+        agent_id=ctx.agent_id,
     ):
         try:
             from app.services.speech_output.delivery import prepare_voice_output

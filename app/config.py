@@ -141,12 +141,6 @@ class Settings(BaseSettings):
     stepfun_api_key: str = ""
     stepfun_realtime_url: str = "wss://api.stepfun.com/v1/realtime"
     stepfun_realtime_model: str = "stepaudio-2.5-realtime"
-    # Voice ids verified against stepaudio-2.5-realtime on 2026-11-04; some
-    # TTS-only ids (soft-spoken-gentleman, wenrougongzi) are rejected. A
-    # session locks the voice after the first audio response, so this is
-    # chosen once per call.
-    stepfun_realtime_voice_female: str = "elegantgentle-female"
-    stepfun_realtime_voice_male: str = "wenrounansheng"
     # Official realtime demo captures and plays 24 kHz mono PCM16.
     stepfun_realtime_sample_rate: int = 24000
     stepfun_realtime_silence_ms: int = 600

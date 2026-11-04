@@ -112,6 +112,7 @@ async def emit_proactive_message(
         if await should_generate_voice(
             context=VoiceContext.PROACTIVE_CHAT,
             client_supports_voice=True,
+            agent_id=agent_id,
         ):
             try:
                 agent = await db.aiagent.find_unique(where={"id": agent_id})

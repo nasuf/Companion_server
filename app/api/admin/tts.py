@@ -19,6 +19,7 @@ from app.db import db
 from app.services.speech_output.client import (
     TTS_PROVIDER,
     SpeechSynthesisError,
+    SynthesizedSpeech,
     synthesize_speech,
 )
 from app.services.speech_output.style import (
@@ -28,6 +29,7 @@ from app.services.speech_output.style import (
     instruction_billable_characters,
     resolve_voice_emotion,
 )
+from app.services.speech_output.policy import effective_tts_probability
 from app.services.speech_output.usage import record_tts_usage
 from app.services.speech_output.voice_enrollment import (
     create_cloned_voice,
@@ -35,7 +37,6 @@ from app.services.speech_output.voice_enrollment import (
 )
 from app.services.speech_output.voices import (
     DEFAULT_SPEECH_RATE,
-    DEFAULT_VOICE_DISPLAY_NAME,
     TTS_MODEL,
     resolve_agent_tts_model,
 )
@@ -58,12 +59,24 @@ class AgentTtsPayload(BaseModel):
     instruction: str | None = None
     auto_emotion: bool = True
     emotion_scale: float = Field(ge=0, le=2.0)
+    # Omitted keeps the stored value; null inherits the global probability.
+    output_probability: int | None = Field(default=None, ge=0, le=100)
 
 
 class AgentTtsPreviewPayload(AgentTtsPayload):
     text: str = Field(min_length=1, max_length=300)
     emotion: str | None = None
     intensity: int = Field(default=50, ge=0, le=100)
+
+
+# Library auditions use the bare voice: no agent instruction or emotion.
+VOICE_SAMPLE_TEXT = "你好呀，今天过得怎么样？有什么想和我聊聊的吗？"
+
+
+class VoicePreviewPayload(BaseModel):
+    text: str | None = Field(default=None, min_length=1, max_length=300)
+    rate: float = Field(default=DEFAULT_SPEECH_RATE, ge=0.5, le=2.0)
+    volume: int = Field(default=50, ge=0, le=100)
 
 
 class VoiceProfilePatch(BaseModel):
@@ -88,7 +101,7 @@ async def _voice_profile(profile_id: str, *, require_enabled: bool) -> dict:
     rows = await db.query_raw(
         """
         SELECT id, display_name, provider, model, voice_id, gender, source,
-               enabled, provider_request_id, consent_confirmed_at,
+               enabled, is_default, provider_request_id, consent_confirmed_at,
                consent_confirmed_by, created_at, updated_at
         FROM tts_voice_profiles
         WHERE id = $1
@@ -111,7 +124,7 @@ async def _agent_tts_response(agent_id: str) -> dict:
         """
         SELECT id, name, gender, user_id, tts_voice_id, tts_rate,
                tts_volume, tts_instruction, tts_auto_emotion,
-               tts_emotion_scale
+               tts_emotion_scale, tts_output_probability
         FROM ai_agents
         WHERE id = $1
         LIMIT 1
@@ -163,15 +176,21 @@ async def _agent_tts_response(agent_id: str) -> dict:
             if row.get("tts_emotion_scale") is not None
             else 1.0
         ),
+        "output_probability": (
+            int(row["tts_output_probability"])
+            if row.get("tts_output_probability") is not None
+            else None
+        ),
+        "global_output_probability": await effective_tts_probability(),
     }
 
 
-@router.get("/voices")
-async def list_voice_profiles() -> dict:
+async def _voice_list() -> list[dict]:
     rows = await db.query_raw(
         """
         SELECT v.id, v.display_name, v.provider, v.model, v.voice_id,
-               v.gender, v.source, v.enabled, v.provider_request_id,
+               v.gender, v.source, v.enabled, v.is_default,
+               v.provider_request_id,
                v.consent_confirmed_at, v.consent_confirmed_by,
                v.created_at, v.updated_at,
                (
@@ -186,7 +205,77 @@ async def list_voice_profiles() -> dict:
         TTS_PROVIDER,
         TTS_MODEL,
     )
-    return {"voices": [dict(row) for row in rows]}
+    return [dict(row) for row in rows]
+
+
+@router.get("/voices")
+async def list_voice_profiles() -> dict:
+    return {"voices": await _voice_list()}
+
+
+@router.put("/voices/{profile_id}/default")
+async def set_default_voice_profile(profile_id: str) -> dict:
+    """New agents of this gender bind to it; existing agents keep theirs."""
+    current = await _voice_profile(profile_id, require_enabled=True)
+    async with db.tx() as tx:
+        # Clear first: the partial unique index allows one default per gender.
+        await tx.execute_raw(
+            """
+            UPDATE tts_voice_profiles
+            SET is_default = false, updated_at = NOW()
+            WHERE provider = $1 AND model = $2 AND gender = $3
+              AND is_default AND id <> $4
+            """,
+            TTS_PROVIDER,
+            TTS_MODEL,
+            str(current.get("gender") or ""),
+            profile_id,
+        )
+        await tx.execute_raw(
+            """
+            UPDATE tts_voice_profiles
+            SET is_default = true, updated_at = NOW()
+            WHERE id = $1 AND NOT is_default
+            """,
+            profile_id,
+        )
+    logger.info(
+        "[TTS-VOICE] default voice gender=%s voice_id=%s",
+        current.get("gender"),
+        current.get("voice_id"),
+    )
+    return {"voices": await _voice_list()}
+
+
+@router.post("/voices/{profile_id}/preview")
+async def preview_voice_profile(
+    profile_id: str,
+    payload: VoicePreviewPayload,
+    admin: dict = Depends(require_admin_jwt),
+) -> Response:
+    # Disabled voices can be auditioned before they are enabled.
+    profile = await _voice_profile(profile_id, require_enabled=False)
+    try:
+        model = await resolve_agent_tts_model()
+        speech = await synthesize_speech(
+            text=(payload.text or "").strip() or VOICE_SAMPLE_TEXT,
+            voice_id=str(profile.get("voice_id") or ""),
+            instruction=None,
+            rate=payload.rate,
+            volume=payload.volume,
+            model=model,
+        )
+    except SpeechSynthesisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    await record_tts_usage(
+        speech=speech,
+        user_id=str(admin.get("sub") or ""),
+        agent_id=None,
+        conversation_id=None,
+        message_id=None,
+        source="admin_voice_preview",
+    )
+    return _audio_response(speech)
 
 
 @router.patch("/voices/{profile_id}")
@@ -204,6 +293,11 @@ async def update_voice_profile(
         else bool(current.get("enabled"))
     )
     current_gender = str(current.get("gender") or "")
+    if current.get("is_default") and (not enabled or gender != current_gender):
+        raise HTTPException(
+            status_code=409,
+            detail="默认音色不能停用或改性别，请先把其他音色设为默认",
+        )
     leaving_current_pool = bool(current.get("enabled")) and (
         not enabled or gender != current_gender
     )
@@ -245,6 +339,8 @@ async def delete_voice_profile(profile_id: str) -> dict[str, str]:
     current = await _voice_profile(profile_id, require_enabled=False)
     if current.get("source") == "system":
         raise HTTPException(status_code=409, detail="系统音色不能删除")
+    if current.get("is_default"):
+        raise HTTPException(status_code=409, detail="默认音色不能删除")
     count_rows = await db.query_raw(
         "SELECT COUNT(*)::int AS count FROM ai_agents WHERE tts_voice_id = $1",
         str(current.get("voice_id") or ""),
@@ -331,11 +427,7 @@ async def clone_voice_profile(
             status_code=503,
             detail="音色已在 StepFun 创建但保存失败，请联系管理员登记该音色",
         ) from exc
-    logger.info(
-        "[TTS-VOICE] enrollment created voice_id=%s default=%s",
-        result.voice_id,
-        clean_display_name == DEFAULT_VOICE_DISPLAY_NAME[gender],
-    )
+    logger.info("[TTS-VOICE] enrollment created voice_id=%s", result.voice_id)
     return dict(rows[0])
 
 
@@ -354,6 +446,7 @@ async def update_agent_tts_config(
         require_enabled=True,
     )
     instruction = _validate_instruction(payload.instruction)
+    keep_probability = "output_probability" not in payload.model_fields_set
     changed = await db.execute_raw(
         """
         UPDATE ai_agents
@@ -363,6 +456,7 @@ async def update_agent_tts_config(
             tts_instruction = $4,
             tts_auto_emotion = $5,
             tts_emotion_scale = $6,
+            tts_output_probability = CASE WHEN $8 THEN tts_output_probability ELSE $9::int END,
             updated_at = NOW()
         WHERE id = $7
         """,
@@ -373,6 +467,8 @@ async def update_agent_tts_config(
         payload.auto_emotion,
         payload.emotion_scale,
         agent_id,
+        keep_probability,
+        payload.output_probability,
     )
     if not changed:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -430,6 +526,10 @@ async def preview_agent_tts(
         message_id=None,
         source="admin_preview",
     )
+    return _audio_response(speech)
+
+
+def _audio_response(speech: SynthesizedSpeech) -> Response:
     return Response(
         content=speech.audio,
         media_type=speech.mime,

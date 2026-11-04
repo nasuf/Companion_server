@@ -18,7 +18,6 @@ from app.services.speech_output.style import (
     instruction_billable_characters,
     resolve_style_instruction,
 )
-from app.services.speech_output.voices import SYSTEM_VOICE_BY_GENDER
 
 
 def _wav_bytes(*, seconds: float = 0.25, rate: int = 24000) -> bytes:
@@ -83,14 +82,6 @@ async def test_ineligible_or_unsupported_client_is_always_text():
         client_supports_voice=False,
         probability=100,
     )
-
-
-def test_voice_assignment_fallbacks_match_realtime_defaults():
-    from app.config import Settings
-
-    fields = Settings.model_fields
-    assert SYSTEM_VOICE_BY_GENDER["female"] == fields["stepfun_realtime_voice_female"].default
-    assert SYSTEM_VOICE_BY_GENDER["male"] == fields["stepfun_realtime_voice_male"].default
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,12 @@ async def postgres_enrollment(monkeypatch):
             ).removesuffix(";") + " ON COMMIT DROP"
             await transaction.execute_raw(table_sql)
             await transaction.execute_raw(
+                'ALTER TABLE tts_voice_profiles ADD COLUMN "is_default" BOOLEAN NOT NULL DEFAULT false',
+            )
+            await transaction.execute_raw(
+                'CREATE UNIQUE INDEX ON tts_voice_profiles ("provider", "model", "gender") WHERE "is_default"',
+            )
+            await transaction.execute_raw(
                 "CREATE TEMP TABLE ai_agents (tts_voice_id TEXT) ON COMMIT DROP",
             )
             # Consent times must remain UTC even when the session uses another zone.

@@ -228,6 +228,8 @@ model AiAgent {
   ttsInstruction           String?                         @map("tts_instruction")
   ttsAutoEmotion           Boolean                         @default(true) @map("tts_auto_emotion")
   ttsEmotionScale          Float                           @default(1.0) @map("tts_emotion_scale")
+  // SQL-only (kept out of the generated client); NULL inherits the global value.
+  ttsOutputProbability     Int?                            @map("tts_output_probability") @ignore
   // 若该 agent 是从某个模板克隆而来, 记录源模板 agent id (用于「模板被使用次数」统计).
   sourceTemplateId         String?                         @map("source_template_id")
   // 仅模板 agent 使用: 上次「全量」知识记忆同步完成的水位 (knowledge_seed 行
@@ -472,10 +474,10 @@ model TtsUsage {
 
   id                   String   @id @default(uuid())
   userId               String   @map("user_id")
-  agentId              String   @map("agent_id")
+  agentId              String?  @map("agent_id")
   conversationId       String?  @map("conversation_id")
   messageId            String?  @map("message_id")
-  source               String   // "chat" | "proactive" | "admin_preview"
+  source               String   // "chat" | "proactive" | "admin_preview" | "admin_voice_preview"
   provider             String   @default("dashscope")
   model                String
   voiceId              String   @map("voice_id")
@@ -505,6 +507,8 @@ model TtsVoiceProfile {
   gender             String
   source             String   // "system" | "cloned"
   enabled            Boolean  @default(true)
+  // SQL-only; at most one per (provider, model, gender), see migration.
+  isDefault          Boolean  @default(false) @map("is_default") @ignore
   providerRequestId  String?  @map("provider_request_id")
   consentConfirmedAt DateTime? @map("consent_confirmed_at")
   consentConfirmedBy String?   @map("consent_confirmed_by")

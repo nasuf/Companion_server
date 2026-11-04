@@ -20,7 +20,6 @@ from app.services.realtime_voice.instructions import (
     format_turn_memories,
     history_turns,
     persona_from_agent,
-    voice_for_gender,
 )
 from app.services.realtime_voice.protocol import (
     RECALL_MEMORY_TOOL,
@@ -124,11 +123,6 @@ class TestDecodePcm:
 # ---------------------------------------------------------------------------
 
 class TestPersona:
-    def test_voice_for_gender(self):
-        assert voice_for_gender("male", female="f", male="m") == "m"
-        assert voice_for_gender("女", female="f", male="m") == "f"
-        assert voice_for_gender(None, female="f", male="m") == "f"
-
     def test_persona_from_agent(self):
         agent = SimpleNamespace(
             name="阿宁", nickname="宁宁", gender="female", age=27,
@@ -492,13 +486,13 @@ class TestVoiceEndpoint:
         assert "ensure_agent_voice(conv.agent)" in source
         assert "fallback_voice=fallback_voice" in source
 
-    def test_default_voices_are_realtime_compatible(self):
-        """soft-spoken-gentleman is TTS-only and fails session.update."""
+    def test_fallback_voice_comes_from_the_library_default(self):
+        """No hardcoded voice: the admin-chosen gender default is the fallback."""
         from app.config import Settings
 
-        fields = Settings.model_fields
-        assert fields["stepfun_realtime_voice_male"].default == "wenrounansheng"
-        assert fields["stepfun_realtime_voice_female"].default == "elegantgentle-female"
+        source = _VOICE.read_text()
+        assert "default_voice_for_gender(" in source
+        assert not [name for name in Settings.model_fields if name.startswith("stepfun_realtime_voice")]
 
     def test_endpoint_has_idle_timeout(self):
         """voice.py should have idle watchdog."""
@@ -552,9 +546,10 @@ class _FakeProviderConnection:
         ("male", "wenrounansheng", "voice-tone-male"),
         ("female", "elegantgentle-female", "voice-tone-female"),
         ("female", "elegantgentle-female", None),
+        ("female", None, None),
     ],
 )
-async def test_call_uses_agent_voice_with_official_fallback(monkeypatch, gender, expected, lookup):
+async def test_call_uses_agent_voice_with_default_fallback(monkeypatch, gender, expected, lookup):
     """The agent's library voice is tried first; rejection reaches the client."""
     from app.api.realtime import voice as endpoint
     from app.services.realtime_voice.provider import StepfunSetupError
@@ -598,6 +593,10 @@ async def test_call_uses_agent_voice_with_official_fallback(monkeypatch, gender,
             raise RuntimeError("database unavailable")
         return lookup
 
+    async def default_voice_for_gender(value):
+        assert value == gender
+        return expected
+
     monkeypatch.setattr(endpoint, "is_redis_healthy", lambda: True)
     monkeypatch.setattr(endpoint, "offered_ticket", lambda _: "ticket")
     monkeypatch.setattr(endpoint, "origin_allowed", lambda _: True)
@@ -607,8 +606,7 @@ async def test_call_uses_agent_voice_with_official_fallback(monkeypatch, gender,
     monkeypatch.setattr(endpoint, "get_patience_zone", lambda _: "normal")
     monkeypatch.setattr(endpoint, "_accounts_current", ok)
     monkeypatch.setattr(endpoint.settings, "stepfun_api_key", "sk-test")
-    monkeypatch.setattr(endpoint.settings, "stepfun_realtime_voice_male", "wenrounansheng")
-    monkeypatch.setattr(endpoint.settings, "stepfun_realtime_voice_female", "elegantgentle-female")
+    monkeypatch.setattr(endpoint, "default_voice_for_gender", default_voice_for_gender)
     monkeypatch.setattr(endpoint, "acquire_call", acquire_call)
     monkeypatch.setattr(endpoint, "release_call", release_call)
     monkeypatch.setattr(endpoint, "load_call_context", load_call_context)
@@ -624,9 +622,14 @@ async def test_call_uses_agent_voice_with_official_fallback(monkeypatch, gender,
     await endpoint.voice_websocket(ws, "conv-1")
 
     assert ws.accepted
-    assert seen["voice"] == (lookup or expected)
-    assert seen["fallback"] == expected
-    assert ws.sent == [{"type": "error", "code": "provider_unavailable", "message": "实时语音暂时连不上"}]
+    if expected is None:
+        # Empty library and a failed lookup: nothing to dial with.
+        assert "voice" not in seen
+        assert ws.sent == [{"type": "error", "code": "not_configured", "message": "音色库没有可用音色"}]
+    else:
+        assert seen["voice"] == (lookup or expected)
+        assert seen["fallback"] == expected
+        assert ws.sent == [{"type": "error", "code": "provider_unavailable", "message": "实时语音暂时连不上"}]
     assert ws.closed_with == 1011
     assert released == [("conv-1", "lock-token")]
 
@@ -879,6 +882,7 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
     monkeypatch.setattr(endpoint, "release_call", none)
     monkeypatch.setattr(endpoint, "load_call_context", context)
     monkeypatch.setattr(endpoint, "ensure_agent_voice", AsyncMock(return_value="voice-tone-1"))
+    monkeypatch.setattr(endpoint, "default_voice_for_gender", AsyncMock(return_value="wenrounansheng"))
     monkeypatch.setattr(endpoint, "get_effective_realtime_model", AsyncMock(return_value="stepaudio-2.5-realtime"))
     monkeypatch.setattr(endpoint, "connect_stepfun", lambda *_: _FakeProviderConnection())
     monkeypatch.setattr(endpoint, "configure_session", configure)
