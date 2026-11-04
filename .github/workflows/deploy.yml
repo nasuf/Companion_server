@@ -230,10 +230,6 @@ jobs:
             CHAT_VOICE_MAX_REQUESTS_PER_MINUTE=${{ vars.CHAT_VOICE_MAX_REQUESTS_PER_MINUTE || '20' }}
             CHAT_VOICE_MAX_BYTES=${{ vars.CHAT_VOICE_MAX_BYTES || '2097152' }}
             STEPFUN_API_KEY=${{ secrets.STEPFUN_API_KEY }}
-            STEPFUN_REALTIME_URL=${{ vars.STEPFUN_REALTIME_URL || 'wss://api.stepfun.com/v1/realtime' }}
-            STEPFUN_REALTIME_MODEL=${{ vars.STEPFUN_REALTIME_MODEL || 'stepaudio-2.5-realtime' }}
-            STEPFUN_REALTIME_VOICE_FEMALE=${{ vars.STEPFUN_REALTIME_VOICE_FEMALE || 'elegantgentle-female' }}
-            STEPFUN_REALTIME_VOICE_MALE=${{ vars.STEPFUN_REALTIME_VOICE_MALE || 'soft-spoken-gentleman' }}
             ONLINE_MODEL=${{ vars.ONLINE_MODEL }}
             REMOTE_PROVIDER=${{ vars.REMOTE_PROVIDER }}
             REMOTE_CHAT_PROVIDER=${{ vars.REMOTE_CHAT_PROVIDER }}
