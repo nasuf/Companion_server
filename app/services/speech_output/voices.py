@@ -12,6 +12,12 @@ SYSTEM_VOICE_BY_GENDER = {
     "female": "longanlingxin",
     "male": "longanlufeng",
 }
+# Named clones are the default for every agent of that gender. The system
+# voices above remain only when these profiles are missing or disabled.
+DEFAULT_VOICE_DISPLAY_NAME = {
+    "female": "女声-2",
+    "male": "男声-2",
+}
 
 
 async def resolve_agent_tts_model() -> str:
@@ -68,7 +74,7 @@ async def assign_random_voice(
     gender: str | None,
     agent: Any | None = None,
 ) -> str:
-    """Pick uniformly from the enabled gender pool and persist atomically."""
+    """Bind the gender default clone, or a random enabled voice if it is absent."""
     gender_key = "male" if str(gender or "").lower() == "male" else "female"
     rows = await db.query_raw(
         """
@@ -78,12 +84,28 @@ async def assign_random_voice(
           AND model = $1
           AND gender = $2
           AND enabled = true
-        ORDER BY random()
+          AND display_name = $3
         LIMIT 1
         """,
         QWEN_AUDIO_TTS_MODEL,
         gender_key,
+        DEFAULT_VOICE_DISPLAY_NAME[gender_key],
     )
+    if not rows:
+        rows = await db.query_raw(
+            """
+            SELECT voice_id
+            FROM tts_voice_profiles
+            WHERE provider = 'dashscope'
+              AND model = $1
+              AND gender = $2
+              AND enabled = true
+            ORDER BY random()
+            LIMIT 1
+            """,
+            QWEN_AUDIO_TTS_MODEL,
+            gender_key,
+        )
     voice_id = (
         str(rows[0].get("voice_id") or "")
         if rows
