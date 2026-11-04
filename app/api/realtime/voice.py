@@ -145,18 +145,14 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
             workspace_id=getattr(conv, "workspaceId", None),
             conversation_id=conversation_id,
         )
-        # Use agent's custom TTS voice if available, else fall back to gender default
-        agent_voice = getattr(conv.agent, "ttsVoiceId", None)
-        if agent_voice and isinstance(agent_voice, str) and agent_voice.strip():
-            voice = agent_voice.strip()
-            logger.info("[realtime-voice] using agent ttsVoiceId=%s", voice)
-        else:
-            voice = voice_for_gender(
-                getattr(conv.agent, "gender", None),
-                female=settings.stepfun_realtime_voice_female,
-                male=settings.stepfun_realtime_voice_male,
-            )
-            logger.info("[realtime-voice] using gender-default voice=%s", voice)
+        # agent.ttsVoiceId is a DashScope clone id; StepFun rejects it, so
+        # realtime calls always use a StepFun official voice by gender.
+        voice = voice_for_gender(
+            getattr(conv.agent, "gender", None),
+            female=settings.stepfun_realtime_voice_female,
+            male=settings.stepfun_realtime_voice_male,
+        )
+        logger.info("[realtime-voice] using gender-default voice=%s", voice)
         model = settings.stepfun_realtime_model.strip() or "stepaudio-2.5-realtime"
         url = realtime_url(settings.stepfun_realtime_url, model)
 

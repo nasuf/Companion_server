@@ -484,10 +484,19 @@ class TestVoiceEndpoint:
         assert "schedule_end_of_call_extraction" in source
         assert "process_memory_pipeline" not in source
 
-    def test_endpoint_uses_agent_tts_voice(self):
-        """voice.py should check agent's ttsVoiceId before gender fallback."""
+    def test_endpoint_ignores_dashscope_tts_voice(self):
+        """agent.ttsVoiceId is a DashScope clone id that StepFun rejects."""
         source = _VOICE.read_text()
-        assert "ttsVoiceId" in source
+        assert 'getattr(conv.agent, "ttsVoiceId"' not in source
+        assert "voice_for_gender(" in source
+
+    def test_default_voices_are_realtime_compatible(self):
+        """soft-spoken-gentleman is TTS-only and fails session.update."""
+        from app.config import Settings
+
+        fields = Settings.model_fields
+        assert fields["stepfun_realtime_voice_male"].default == "wenrounansheng"
+        assert fields["stepfun_realtime_voice_female"].default == "elegantgentle-female"
 
     def test_endpoint_has_idle_timeout(self):
         """voice.py should have idle watchdog."""
