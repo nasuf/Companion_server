@@ -383,6 +383,9 @@ model Message {
   content        String
   metadata       Json?
   createdAt      DateTime                @default(now()) @map("created_at")
+  // Realtime voice-call transcripts: kept for memory extraction and chat
+  // context, but never shown in the user's chat timeline.
+  hiddenFromTimeline Boolean             @default(false) @map("hidden_from_timeline")
   bugReports     BugReport[]
   attachments    ChatMessageAttachment[]
   linkCards      ChatLinkCard[]

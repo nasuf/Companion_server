@@ -109,6 +109,7 @@ async def _search_text(
     where: dict = {
         "conversationId": conversation_id,
         "role": {"in": ["user", "assistant"]},
+        "hiddenFromTimeline": False,
     }
     if query:
         # Same contains/insensitive pattern as memories.py list_memories search.
@@ -278,6 +279,7 @@ async def _ranks_for(conversation_id: str, message_ids: list[str]) -> dict[str, 
         SELECT m.id, (
             SELECT COUNT(*) FROM messages m2
             WHERE m2.conversation_id = m.conversation_id AND m2.created_at > m.created_at
+              AND NOT m2.hidden_from_timeline
         ) AS rank
         FROM messages m
         WHERE m.conversation_id = $1 AND m.id = ANY($2::text[])

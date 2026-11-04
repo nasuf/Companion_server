@@ -1,5 +1,8 @@
 """Store voice transcripts on the same conversation as text chat.
 
+Rows are marked hiddenFromTimeline: the call is heard, not read, so the chat
+history never lists them, while memory extraction and chat context still do.
+
 Memory extraction is NOT done per-utterance. Instead, transcripts are
 persisted as normal messages and extracted in batch at call end via the
 standard text-chat watermark pipeline (_bg_memory_pipeline). This avoids:
@@ -42,6 +45,7 @@ async def save_user_transcript(
             "role": "user",
             "content": content[:4000],
             "metadata": Json(_metadata(model)),
+            "hiddenFromTimeline": True,
         }
     )
     fire_background(_mark_present(conversation_id))
@@ -73,6 +77,7 @@ async def save_assistant_transcript(
             "role": "assistant",
             "content": content[:4000],
             "metadata": Json(metadata),
+            "hiddenFromTimeline": True,
         }
     )
     return created.id

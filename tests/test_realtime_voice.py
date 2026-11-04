@@ -611,3 +611,60 @@ async def test_call_uses_official_voice_and_reports_rejection(monkeypatch, gende
     assert ws.sent == [{"type": "error", "code": "provider_unavailable", "message": "实时语音暂时连不上"}]
     assert ws.closed_with == 1011
     assert released == [("conv-1", "lock-token")]
+
+
+async def test_call_transcripts_are_hidden_from_timeline(monkeypatch):
+    """Voice calls are heard, not read: transcripts never reach the chat list."""
+    from app.services.realtime_voice import persist
+
+    created: list[dict] = []
+
+    async def create(*, data):
+        created.append(data)
+        return SimpleNamespace(id=f"m{len(created)}")
+
+    monkeypatch.setattr(persist.db, "message", SimpleNamespace(create=create), raising=False)
+    monkeypatch.setattr(persist, "fire_background", lambda coro: coro.close())
+
+    user_id = await persist.save_user_transcript(
+        conversation_id="c1", user_id="u1", workspace_id=None, model="m", text="你好",
+    )
+    await persist.save_assistant_transcript(
+        conversation_id="c1", user_id="u1", workspace_id=None, model="m",
+        text="嗨", user_message_id=user_id, interrupted=False,
+    )
+
+    assert [row["hiddenFromTimeline"] for row in created] == [True, True]
+
+
+async def test_chat_history_skips_hidden_rows(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api.public import conversations
+
+    find_many = AsyncMock(return_value=[])
+    monkeypatch.setattr(conversations, "db", SimpleNamespace(message=SimpleNamespace(find_many=find_many)))
+    await conversations.list_messages(
+        conversation_id="c1", limit=50, offset=0, include_metadata=True,
+        include_achievements=False, include_usage=False,
+        conv=SimpleNamespace(userId="u1", agentId="a1"), user={"sub": "u1", "role": "user"},
+    )
+    assert find_many.call_args.kwargs["where"]["hiddenFromTimeline"] is False
+
+
+async def test_search_and_rank_skip_hidden_rows(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.services.chat import message_search
+
+    find_many = AsyncMock(return_value=[])
+    query_raw = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        message_search, "db",
+        SimpleNamespace(message=SimpleNamespace(find_many=find_many), query_raw=query_raw),
+    )
+    await message_search.search_messages(conversation_id="c1", q="天气", scope="text", limit=30, offset=0)
+    await message_search.message_rank("c1", "m1")
+
+    assert find_many.call_args.kwargs["where"]["hiddenFromTimeline"] is False
+    assert "NOT m2.hidden_from_timeline" in query_raw.call_args.args[0]

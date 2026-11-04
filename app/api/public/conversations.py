@@ -303,7 +303,7 @@ async def list_messages(
     user: dict = Depends(require_user),
 ):
     messages = await db.message.find_many(
-        where={"conversationId": conversation_id},
+        where={"conversationId": conversation_id, "hiddenFromTimeline": False},
         order={"createdAt": "desc"},
         take=limit,
         skip=offset,
