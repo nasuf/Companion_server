@@ -248,6 +248,13 @@ async def test_http_arrival_preserves_payload_and_returns_before_delivery(arriva
 
 async def test_manual_confirmation_preserves_unverified_contract(arrival):
     db,aid,uid,*_=arrival
+    # A located place never accepts a manual statement in place of GPS.
+    with pytest.raises(HTTPException) as rejected:
+        await activity_service.arrive_activity(uid,aid,manual_confirmation=True)
+    assert rejected.value.status_code==422
+    assert await receipt(db,aid) is None
+    # Only a legacy row that never had coordinates keeps the unverified path.
+    await db.execute_raw('UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',aid)
     response=await activity_service.arrive_activity(uid,aid,manual_confirmation=True)
     assert response.reached and not response.arrival_verified
     rows=await db.query_raw('SELECT arrival_lat,arrival_lng FROM offline_activity_recommendations WHERE id=$1',aid)
