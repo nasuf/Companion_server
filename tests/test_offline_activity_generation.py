@@ -458,6 +458,7 @@ async def test_article_place_requires_independent_source_and_survives_image_time
     images = AsyncMock(side_effect=TimeoutError) if timeout else AsyncMock(return_value=[])
     monkeypatch.setattr(gen, 'persist_activity_images', images)
     monkeypatch.setattr(gen, '_recommendation_copy', AsyncMock(return_value=''))
+    monkeypatch.setattr(gen, 'geocode_address', AsyncMock(return_value=(32.21, 119.43)))
     result = await gen.generate_activity_card(user_id='u', workspace_id=None, city='镇江市', source='manual')
     assert bool(result) == expected
     if expected:

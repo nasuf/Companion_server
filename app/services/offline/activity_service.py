@@ -227,16 +227,24 @@ async def create_recommendation_for_user(
                     "reason": "no_suitable_activity", "message": "暂时没找到合适的新去处，请稍后再试。",
                 })
             return None
-        # 地理编码：地址 -> 经纬度（供到达距离校验）+ 同地点去重键。key 未配置或失败
-        # 时 coords=None，不阻断推荐（到达校验按 offline_arrival_require_geocode 处理）。
+        # 到达必须按坐标做 GPS 校验：生成阶段已为候选绑定坐标（原生 POI 或地理编码），
+        # 无坐标的卡片（如旧的预生成候选）尝试补编码，仍失败则不推荐。
         metadata = card.get('discovery_metadata') or {}
         if metadata.get('coordinate_source') == 'native_poi':
-            place_lat, place_lng = card['place_lat'], card['place_lng']
             place_key = metadata.get('session_key') or ('poi:' + metadata['poi_id'])
         else:
-            coords = await geocode_address(card.get("address"), card.get("city") or city)
-            place_lat, place_lng = coords if coords else (None, None)
             place_key = make_place_key(card.get("location_name"), card.get("address"), card.get("city") or city)
+        place_lat, place_lng = card.get('place_lat'), card.get('place_lng')
+        if place_lat is None or place_lng is None:
+            coords = await geocode_address(card.get("address"), card.get("city") or city)
+            if not coords:
+                logger.warning("[offline] recommendation dropped: no coordinates place=%r", card.get("location_name"))
+                if source == "manual":
+                    raise HTTPException(status_code=503, detail={
+                        "reason": "no_suitable_activity", "message": "暂时没找到合适的新去处，请稍后再试。",
+                    })
+                return None
+            place_lat, place_lng = coords
         message: str | None = None
         if publication_guard is not None:
             await publication_guard(ctx)
@@ -557,6 +565,9 @@ async def arrive_activity(
             detail="你还有一段正在进行的旅途，先把那一段收好再开始这里吧",
         )
     has_place = activity.get('place_lat') is not None and activity.get('place_lng') is not None
+    # A place with coordinates is always GPS-verified; a manual statement is
+    # accepted only for legacy rows that never had coordinates to verify.
+    manual_confirmation = manual_confirmation and not has_place
     if not manual_confirmation:
         if not has_place:
             raise HTTPException(status_code=422, detail={"reason": "no_geocode", "message": "暂时没能确认到达，请稍后再试"})
@@ -572,8 +583,8 @@ async def arrive_activity(
             raise HTTPException(status_code=422, detail={'reason': 'no_geocode', 'message': '暂时没能确认到达，请稍后再试'})
         check_lat, check_lng = wgs84_to_gcj02(lat, lng) if crs == 'gcj02' else (lat, lng)
         _verify_arrival_distance(activity, check_lat, check_lng)
-    # Explicit user confirmation overrides only location checks. It is a user
-    # statement, not a GPS-verified observation or an inferred device position.
+    # A legacy manual arrival is a user statement, not a GPS-verified
+    # observation or an inferred device position.
     updated = await repo.mark_arrived(
         activity_id, user_id,
         lat=None if manual_confirmation else lat,

@@ -21,6 +21,7 @@ from app.services.offline import activity_service as service, repository as repo
 from app.services.offline import activity_recommendation_message as note
 from app.services.offline.activity_discovery import ACTIVITY_PLACE_CATEGORIES, ordered_categories, event_facts, source_address
 from app.services.offline.chat_emit import build_activity_component_card
+from app.services.offline.geocode import wgs84_to_gcj02
 from app.services.offline.providers import search
 from app.services.prompting import store
 from tests.test_offline_quality_e2e import journey  # noqa: F401
@@ -59,7 +60,7 @@ async def discovery(journey, monkeypatch, tmp_path):
     monkeypatch.setattr(repo, 'list_user_tags', AsyncMock(return_value=[]))
     monkeypatch.setattr(repo, 'memory_brief', AsyncMock(return_value=''))
     monkeypatch.setattr(offline, 'is_activity_enabled', AsyncMock(return_value=True))
-    monkeypatch.setattr(service, 'geocode_address', AsyncMock(return_value=None))
+    monkeypatch.setattr(gen, 'geocode_address', AsyncMock(return_value=wgs84_to_gcj02(32.2, 119.45)))
     monkeypatch.setattr(service, 'generate_activity_invite_message', AsyncMock(return_value='找到个地方，想看看吗'))
     monkeypatch.setattr(gen, '_recommendation_copy', AsyncMock(return_value=''))
     # Other suites can publish note-review prompts in this shared test DB.
@@ -188,7 +189,7 @@ async def test_photo_channels_reach_http_detail_and_archived_album(discovery, ch
     path = '/offline/activities/' + card['id']
     assert (await j.client.get(path)).json()['image_urls'] == card['image_urls']
     assert (await j.client.post(path + '/accept')).status_code == 200
-    assert (await j.client.post(path + '/arrive', json={'manual_confirmation': True})).status_code == 200
+    assert (await j.client.post(path + '/arrive', json={'lat': 32.2, 'lng': 119.45, 'accuracy_m': 10})).status_code == 200
     assert (await j.client.post(path + '/archive')).status_code == 200
     review = (await j.client.get(path + '/review')).json()
     assert review['image_urls'] == card['image_urls'] and not review['gallery']

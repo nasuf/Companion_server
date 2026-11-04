@@ -80,6 +80,8 @@ async def test_create_recommendation_emits_invite_message_and_activity_card(monk
         "description": "适合独自慢慢逛的常设展。",
         "location_name": "镇江博物馆",
         "image_urls": ["/offline/media/activity.jpg"],
+        "place_lat": 32.21,
+        "place_lng": 119.43,
     }
     created_activity = {
         **generated_card,
