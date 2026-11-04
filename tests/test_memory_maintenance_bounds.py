@@ -26,10 +26,12 @@ async def test_fifty_thousand_rows_do_not_load_into_application(memory_flow):
     print(json.dumps({"synthetic_rows":50000,"scanned":1000,"peak_python_bytes":peak,"duration_seconds":round(time.monotonic()-started,3)}))
     # 5 万行在夹具收尾时由一次级联删除清掉, 行级触发器 (时间版本) 让这一条语句在慢
     # CI 上超过查询引擎的 HTTP 超时 (2026-11-02 连续两次 teardown ReadTimeout)。
-    # 这里分批删掉, 每批一次独立请求。
-    for _ in range(20):
+    # 这里分批删掉, 每批一次独立请求。每行删除要跑擦除围栏与时间版本级联, 本机 5000 行
+    # 一批约 0.6 秒, CI 负载高时一批仍超过 30 秒 HTTP 超时 (2026-11-04 连续两次), 超时的
+    # 请求还占着连接, 收尾也拿不到连接。批量降到 1000, 单批耗时降为五分之一。
+    for _ in range(100):
         left = await f.db.execute_raw(
-            "DELETE FROM memories_user WHERE id IN (SELECT id FROM memories_user WHERE user_id=$1 LIMIT 5000)",
+            "DELETE FROM memories_user WHERE id IN (SELECT id FROM memories_user WHERE user_id=$1 LIMIT 1000)",
             f.ids["owner"])
         if not left:
             break
