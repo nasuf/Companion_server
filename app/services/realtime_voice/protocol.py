@@ -106,6 +106,10 @@ def history_item_event(*, item_id: str, role: str, text: str) -> dict[str, Any]:
     }
 
 
+def item_delete_event(item_id: str) -> dict[str, Any]:
+    return {"event_id": event_id(), "type": "conversation.item.delete", "item_id": item_id}
+
+
 def append_audio_event(pcm: bytes) -> dict[str, Any]:
     return {
         "event_id": event_id(),

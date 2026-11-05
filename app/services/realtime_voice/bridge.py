@@ -29,6 +29,8 @@ from app.services.realtime_voice.protocol import (
     assistant_transcript,
     decode_client_pcm,
     function_call_output_event,
+    history_item_event,
+    item_delete_event,
     parse_client_message,
     response_cancel_event,
     response_create_event,
@@ -36,6 +38,12 @@ from app.services.realtime_voice.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+# StepFun answers a bare response.create with an empty reply (1 output
+# token), whatever the instructions say. A user-role cue item makes the agent
+# open the call (~0.6 s to first audio, verified 2026-11-05); it is deleted
+# once the greeting is done, so later turns and extraction never see it.
+_GREET_CUE = "（用户刚给你打来电话，你接起来先开口，像熟人一样简短地打个招呼。）"
 
 # ---------------------------------------------------------------------------
 # Callback type aliases
@@ -91,6 +99,10 @@ class VoiceBridge:
         # Set on barge-in: audio and the final transcript of the interrupted
         # response are dropped until the provider starts the next one.
         self._discarding = False
+
+        # Greeting cue: sent, then its provider item id once created
+        self._greet_cue_sent = False
+        self._greet_cue_id: str | None = None
 
         # Function call accumulation
         self._pending_calls: dict[str, dict] = {}  # call_id -> {name, arguments}
@@ -249,6 +261,9 @@ class VoiceBridge:
         # --- Function call events ---
         if kind == "conversation.item.created":
             item = event.get("item")
+            if self._is_greet_cue(item):
+                self._greet_cue_id = item["id"]
+                return
             if isinstance(item, dict) and item.get("type") == "function_call":
                 call_id = item.get("call_id") or ""
                 name = item.get("name") or ""
@@ -359,6 +374,7 @@ class VoiceBridge:
         """Response finished — save complete assistant transcript."""
         self._responding = False
         self._output_active = False
+        await self._drop_greet_cue()
         text = assistant_transcript(event) or "".join(self._assistant_parts).strip()
         self._assistant_parts = []
         if self._discarding:
@@ -583,10 +599,31 @@ class VoiceBridge:
             await self._send_client({"type": "interrupted"})
 
     async def _greet(self) -> None:
-        """Client requests an opening greeting."""
-        if self._responding or self._output_active:
+        """Client requests an opening greeting: the agent speaks first."""
+        if self._responding or self._output_active or self._greet_cue_sent:
             return
+        self._greet_cue_sent = True
+        await self._send_provider(history_item_event(item_id="greet_cue", role="user", text=_GREET_CUE))
         await self._send_provider(response_create_event())
+
+    @staticmethod
+    def _is_greet_cue(item: object) -> bool:
+        if not isinstance(item, dict) or item.get("role") != "user" or not item.get("id"):
+            return False
+        parts = item.get("content") if isinstance(item.get("content"), list) else []
+        return any(
+            isinstance(part, dict) and _GREET_CUE in (part.get("transcript"), part.get("text"))
+            for part in parts
+        )
+
+    async def _drop_greet_cue(self) -> None:
+        cue_id, self._greet_cue_id = self._greet_cue_id, None
+        if not cue_id:
+            return
+        try:
+            await self._send_provider(item_delete_event(cue_id))
+        except Exception:
+            logger.warning("[realtime-voice] greeting cue not removed")
 
     # ------------------------------------------------------------------
     # Error handling

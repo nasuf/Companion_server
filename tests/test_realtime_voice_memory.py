@@ -492,3 +492,76 @@ def test_mic_meter_with_no_audio_reads_minus_infinity():
     from app.services.realtime_voice.bridge import _MicMeter
 
     assert _MicMeter().summary() == "bytes=0 chunks=0 seconds=0.0 peak_dbfs=-inf rms_dbfs=-inf"
+
+
+# ---------------------------------------------------------------------------
+# Opening greeting: a one-off user cue makes the agent speak first
+# ---------------------------------------------------------------------------
+
+async def _greeting_bridge(send=None):
+    async def retrieve(text, previous):
+        return []
+
+    return _bridge(retrieve, send=send)
+
+
+async def test_greet_sends_a_cue_then_a_response_once():
+    from app.services.realtime_voice.bridge import _GREET_CUE
+
+    bridge, provider, _ = await _greeting_bridge()
+    await bridge.feed_client_text('{"type": "greet"}')
+    await bridge.feed_client_text('{"type": "greet"}')
+    cue, create = provider
+    assert cue["type"] == "conversation.item.create"
+    assert cue["item"]["role"] == "user"
+    assert cue["item"]["content"] == [{"type": "input_text", "text": _GREET_CUE}]
+    assert create["type"] == "response.create"
+
+
+async def test_greeting_cue_is_deleted_after_the_greeting_and_never_stored():
+    from app.services.realtime_voice.bridge import _GREET_CUE
+
+    bridge, provider, _ = await _greeting_bridge()
+    await bridge.feed_client_text('{"type": "greet"}')
+    # StepFun echoes the cue with its own id and an audio-typed part.
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "srv-cue", "role": "user", "type": "message",
+        "content": [{"type": "audio", "audio": "", "transcript": _GREET_CUE}]}})
+    # Other user items (history, real speech) are not the cue.
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "srv-hist", "role": "user", "content": [{"type": "audio", "transcript": "你好"}]}})
+    assert bridge._greet_cue_id == "srv-cue"
+    await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed", "output": [
+        {"type": "message", "content": [{"type": "audio", "transcript": "喂，怎么突然给我打电话呀？"}]}]}})
+    assert provider[-1] == {"event_id": provider[-1]["event_id"], "type": "conversation.item.delete",
+                            "item_id": "srv-cue"}
+    assert bridge.message_ids == ["msg"]
+    # Only once: the next reply deletes nothing.
+    await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed"}})
+    assert sum(e["type"] == "conversation.item.delete" for e in provider) == 1
+
+
+async def test_failed_cue_delete_does_not_break_the_call(caplog):
+    from app.services.realtime_voice.bridge import _GREET_CUE
+
+    async def send(event):
+        if event["type"] == "conversation.item.delete":
+            raise RuntimeError("socket closed")
+
+    bridge, _, client = await _greeting_bridge(send=send)
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "srv-cue", "role": "user", "content": [{"type": "input_text", "text": _GREET_CUE}]}})
+    await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed"}})
+    assert "greeting cue not removed" in caplog.text
+    assert client[-1]["type"] == "response.done"
+
+
+def test_greeting_cue_recognition_rejects_other_items():
+    from app.services.realtime_voice.bridge import VoiceBridge, _GREET_CUE
+
+    assert not VoiceBridge._is_greet_cue(None)
+    assert not VoiceBridge._is_greet_cue({"id": "x", "role": "assistant",
+                                          "content": [{"text": _GREET_CUE}]})
+    assert not VoiceBridge._is_greet_cue({"role": "user", "content": [{"text": _GREET_CUE}]})
+    assert not VoiceBridge._is_greet_cue({"id": "x", "role": "user", "content": "text"})
+    assert not VoiceBridge._is_greet_cue({"id": "x", "role": "user", "content": ["raw"]})
