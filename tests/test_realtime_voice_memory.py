@@ -457,3 +457,38 @@ def test_memory_lines_from_classified_memories_keep_raw_text_for_dedup():
     # The raw text, not the time-labelled line, is what dedups against the core block.
     slot = MemorySlot("- 用户养了一只叫团子的橘猫")
     assert not slot.merge(lines[:1], turn=1)
+
+
+# ---------------------------------------------------------------------------
+# Microphone meter (diagnoses calls where StepFun never hears the user)
+# ---------------------------------------------------------------------------
+
+async def test_mic_meter_reports_volume_once_after_three_seconds(caplog):
+    import struct
+
+    caplog.set_level(logging.INFO, logger="app.services.realtime_voice.bridge")
+
+    async def retrieve(text, previous):
+        return []
+
+    bridge, provider, _ = _bridge(retrieve)
+    quiet = struct.pack("<8h", 0, 0, 0, 0, 0, 0, 0, 0) * 600   # 0.2 s of digital silence
+    loud = struct.pack("<8h", 16384, 0, 0, 0, 0, 0, 0, 0) * 600
+    for _ in range(14):
+        await bridge.feed_audio(quiet)
+    assert "mic first 3s" not in caplog.text
+    await bridge.feed_audio(loud)
+    await bridge.feed_audio(loud)
+    assert caplog.text.count("mic first 3s") == 1
+    assert len([e for e in provider if e["type"] == "input_audio_buffer.append"]) == 16
+    await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started"})
+    summary = bridge.mic_summary
+    assert "chunks=16" in summary and "seconds=3.2" in summary
+    assert "peak_dbfs=-6.0" in summary
+    assert summary.endswith("speech_turns=1")
+
+
+def test_mic_meter_with_no_audio_reads_minus_infinity():
+    from app.services.realtime_voice.bridge import _MicMeter
+
+    assert _MicMeter().summary() == "bytes=0 chunks=0 seconds=0.0 peak_dbfs=-inf rms_dbfs=-inf"

@@ -210,8 +210,8 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
         if bridge is not None:
             n_pairs = len(bridge.transcript_pairs)
             logger.info(
-                "[realtime-voice] call ended conv=%s transcript_pairs=%d",
-                conversation_id[:8], n_pairs,
+                "[realtime-voice] call ended conv=%s transcript_pairs=%d mic %s",
+                conversation_id[:8], n_pairs, bridge.mic_summary,
             )
             await bridge.aclose()
             await _record_call_usage(

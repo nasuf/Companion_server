@@ -899,6 +899,7 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
     class FakeBridge:
         transcript_pairs = [{"role": "user", "text": "hi"}]
         message_ids = ["msg-u1", "msg-a1"]
+        mic_summary = "bytes=0 chunks=0 seconds=0.0 peak_dbfs=-inf rms_dbfs=-inf speech_turns=0"
         usage = {"input": 5, "output": 2, "cached_input": 0, "responses": 1}
 
         async def aclose(self):

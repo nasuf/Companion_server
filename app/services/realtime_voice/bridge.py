@@ -16,12 +16,15 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import time
+from array import array
 from collections.abc import Awaitable, Callable
 
 from app.services.realtime_voice.instructions import format_turn_memories
 from app.services.realtime_voice.memory_slot import MemorySlot
 from app.services.realtime_voice.protocol import (
+    SAMPLE_RATE,
     append_audio_event,
     assistant_transcript,
     decode_client_pcm,
@@ -101,6 +104,10 @@ class VoiceBridge:
         # Persisted message ids, in order: end-of-call extraction binds to them.
         self._message_ids: list[str] = []
 
+        # Microphone input seen by the server, for diagnosing silent calls
+        self._mic = _MicMeter()
+        self._speech_turns = 0
+
         # Provider token usage, summed over every response.done
         self._usage = {"input": 0, "output": 0, "cached_input": 0, "responses": 0}
 
@@ -141,6 +148,11 @@ class VoiceBridge:
         return list(self._transcript_pairs)
 
     @property
+    def mic_summary(self) -> str:
+        """One log line: how much microphone audio arrived and how loud."""
+        return f"{self._mic.summary()} speech_turns={self._speech_turns}"
+
+    @property
     def usage(self) -> dict[str, int]:
         """Token usage StepFun reported for this call (billed per token)."""
         return dict(self._usage)
@@ -155,6 +167,8 @@ class VoiceBridge:
         pcm = decode_client_pcm(pcm) or b""
         if not pcm:
             return
+        if self._mic.add(pcm):
+            logger.info("[realtime-voice] mic first 3s %s", self._mic.summary())
         await self._send_provider(append_audio_event(pcm))
 
     # ------------------------------------------------------------------
@@ -271,6 +285,7 @@ class VoiceBridge:
         being generated is cancelled here and its remaining audio is not
         forwarded; one that already finished needs nothing server-side.
         """
+        self._speech_turns += 1
         interrupted = self._output_active or self._responding
         cancelled = False
         if self._responding:
@@ -605,3 +620,52 @@ class VoiceBridge:
             "interrupted": interrupted,
             "ts": time.time(),
         })
+
+
+class _MicMeter:
+    """Byte count and level of the client's PCM16, sampled every 8th sample.
+
+    A call where StepFun never reports speech is either missing audio
+    (bytes=0) or too quiet for server VAD (low peak_dbfs); this tells which.
+    """
+
+    _STRIDE = 8
+    _FIRST_REPORT_BYTES = SAMPLE_RATE * 2 * 3
+
+    def __init__(self) -> None:
+        self.bytes = 0
+        self.chunks = 0
+        self._peak = 0
+        self._sum_squares = 0
+        self._samples = 0
+        self._reported = False
+
+    def add(self, pcm: bytes) -> bool:
+        """Count a chunk. True once, when the first 3 s have arrived."""
+        self.bytes += len(pcm)
+        self.chunks += 1
+        samples = array("h")
+        samples.frombytes(pcm)
+        picked = samples[:: self._STRIDE]
+        if picked:
+            self._peak = max(self._peak, max(map(abs, picked)))
+            self._sum_squares += sum(value * value for value in picked)
+            self._samples += len(picked)
+        if not self._reported and self.bytes >= self._FIRST_REPORT_BYTES:
+            self._reported = True
+            return True
+        return False
+
+    def summary(self) -> str:
+        seconds = self.bytes / (SAMPLE_RATE * 2)
+        rms = math.sqrt(self._sum_squares / self._samples) if self._samples else 0.0
+        return (
+            f"bytes={self.bytes} chunks={self.chunks} seconds={seconds:.1f} "
+            f"peak_dbfs={_dbfs(self._peak)} rms_dbfs={_dbfs(rms)}"
+        )
+
+
+def _dbfs(value: float) -> str:
+    if value <= 0:
+        return "-inf"
+    return f"{20 * math.log10(value / 32768):.1f}"
