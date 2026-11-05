@@ -1,84 +1,90 @@
 {
- "_note": "CHAT01.10.2 门禁界值, 由 A/A (同一份源码多次回放) 按 compare.calibrate 的规则标定。换主模型、评判模型、用例集或回放方式后要重新标定; 以后每次门禁里基线的几次回放也是 A/A 数据, 攒够后可重新标定。",
- "runs_per_arm": 8,
- "calibrated_at": "2026-11-03",
- "source_commit": "40dd777b",
- "samples_per_run": 5,
- "cases": 259,
- "reply_model": "doubao-seed-character-260628",
- "repetition_judge": "qwen3.5-plus",
- "responded_judge": "qwen3.5-flash",
- "rule_history": [
-  "v1 (先于 A/A 结果登记): 一对 A/A, 界值 = 1.84 × bootstrap 区间半宽",
-  "v2 (同日, 独立 review 后): 两项各 2.5%, 界值 = 2 × 半宽; 加上限 6 个百分点; 多对取最宽",
-  "v3 (同日, 第三、四次 A/A 后): bootstrap 与逐例采样噪声都低估了整次回放之间的波动, 改为按整次回放均值的标准差标定, 门禁按每组回放次数定界值",
-  "v4 (同日, 独立 review 后): 用例层与整次回放层方差相加 (不取最宽); 整次回放层用 t 分位数 (自由度小); 回放次数按数据计、要求每例采样数够、要求比较与门禁用同一份标定。4 次回放时界值 8 个百分点超上限, 定为每组 8 次回放"
- ],
- "rule": {
-  "factor": 2,
-  "max_margin": 0.06,
-  "round_to": 0.005
- },
- "metrics": {
-  "positive_repeated": {
-   "side": "upper",
-   "cases": 129,
-   "run_means": {
-    "current": 0.2806,
-    "current-b": 0.2527,
-    "current-c": 0.2977,
-    "current-d": 0.2605,
-    "nofix": 0.3271,
-    "nofix-b": 0.3612
-   },
-   "aa_groups": [
-    [
-     "current",
-     "current-b",
-     "current-c",
-     "current-d"
-    ],
-    [
-     "nofix",
-     "nofix-b"
-    ]
-   ],
-   "run_sd": 0.0213,
-   "df": 4,
-   "se_sampling_one_run_pair": 0.0205,
-   "se_case_one_run_pair": 0.0225,
-   "expected_half_width": 0.0267,
-   "margin": 0.055
+  "_note": "CHAT01.10.2 门禁界值, 由 A/A (同一份源码多次回放) 按 compare.calibrate 的规则标定。换主模型、评判模型、用例集或回放方式后要重新标定; 以后每次门禁里基线的几次回放也是 A/A 数据, 攒够后可重新标定。",
+  "calibrated_at": "2026-11-05",
+  "runs_per_arm": 8,
+  "case_set": "rr-20261104",
+  "cases": 259,
+  "samples_per_run": 5,
+  "reply_model": "doubao-seed-character-260628",
+  "source_commit": "42269975",
+  "repetition_judge": "qwen3.5-plus",
+  "responded_judge": "qwen3.5-flash",
+  "rule_history": [
+    "v1 (先于 A/A 结果登记): 一对 A/A, 界值 = 1.84 × bootstrap 区间半宽",
+    "v2 (同日, 独立 review 后): 两项各 2.5%, 界值 = 2 × 半宽; 加上限 6 个百分点; 多对取最宽",
+    "v3 (同日, 第三、四次 A/A 后): bootstrap 与逐例采样噪声都低估了整次回放之间的波动, 改为按整次回放均值的标准差标定, 门禁按每组回放次数定界值",
+    "v4 (同日, 独立 review 后): 用例层与整次回放层方差相加 (不取最宽); 整次回放层用 t 分位数 (自由度小); 回放次数按数据计、要求每例采样数够、要求比较与门禁用同一份标定。4 次回放时界值 8 个百分点超上限, 定为每组 8 次回放",
+    "v5 (2026-11-05): 规则不变。用例换成人工复核过的脱敏版 (rr-20261104, 生产库私有表), 在 GitHub 复读门禁里用 8 次 A/A 回放重新标定 (run 41971993295, 花费 ¥21.49); 自由度 3 → 7"
+  ],
+  "rule": {
+    "factor": 2,
+    "max_margin": 0.06,
+    "round_to": 0.005
   },
-  "all_responded": {
-   "side": "lower",
-   "cases": 258,
-   "run_means": {
-    "current": 0.9481,
-    "current-b": 0.9473,
-    "current-c": 0.9512,
-    "current-d": 0.9504,
-    "nofix": 0.9547,
-    "nofix-b": 0.9615
-   },
-   "aa_groups": [
-    [
-     "current",
-     "current-b",
-     "current-c",
-     "current-d"
-    ],
-    [
-     "nofix",
-     "nofix-b"
-    ]
-   ],
-   "run_sd": 0.0029,
-   "df": 4,
-   "se_sampling_one_run_pair": 0.0071,
-   "se_case_one_run_pair": 0.0121,
-   "expected_half_width": 0.0084,
-   "margin": 0.02
+  "metrics": {
+    "positive_repeated": {
+      "side": "upper",
+      "cases": 129,
+      "run_means": {
+        "base-1": 0.2884,
+        "base-2": 0.2806,
+        "base-3": 0.2729,
+        "base-4": 0.2682,
+        "base-5": 0.2729,
+        "base-6": 0.2698,
+        "base-7": 0.2853,
+        "base-8": 0.2713
+      },
+      "aa_groups": [
+        [
+          "base-1",
+          "base-2",
+          "base-3",
+          "base-4",
+          "base-5",
+          "base-6",
+          "base-7",
+          "base-8"
+        ]
+      ],
+      "run_sd": 0.0076,
+      "df": 7,
+      "se_sampling_one_run_pair": 0.0201,
+      "se_case_one_run_pair": 0.0206,
+      "expected_half_width": 0.0143,
+      "margin": 0.03
+    },
+    "all_responded": {
+      "side": "lower",
+      "cases": 257,
+      "run_means": {
+        "base-1": 0.9531,
+        "base-2": 0.9502,
+        "base-3": 0.9658,
+        "base-4": 0.957,
+        "base-5": 0.9541,
+        "base-6": 0.9626,
+        "base-7": 0.9533,
+        "base-8": 0.9576
+      },
+      "aa_groups": [
+        [
+          "base-1",
+          "base-2",
+          "base-3",
+          "base-4",
+          "base-5",
+          "base-6",
+          "base-7",
+          "base-8"
+        ]
+      ],
+      "run_sd": 0.0052,
+      "df": 7,
+      "se_sampling_one_run_pair": 0.0064,
+      "se_case_one_run_pair": 0.0084,
+      "expected_half_width": 0.0066,
+      "margin": 0.015
+    }
   }
- }
 }
