@@ -19,9 +19,11 @@ import logging
 import math
 import time
 from array import array
+from collections import deque
 from collections.abc import Awaitable, Callable
+from difflib import SequenceMatcher
 
-from app.services.realtime_voice.instructions import format_turn_memories
+from app.services.realtime_voice.instructions import format_turn_memories, spoken_key
 from app.services.realtime_voice.memory_slot import MemorySlot
 from app.services.realtime_voice.protocol import (
     SAMPLE_RATE,
@@ -45,6 +47,13 @@ logger = logging.getLogger(__name__)
 # once the greeting is done, so later turns and extraction never see it.
 # The endpoint passes a cue that knows how long ago the two last talked.
 _GREET_CUE = "（用户给你打来电话，你接起来先开口，简短自然地打个招呼。）"
+
+# A reply this close to one of the last few is a repeat. The 2026-11-05 call
+# repeated a 43-character line differing by one character (ratio 0.99);
+# short acknowledgements ("对呀") are allowed to recur.
+_REPEAT_WINDOW = 3
+_REPEAT_RATIO = 0.8
+_REPEAT_MIN_CHARS = 8
 
 # ---------------------------------------------------------------------------
 # Callback type aliases
@@ -85,6 +94,7 @@ class VoiceBridge:
         self._slot = MemorySlot(instructions) if instructions else None
         self._turn = 0
         self._last_assistant_text = ""
+        self._recent_replies: deque[str] = deque(maxlen=_REPEAT_WINDOW)
 
         self._lock = asyncio.Lock()
         self._closed = False
@@ -405,6 +415,7 @@ class VoiceBridge:
                 self._last_assistant_text = text
             except Exception:
                 logger.warning("[realtime-voice] assistant transcript not stored")
+            await self._guard_repeat(text)
             if not self._closed:
                 await self._send_client({
                     "type": "transcript.assistant",
@@ -573,6 +584,26 @@ class VoiceBridge:
             turn, len(entries), len(self._slot.lines),
             round((time.monotonic() - started) * 1000),
         )
+
+    async def _guard_repeat(self, text: str) -> None:
+        """Name a repeated line in the instructions so the next reply avoids it.
+
+        The repeat itself is already spoken; this keeps it from a third time.
+        """
+        key = spoken_key(text)
+        repeated = len(key) >= _REPEAT_MIN_CHARS and any(
+            SequenceMatcher(None, key, earlier).ratio() >= _REPEAT_RATIO
+            for earlier in self._recent_replies
+        )
+        self._recent_replies.append(key)
+        if not repeated or self._slot is None or self._closed or not self._slot.avoid(text):
+            return
+        try:
+            await self._send_provider(session_instructions_event(self._slot.instructions()))
+        except Exception:
+            logger.warning("[realtime-voice] repeat guard update failed")
+            return
+        logger.info("[realtime-voice] repeat detected len=%d turn=%d", len(text), self._turn)
 
     def _prefetch_done(self, task: asyncio.Task) -> None:
         if task.cancelled():

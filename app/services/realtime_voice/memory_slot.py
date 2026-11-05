@@ -24,6 +24,8 @@ _HEADER = (
 )
 # Raw-text prefix that marks a memory as already present in the core block.
 _DEDUP_PREFIX = 24
+# Lines the agent has said twice; the newest few are named so it stops.
+_MAX_AVOIDED = 2
 
 
 @dataclass
@@ -56,15 +58,26 @@ class MemorySlot:
         self._ttl_turns = ttl_turns
         self._entries: list[_Entry] = []
         self._rendered = ""
+        self._avoided: list[str] = []
 
     @property
     def lines(self) -> list[str]:
         return [entry.line for entry in self._entries]
 
     def instructions(self) -> str:
-        if not self._rendered:
-            return self._base
-        return f"{self._base}\n\n{self._rendered}"
+        parts = [self._base, self._rendered]
+        if self._avoided:
+            quoted = "、".join(f"「{line}」" for line in self._avoided)
+            parts.append(f"【别再重复】你这通电话里已经说过{quoted}，接下来换个说法或换个话题，不要再说这句。")
+        return "\n\n".join(part for part in parts if part)
+
+    def avoid(self, line: str) -> bool:
+        """Name a line the agent keeps repeating. True when it is new."""
+        line = line.strip()
+        if not line or line in self._avoided:
+            return False
+        self._avoided = [*self._avoided, line][-_MAX_AVOIDED:]
+        return True
 
     def merge(self, memories: list[dict[str, str]], turn: int) -> bool:
         """Add one retrieval's memories. True when the block text changed."""

@@ -159,6 +159,10 @@ class Settings(BaseSettings):
     # and still ignores -44 dBFS (echo residue) and noise up to -34 dBFS
     # (StepFun probe with synthesized speech, 2026-11-05).
     stepfun_realtime_vad_threshold_android: int = 300
+    # StepFun's default sampling is nearly greedy: the same context gave the
+    # same reply 3 times out of 4, and calls repeated a line word for word.
+    # 0.7 gave 4 distinct replies in 4; 1.2 started to ramble (2026-11-05).
+    stepfun_realtime_temperature: float = 0.7
     stepfun_realtime_transcript_timeout_s: float = 2.5
     stepfun_realtime_retrieval_timeout_s: float = 1.5
     stepfun_realtime_max_seconds: int = 28 * 60

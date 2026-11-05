@@ -87,6 +87,7 @@ async def configure_session(
     silence_duration_ms: int = 600,
     prefix_padding_ms: int = 500,
     energy_threshold: int | None = None,
+    temperature: float | None = None,
     enable_memory_tool: bool = True,
     fallback_voice: str | None = None,
 ) -> str:
@@ -105,6 +106,7 @@ async def configure_session(
             silence_duration_ms=silence_duration_ms,
             prefix_padding_ms=prefix_padding_ms,
             energy_threshold=energy_threshold,
+            temperature=temperature,
             enable_memory_tool=enable_memory_tool,
         ))
         await _wait_until(sock, "session.updated", 8)

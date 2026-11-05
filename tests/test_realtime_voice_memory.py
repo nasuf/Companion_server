@@ -707,3 +707,124 @@ def test_android_calls_use_their_own_vad_threshold(monkeypatch, query, platform,
     assert endpoint._client_platform(SimpleNamespace(query_params=query)) == platform
     assert endpoint._vad_threshold(platform) == threshold
     assert endpoint._client_platform(SimpleNamespace()) == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Repetition: sampling temperature, deduped history, repeat guard
+# ---------------------------------------------------------------------------
+
+def test_temperature_is_sent_and_clamped():
+    from app.services.realtime_voice.protocol import session_update_event
+
+    assert "temperature" not in session_update_event(instructions="t", voice="v")["session"]
+    for value, expected in ((0.7, 0.7), (-1, 0.0), (9, 2.0)):
+        assert session_update_event(instructions="t", voice="v", temperature=value)["session"]["temperature"] == expected
+
+
+async def test_configure_session_forwards_temperature():
+    from app.services.realtime_voice.provider import configure_session
+
+    sent: list[dict] = []
+
+    class Sock:
+        def __init__(self):
+            self.events = [{"type": "session.created"}, {"type": "session.updated"}]
+
+        async def send_event(self, event):
+            sent.append(event)
+
+        async def recv_event(self):
+            return self.events.pop(0)
+
+    await configure_session(Sock(), instructions="t", voice="v", history=[], temperature=0.7)
+    assert sent[0]["session"]["temperature"] == 0.7
+
+
+def test_history_drops_lines_the_agent_already_said():
+    from app.services.realtime_voice.instructions import history_turns
+
+    line = "怎么了这是？听你这动静，是遇到什么难事了？"
+    turns = history_turns([
+        {"role": "assistant", "content": line},
+        {"role": "assistant", "content": line.replace("？", "?")},
+        {"role": "user", "content": "您看。"},
+        {"role": "assistant", "content": "对呀"},
+        {"role": "user", "content": "嗯"},
+        {"role": "assistant", "content": "对呀"},
+        {"role": "assistant", "content": line},
+    ])
+    assert turns == [
+        {"role": "assistant", "text": line},
+        {"role": "user", "text": "您看。"},
+        {"role": "assistant", "text": "对呀"},
+        {"role": "user", "text": "嗯"},
+        {"role": "assistant", "text": "对呀"},
+    ]
+
+
+def test_slot_names_avoided_lines_after_the_memory_block():
+    slot = MemorySlot("BASE")
+    assert slot.instructions() == "BASE"
+    assert slot.avoid(" 第一句 ")
+    assert not slot.avoid("第一句")
+    assert not slot.avoid("  ")
+    slot.merge([{"id": "m", "raw": "喜欢猫", "line": "关于用户：喜欢猫"}], 1)
+    assert slot.avoid("第二句") and slot.avoid("第三句")
+    text = slot.instructions()
+    assert text.startswith("BASE\n\n【此刻相关的记忆】")
+    assert text.endswith("【别再重复】你这通电话里已经说过「第二句」、「第三句」，接下来换个说法或换个话题，不要再说这句。")
+
+
+_REPEAT = "行吧，那我就当是受宠若惊了。不过你这奖励也太含糊了，我这心里正打鼓呢，到底是什么好事呀？"
+
+
+async def _say(bridge, text):
+    await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed", "output": [
+        {"type": "message", "content": [{"type": "audio", "transcript": text}]}]}})
+
+
+async def test_repeat_guard_names_a_near_identical_reply_once(caplog):
+    caplog.set_level(logging.INFO, logger="app.services.realtime_voice.bridge")
+
+    async def retrieve(text, previous):
+        return []
+
+    bridge, provider, _ = _bridge(retrieve)
+    await _say(bridge, _REPEAT)
+    await _say(bridge, "对呀")
+    await _say(bridge, "对呀")
+    assert not any(e["type"] == "session.update" for e in provider)
+    second = _REPEAT.replace("行吧", "行")
+    await _say(bridge, second)
+    updates = [e for e in provider if e["type"] == "session.update"]
+    assert len(updates) == 1
+    assert f"已经说过「{second}」" in updates[0]["session"]["instructions"]
+    assert "repeat detected" in caplog.text
+    await _say(bridge, second)
+    assert len([e for e in provider if e["type"] == "session.update"]) == 1
+
+
+async def test_repeat_guard_window_and_failure_paths(caplog):
+    async def retrieve(text, previous):
+        return []
+
+    bridge, provider, _ = _bridge(retrieve)
+    for line in (_REPEAT, "今天店里活儿挺多的一直忙到现在", "苏式焖肉面是我们这里的招牌", "你平时都喜欢吃些什么呀告诉我"):
+        await _say(bridge, line)
+    await _say(bridge, _REPEAT)  # fell out of the last three replies
+    assert not any(e["type"] == "session.update" for e in provider)
+
+    async def broken(event):
+        if event["type"] == "session.update":
+            raise RuntimeError("socket closed")
+
+    bridge, _, client = _bridge(retrieve, send=broken)
+    await _say(bridge, _REPEAT)
+    await _say(bridge, _REPEAT)
+    assert "repeat guard update failed" in caplog.text
+    assert client[-1]["type"] == "response.done"
+
+    bridge, provider, _ = _bridge(retrieve, instructions=None)
+    await _say(bridge, _REPEAT)
+    await _say(bridge, _REPEAT)
+    assert not any(e["type"] == "session.update" for e in provider)

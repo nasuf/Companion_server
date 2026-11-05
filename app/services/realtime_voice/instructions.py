@@ -6,6 +6,8 @@ are injected via the ``recall_memory`` tool result.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 
 from app.services.mbti import build_personality_brief, get_mbti
@@ -180,8 +182,11 @@ def history_turns(messages: list[dict], *, limit: int = 8, char_limit: int = 300
 
     Text chat stores one reply as several bubble rows; consecutive rows of a
     role are one turn, so the limit counts exchanges rather than bubbles.
+    A line the agent already said is dropped: seeding a call with the
+    agent's own repetition invites it to repeat again.
     """
     turns: list[dict[str, str]] = []
+    said: set[str] = set()
     for message in messages:
         role = message.get("role")
         if role not in {"user", "assistant"}:
@@ -189,11 +194,24 @@ def history_turns(messages: list[dict], *, limit: int = 8, char_limit: int = 300
         text = " ".join(str(message.get("content") or "").split())
         if not text:
             continue
+        if role == "assistant" and len(key := spoken_key(text)) >= _REPEAT_KEY_CHARS:
+            if key in said:
+                continue
+            said.add(key)
         if turns and turns[-1]["role"] == role:
             turns[-1]["text"] = f"{turns[-1]['text']} {text}"
         else:
             turns.append({"role": role, "text": text})
     return [{"role": t["role"], "text": _clip(t["text"], char_limit)} for t in turns[-limit:]]
+
+
+# Short acknowledgements ("对呀", "嗯？") legitimately recur.
+_REPEAT_KEY_CHARS = 8
+
+
+def spoken_key(text: str) -> str:
+    """Text without punctuation and spaces, for comparing spoken lines."""
+    return re.sub(r"[\W_]+", "", text)
 
 
 # Gap buckets for the opening line. A call redialled within minutes is the

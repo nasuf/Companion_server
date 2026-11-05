@@ -58,6 +58,7 @@ def session_update_event(
     silence_duration_ms: int = 600,
     prefix_padding_ms: int = 500,
     energy_threshold: int | None = None,
+    temperature: float | None = None,
     enable_memory_tool: bool = True,
 ) -> dict[str, Any]:
     """Server VAD + optional recall_memory tool."""
@@ -78,6 +79,8 @@ def session_update_event(
     }
     if energy_threshold is not None:
         session["turn_detection"]["energy_awakeness_threshold"] = max(0, min(5000, int(energy_threshold)))
+    if temperature is not None:
+        session["temperature"] = max(0.0, min(2.0, float(temperature)))
     if tools:
         session["tools"] = tools
         session["tool_choice"] = "auto"
