@@ -1,4 +1,9 @@
-"""Durable admin-evaluation queue and a single expiring cluster lease."""
+"""Durable admin-evaluation queue and expiring cluster leases.
+
+Executor 'primary' runs every API-worker and nightly job. The manual repetition
+gate holds its own executor 'repetition_gate', so its hours-long replay never
+blocks the nightly or prompt-save regressions (each still runs one at a time).
+"""
 
 from datetime import UTC, datetime, timedelta
 import json
@@ -18,7 +23,7 @@ class LostLease(RuntimeError):
 async def enqueue(
     kind, source_key, source_version, snapshot, *, now=None, delay=0, for_day=None
 ):
-    if kind not in {"daily", "prompt", "routing", "nightly", "calibration"}:
+    if kind not in {"daily", "prompt", "routing", "nightly", "calibration", "repetition_gate"}:
         raise ValueError("invalid_quality_job_kind")
     now = now or datetime.now(UTC)
     ident = uuid4().hex
@@ -49,12 +54,13 @@ async def enqueue(
     return rows[0]["id"]
 
 
-async def claim(*, job_id=None):
+async def claim(*, job_id=None, executor="primary"):
     token = uuid4().hex
     async with db.tx(timeout=timedelta(seconds=8)) as tx:
         lock = (
             await tx.query_raw(
-                "SELECT *,lease_until>NOW() AS active FROM quality_executor WHERE id='primary' FOR UPDATE"
+                "SELECT *,lease_until>NOW() AS active FROM quality_executor WHERE id=$1 FOR UPDATE",
+                executor,
             )
         )[0]
         if lock["active"]:
@@ -74,17 +80,20 @@ async def claim(*, job_id=None):
             )
         rows = await tx.query_raw(
             """SELECT * FROM quality_jobs WHERE status='pending' AND source_key<>'quality-watch-v1' AND (kind<>'nightly' OR $1::text IS NOT NULL) AND not_before<=NOW()
-          AND ($1::text IS NULL OR id=$1) ORDER BY created_at,id LIMIT 1 FOR UPDATE""",
+          AND ($1::text IS NULL OR id=$1) AND (kind='repetition_gate')=($2::text='repetition_gate')
+          ORDER BY created_at,id LIMIT 1 FOR UPDATE""",
             job_id,
+            executor,
         )
         if not rows:
             return None
         row = rows[0]
         await tx.execute_raw(
-            "UPDATE quality_executor SET job_id=$1,lease_token=$2,lease_until=NOW()+make_interval(secs=>$3) WHERE id='primary'",
+            "UPDATE quality_executor SET job_id=$1,lease_token=$2,lease_until=NOW()+make_interval(secs=>$3) WHERE id=$4",
             row["id"],
             token,
             LEASE_SECONDS,
+            executor,
         )
         await tx.execute_raw(
             "UPDATE quality_jobs SET status='running',lease_token=$2,lease_until=NOW()+make_interval(secs=>$3),updated_at=NOW() WHERE id=$1",
@@ -97,7 +106,7 @@ async def claim(*, job_id=None):
 
 async def require_lease(tx, job_id, token):
     rows = await tx.query_raw(
-        "SELECT id FROM quality_executor WHERE id='primary' AND job_id=$1 AND lease_token=$2 AND lease_until>NOW() FOR UPDATE",
+        "SELECT id FROM quality_executor WHERE job_id=$1 AND lease_token=$2 AND lease_until>NOW() FOR UPDATE",
         job_id,
         token,
     )
@@ -109,8 +118,9 @@ async def renew(job_id, token):
     async with db.tx(timeout=timedelta(seconds=8)) as tx:
         await require_lease(tx, job_id, token)
         await tx.execute_raw(
-            "UPDATE quality_executor SET lease_until=NOW()+make_interval(secs=>$1) WHERE id='primary'",
+            "UPDATE quality_executor SET lease_until=NOW()+make_interval(secs=>$1) WHERE job_id=$2",
             LEASE_SECONDS,
+            job_id,
         )
         await tx.execute_raw(
             "UPDATE quality_jobs SET lease_until=NOW()+make_interval(secs=>$2) WHERE id=$1 AND status='running'",
@@ -138,7 +148,8 @@ async def finish(job, status, report):
             json.dumps(report),
         )
         await tx.execute_raw(
-            "UPDATE quality_executor SET job_id=NULL,lease_token=NULL,lease_until=NULL WHERE id='primary'"
+            "UPDATE quality_executor SET job_id=NULL,lease_token=NULL,lease_until=NULL WHERE job_id=$1",
+            job["id"],
         )
         if status in {"failed", "budget_exhausted", "interrupted"}:
             await notify(tx, job["id"], status)

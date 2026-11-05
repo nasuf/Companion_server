@@ -1,0 +1,77 @@
+name: Repetition gate
+# CHAT01.10.2 / CHAT01.02: candidate branch vs main on the human-reviewed,
+# sanitized repetition cases (held only in the production database). Manual
+# only; the server enforces 60 CNY per run and 240 CNY per month per call block.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: gate = compare a candidate branch with main; calibrate = A/A replays of main
+        type: choice
+        options: [gate, calibrate]
+        default: gate
+      candidate_ref:
+        description: Candidate branch or commit (gate mode)
+        required: false
+      case_set:
+        description: Case set loaded on the server
+        default: rr-20261104
+permissions:
+  contents: read
+concurrency:
+  group: quality-repetition-gate
+  cancel-in-progress: false
+jobs:
+  replay:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    # 16 full replays + scoring take about two hours; leave room for provider slowness.
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the candidate
+        if: inputs.mode == 'gate'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_ref }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install isolated replay dependencies
+        run: python -m pip install -c runtime-constraints.txt -e '.[quality]'
+      - name: Generate offline Prisma types (no database connection)
+        env:
+          DATABASE_URL: postgresql://test:test@127.0.0.1:1/quality_no_database
+        run: prisma generate
+      - name: Hand evaluation keys to the controller only
+        env:
+          EVAL_ARK_API_KEY: ${{ secrets.EVAL_ARK_API_KEY }}
+          EVAL_DASHSCOPE_API_KEY: ${{ secrets.EVAL_DASHSCOPE_API_KEY }}
+        # Files, not environment: replay/scoring children (which run candidate
+        # code) inherit neither keys nor OIDC credentials. The controller deletes them.
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/eval-keys"
+          printf '%s' "$EVAL_ARK_API_KEY" > "$RUNNER_TEMP/eval-keys/ark"
+          printf '%s' "$EVAL_DASHSCOPE_API_KEY" > "$RUNNER_TEMP/eval-keys/dashscope"
+      - name: Run the metered repetition gate
+        env:
+          EVAL_KEYS_DIR: ${{ runner.temp }}/eval-keys
+          MODE: ${{ inputs.mode }}
+          CASE_SET: ${{ inputs.case_set }}
+          PYTHON_DOTENV_DISABLED: '1'
+        run: |
+          set -- --mode "$MODE" --case-set "$CASE_SET" --baseline-root .
+          if [ "$MODE" = gate ]; then set -- "$@" --candidate-root candidate; fi
+          python -m evals.reply_repetition.gate "$@"
+      - name: Remove any key file left behind
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/eval-keys"
+      # No artifact upload: cases, prompts and replies must not become public
+      # attachments in this public repository. The full report is on the server.

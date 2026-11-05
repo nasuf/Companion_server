@@ -33,6 +33,7 @@ async def control(quality, monkeypatch):
         "sha": "a" * 40,
         "run_id": str(int(uuid4().hex[:12], 16)),
         "run_attempt": "1",
+        "quality_workflow": "nightly",
     }
     app = FastAPI()
     app.include_router(api.router)

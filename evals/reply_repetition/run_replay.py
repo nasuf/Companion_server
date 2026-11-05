@@ -16,6 +16,9 @@
 解析)。不给时这三项都是空, 「你的隐性状态约束」「话题上下文」「回复时机说明」三段不会渲染 ——
 而生产里前两段几乎每轮都有。给了就按生产原值交给真实的拼装代码, 段落是否出现仍由当前代码判断
 (例如延迟不到 20 秒的「回复时机说明」照样不渲染)。
+
+提示词快照里 content 为 null 的行用本源码目录自己的默认文本: 门禁里这些是不归 Web 管的提示词,
+部署时会随代码同步 (store.ensure_prompt_templates), 两组各用各的代码版本才是部署后的样子。
 """
 from __future__ import annotations
 
@@ -27,6 +30,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 MODEL = "doubao-seed-character-260628"  # 生产主回复模型 (get_chat_model)
+# 复读门禁 (gate.py) 要求候选分支的回放器认得这一版协议: 提示词快照里 content 为 null 的行用本源码目录的默认文本
+GATE_PROTOCOL = 1
 JUDGE_MODEL = "qwen3.5-flash"
 # Ark 价格 (元 / 百万 token): 输入 / 命中缓存的输入 / 输出, 与 context_embedding 一致
 ARK_PRICE = (0.8, 0.16, 2.0)
@@ -97,6 +102,14 @@ def apply_production_context(patches, chat_module, context: dict) -> None:
         patches.setattr(chat_module, "explain_delay_reason", AsyncMock(return_value=delay["reason_text"]))
 
 
+def code_prompts(rows: list[dict]) -> list[dict]:
+    """content 为 null 的行换成本源码目录的默认文本; 本源码目录已没有的提示词丢掉。"""
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    return [{**r, "content": PROMPT_DEFINITION_MAP[r["key"]].default_text if r["content"] is None else r["content"]}
+            for r in rows if r["key"] in PROMPT_DEFINITION_MAP]
+
+
 def force_main(snapshot: dict, original_context, contexts: dict | None = None):
     """与 context_embedding 相同: 按快照还原提示词启用状态, 用真实的意图上下文, 主回复强制走主 prompt。"""
     def hook(patches, chat_module, io, current_case):
@@ -141,12 +154,16 @@ async def run(args) -> dict:
     if (source_root / ".env").exists():
         raise ValueError("Run each arm from an isolated checkout without .env")
     cases = shard(json.loads(args.cases.read_text()), args.shard)
-    snapshot = {p["key"]: p for p in json.loads(args.prompt_snapshot.read_text())}
+    rows = code_prompts(json.loads(args.prompt_snapshot.read_text()))
+    snapshot = {p["key"]: p for p in rows}
     contexts = json.loads(args.production_context.read_text()) if args.production_context else None
     if contexts is not None and (missing := [c["id"] for c in cases if c["id"] not in contexts]):
         raise ValueError(f"Production context missing for {len(missing)} cases, e.g. {missing[0]}")
     out = args.output_dir / args.arm
     out.mkdir(parents=True, exist_ok=True)
+    prompts = out / f".prompts-{args.shard.replace('/', 'of')}.json"  # 回放器读文件; 各分片各写一份
+    prompts.write_text(json.dumps(rows, ensure_ascii=False))
+    prompts.chmod(0o600)
     summary = {"arm": args.arm, "source_root": str(source_root), "shard": args.shard, "done": 0, "failed": []}
     for case in cases:
         detail = out / f"{case['id']}.json"
@@ -161,7 +178,7 @@ async def run(args) -> dict:
             summary["stopped"] = f"cost cap {args.max_cost_cny} reached ({spent:.2f})"
             break
         runner = SimpleNamespace(
-            source_root=source_root, prompt_snapshot=args.prompt_snapshot, model=MODEL,
+            source_root=source_root, prompt_snapshot=prompts, model=MODEL,
             judge_model=JUDGE_MODEL, judging_instruction=JUDGING_INSTRUCTION, guard_model="qwen3.5-flash",
             samples=args.samples, output=detail,
             fixture_hook=force_main(snapshot, original_context, contexts),

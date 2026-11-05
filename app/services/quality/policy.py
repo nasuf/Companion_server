@@ -19,13 +19,27 @@ def money(value) -> Decimal:
     return Decimal(str(value)).quantize(Decimal(".00000001"))
 
 
+GATE_KIND = "repetition_gate"
+
+
 def run_limit(kind: str) -> Decimal:
     return money(
         settings.quality_daily_cny
         if kind in ("daily", "calibration")
         else settings.quality_prompt_run_cny
         if kind == "prompt"
+        else settings.quality_repetition_gate_run_cny
+        if kind == GATE_KIND
         else settings.quality_full_run_cny
+    )
+
+
+def monthly_limit(kind: str) -> Decimal:
+    """The repetition gate has its own month; every other kind shares one."""
+    return money(
+        settings.quality_repetition_gate_monthly_cny
+        if kind == GATE_KIND
+        else settings.quality_monthly_cny
     )
 
 
@@ -41,6 +55,8 @@ def public_policy() -> dict:
         prompt_daily_cny=settings.quality_prompt_daily_cny,
         full_run_cny=settings.quality_full_run_cny,
         monthly_cny=settings.quality_monthly_cny,
+        repetition_gate_run_cny=settings.quality_repetition_gate_run_cny,
+        repetition_gate_monthly_cny=settings.quality_repetition_gate_monthly_cny,
         prompt_debounce_seconds=settings.quality_prompt_debounce_seconds,
         critical_repeats=settings.quality_critical_repeats,
         warning_only=True,

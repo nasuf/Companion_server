@@ -1,6 +1,8 @@
 """Cluster-wide conservative reservations. No provider call precedes reserve().
 
 Lock order is executor -> month -> job. Settlement only takes month -> charge.
+The month row commits every kind; the repetition gate's share is summed from
+its own charges, so the gate and the other kinds each stay within their month.
 Failed/ambiguous requests keep their reservation;
 settlement and llm_usage are one transaction and idempotent by charge ID.
 """
@@ -11,7 +13,7 @@ import json
 
 from app.config import settings
 from app.db import db
-from app.services.quality.policy import local_day, money, run_limit
+from app.services.quality.policy import GATE_KIND, local_day, money, monthly_limit, run_limit
 
 
 class BudgetExhausted(RuntimeError):
@@ -54,18 +56,23 @@ async def reserve(
                 """SELECT
           COALESCE(SUM(COALESCE(c.cost_cny,c.reserved_cny)) FILTER(WHERE c.job_id=$1),0) AS run,
           COALESCE(SUM(COALESCE(c.cost_cny,c.reserved_cny)) FILTER(WHERE c.local_date=$2::date AND j.kind IN ('daily','calibration')),0) AS daily,
-          COALESCE(SUM(COALESCE(c.cost_cny,c.reserved_cny)) FILTER(WHERE c.local_date=$2::date AND j.kind='prompt'),0) AS prompts
+          COALESCE(SUM(COALESCE(c.cost_cny,c.reserved_cny)) FILTER(WHERE c.local_date=$2::date AND j.kind='prompt'),0) AS prompts,
+          COALESCE(SUM(COALESCE(c.cost_cny,c.reserved_cny)) FILTER(WHERE c.month=$3::date AND j.kind=$4),0) AS gate
           FROM quality_charges c JOIN quality_jobs j ON j.id=c.job_id
           WHERE c.month=$3::date OR c.job_id=$1""",
                 job_id,
                 str(day),
                 str(month),
+                GATE_KIND,
             )
         )[0]
+        gate_month = money(spent["gate"])
         limits = [
             (
-                money(row["committed_cny"]),
-                money(settings.quality_monthly_cny),
+                gate_month
+                if kind == GATE_KIND
+                else money(row["committed_cny"]) - gate_month,
+                monthly_limit(kind),
                 "monthly",
             ),
             (money(spent["run"]), run_limit(kind), "run"),
@@ -154,12 +161,14 @@ async def settle(charge_id: str, cost, usage: dict) -> None:
         }
         await tx.execute_raw(
             """INSERT INTO llm_usage(id,scope,input_tokens,output_tokens,tokens_by_model,cost_cny,call_count,created_at)
-          VALUES($1,'quality_eval',$2,$3,$4::jsonb,$5::double precision,1,CURRENT_TIMESTAMP)""",
+          VALUES($1,'quality_eval',$2,$3,$4::jsonb,$5::double precision,$6,CURRENT_TIMESTAMP)""",
             "quality-" + charge_id,
             usage["input"],
             usage["output"],
             json.dumps(bucket),
             float(cost),
+            # A repetition-gate block settles many provider calls at once.
+            int(usage.get("calls", 1)),
         )
 
 

@@ -21,7 +21,7 @@ async def quality(world, monkeypatch):
         monkeypatch.setattr(module, "db", database)
     monkeypatch.setattr(jobs, "notify", AsyncMock())
     await database.execute_raw(
-        "UPDATE quality_executor SET job_id=NULL,lease_token=NULL,lease_until=NULL WHERE id='primary'"
+        "UPDATE quality_executor SET job_id=NULL,lease_token=NULL,lease_until=NULL"
     )
     original = set(
         r["id"] for r in await database.query_raw("SELECT id FROM quality_jobs")
@@ -30,7 +30,7 @@ async def quality(world, monkeypatch):
         yield world
     finally:
         await database.execute_raw(
-            "UPDATE quality_executor SET job_id=NULL,lease_token=NULL,lease_until=NULL WHERE id='primary'"
+            "UPDATE quality_executor SET job_id=NULL,lease_token=NULL,lease_until=NULL"
         )
         ids = [
             r["id"]

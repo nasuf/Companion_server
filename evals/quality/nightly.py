@@ -19,7 +19,7 @@ RETRY_WINDOW_SECONDS = 60
 _RETRYABLE_ACTIONS = frozenset(
     {"renew", "prepare", "result", "baseline", "settle", "uncertain"}
 )
-_OPERATIONS = _RETRYABLE_ACTIONS | {"begin", "reserve", "finish"}
+_OPERATIONS = _RETRYABLE_ACTIONS | {"begin", "reserve", "finish", "reserve_block", "settle_block"}
 _TRANSIENT_STATUS = frozenset({500, 502, 503, 504})
 
 
@@ -71,14 +71,10 @@ class Control:
         self.job = None
 
     async def request(self, path, data):
-        operation = "begin" if path == "/begin" else data.get("operation", "unknown")
+        operation = "begin" if path.endswith("/begin") else data.get("operation", "unknown")
         # begin claims a lease, reserve creates a new charge, and finish releases
         # the lease. None may be blindly replayed after an ambiguous response.
-        retryable = (
-            path.startswith("/jobs/")
-            and path.count("/") == 2
-            and operation in _RETRYABLE_ACTIONS
-        )
+        retryable = self.retryable(path, operation)
         # A deploy restart answers 502 for up to ~30s (14 deploys on 10-30/31:
         # 9 under 10s, 4 at 13-19s, one 29s). Waits of 5+10+15+15s cover 45s.
         attempts = 5 if retryable else 1
@@ -126,6 +122,13 @@ class Control:
                 flush=True,
             )
             raise error from exc
+
+    def retryable(self, path, operation):
+        return (
+            path.startswith("/jobs/")
+            and path.count("/") == 2
+            and operation in _RETRYABLE_ACTIONS
+        )
 
     async def _request_once(self, path, data, operation):
         async with httpx.AsyncClient(timeout=30, trust_env=False) as client:

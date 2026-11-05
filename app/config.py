@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     quality_enabled: bool = True  # qualified admin-only worker; QUALITY_ENABLED=false stops dispatch
     quality_oidc_repository: str = "nasuf/Companion_server"
     quality_oidc_repository_id: str = "1180603795"
+    # CHAT01.10.2 复读门禁 (手动工作流): 一次 = 两组各 8 次回放 × 259 例 × 5 次采样 + 评判,
+    # 实测估算约 45 元; 月度单独计, 不占上面夜间/抽检共用的月度额度。
+    quality_repetition_gate_run_cny: float = Field(default=60, gt=0, le=200)
+    quality_repetition_gate_monthly_cny: float = Field(default=240, gt=0, le=2000)
+    # 百炼 text-embedding-v4 (元/百万 token); 模型价格表没有向量模型的价, 门禁按这里计
+    quality_embedding_cny_per_million: float = Field(default=0.5, gt=0, le=10)
 
     # Android JPush: JSON keyed by package name, values app_key/master_secret.
     # None enables sending when matching credentials exist; False is a kill switch.

@@ -49,6 +49,22 @@ def test_oidc_rejects_other_repo_ref_workflow_and_unsigned(monkeypatch):
             oidc.verify(jwt.encode({**claims, **change}, key, algorithm="RS256"))
     with pytest.raises(jwt.PyJWTError):
         oidc.verify(jwt.encode(claims, key=None, algorithm="none"))
+    gate = {**claims, "workflow_ref": "nasuf/Companion_server/.github/workflows/quality-repetition-gate.yml@refs/heads/main"}
+    with pytest.raises(ValueError):  # the billed gate is manual only
+        oidc.verify(jwt.encode(gate, key, algorithm="RS256"))
+    gate["event_name"] = "workflow_dispatch"
+    assert oidc.verify(jwt.encode(gate, key, algorithm="RS256"))["quality_workflow"] == "repetition_gate"
+    assert oidc.verify(jwt.encode(claims, key, algorithm="RS256"))["quality_workflow"] == "nightly"
+
+
+async def test_oidc_workflow_controls_only_its_own_kind():
+    from fastapi import HTTPException
+
+    claims = {"quality_workflow": "nightly"}
+    assert await oidc.NIGHTLY(claims) is claims
+    with pytest.raises(HTTPException) as error:
+        await oidc.REPETITION_GATE(claims)
+    assert error.value.status_code == 403
 
 
 def test_gate_baseline_missing_incomplete_critical_and_noise():

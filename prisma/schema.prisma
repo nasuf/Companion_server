@@ -3284,6 +3284,16 @@ model QualityResult {
   @@map("quality_results")
   @@ignore
 }
+model QualityRepetitionCase {
+  id String @id
+  caseSet String @map("case_set")
+  caseData Json @map("case_data")
+  context Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  @@index([caseSet, id], map: "quality_repetition_cases_set_idx")
+  @@map("quality_repetition_cases")
+  @@ignore
+}
 model QualityExecutor {
   id String @id
   jobId String? @map("job_id")
