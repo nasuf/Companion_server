@@ -84,6 +84,15 @@ def session_update_event(
     return {"event_id": event_id(), "type": "session.update", "session": session}
 
 
+def session_instructions_event(instructions: str) -> dict[str, Any]:
+    """Partial session.update: StepFun merges it, keeping tools, VAD and voice."""
+    return {
+        "event_id": event_id(),
+        "type": "session.update",
+        "session": {"instructions": instructions},
+    }
+
+
 def history_item_event(*, item_id: str, role: str, text: str) -> dict[str, Any]:
     return {
         "event_id": event_id(),

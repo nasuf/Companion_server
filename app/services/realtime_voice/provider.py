@@ -121,33 +121,36 @@ async def configure_session(
         await update(voice)
     if not history:
         return voice
-    pending: list[str] = []
     for index, turn in enumerate(history):
-        item_id = f"hist_{index}"
-        pending.append(item_id)
         await sock.send_event(history_item_event(
-            item_id=item_id,
+            item_id=f"hist_{index}",
             role=turn["role"],
             text=turn["text"],
         ))
+    # StepFun assigns its own item ids (verified 2026-11-05), so count the
+    # acknowledgements instead of matching ids; matching never succeeded and
+    # held every call for the full timeout.
+    remaining = len(history)
     deadline = time.monotonic() + 3
-    while pending and time.monotonic() < deadline:
-        remaining = deadline - time.monotonic()
+    while remaining and time.monotonic() < deadline:
         try:
-            event = await asyncio.wait_for(sock.recv_event(), timeout=max(0.1, remaining))
+            event = await asyncio.wait_for(
+                sock.recv_event(), timeout=max(0.1, deadline - time.monotonic()),
+            )
         except TimeoutError:
             break
         if event.get("type") == "error":
             logger.warning("[realtime-voice] history seed returned an error: %s", _error_message(event))
             break
-        if event.get("type") != "conversation.item.created":
-            continue
         item = event.get("item")
-        item_id = item.get("id") if isinstance(item, dict) else None
-        if isinstance(item_id, str) and item_id in pending:
-            pending.remove(item_id)
-    if pending:
-        logger.warning("[realtime-voice] history seed incomplete, remaining=%s", len(pending))
+        if (
+            event.get("type") == "conversation.item.created"
+            and isinstance(item, dict)
+            and item.get("role") in {"user", "assistant"}
+        ):
+            remaining -= 1
+    if remaining:
+        logger.warning("[realtime-voice] history seed incomplete, remaining=%s", remaining)
     return voice
 
 

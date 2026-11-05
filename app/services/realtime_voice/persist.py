@@ -83,22 +83,35 @@ async def save_assistant_transcript(
     return created.id
 
 
+# One extraction run reads at most 30 new rows per side, and a source batch
+# may name at most 100 rows. 60 ids keep both sides near one run's page.
+_EXTRACTION_BATCH = 60
+# A 28-minute call stores ~200 rows; leave room for a text backlog before it.
+_MAX_EXTRACTION_ROUNDS = 12
+
+
 def schedule_end_of_call_extraction(
     *,
     user_id: str,
     workspace_id: str | None,
     conversation_id: str,
+    agent_id: str | None,
+    message_ids: list[str],
 ) -> None:
-    """Trigger the standard text-chat memory pipeline for this conversation.
+    """Run the text-chat memory pipeline over this call's transcript rows.
 
-    The pipeline uses watermarks to find un-extracted messages (including
-    the voice transcripts we just persisted) and processes them with full
-    context. This is the same path text chat uses.
+    The pipeline only extracts persisted rows it can identify, so the call
+    passes the ids it stored; without them every run failed with
+    source_identity_missing and the call waited for the next text message.
     """
+    if not message_ids:
+        return
     fire_background(_run_extraction(
         user_id=user_id,
         workspace_id=workspace_id,
         conversation_id=conversation_id,
+        agent_id=agent_id,
+        message_ids=list(dict.fromkeys(message_ids)),
     ))
 
 
@@ -123,22 +136,58 @@ async def _run_extraction(
     user_id: str,
     workspace_id: str | None,
     conversation_id: str,
+    agent_id: str | None,
+    message_ids: list[str],
 ) -> None:
-    """Run the standard dual-side memory pipeline.
+    """Extract the call in chronological batches until both sides catch up.
 
-    This picks up all un-extracted messages in the conversation (both
-    voice transcripts and any text messages), using the watermark system
-    to avoid re-processing.
+    Each run advances the per-side watermark by one bounded page, so a long
+    call needs several runs. A batch's ids are the run's identified sources
+    and context; once batches run out, the last one is reused while a side
+    still reports more backlog (rows saved before the call).
     """
+    from app.services.chat.post_process import _bg_memory_pipeline
+    from app.services.llm.usage_tracker import usage_session
+
+    batches = [
+        message_ids[i:i + _EXTRACTION_BATCH]
+        for i in range(0, len(message_ids), _EXTRACTION_BATCH)
+    ]
+    stored = 0
+    rounds = 0
+    outcome = "completed"
+    logger.info(
+        "[realtime-voice] end-of-call extraction conv=%s rows=%d",
+        conversation_id[:8], len(message_ids),
+    )
     try:
-        from app.services.chat.post_process import _bg_memory_pipeline
-        logger.info("[realtime-voice] running end-of-call extraction conv=%s", conversation_id[:8])
-        await _bg_memory_pipeline(
-            user_id,
-            [],
-            conversation_id=conversation_id,
-            workspace_id=workspace_id,
-        )
-        logger.info("[realtime-voice] end-of-call extraction completed conv=%s", conversation_id[:8])
+        async with usage_session(
+            scope="post_process", conversation_id=conversation_id,
+            agent_id=agent_id, user_id=user_id,
+        ):
+            while rounds < _MAX_EXTRACTION_ROUNDS:
+                batch = batches[min(rounds, len(batches) - 1)]
+                rounds += 1
+                results = await _bg_memory_pipeline(
+                    user_id,
+                    [],
+                    conversation_id=conversation_id,
+                    workspace_id=workspace_id,
+                    source_message_ids=batch,
+                )
+                stored += sum(r.memory_count or 0 for r in results)
+                if any(r.status in {"failed", "disabled"} for r in results):
+                    outcome = ",".join(f"{r.side}:{r.reason}" for r in results if r.status in {"failed", "disabled"})
+                    break
+                if rounds >= len(batches) and not any(r.has_more for r in results):
+                    break
+            else:
+                outcome = "round_limit"
     except Exception as exc:
+        outcome = f"error:{type(exc).__name__}"
         logger.warning("[realtime-voice] end-of-call extraction failed: %s", exc)
+    logger.log(
+        logging.INFO if outcome == "completed" else logging.WARNING,
+        "[realtime-voice] end-of-call extraction %s conv=%s rounds=%d memories=%d",
+        outcome, conversation_id[:8], rounds, stored,
+    )

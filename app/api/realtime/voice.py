@@ -31,7 +31,7 @@ from app.redis_client import is_redis_healthy
 from app.services.interaction.boundary import get_patience, get_patience_zone
 from app.services.realtime_voice.bridge import VoiceBridge
 from app.services.realtime_voice.context import load_call_context
-from app.services.realtime_voice.instructions import format_retrieved_memories
+from app.services.realtime_voice.instructions import memory_lines
 from app.services.realtime_voice.lock import acquire_call, refresh_call, release_call
 from app.services.realtime_voice.persist import (
     save_assistant_transcript,
@@ -181,6 +181,7 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 user_id=conv.userId,
                 workspace_id=getattr(conv, "workspaceId", None),
                 model=model,
+                instructions=instructions,
             )
             await websocket.send_json({
                 "type": "ready",
@@ -226,6 +227,8 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                     user_id=conv.userId,
                     workspace_id=getattr(conv, "workspaceId", None),
                     conversation_id=conversation_id,
+                    agent_id=str(conv.agent.id),
+                    message_ids=bridge.message_ids,
                 )
                 logger.info("[realtime-voice] end-of-call extraction scheduled conv=%s", conversation_id[:8])
             except Exception:
@@ -288,6 +291,10 @@ async def _record_call_usage(
 # Bridge factory
 # ---------------------------------------------------------------------------
 
+_SHORT_FOLLOW_UP_CHARS = 8
+_FOLLOW_UP_CONTEXT_CHARS = 60
+
+
 def _bridge(
     *,
     sock,
@@ -296,22 +303,29 @@ def _bridge(
     user_id,
     workspace_id,
     model,
+    instructions: str | None = None,
 ) -> VoiceBridge:
 
-    async def retrieve(text: str) -> str | None:
+    async def retrieve(text: str, previous: str | None) -> list[dict[str, str]]:
         from app.services.chat.memory_usage import submit_memory_usage
         from app.services.memory.retrieval.hybrid import hybrid_retrieve
 
+        # Short follow-ups ("那后来呢") name nothing; borrow the topic from
+        # the agent's last line for the embedding, keep the user's words for
+        # time parsing.
+        enhanced = None
+        if previous and len(text) <= _SHORT_FOLLOW_UP_CHARS:
+            enhanced = f"{previous[-_FOLLOW_UP_CONTEXT_CHARS:]} {text}"
         found = await hybrid_retrieve(
             text,
             user_id,
             workspace_id=workspace_id,
             token_budget=500,
+            enhanced_query=enhanced,
         )
         memories = found.get("memories") if isinstance(found, dict) else None
-        if not isinstance(memories, list):
-            memories = []
-        reminder, selected_ids = format_retrieved_memories(memories)
+        entries = memory_lines(memories if isinstance(memories, list) else [])
+        selected_ids = [entry["id"] for entry in entries if entry["id"]]
         candidates = list(found.get("candidate_ids") or []) if isinstance(found, dict) else []
         if selected_ids or candidates:
             try:
@@ -324,7 +338,7 @@ def _bridge(
                 )
             except Exception:
                 logger.debug("[realtime-voice] memory usage not recorded")
-        return reminder
+        return entries
 
     async def save_user(text: str) -> str | None:
         return await save_user_transcript(
@@ -335,8 +349,8 @@ def _bridge(
             text=text,
         )
 
-    async def save_assistant(text: str, user_message_id: str | None, interrupted: bool) -> None:
-        await save_assistant_transcript(
+    async def save_assistant(text: str, user_message_id: str | None, interrupted: bool) -> str | None:
+        return await save_assistant_transcript(
             conversation_id=conversation_id,
             user_id=user_id,
             workspace_id=workspace_id,
@@ -353,6 +367,7 @@ def _bridge(
         save_user_line=save_user,
         save_assistant_line=save_assistant,
         retrieval_timeout_s=settings.stepfun_realtime_retrieval_timeout_s,
+        instructions=instructions,
     )
 
 

@@ -3,8 +3,9 @@
 With server_vad enabled, StepFun handles turn detection, barge-in and
 response triggering natively. This bridge:
   1. Forwards client PCM to the provider
-  2. Handles function_call events (recall_memory tool)
-  3. Prefetches memories in the background on each user transcript
+  2. Retrieves memories in the background on each user transcript and puts
+     them in the instructions for the following replies (memory_slot.py);
+     the recall_memory tool is a fallback for explicit questions
   4. Persists transcripts (extraction deferred to call end)
   5. Relays audio deltas and status events to the client
 """
@@ -18,6 +19,8 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from app.services.realtime_voice.instructions import format_turn_memories
+from app.services.realtime_voice.memory_slot import MemorySlot
 from app.services.realtime_voice.protocol import (
     append_audio_event,
     assistant_transcript,
@@ -26,6 +29,7 @@ from app.services.realtime_voice.protocol import (
     parse_client_message,
     response_cancel_event,
     response_create_event,
+    session_instructions_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,13 +39,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 SendProvider = Callable[[dict], Awaitable[None]]
 SendClient = Callable[[dict], Awaitable[None]]
-RetrieveMemories = Callable[[str], Awaitable[str | None]]
+# (query, previous assistant line) -> memory_lines() entries
+RetrieveMemories = Callable[[str, str | None], Awaitable[list[dict[str, str]]]]
 SaveUserLine = Callable[[str], Awaitable[str | None]]
-SaveAssistantLine = Callable[[str, str | None, bool], Awaitable[None]]
-
-# Max number of memory prefetch results to cache
-_PREFETCH_CACHE_SIZE = 3
-
+SaveAssistantLine = Callable[[str, str | None, bool], Awaitable[str | None]]
 
 class VoiceBridge:
     """Stateful bridge for one voice call.
@@ -59,6 +60,7 @@ class VoiceBridge:
         save_user_line: SaveUserLine,
         save_assistant_line: SaveAssistantLine,
         retrieval_timeout_s: float = 2.0,
+        instructions: str | None = None,
     ) -> None:
         self._send_provider = send_provider
         self._send_client = send_client
@@ -66,6 +68,10 @@ class VoiceBridge:
         self._save_user_line = save_user_line
         self._save_assistant_line = save_assistant_line
         self._retrieval_timeout_s = retrieval_timeout_s
+        # None: the session's instructions are never rewritten (tests, tools only).
+        self._slot = MemorySlot(instructions) if instructions else None
+        self._turn = 0
+        self._last_assistant_text = ""
 
         self._lock = asyncio.Lock()
         self._closed = False
@@ -86,13 +92,14 @@ class VoiceBridge:
         # Function call accumulation
         self._pending_calls: dict[str, dict] = {}  # call_id -> {name, arguments}
 
-        # Memory prefetch cache: most recent query result
-        self._prefetch_result: str | None = None
+        # Most recent retrieval, for the recall_memory fallback
+        self._prefetch_result: list[dict[str, str]] | None = None
         self._prefetch_task: asyncio.Task | None = None
-        self._prefetch_query: str = ""
 
         # Collected transcripts for end-of-call extraction
         self._transcript_pairs: list[dict] = []
+        # Persisted message ids, in order: end-of-call extraction binds to them.
+        self._message_ids: list[str] = []
 
         # Provider token usage, summed over every response.done
         self._usage = {"input": 0, "output": 0, "cached_input": 0, "responses": 0}
@@ -122,6 +129,11 @@ class VoiceBridge:
             return
         self._closed = True
         self._cancel_prefetch()
+
+    @property
+    def message_ids(self) -> list[str]:
+        """Ids of the transcript rows this call stored, oldest first."""
+        return list(self._message_ids)
 
     @property
     def transcript_pairs(self) -> list[dict]:
@@ -281,7 +293,9 @@ class VoiceBridge:
         partial = "".join(self._assistant_parts).strip()
         if partial and interrupted:
             try:
-                await self._save_assistant_line(partial, self._user_message_id, True)
+                self._remember_id(
+                    await self._save_assistant_line(partial, self._user_message_id, True),
+                )
                 self._collect_transcript("assistant", partial, interrupted=True)
             except Exception:
                 logger.warning("[realtime-voice] interrupted transcript not stored")
@@ -304,10 +318,12 @@ class VoiceBridge:
             logger.info("[realtime-voice] user transcript len=%d", len(text))
             try:
                 self._user_message_id = await self._save_user_line(text)
+                self._remember_id(self._user_message_id)
             except Exception:
                 logger.warning("[realtime-voice] user transcript not stored")
             self._collect_transcript("user", text)
-            # Prefetch memories in background for potential tool call
+            # Never awaited here: the reply to this turn is already starting.
+            self._turn += 1
             self._start_prefetch(text)
         if not self._closed:
             await self._send_client({
@@ -348,8 +364,11 @@ class VoiceBridge:
                 len(text), interrupted,
             )
             try:
-                await self._save_assistant_line(text, self._user_message_id, interrupted)
+                self._remember_id(
+                    await self._save_assistant_line(text, self._user_message_id, interrupted),
+                )
                 self._collect_transcript("assistant", text, interrupted=interrupted)
+                self._last_assistant_text = text
             except Exception:
                 logger.warning("[realtime-voice] assistant transcript not stored")
             if not self._closed:
@@ -430,8 +449,10 @@ class VoiceBridge:
             pass
 
         # Try prefetch cache first, then fetch
-        result = await self._get_memories(query)
-        output = result or "没有找到相关记忆。"
+        entries = await self._get_memories(query)
+        output = format_turn_memories(
+            [entry["line"] for entry in entries or []], char_budget=1600,
+        ) or "没有找到相关记忆。"
 
         await self._send_provider(function_call_output_event(
             call_id=call_id,
@@ -439,7 +460,7 @@ class VoiceBridge:
         ))
         await self._send_provider(response_create_event())
 
-    async def _get_memories(self, query: str) -> str | None:
+    async def _get_memories(self, query: str) -> list[dict[str, str]] | None:
         """Get memories: use prefetch cache if available, else fetch live."""
         # If prefetch is running for a similar query, wait for it
         if self._prefetch_task and not self._prefetch_task.done():
@@ -459,7 +480,7 @@ class VoiceBridge:
         # Fresh retrieval
         try:
             return await asyncio.wait_for(
-                self._retrieve_memories(query),
+                self._retrieve_memories(query, None),
                 timeout=self._retrieval_timeout_s,
             )
         except TimeoutError:
@@ -474,24 +495,50 @@ class VoiceBridge:
     # ------------------------------------------------------------------
 
     def _start_prefetch(self, query: str) -> None:
-        """Start background memory retrieval so tool calls return faster."""
+        """Retrieve for this user turn in the background; newest turn wins."""
         self._cancel_prefetch()
-        self._prefetch_query = query
         self._prefetch_result = None
-        self._prefetch_task = asyncio.create_task(self._do_prefetch(query))
+        self._prefetch_task = asyncio.create_task(
+            self._do_prefetch(query, self._last_assistant_text or None, self._turn),
+        )
         self._prefetch_task.add_done_callback(self._prefetch_done)
 
-    async def _do_prefetch(self, query: str) -> None:
+    async def _do_prefetch(self, query: str, previous: str | None, turn: int) -> None:
+        started = time.monotonic()
+        entries: list[dict[str, str]] = []
         try:
-            result = await asyncio.wait_for(
-                self._retrieve_memories(query),
+            entries = await asyncio.wait_for(
+                self._retrieve_memories(query, previous),
                 timeout=self._retrieval_timeout_s,
-            )
-            self._prefetch_result = result
-        except (TimeoutError, asyncio.CancelledError):
-            pass
+            ) or []
+            self._prefetch_result = entries
+        except TimeoutError:
+            logger.info("[realtime-voice] memory retrieval timed out turn=%d", turn)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.debug("[realtime-voice] prefetch failed")
+        await self._refresh_slot(entries, turn, started)
+
+    async def _refresh_slot(
+        self, entries: list[dict[str, str]], turn: int, started: float,
+    ) -> None:
+        """Rewrite the instructions' memory block when its text changed."""
+        if self._slot is None or self._closed or turn != self._turn:
+            return
+        changed = self._slot.merge(entries, turn) if entries else self._slot.expire(turn)
+        if not changed:
+            return
+        try:
+            await self._send_provider(session_instructions_event(self._slot.instructions()))
+        except Exception:
+            logger.warning("[realtime-voice] memory block update failed")
+            return
+        logger.info(
+            "[realtime-voice] memory block turn=%d hits=%d lines=%d ms=%d",
+            turn, len(entries), len(self._slot.lines),
+            round((time.monotonic() - started) * 1000),
+        )
 
     def _prefetch_done(self, task: asyncio.Task) -> None:
         if task.cancelled():
@@ -545,6 +592,10 @@ class VoiceBridge:
     # ------------------------------------------------------------------
     # Transcript collection (for end-of-call extraction)
     # ------------------------------------------------------------------
+
+    def _remember_id(self, message_id: str | None) -> None:
+        if message_id:
+            self._message_ids.append(message_id)
 
     def _collect_transcript(self, role: str, text: str, *, interrupted: bool = False) -> None:
         """Record a transcript pair for batch extraction at call end."""

@@ -16,7 +16,6 @@ from app.services.realtime_voice.instructions import (
     DynamicContext,
     PersonaFacts,
     build_instructions,
-    format_retrieved_memories,
     format_turn_memories,
     history_turns,
     persona_from_agent,
@@ -178,16 +177,15 @@ class TestPersona:
         )
         assert "不满" in text
 
-    def test_format_retrieved_memories(self):
-        items = [
-            {"source": "user", "id": "u1", "text": "用户养了一只叫米粒的猫"},
-            {"source": "ai", "id": "a1", "text": "阿宁现居杭州"},
-        ]
-        text, ids = format_retrieved_memories(items)
-        assert text is not None
-        assert "米粒" in text
-        assert "杭州" in text
-        assert set(ids) == {"u1", "a1"}
+    def test_memory_lines_label_owner_and_cap_each_side(self):
+        from app.services.realtime_voice.instructions import memory_lines
+
+        items = [{"source": "user", "id": f"u{i}", "text": f"用户的第{i}件事"} for i in range(7)]
+        items += [{"source": "ai", "id": "a1", "text": "阿宁现居杭州"}, "noise", {"source": "user", "text": " "}]
+        lines = memory_lines(items)
+        assert [entry["id"] for entry in lines] == ["u0", "u1", "u2", "u3", "u4", "a1"]
+        assert lines[0] == {"id": "u0", "raw": "用户的第0件事", "line": "关于用户：用户的第0件事"}
+        assert lines[-1]["line"] == "关于你自己：阿宁现居杭州"
 
     def test_history_turns_limits(self):
         messages = [{"role": "user", "content": f"第{i}句"} for i in range(20)]
@@ -208,8 +206,11 @@ class TestVoiceBridge:
         *,
         provider_events: list | None = None,
         client_events: list | None = None,
-        memory_result: str | None = "关于用户：用户喜欢蓝色",
+        memory_result: list | None = None,
+        instructions: str | None = None,
     ) -> tuple[VoiceBridge, list, list]:
+        if memory_result is None:
+            memory_result = [{"id": "m1", "raw": "用户喜欢蓝色", "line": "关于用户：用户喜欢蓝色"}]
         provider_sent: list = provider_events if provider_events is not None else []
         client_sent: list = client_events if client_events is not None else []
 
@@ -219,7 +220,7 @@ class TestVoiceBridge:
         async def send_client(event):
             client_sent.append(event)
 
-        async def retrieve(text):
+        async def retrieve(text, previous):
             return memory_result
 
         async def save_user(text):
@@ -235,6 +236,7 @@ class TestVoiceBridge:
             save_user_line=save_user,
             save_assistant_line=save_assistant,
             retrieval_timeout_s=1.0,
+            instructions=instructions,
         )
         return bridge, provider_sent, client_sent
 
@@ -306,7 +308,7 @@ class TestVoiceBridge:
     @pytest.mark.asyncio
     async def test_function_call_recall_memory(self):
         """recall_memory tool call: prefetch result returned to provider."""
-        bridge, provider_sent, _ = self._make_bridge(memory_result="关于用户：用户喜欢蓝色")
+        bridge, provider_sent, _ = self._make_bridge()
 
         # Simulate user transcript to trigger prefetch
         await bridge.feed_provider_event({
@@ -896,6 +898,7 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
 
     class FakeBridge:
         transcript_pairs = [{"role": "user", "text": "hi"}]
+        message_ids = ["msg-u1", "msg-a1"]
         usage = {"input": 5, "output": 2, "cached_input": 0, "responses": 1}
 
         async def aclose(self):
@@ -956,7 +959,10 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
         "usage": FakeBridge.usage, "model": "stepaudio-2.5-realtime",
         "conversation_id": "conv-1", "agent_id": "agent-1", "user_id": "user-1",
     }]
-    assert extracted == [{"user_id": "user-1", "workspace_id": None, "conversation_id": "conv-1"}]
+    assert extracted == [{
+        "user_id": "user-1", "workspace_id": None, "conversation_id": "conv-1",
+        "agent_id": "agent-1", "message_ids": ["msg-u1", "msg-a1"],
+    }]
 
 
 async def test_call_usage_metering_failure_is_swallowed(monkeypatch, caplog):
