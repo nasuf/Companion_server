@@ -77,14 +77,17 @@ def build_instructions(
     *,
     has_history: bool,
     dynamic: DynamicContext | None = None,
+    last_contact: str = "",
     budget: int = INSTRUCTION_BUDGET,
 ) -> str:
     head = _persona_block(persona)
     opening = (
-        "下面已经有你们聊过的内容，接着聊，不要重新自我介绍。"
+        "下面已经有你们聊过的内容，接着聊，不要重新自我介绍，也不要重复你上一句说过的话。"
         if has_history
         else "通话刚开始。用户先开口就直接接话；若用户请你先说话，用一句很短的招呼，不要介绍设定。"
     )
+    if last_contact:
+        opening = f"{opening}\n{last_contact}"
     user_keep, user_extra = _split_memories(user_memories)
     ai_keep, ai_extra = _split_memories(ai_memories)
     dynamic_block = _dynamic_block(dynamic) if dynamic else ""
@@ -173,21 +176,65 @@ def format_turn_memories(lines: list[str], *, limit: int = 10, char_budget: int 
 
 
 def history_turns(messages: list[dict], *, limit: int = 8, char_limit: int = 300) -> list[dict[str, str]]:
+    """Recent dialogue as alternating turns.
+
+    Text chat stores one reply as several bubble rows; consecutive rows of a
+    role are one turn, so the limit counts exchanges rather than bubbles.
+    """
     turns: list[dict[str, str]] = []
     for message in messages:
         role = message.get("role")
         if role not in {"user", "assistant"}:
             continue
-        text = _clip(str(message.get("content") or ""), char_limit)
+        text = " ".join(str(message.get("content") or "").split())
         if not text:
             continue
-        turns.append({"role": role, "text": text})
-    return turns[-limit:]
+        if turns and turns[-1]["role"] == role:
+            turns[-1]["text"] = f"{turns[-1]['text']} {text}"
+        else:
+            turns.append({"role": role, "text": text})
+    return [{"role": t["role"], "text": _clip(t["text"], char_limit)} for t in turns[-limit:]]
+
+
+# Gap buckets for the opening line. A call redialled within minutes is the
+# same conversation; after a few hours the agent should not say "刚才".
+_JUST_NOW_S = 5 * 60
+_EARLIER_S = 3 * 3600
+
+
+def last_contact_line(gap_seconds: float | None, *, was_call: bool) -> str:
+    """When and where the two last talked, for the opening instructions."""
+    if gap_seconds is None:
+        return ""
+    place = "打电话" if was_call else "文字聊天"
+    if gap_seconds < _JUST_NOW_S:
+        return f"你们上一次说话就在刚才（{place}），这通电话是接着聊的。"
+    return f"你们上一次说话是 {format_gap_text(gap_seconds)}前（{place}），不是刚才。"
+
+
+def greeting_cue(gap_seconds: float | None, *, was_call: bool) -> str:
+    """The one-off user cue that makes the agent open the call."""
+    if gap_seconds is None:
+        return "（用户给你打来电话，你接起来先开口，简短自然地打个招呼。）"
+    if gap_seconds < _JUST_NOW_S:
+        if was_call:
+            return "（用户刚挂断又马上打回来了。你接起来先开口，顺着刚才的话头说一句，别重复你刚说过的话，也别像很久没联系。）"
+        return "（你们刚才还在文字聊天，用户这会儿直接打来电话。你接起来先开口，顺着刚才聊的说一句。）"
+    if gap_seconds < _EARLIER_S:
+        return f"（用户隔了 {format_gap_text(gap_seconds)}又给你打来电话。你接起来先开口，像熟人一样简短地打个招呼。）"
+    return f"（距离上次聊天已经 {format_gap_text(gap_seconds)}了，用户给你打来电话。你接起来先开口打个招呼，可以顺着上次聊到的事问一句。）"
 
 
 # ---------------------------------------------------------------------------
 # Internal assembly
 # ---------------------------------------------------------------------------
+
+def format_gap_text(seconds: float) -> str:
+    """Coarse spoken gap: "45 分钟" / "5 小时" / "2 天"."""
+    from app.services.chat.prompt_builder import format_gap_text as coarse
+
+    return coarse(seconds)
+
 
 def _assemble(
     head: str,

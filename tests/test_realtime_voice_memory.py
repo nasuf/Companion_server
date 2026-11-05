@@ -565,3 +565,145 @@ def test_greeting_cue_recognition_rejects_other_items():
     assert not VoiceBridge._is_greet_cue({"role": "user", "content": [{"text": _GREET_CUE}]})
     assert not VoiceBridge._is_greet_cue({"id": "x", "role": "user", "content": "text"})
     assert not VoiceBridge._is_greet_cue({"id": "x", "role": "user", "content": ["raw"]})
+
+
+# ---------------------------------------------------------------------------
+# Call opening knows how long ago the two last talked
+# ---------------------------------------------------------------------------
+
+def test_history_turns_merge_text_bubbles_into_one_turn():
+    from app.services.realtime_voice.instructions import history_turns
+
+    turns = history_turns([
+        {"role": "user", "content": "忙吗"},
+        {"role": "assistant", "content": "刚弄完裱花"},
+        {"role": "assistant", "content": " 正歇着呢 "},
+        {"role": "system", "content": "ignored"},
+        {"role": "assistant", "content": "  "},
+        {"role": "user", "content": "那聊会儿"},
+    ], limit=2, char_limit=8)
+    assert turns == [{"role": "assistant", "text": "刚弄完裱花 正…"},
+                     {"role": "user", "text": "那聊会儿"}]
+
+
+@pytest.mark.parametrize("gap,was_call,line,cue", [
+    (None, False, "", "简短自然地打个招呼"),
+    (90, True, "就在刚才（打电话）", "刚挂断又马上打回来"),
+    (90, False, "就在刚才（文字聊天）", "刚才还在文字聊天"),
+    (40 * 60, True, "40 分钟前（打电话），不是刚才", "隔了 40 分钟又给你打来电话"),
+    (5 * 3600, False, "5 小时前（文字聊天）", "已经 5 小时了"),
+])
+def test_opening_line_and_cue_follow_the_gap(gap, was_call, line, cue):
+    from app.services.realtime_voice.instructions import greeting_cue, last_contact_line
+
+    assert line in last_contact_line(gap, was_call=was_call)
+    assert bool(last_contact_line(gap, was_call=was_call)) == bool(line)
+    assert cue in greeting_cue(gap, was_call=was_call)
+
+
+def test_last_contact_line_lands_in_the_opening():
+    from app.services.realtime_voice.instructions import PersonaFacts, build_instructions
+
+    persona = PersonaFacts("阿宁", "", "女生", 27, "", "", "", "", "", "", "")
+    text = build_instructions(persona, [], [], has_history=True, last_contact="你们上一次说话是 3 小时前（打电话），不是刚才。")
+    assert "不要重复你上一句说过的话。\n你们上一次说话是 3 小时前" in text
+
+
+def test_last_contact_reads_the_newest_message():
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.realtime_voice.context import _last_contact
+
+    assert _last_contact([]) == (None, False)
+    assert _last_contact([{"createdAt": "2026-11-05"}]) == (None, False)
+    naive = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=2)
+    gap, was_call = _last_contact([{"createdAt": naive, "channel": "realtime_voice"}])
+    assert 100 < gap < 140 and was_call
+    gap, was_call = _last_contact([{"createdAt": datetime.now(timezone.utc) - timedelta(hours=3), "channel": None}])
+    assert 3 * 3600 - 5 < gap < 3 * 3600 + 5 and not was_call
+
+
+async def test_recent_messages_skip_cards_and_keep_time_and_channel(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app.services.realtime_voice import context
+
+    at = datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc)
+    rows = [
+        SimpleNamespace(role="assistant", content="喂", createdAt=at, metadata={"channel": "realtime_voice"}),
+        SimpleNamespace(role="assistant", content="活动卡片：咖啡馆", createdAt=at, metadata={"component_card": {"type": "x"}}),
+        SimpleNamespace(role="user", content="  ", createdAt=at, metadata=None),
+        SimpleNamespace(role="user", content="在吗", createdAt=at, metadata=None),
+    ]
+
+    async def find_many(**kwargs):
+        assert kwargs["take"] == 40
+        return rows
+
+    monkeypatch.setattr(context.db, "message", SimpleNamespace(find_many=find_many), raising=False)
+    assert await context._recent_messages("conv") == [
+        {"role": "user", "content": "在吗", "createdAt": at, "channel": None},
+        {"role": "assistant", "content": "喂", "createdAt": at, "channel": "realtime_voice"},
+    ]
+
+
+async def test_call_context_returns_a_gap_aware_cue(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from app.services.realtime_voice import context
+    from app.services.realtime_voice.instructions import DynamicContext
+
+    recent = [{"role": "assistant", "content": "下次聊", "channel": "realtime_voice",
+               "createdAt": datetime.now(timezone.utc) - timedelta(seconds=30)}]
+
+    async def gather(**_):
+        return [], [], recent, DynamicContext()
+
+    monkeypatch.setattr(context, "_gather_all", gather)
+    agent = SimpleNamespace(name="阿宁", gender="female")
+    _, instructions, history, cue = await context.load_call_context(
+        agent=agent, user_id="u", workspace_id=None, conversation_id="c")
+    assert history == [{"role": "assistant", "text": "下次聊"}]
+    assert "就在刚才（打电话）" in instructions
+    assert "刚挂断又马上打回来" in cue
+
+
+async def test_bridge_greets_with_the_cue_it_was_given():
+    async def retrieve(text, previous):
+        return []
+
+    provider: list[dict] = []
+
+    async def send(event):
+        provider.append(event)
+
+    async def save(*_):
+        return "msg"
+
+    bridge = VoiceBridge(send_provider=send, send_client=send, retrieve_memories=retrieve,
+                         save_user_line=save, save_assistant_line=save, greet_cue="（刚挂又打来）")
+    await bridge.feed_client_text('{"type": "greet"}')
+    assert provider[0]["item"]["content"][0]["text"] == "（刚挂又打来）"
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "srv-cue", "role": "user", "content": [{"type": "audio", "transcript": "（刚挂又打来）"}]}})
+    assert bridge._greet_cue_id == "srv-cue"
+
+
+@pytest.mark.parametrize("query,platform,threshold", [
+    ({"platform": "Android"}, "android", 300),
+    ({"platform": "ios"}, "ios", 2500),
+    ({"platform": "web"}, "unknown", 2500),
+    ({}, "unknown", 2500),
+])
+def test_android_calls_use_their_own_vad_threshold(monkeypatch, query, platform, threshold):
+    from types import SimpleNamespace
+
+    from app.api.realtime import voice as endpoint
+
+    monkeypatch.setattr(endpoint.settings, "stepfun_realtime_vad_threshold", 2500)
+    monkeypatch.setattr(endpoint.settings, "stepfun_realtime_vad_threshold_android", 300)
+    assert endpoint._client_platform(SimpleNamespace(query_params=query)) == platform
+    assert endpoint._vad_threshold(platform) == threshold
+    assert endpoint._client_platform(SimpleNamespace()) == "unknown"

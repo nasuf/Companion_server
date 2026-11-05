@@ -154,6 +154,11 @@ class Settings(BaseSettings):
     # Lower lets quieter barge-in through echo cancellation, at the risk of
     # the agent's own speaker audio counting as the user talking.
     stepfun_realtime_vad_threshold: int = 2500
+    # Android's communication capture reaches only about -30 dBFS even with
+    # AGC, where 2500 drops most words. 300 keeps -30/-34 dBFS speech whole
+    # and still ignores -44 dBFS (echo residue) and noise up to -34 dBFS
+    # (StepFun probe with synthesized speech, 2026-11-05).
+    stepfun_realtime_vad_threshold_android: int = 300
     stepfun_realtime_transcript_timeout_s: float = 2.5
     stepfun_realtime_retrieval_timeout_s: float = 1.5
     stepfun_realtime_max_seconds: int = 28 * 60

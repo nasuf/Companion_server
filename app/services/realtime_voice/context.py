@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from app.db import db
 from app.services.memory.core_memory import load_core_memory_strings
@@ -11,7 +12,9 @@ from app.services.realtime_voice.instructions import (
     DynamicContext,
     PersonaFacts,
     build_instructions,
+    greeting_cue,
     history_turns,
+    last_contact_line,
     persona_from_agent,
 )
 
@@ -24,10 +27,10 @@ async def load_call_context(
     user_id: str,
     workspace_id: str | None,
     conversation_id: str,
-) -> tuple[PersonaFacts, str, list[dict[str, str]]]:
+) -> tuple[PersonaFacts, str, list[dict[str, str]], str]:
     """Load everything needed to configure a voice session.
 
-    Returns (persona, instructions_text, history_turns_list).
+    Returns (persona, instructions_text, history_turns_list, greeting_cue).
     """
     (
         user_memories, ai_memories, recent,
@@ -40,14 +43,16 @@ async def load_call_context(
     )
     persona = persona_from_agent(agent)
     history = history_turns(recent)
+    gap, was_call = _last_contact(recent)
     instructions = build_instructions(
         persona,
         user_memories,
         ai_memories,
         has_history=bool(history),
         dynamic=dynamic,
+        last_contact=last_contact_line(gap, was_call=was_call),
     )
-    return persona, instructions, history
+    return persona, instructions, history, greeting_cue(gap, was_call=was_call)
 
 
 async def load_dynamic_context(
@@ -155,15 +160,39 @@ def _or_empty(value, label: str):
     return value or []
 
 
+def _last_contact(recent: list[dict]) -> tuple[float | None, bool]:
+    """Seconds since the last message, and whether it was said on a call."""
+    if not recent:
+        return None, False
+    last = recent[-1]
+    created = last.get("createdAt")
+    if not isinstance(created, datetime):
+        return None, False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    gap = max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+    return gap, last.get("channel") == "realtime_voice"
+
+
 async def _recent_messages(conversation_id: str) -> list[dict]:
+    # Text replies are split into bubble rows (up to 4 per reply), so read
+    # enough rows for history_turns to fill its limit after merging them.
     rows = await db.message.find_many(
         where={"conversationId": conversation_id},
         order={"createdAt": "desc"},
-        take=12,
+        take=40,
     )
-    ordered = list(reversed(rows))
-    return [
-        {"role": row.role, "content": row.content or ""}
-        for row in ordered
-        if row.role in {"user", "assistant"} and (row.content or "").strip()
-    ]
+    messages = []
+    for row in reversed(rows):
+        metadata = row.metadata if isinstance(row.metadata, dict) else {}
+        if row.role not in {"user", "assistant"} or not (row.content or "").strip():
+            continue
+        if metadata.get("component_card"):
+            continue  # activity cards are UI, not something either side said
+        messages.append({
+            "role": row.role,
+            "content": row.content or "",
+            "createdAt": row.createdAt,
+            "channel": metadata.get("channel"),
+        })
+    return messages

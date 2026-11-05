@@ -188,7 +188,7 @@ class TestPersona:
         assert lines[-1]["line"] == "关于你自己：阿宁现居杭州"
 
     def test_history_turns_limits(self):
-        messages = [{"role": "user", "content": f"第{i}句"} for i in range(20)]
+        messages = [{"role": ("user", "assistant")[i % 2], "content": f"第{i}句"} for i in range(20)]
         turns = history_turns(messages, limit=3)
         assert len(turns) == 3
         assert [turn["text"] for turn in turns] == ["第17句", "第18句", "第19句"]
@@ -633,7 +633,7 @@ async def test_call_uses_agent_voice_with_default_fallback(monkeypatch, gender, 
         return True
 
     async def load_call_context(**_):
-        return SimpleNamespace(name="阿宁"), "instructions", []
+        return SimpleNamespace(name="阿宁"), "instructions", [], "cue"
 
     async def acquire_call(_):
         return "lock-token"
@@ -918,7 +918,7 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
         return principal
 
     async def context(**_):
-        return SimpleNamespace(name="阿宁"), "instructions", []
+        return SimpleNamespace(name="阿宁"), "instructions", [], "cue"
 
     async def lock(_):
         return "lock-token"

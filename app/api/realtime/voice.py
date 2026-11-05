@@ -138,10 +138,11 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
     model = ""
     try:
         logger.info(
-            "[realtime-voice] call starting conv=%s user=%s agent=%s",
-            conversation_id[:8], conv.userId[:8], str(conv.agent.id)[:8],
+            "[realtime-voice] call starting conv=%s user=%s agent=%s platform=%s",
+            conversation_id[:8], conv.userId[:8], str(conv.agent.id)[:8], _client_platform(websocket),
         )
-        persona, instructions, history = await load_call_context(
+        platform = _client_platform(websocket)
+        persona, instructions, history, greet_cue = await load_call_context(
             agent=conv.agent,
             user_id=conv.userId,
             workspace_id=getattr(conv, "workspaceId", None),
@@ -171,7 +172,7 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 voice=voice,
                 history=history,
                 silence_duration_ms=settings.stepfun_realtime_silence_ms,
-                energy_threshold=settings.stepfun_realtime_vad_threshold,
+                energy_threshold=_vad_threshold(platform),
                 fallback_voice=fallback_voice,
             )
             bridge = _bridge(
@@ -182,6 +183,7 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 workspace_id=getattr(conv, "workspaceId", None),
                 model=model,
                 instructions=instructions,
+                greet_cue=greet_cue,
             )
             await websocket.send_json({
                 "type": "ready",
@@ -291,6 +293,19 @@ async def _record_call_usage(
 # Bridge factory
 # ---------------------------------------------------------------------------
 
+def _client_platform(websocket) -> str:
+    """The app sends ?platform=android|ios; older builds send nothing."""
+    params = getattr(websocket, "query_params", None) or {}
+    value = str(params.get("platform") or "").strip().lower()
+    return value if value in {"android", "ios"} else "unknown"
+
+
+def _vad_threshold(platform: str) -> int:
+    if platform == "android":
+        return settings.stepfun_realtime_vad_threshold_android
+    return settings.stepfun_realtime_vad_threshold
+
+
 _SHORT_FOLLOW_UP_CHARS = 8
 _FOLLOW_UP_CONTEXT_CHARS = 60
 
@@ -304,6 +319,7 @@ def _bridge(
     workspace_id,
     model,
     instructions: str | None = None,
+    greet_cue: str | None = None,
 ) -> VoiceBridge:
 
     async def retrieve(text: str, previous: str | None) -> list[dict[str, str]]:
@@ -368,6 +384,7 @@ def _bridge(
         save_assistant_line=save_assistant,
         retrieval_timeout_s=settings.stepfun_realtime_retrieval_timeout_s,
         instructions=instructions,
+        greet_cue=greet_cue,
     )
 
 

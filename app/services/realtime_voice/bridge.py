@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 # token), whatever the instructions say. A user-role cue item makes the agent
 # open the call (~0.6 s to first audio, verified 2026-11-05); it is deleted
 # once the greeting is done, so later turns and extraction never see it.
-_GREET_CUE = "（用户刚给你打来电话，你接起来先开口，像熟人一样简短地打个招呼。）"
+# The endpoint passes a cue that knows how long ago the two last talked.
+_GREET_CUE = "（用户给你打来电话，你接起来先开口，简短自然地打个招呼。）"
 
 # ---------------------------------------------------------------------------
 # Callback type aliases
@@ -72,6 +73,7 @@ class VoiceBridge:
         save_assistant_line: SaveAssistantLine,
         retrieval_timeout_s: float = 2.0,
         instructions: str | None = None,
+        greet_cue: str | None = None,
     ) -> None:
         self._send_provider = send_provider
         self._send_client = send_client
@@ -101,6 +103,7 @@ class VoiceBridge:
         self._discarding = False
 
         # Greeting cue: sent, then its provider item id once created
+        self._greet_cue = greet_cue or _GREET_CUE
         self._greet_cue_sent = False
         self._greet_cue_id: str | None = None
 
@@ -261,7 +264,7 @@ class VoiceBridge:
         # --- Function call events ---
         if kind == "conversation.item.created":
             item = event.get("item")
-            if self._is_greet_cue(item):
+            if self._is_greet_cue(item, self._greet_cue):
                 self._greet_cue_id = item["id"]
                 return
             if isinstance(item, dict) and item.get("type") == "function_call":
@@ -603,16 +606,16 @@ class VoiceBridge:
         if self._responding or self._output_active or self._greet_cue_sent:
             return
         self._greet_cue_sent = True
-        await self._send_provider(history_item_event(item_id="greet_cue", role="user", text=_GREET_CUE))
+        await self._send_provider(history_item_event(item_id="greet_cue", role="user", text=self._greet_cue))
         await self._send_provider(response_create_event())
 
     @staticmethod
-    def _is_greet_cue(item: object) -> bool:
+    def _is_greet_cue(item: object, cue: str = _GREET_CUE) -> bool:
         if not isinstance(item, dict) or item.get("role") != "user" or not item.get("id"):
             return False
         parts = item.get("content") if isinstance(item.get("content"), list) else []
         return any(
-            isinstance(part, dict) and _GREET_CUE in (part.get("transcript"), part.get("text"))
+            isinstance(part, dict) and cue in (part.get("transcript"), part.get("text"))
             for part in parts
         )
 
