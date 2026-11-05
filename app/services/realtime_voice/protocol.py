@@ -57,6 +57,7 @@ def session_update_event(
     voice: str,
     silence_duration_ms: int = 600,
     prefix_padding_ms: int = 500,
+    energy_threshold: int | None = None,
     enable_memory_tool: bool = True,
 ) -> dict[str, Any]:
     """Server VAD + optional recall_memory tool."""
@@ -75,6 +76,8 @@ def session_update_event(
             "prefix_padding_ms": prefix_padding_ms,
         },
     }
+    if energy_threshold is not None:
+        session["turn_detection"]["energy_awakeness_threshold"] = max(0, min(5000, int(energy_threshold)))
     if tools:
         session["tools"] = tools
         session["tool_choice"] = "auto"

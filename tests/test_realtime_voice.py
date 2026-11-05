@@ -89,6 +89,12 @@ class TestSessionUpdateEvent:
         td = event["session"]["turn_detection"]
         assert td["silence_duration_ms"] == 800
         assert td["prefix_padding_ms"] == 300
+        assert "energy_awakeness_threshold" not in td
+
+    def test_energy_threshold_is_sent_and_clamped(self):
+        for value, sent in ((1800, 1800), (9000, 5000), (-1, 0)):
+            event = session_update_event(instructions="t", voice="v", energy_threshold=value)
+            assert event["session"]["turn_detection"]["energy_awakeness_threshold"] == sent
 
 
 class TestFunctionCallOutput:
@@ -391,6 +397,56 @@ class TestVoiceBridge:
         assert bridge._output_active is False
         assert bridge._responding is False
         assert any(e["type"] == "speech.started" for e in client_sent)
+
+    @pytest.mark.asyncio
+    async def test_barge_in_cancels_generation_and_drops_its_audio(self):
+        """The cut-off reply stops streaming; the next reply plays normally."""
+        import base64
+        saved: list[tuple] = []
+        bridge, provider_sent, client_sent = self._make_bridge()
+
+        async def save_assistant(text, user_msg_id, interrupted):
+            saved.append((text, interrupted))
+
+        bridge._save_assistant_line = save_assistant
+        chunk = base64.b64encode(b"\x01\x00" * 8).decode()
+        await bridge.feed_provider_event({"type": "response.created"})
+        await bridge.feed_provider_event({"type": "response.audio.delta", "delta": chunk})
+        await bridge.feed_provider_event({"type": "response.audio_transcript.delta", "delta": "我跟你说"})
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started"})
+
+        assert [e["type"] for e in provider_sent] == ["response.cancel"]
+        client_sent.clear()
+        # Late events of the cancelled reply are swallowed.
+        await bridge.feed_provider_event({"type": "response.audio.delta", "delta": chunk})
+        await bridge.feed_provider_event({"type": "response.audio_transcript.delta", "delta": "后面的话"})
+        await bridge.feed_provider_event({"type": "response.done", "response": {"status": "cancelled"}})
+        assert [e["type"] for e in client_sent] == ["response.done"]
+        assert saved == [("我跟你说", True)]
+
+        await bridge.feed_provider_event({"type": "response.created"})
+        await bridge.feed_provider_event({"type": "response.audio.delta", "delta": chunk})
+        assert client_sent[-1]["type"] == "audio.delta"
+
+    @pytest.mark.asyncio
+    async def test_speech_after_generation_finished_sends_no_cancel(self):
+        """Playback-only tail: the client clears it, the provider has nothing to cancel."""
+        bridge, provider_sent, client_sent = self._make_bridge()
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started"})
+        assert provider_sent == []
+        assert client_sent == [{"type": "speech.started"}]
+
+    @pytest.mark.asyncio
+    async def test_barge_in_survives_a_failed_cancel(self):
+        bridge, _, client_sent = self._make_bridge()
+
+        async def broken(event):
+            raise RuntimeError("socket closed")
+
+        bridge._send_provider = broken
+        bridge._responding = True
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started"})
+        assert client_sent[-1] == {"type": "speech.started"}
 
     @pytest.mark.asyncio
     async def test_client_interrupt(self):

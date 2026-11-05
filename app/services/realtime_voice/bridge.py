@@ -79,6 +79,9 @@ class VoiceBridge:
         self._audio_seq = 0
         self._output_active = False
         self._responding = False
+        # Set on barge-in: audio and the final transcript of the interrupted
+        # response are dropped until the provider starts the next one.
+        self._discarding = False
 
         # Function call accumulation
         self._pending_calls: dict[str, dict] = {}  # call_id -> {name, arguments}
@@ -195,13 +198,14 @@ class VoiceBridge:
         # --- Response lifecycle ---
         if kind == "response.created":
             self._responding = True
+            self._discarding = False
             return
         if kind == "response.audio.delta":
             await self._on_audio_delta(event.get("delta"))
             return
         if kind == "response.audio_transcript.delta":
             delta = event.get("delta")
-            if isinstance(delta, str) and delta:
+            if isinstance(delta, str) and delta and not self._discarding:
                 self._assistant_parts.append(delta)
             return
         if kind == "response.audio_transcript.done":
@@ -249,8 +253,28 @@ class VoiceBridge:
     # ------------------------------------------------------------------
 
     async def _on_speech_started(self) -> None:
-        """User started speaking — StepFun auto-interrupts any ongoing response."""
+        """Barge-in: stop the reply now and let the user finish.
+
+        The client drops its queued audio on speech.started. A reply still
+        being generated is cancelled here and its remaining audio is not
+        forwarded; one that already finished needs nothing server-side.
+        """
         interrupted = self._output_active or self._responding
+        cancelled = False
+        if self._responding:
+            try:
+                await self._send_provider(response_cancel_event())
+                cancelled = True
+            except Exception:
+                logger.warning("[realtime-voice] cancel on barge-in failed")
+        # One line per detected user turn: shows whether VAD fired while the
+        # agent was talking and whether generation had to be cancelled.
+        logger.info(
+            "[realtime-voice] speech started generating=%s cancelled=%s",
+            interrupted, cancelled,
+        )
+        if interrupted:
+            self._discarding = True
         self._output_active = False
         self._responding = False
         # Save partial assistant transcript if interrupted
@@ -306,6 +330,10 @@ class VoiceBridge:
         self._output_active = False
         text = assistant_transcript(event) or "".join(self._assistant_parts).strip()
         self._assistant_parts = []
+        if self._discarding:
+            # The barge-in already stored what was said before the cut.
+            self._discarding = False
+            text = ""
 
         status = ""
         response = event.get("response")
@@ -353,7 +381,7 @@ class VoiceBridge:
     # ------------------------------------------------------------------
 
     async def _on_audio_delta(self, delta: object) -> None:
-        if not isinstance(delta, str) or not delta:
+        if self._discarding or not isinstance(delta, str) or not delta:
             return
         try:
             base64.b64decode(delta, validate=True)

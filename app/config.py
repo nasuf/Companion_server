@@ -144,6 +144,10 @@ class Settings(BaseSettings):
     # Official realtime demo captures and plays 24 kHz mono PCM16.
     stepfun_realtime_sample_rate: int = 24000
     stepfun_realtime_silence_ms: int = 600
+    # server_vad energy_awakeness_threshold (0-5000, provider default 2500).
+    # Lower lets quieter barge-in through echo cancellation, at the risk of
+    # the agent's own speaker audio counting as the user talking.
+    stepfun_realtime_vad_threshold: int = 2500
     stepfun_realtime_transcript_timeout_s: float = 2.5
     stepfun_realtime_retrieval_timeout_s: float = 1.5
     stepfun_realtime_max_seconds: int = 28 * 60

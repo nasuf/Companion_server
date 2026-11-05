@@ -171,6 +171,7 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 voice=voice,
                 history=history,
                 silence_duration_ms=settings.stepfun_realtime_silence_ms,
+                energy_threshold=settings.stepfun_realtime_vad_threshold,
                 fallback_voice=fallback_voice,
             )
             bridge = _bridge(
