@@ -238,7 +238,6 @@ async def _seed_system_config_with_env_defaults():
         "localSmallModel": settings.local_small_model,
         "remoteChatModel": settings.remote_chat_model,
         "remoteSmallModel": settings.remote_small_model,
-        "ttsModel": settings.stepfun_tts_model,
         "ttsOutputProbability": settings.tts_output_probability,
     }})
 
@@ -421,7 +420,7 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
         remote_small_model=_pick("remoteSmallModel", settings.remote_small_model),
         vision_model=_pick("visionModel", settings.doubao_vision_model),
         asr_model=_pick("asrModel", settings.dashscope_asr_model),
-        tts_model=_pick("ttsModel", settings.stepfun_tts_model),
+        tts_model=_pick("ttsModel", "") or "",
         tts_output_probability=max(
             0,
             min(
@@ -473,7 +472,7 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
         ),
         filler_emoji_probability=float(glob.get("fillerEmojiProbability") or 0.0),
         realtime_model=str(
-            glob.get("realtimeModel") or settings.stepfun_realtime_model
+            glob.get("realtimeModel") or settings.dashscope_realtime_model
         ).strip(),
         reply_delay_enabled=bool(
             _pick("replyDelayEnabled", settings.reply_delay_enabled),
@@ -513,15 +512,9 @@ async def get_effective_asr_model() -> str:
 
 
 async def get_effective_realtime_model() -> str:
-    """Realtime voice call model (admin override → env STEPFUN_REALTIME_MODEL)."""
+    """Voice call and voice message model (admin override → DASHSCOPE_REALTIME_MODEL)."""
     await ensure_loaded()
     return resolve_config_sync(agent_id=None).realtime_model
-
-
-async def get_effective_tts_model() -> str:
-    """Assistant TTS model id (admin override → env STEPFUN_TTS_MODEL)."""
-    await ensure_loaded()
-    return resolve_config_sync(agent_id=None).tts_model
 
 
 def get_effective_tts_probability() -> int:

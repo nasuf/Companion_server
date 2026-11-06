@@ -169,14 +169,7 @@ def public_provider_options(*, include_local: bool = True) -> list[dict]:
 
 # Providers that serve only media routes (never chat/small). They appear in
 # media dropdowns and the model registry, not in LLM provider lists.
-_MEDIA_ONLY_PROVIDERS: dict[str, dict] = {
-    "stepfun": {
-        "display_name": "阶跃星辰 / StepFun",
-        "description": "StepAudio 语音合成与音色复刻，和实时语音通话共用音色",
-        "api_key_setting": "stepfun_api_key",
-        "credential_env": "STEPFUN_API_KEY",
-    },
-}
+_MEDIA_ONLY_PROVIDERS: dict[str, dict] = {}
 
 
 def media_provider_ids() -> set[str]:

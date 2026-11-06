@@ -52,17 +52,21 @@ def _persona() -> PersonaFacts:
 # ---------------------------------------------------------------------------
 
 class TestSessionUpdateEvent:
-    def test_server_vad_enabled(self):
-        event = session_update_event(instructions="你是阿宁。", voice="elegantgentle-female")
+    def test_server_vad_finds_turns_but_never_replies_or_cancels_by_itself(self):
+        event = session_update_event(instructions="你是阿宁。", voice="Serena")
         session = event["session"]
         assert session["modalities"] == ["text", "audio"]
-        assert session["input_audio_format"] == "pcm16"
-        assert session["output_audio_format"] == "pcm16"
-        # Server VAD must be enabled
+        assert session["voice"] == "Serena"
+        assert session["audio"] == {
+            "input": {"format": {"type": "pcm", "sample_rate": 24000}},
+            "output": {"format": {"type": "pcm", "sample_rate": 24000}},
+        }
         td = session["turn_detection"]
         assert td["type"] == "server_vad"
-        assert "silence_duration_ms" in td
-        assert "prefix_padding_ms" in td
+        # The bridge asks for each reply after retrieval, and decides barge-in.
+        assert td["create_response"] is False
+        assert td["interrupt_response"] is False
+        assert session["input_audio_transcription"] == {"model": "qwen3-asr-flash-realtime"}
 
     def test_recall_memory_tool_included(self):
         event = session_update_event(instructions="test", voice="test")
@@ -80,20 +84,14 @@ class TestSessionUpdateEvent:
         assert session.get("tools", []) == []
         assert "tool_choice" not in session
 
-    def test_silence_duration_configurable(self):
-        event = session_update_event(
-            instructions="test", voice="test",
-            silence_duration_ms=800, prefix_padding_ms=300,
-        )
-        td = event["session"]["turn_detection"]
-        assert td["silence_duration_ms"] == 800
-        assert td["prefix_padding_ms"] == 300
-        assert "energy_awakeness_threshold" not in td
-
-    def test_energy_threshold_is_sent_and_clamped(self):
-        for value, sent in ((1800, 1800), (9000, 5000), (-1, 0)):
-            event = session_update_event(instructions="t", voice="v", energy_threshold=value)
-            assert event["session"]["turn_detection"]["energy_awakeness_threshold"] == sent
+    def test_vad_and_temperature_are_clamped(self):
+        td = session_update_event(instructions="t", voice="v", silence_duration_ms=800, vad_threshold=0.7)["session"]["turn_detection"]
+        assert td["silence_duration_ms"] == 800 and td["threshold"] == 0.7
+        td = session_update_event(instructions="t", voice="v", silence_duration_ms=50, vad_threshold=3)["session"]["turn_detection"]
+        assert td["silence_duration_ms"] == 200 and td["threshold"] == 1.0
+        assert session_update_event(instructions="t", voice="v", silence_duration_ms=9000)["session"]["turn_detection"]["silence_duration_ms"] == 6000
+        assert "temperature" not in session_update_event(instructions="t", voice="v")["session"]
+        assert session_update_event(instructions="t", voice="v", temperature=5)["session"]["temperature"] == 1.99
 
 
 class TestFunctionCallOutput:
@@ -263,6 +261,7 @@ class TestVoiceBridge:
     async def test_speech_stopped_relayed(self):
         """Provider speech_stopped event relayed to client."""
         bridge, _, client_sent = self._make_bridge()
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "item_001"})
         await bridge.feed_provider_event({
             "type": "input_audio_buffer.speech_stopped",
             "audio_end_ms": 2000,
@@ -307,37 +306,24 @@ class TestVoiceBridge:
 
     @pytest.mark.asyncio
     async def test_function_call_recall_memory(self):
-        """recall_memory tool call: prefetch result returned to provider."""
+        """recall_memory runs once its reply is done, then the follow-up reply."""
         bridge, provider_sent, _ = self._make_bridge()
-
-        # Simulate user transcript to trigger prefetch
         await bridge.feed_provider_event({
             "type": "conversation.item.input_audio_transcription.completed",
             "item_id": "item_001",
             "transcript": "你还记得我喜欢什么颜色吗",
         })
-        # Wait for prefetch
-        if bridge._prefetch_task:
-            await bridge._prefetch_task
-
-        # Simulate function_call creation
-        await bridge.feed_provider_event({
-            "type": "conversation.item.created",
-            "item": {
-                "id": "fc_001",
-                "type": "function_call",
-                "call_id": "call_001",
-                "name": "recall_memory",
-            },
-        })
-        # Simulate arguments
+        await bridge._reply_task
+        assert provider_sent[-1]["type"] == "response.create"
+        await bridge.feed_provider_event({"type": "response.created"})
         await bridge.feed_provider_event({
             "type": "response.function_call_arguments.done",
-            "call_id": "call_001",
+            "call_id": "call_001", "name": "recall_memory",
             "arguments": '{"query": "用户喜欢的颜色"}',
         })
-
-        # Should have sent function_call_output + response.create
+        await bridge.feed_provider_event({"type": "response.done", "response": {
+            "status": "completed", "output": [{"type": "function_call", "call_id": "call_001"}]}})
+        await bridge._tool_task
         output_events = [
             e for e in provider_sent
             if e.get("type") == "conversation.item.create"
@@ -346,7 +332,8 @@ class TestVoiceBridge:
         ]
         assert len(output_events) == 1
         assert "蓝色" in output_events[0]["item"]["output"]
-        assert any(e["type"] == "response.create" for e in provider_sent)
+        assert provider_sent[-1]["type"] == "response.create"
+        assert sum(e["type"] == "response.create" for e in provider_sent) == 2
 
     @pytest.mark.asyncio
     async def test_response_done_saves_transcript(self):
@@ -378,32 +365,27 @@ class TestVoiceBridge:
         assert transcript_events[0]["text"] == "蓝色挺好看的"
         assert transcript_events[0]["interrupted"] is False
 
-    @pytest.mark.asyncio
-    async def test_speech_started_interrupts_output(self):
-        """Speech during output marks it as interrupted."""
+    @staticmethod
+    async def _agent_speaking(bridge, text="今天店里特别忙一下午做了三个蛋糕"):
         import base64
-        bridge, _, client_sent = self._make_bridge()
+        chunk = base64.b64encode(b"\x01\x00" * 2400).decode()
+        await bridge.feed_provider_event({"type": "response.created"})
+        await bridge.feed_provider_event({"type": "response.audio_transcript.delta", "delta": text})
+        await bridge.feed_provider_event({"type": "response.audio.delta", "delta": chunk})
+        return chunk
 
-        # Start output
-        bridge._responding = True
-        bridge._output_active = True
-        bridge._assistant_parts = ["你好"]
-
-        # User starts speaking — triggers barge-in
-        await bridge.feed_provider_event({
-            "type": "input_audio_buffer.speech_started",
-            "audio_start_ms": 1000,
-            "item_id": "item_002",
-        })
-
-        assert bridge._output_active is False
-        assert bridge._responding is False
-        assert any(e["type"] == "speech.started" for e in client_sent)
+    @pytest.mark.asyncio
+    async def test_speech_over_the_agent_waits_for_its_transcript(self):
+        """Speech over the agent may be its own echo: nothing stops yet."""
+        bridge, provider_sent, client_sent = self._make_bridge()
+        await self._agent_speaking(bridge)
+        client_sent.clear()
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "item_002"})
+        assert client_sent == [] and provider_sent == []
 
     @pytest.mark.asyncio
     async def test_barge_in_cancels_generation_and_drops_its_audio(self):
-        """The cut-off reply stops streaming; the next reply plays normally."""
-        import base64
+        """The user's own words cut the reply; the next reply plays normally."""
         saved: list[tuple] = []
         bridge, provider_sent, client_sent = self._make_bridge()
 
@@ -411,13 +393,13 @@ class TestVoiceBridge:
             saved.append((text, interrupted))
 
         bridge._save_assistant_line = save_assistant
-        chunk = base64.b64encode(b"\x01\x00" * 8).decode()
-        await bridge.feed_provider_event({"type": "response.created"})
-        await bridge.feed_provider_event({"type": "response.audio.delta", "delta": chunk})
-        await bridge.feed_provider_event({"type": "response.audio_transcript.delta", "delta": "我跟你说"})
-        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started"})
+        chunk = await self._agent_speaking(bridge, "我跟你说")
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "u1"})
+        await bridge.feed_provider_event({
+            "type": "conversation.item.input_audio_transcription.delta", "item_id": "u1", "text": "等一下", "stash": "我想问"})
 
         assert [e["type"] for e in provider_sent] == ["response.cancel"]
+        assert client_sent[-1] == {"type": "speech.started"}
         client_sent.clear()
         # Late events of the cancelled reply are swallowed.
         await bridge.feed_provider_event({"type": "response.audio.delta", "delta": chunk})
@@ -429,6 +411,51 @@ class TestVoiceBridge:
         await bridge.feed_provider_event({"type": "response.created"})
         await bridge.feed_provider_event({"type": "response.audio.delta", "delta": chunk})
         assert client_sent[-1]["type"] == "audio.delta"
+
+    @pytest.mark.asyncio
+    async def test_the_agents_own_voice_in_the_microphone_is_dropped(self):
+        bridge, provider_sent, client_sent = self._make_bridge()
+        await self._agent_speaking(bridge)
+        client_sent.clear()
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "e1"})
+        await bridge.feed_provider_event({
+            "type": "conversation.item.input_audio_transcription.delta", "item_id": "e1", "text": "店里特别忙", "stash": "一下午"})
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_stopped", "item_id": "e1"})
+        await bridge.feed_provider_event({
+            "type": "conversation.item.input_audio_transcription.completed", "item_id": "e1", "transcript": "店里特别忙一下午做了。"})
+        assert client_sent == []
+        assert [e["type"] for e in provider_sent] == ["conversation.item.delete"]
+        assert provider_sent[0]["item_id"] == "e1"
+        assert "echo_dropped=1" in bridge.mic_summary
+        assert bridge.transcript_pairs == []
+
+    @pytest.mark.asyncio
+    async def test_a_backchannel_over_the_agent_gets_no_reply(self):
+        bridge, provider_sent, client_sent = self._make_bridge()
+        await self._agent_speaking(bridge)
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "b1"})
+        await bridge.feed_provider_event({
+            "type": "conversation.item.input_audio_transcription.completed", "item_id": "b1", "transcript": "嗯。"})
+        assert [e["type"] for e in provider_sent] == ["conversation.item.delete"]
+        assert not any(e["type"] == "speech.started" for e in client_sent[1:])
+        assert bridge.transcript_pairs == []
+
+    @pytest.mark.asyncio
+    async def test_a_short_answer_right_after_the_agent_is_the_user(self):
+        import time as _time
+        bridge, provider_sent, client_sent = self._make_bridge()
+        await self._agent_speaking(bridge, "你吃了吗")
+        await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed"}})
+        bridge._playback_until = _time.monotonic() - 0.1  # playback just ended
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "t1"})
+        assert not any(e["type"] == "speech.started" for e in client_sent)
+        await bridge.feed_provider_event({
+            "type": "conversation.item.input_audio_transcription.completed", "item_id": "t1", "transcript": "吃了"})
+        await bridge._reply_task
+        assert client_sent[-2:][0]["type"] == "speech.started" or any(
+            e["type"] == "speech.started" for e in client_sent)
+        assert bridge.transcript_pairs[-1] == {**bridge.transcript_pairs[-1], "role": "user", "text": "吃了"}
+        assert provider_sent[-1]["type"] == "response.create"
 
     @pytest.mark.asyncio
     async def test_speech_after_generation_finished_sends_no_cancel(self):
@@ -445,9 +472,11 @@ class TestVoiceBridge:
         async def broken(event):
             raise RuntimeError("socket closed")
 
+        await self._agent_speaking(bridge)
         bridge._send_provider = broken
-        bridge._responding = True
-        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started"})
+        await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "u1"})
+        await bridge.feed_provider_event({
+            "type": "conversation.item.input_audio_transcription.delta", "item_id": "u1", "text": "你等一下", "stash": ""})
         assert client_sent[-1] == {"type": "speech.started"}
 
     @pytest.mark.asyncio
@@ -538,19 +567,18 @@ class TestVoiceEndpoint:
         assert "process_memory_pipeline" not in source
 
     def test_endpoint_resolves_the_shared_agent_voice(self):
-        """Calls use the agent's library voice, with the official gender voice as fallback."""
+        """Calls use the agent's library voice, the one its voice messages use."""
         source = _VOICE.read_text()
         assert 'getattr(conv.agent, "ttsVoiceId"' not in source
         assert "ensure_agent_voice(conv.agent)" in source
-        assert "fallback_voice=fallback_voice" in source
 
-    def test_fallback_voice_comes_from_the_library_default(self):
-        """No hardcoded voice: the admin-chosen gender default is the fallback."""
+    def test_no_provider_fallback_remains(self):
+        """DashScope is the only voice provider: no StepFun setting or fallback."""
         from app.config import Settings
 
         source = _VOICE.read_text()
-        assert "default_voice_for_gender(" in source
-        assert not [name for name in Settings.model_fields if name.startswith("stepfun_realtime_voice")]
+        assert "fallback_voice" not in source and "stepfun" not in source.lower()
+        assert not [name for name in Settings.model_fields if name.startswith("stepfun")]
 
     def test_endpoint_has_idle_timeout(self):
         """voice.py should have idle watchdog."""
@@ -563,13 +591,11 @@ class TestVoiceEndpoint:
         source = _CHAT_WS.read_text()
         assert "realtime_voice" not in source
 
-    def test_stepfun_key_not_in_deploy_required(self):
-        """STEPFUN_API_KEY should not block deployment when unconfigured."""
+    def test_deploy_no_longer_ships_stepfun_settings(self):
         deploy = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy.yml"
-        if deploy.exists():
-            required_line = deploy.read_text()
-            # The key should NOT be in the mandatory check loop
-            assert "STEPFUN_API_KEY" not in required_line.split("for key in")[1].split("; do")[0] if "for key in" in required_line else True
+        text = deploy.read_text()
+        assert "STEPFUN" not in text
+        assert "DASHSCOPE_WORKSPACE_ID=${{ vars.DASHSCOPE_WORKSPACE_ID }}" in text
 
 
 class _FakeVoiceSocket:
@@ -598,98 +624,95 @@ class _FakeProviderConnection:
         return False
 
 
-@pytest.mark.parametrize(
-    ("gender", "expected", "lookup"),
-    [
-        ("male", "wenrounansheng", "voice-tone-male"),
-        ("female", "elegantgentle-female", "voice-tone-female"),
-        ("female", "elegantgentle-female", None),
-        ("female", None, None),
-    ],
-)
-async def test_call_uses_agent_voice_with_default_fallback(monkeypatch, gender, expected, lookup):
-    """The agent's library voice is tried first; rejection reaches the client."""
-    from app.api.realtime import voice as endpoint
-    from app.services.realtime_voice.provider import StepfunSetupError
-
-    agent = SimpleNamespace(
-        id="agent-1", userId="user-1", status="active", gender=gender,
-        ttsVoiceId="qwen-audio-3.0-tts-plus-voice-clone",
-    )
-    conv = SimpleNamespace(
-        id="conv-1", userId="user-1", isDeleted=False, agent=agent, workspaceId=None,
-    )
+def _endpoint_fixtures(monkeypatch, endpoint, conv):
     principal = SimpleNamespace(role="user", user_id="user-1", expires_at=float("inf"))
-    seen: dict = {}
-    released: list[tuple] = []
-
-    async def find_unique(**_):
-        return conv
-
-    async def consume_ticket(*_):
-        return principal
 
     async def ok(*_, **__):
         return True
 
-    async def load_call_context(**_):
+    async def find_unique(**_):
+        return conv
+
+    async def principal_for(*_):
+        return principal
+
+    async def context(**_):
         return SimpleNamespace(name="阿宁"), "instructions", [], "cue"
 
-    async def acquire_call(_):
+    async def lock(_):
         return "lock-token"
-
-    async def release_call(conversation_id, token):
-        released.append((conversation_id, token))
-
-    async def configure_session(sock, *, voice, fallback_voice, **_):
-        seen["voice"] = voice
-        seen["fallback"] = fallback_voice
-        raise StepfunSetupError(f"voice {voice} is not valid")
-
-    async def ensure_agent_voice(agent):
-        if lookup is None:
-            raise RuntimeError("database unavailable")
-        return lookup
-
-    async def default_voice_for_gender(value):
-        assert value == gender
-        return expected
 
     monkeypatch.setattr(endpoint, "is_redis_healthy", lambda: True)
     monkeypatch.setattr(endpoint, "offered_ticket", lambda _: "ticket")
     monkeypatch.setattr(endpoint, "origin_allowed", lambda _: True)
-    monkeypatch.setattr(endpoint, "consume_ticket", consume_ticket)
+    monkeypatch.setattr(endpoint, "consume_ticket", principal_for)
     monkeypatch.setattr(endpoint.db, "conversation", SimpleNamespace(find_unique=find_unique), raising=False)
     monkeypatch.setattr(endpoint, "get_patience", ok)
     monkeypatch.setattr(endpoint, "get_patience_zone", lambda _: "normal")
     monkeypatch.setattr(endpoint, "_accounts_current", ok)
-    monkeypatch.setattr(endpoint.settings, "stepfun_api_key", "sk-test")
-    monkeypatch.setattr(endpoint, "default_voice_for_gender", default_voice_for_gender)
-    monkeypatch.setattr(endpoint, "acquire_call", acquire_call)
-    monkeypatch.setattr(endpoint, "release_call", release_call)
-    monkeypatch.setattr(endpoint, "load_call_context", load_call_context)
-    monkeypatch.setattr(endpoint, "connect_stepfun", lambda *_: _FakeProviderConnection())
-    monkeypatch.setattr(endpoint, "configure_session", configure_session)
-    monkeypatch.setattr(endpoint, "ensure_agent_voice", ensure_agent_voice)
+    monkeypatch.setattr(endpoint.settings, "dashscope_api_key", "sk-test")
+    monkeypatch.setattr(endpoint, "acquire_call", lock)
+    monkeypatch.setattr(endpoint, "load_call_context", context)
+    monkeypatch.setattr(endpoint, "connect_realtime", lambda *_: _FakeProviderConnection())
     monkeypatch.setattr(
         endpoint, "get_effective_realtime_model",
-        AsyncMock(return_value="stepaudio-2.5-realtime"),
+        AsyncMock(return_value="qwen3.8-omni-flash-realtime"),
     )
+
+
+@pytest.mark.parametrize("lookup", ["Serena", None])
+async def test_call_dials_the_agent_voice_or_reports_an_empty_library(monkeypatch, lookup):
+    from app.api.realtime import voice as endpoint
+    from app.services.realtime_voice.provider import RealtimeSetupError
+
+    agent = SimpleNamespace(id="agent-1", userId="user-1", status="active", gender="female")
+    conv = SimpleNamespace(id="conv-1", userId="user-1", isDeleted=False, agent=agent, workspaceId=None)
+    seen: dict = {}
+    released: list[tuple] = []
+    _endpoint_fixtures(monkeypatch, endpoint, conv)
+
+    async def release_call(conversation_id, token):
+        released.append((conversation_id, token))
+
+    async def configure_session(sock, *, voice, **kwargs):
+        seen.update(voice=voice, **kwargs)
+        raise RealtimeSetupError("session rejected")
+
+    async def ensure_agent_voice(agent):
+        if lookup is None:
+            raise LookupError("No enabled female voice in the library")
+        return lookup
+
+    monkeypatch.setattr(endpoint, "release_call", release_call)
+    monkeypatch.setattr(endpoint, "configure_session", configure_session)
+    monkeypatch.setattr(endpoint, "ensure_agent_voice", ensure_agent_voice)
 
     ws = _FakeVoiceSocket()
     await endpoint.voice_websocket(ws, "conv-1")
 
     assert ws.accepted
-    if expected is None:
-        # Empty library and a failed lookup: nothing to dial with.
+    if lookup is None:
         assert "voice" not in seen
         assert ws.sent == [{"type": "error", "code": "not_configured", "message": "音色库没有可用音色"}]
     else:
-        assert seen["voice"] == (lookup or expected)
-        assert seen["fallback"] == expected
+        assert seen["voice"] == "Serena"
+        assert seen["vad_threshold"] == endpoint.settings.dashscope_realtime_vad_threshold
+        assert seen["temperature"] == endpoint.settings.dashscope_realtime_temperature
         assert ws.sent == [{"type": "error", "code": "provider_unavailable", "message": "实时语音暂时连不上"}]
     assert ws.closed_with == 1011
     assert released == [("conv-1", "lock-token")]
+
+
+async def test_call_without_a_key_is_not_configured(monkeypatch):
+    from app.api.realtime import voice as endpoint
+
+    agent = SimpleNamespace(id="agent-1", userId="user-1", status="active", gender="female")
+    conv = SimpleNamespace(id="conv-1", userId="user-1", isDeleted=False, agent=agent, workspaceId=None)
+    _endpoint_fixtures(monkeypatch, endpoint, conv)
+    monkeypatch.setattr(endpoint.settings, "dashscope_api_key", " ")
+    ws = _FakeVoiceSocket()
+    await endpoint.voice_websocket(ws, "conv-1")
+    assert ws.sent[0]["code"] == "not_configured" and "DASHSCOPE_API_KEY" in ws.sent[0]["message"]
 
 
 async def test_call_transcripts_are_hidden_from_timeline(monkeypatch):
@@ -750,7 +773,7 @@ async def test_search_and_rank_skip_hidden_rows(monkeypatch):
 
 
 class _ScriptedProvider:
-    """StepfunSocket stand-in that replays provider events per session.update."""
+    """RealtimeSocket stand-in that replays provider events per session.update."""
 
     def __init__(self, replies):
         self.replies = list(replies)
@@ -768,43 +791,23 @@ class _ScriptedProvider:
         return self.inbox.pop(0)
 
 
-_REJECTED = {"type": "error", "error": {"message": "voice voice-tone-x is not valid"}}
-
-
-async def test_configure_session_retries_a_rejected_voice_once():
-    from app.services.realtime_voice.provider import configure_session
-
-    sock = _ScriptedProvider([_REJECTED, {"type": "session.updated"}])
-    voice = await configure_session(
-        sock, instructions="hi", voice="voice-tone-x", history=[], fallback_voice="wenrounansheng",
-    )
-    assert voice == "wenrounansheng"
-    assert [e["session"]["voice"] for e in sock.sent] == ["voice-tone-x", "wenrounansheng"]
-
-
-async def test_configure_session_keeps_an_accepted_voice():
+async def test_configure_session_sends_the_voice_and_waits_for_the_ack():
     from app.services.realtime_voice.provider import configure_session
 
     sock = _ScriptedProvider([{"type": "session.updated"}])
-    voice = await configure_session(
-        sock, instructions="hi", voice="voice-tone-x", history=[], fallback_voice="wenrounansheng",
-    )
-    assert voice == "voice-tone-x"
-    assert len(sock.sent) == 1
+    await configure_session(sock, instructions="hi", voice="Serena", history=[])
+    assert [e["session"]["voice"] for e in sock.sent] == ["Serena"]
 
 
-@pytest.mark.parametrize("fallback", [None, "voice-tone-x"])
-async def test_configure_session_without_a_distinct_fallback_raises(fallback):
-    from app.services.realtime_voice.provider import StepfunSetupError, configure_session
+async def test_a_rejected_session_raises():
+    from app.services.realtime_voice.provider import RealtimeSetupError, configure_session
 
-    sock = _ScriptedProvider([_REJECTED])
-    with pytest.raises(StepfunSetupError, match="not valid"):
-        await configure_session(
-            sock, instructions="hi", voice="voice-tone-x", history=[], fallback_voice=fallback,
-        )
+    sock = _ScriptedProvider([{"type": "error", "error": {"message": "bad session"}}])
+    with pytest.raises(RealtimeSetupError, match="bad session"):
+        await configure_session(sock, instructions="hi", voice="Serena", history=[])
 
 
-async def test_bridge_sums_provider_usage_across_responses():
+async def test_bridge_sums_provider_usage_per_modality():
     sent: list[dict] = []
 
     async def send(event):
@@ -818,7 +821,10 @@ async def test_bridge_sums_provider_usage_across_responses():
         save_user_line=noop, save_assistant_line=noop,
     )
     for usage in (
-        {"input_tokens": 31, "output_tokens": 3, "input_token_details": {"cached_tokens": 10}},
+        {"input_tokens": 1087, "output_tokens": 35,
+         "input_tokens_details": {"text_tokens": 1000, "audio_tokens": 87},
+         "output_tokens_details": {"text_tokens": 9, "audio_tokens": 26}},
+        # No details: the tokens count as audio, the dearer kind.
         {"input_tokens": 50, "output_tokens": 7},
         None,
     ):
@@ -827,7 +833,13 @@ async def test_bridge_sums_provider_usage_across_responses():
             response["usage"] = usage
         await bridge.feed_provider_event({"type": "response.done", "response": response})
 
-    assert bridge.usage == {"input": 81, "output": 10, "cached_input": 10, "responses": 2}
+    assert bridge.usage == {
+        "input_text": 1000, "input_audio": 137,
+        "output_text": 9, "output_audio": 33, "responses": 2,
+    }
+
+
+_CALL_USAGE = {"input_text": 1000, "input_audio": 137, "output_text": 9, "output_audio": 33, "responses": 2}
 
 
 async def test_call_usage_is_written_as_one_realtime_row(monkeypatch):
@@ -840,22 +852,42 @@ async def test_call_usage_is_written_as_one_realtime_row(monkeypatch):
         written.append(kwargs)
 
     monkeypatch.setattr(usage_repo, "persist_usage", persist)
+    model = "qwen3.8-omni-flash-realtime"
     await endpoint._record_call_usage(
-        {"input": 81, "output": 10, "cached_input": 10, "responses": 2},
-        model="stepaudio-2.5-realtime", conversation_id="conv-1", agent_id="a1", user_id="u1",
+        _CALL_USAGE, model=model, conversation_id="conv-1", agent_id="a1", user_id="u1",
     )
     await endpoint._record_call_usage(
-        {"input": 0, "output": 0, "cached_input": 0, "responses": 0},
-        model="stepaudio-2.5-realtime", conversation_id="conv-1", agent_id="a1", user_id="u1",
+        {**_CALL_USAGE, "responses": 0}, model=model, conversation_id="conv-1", agent_id="a1", user_id="u1",
     )
 
     assert len(written) == 1
     row = written[0]
     assert row["scope"] == "realtime_voice"
+    # Text and audio tokens are priced separately: the ':audio' bucket.
     assert row["summary"]["tokens_by_model"] == {
-        "stepaudio-2.5-realtime": {"input": 81, "output": 10, "cached_input": 10},
+        model: {"input": 1000, "output": 9, "cached_input": 0},
+        f"{model}:audio": {"input": 137, "output": 33, "cached_input": 0},
     }
+    assert row["summary"]["input_tokens"] == 1137 and row["summary"]["output_tokens"] == 42
     assert row["summary"]["call_count"] == 2
+
+
+def test_billing_prices_text_and_audio_tokens_separately(monkeypatch):
+    from app.services.llm import pricing
+    from app.services.realtime_voice import billing
+
+    prices = {"m": (1.5, 4.5), "m:audio": (6.0, 12.0)}
+    monkeypatch.setattr(pricing, "estimate_cost_cny", lambda name, i, o, cached_input_tokens=0: (
+        (i * prices[name][0] + o * prices[name][1]) / 1_000_000))
+    split = billing.split_usage({
+        "input_tokens": 100, "output_tokens": 40,
+        "input_tokens_details": {"text_tokens": 100},
+        "output_tokens_details": {"text_tokens": 10, "audio_tokens": 30},
+    })
+    assert billing.cost_cny("m", split) == round((100 * 1.5 + 10 * 4.5 + 30 * 12.0) / 1_000_000, 6)
+    assert billing.is_price_only("m:audio") and not billing.is_price_only("m")
+    assert billing.split_usage({"input_tokens": -3, "output_tokens": "x"}) == {
+        "input_text": 0, "input_audio": 0, "output_text": 0, "output_audio": 0}
 
 
 def test_realtime_usage_is_its_own_cost_category():
@@ -872,80 +904,48 @@ def test_realtime_model_resolves_from_system_config(monkeypatch):
     monkeypatch.setattr(runtime_config, "_CACHE_LOADED", True)
     monkeypatch.setattr(runtime_config, "_AGENT_CACHE", {})
     monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {})
-    assert runtime_config.resolve_config_sync(agent_id=None).realtime_model == "stepaudio-2.5-realtime"
-    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realtimeModel": "stepaudio-3-realtime"})
-    assert runtime_config.resolve_config_sync(agent_id=None).realtime_model == "stepaudio-3-realtime"
+    assert runtime_config.resolve_config_sync(agent_id=None).realtime_model == "qwen3.8-omni-flash-realtime"
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realtimeModel": "qwen3.9-omni-flash-realtime"})
+    assert runtime_config.resolve_config_sync(agent_id=None).realtime_model == "qwen3.9-omni-flash-realtime"
 
 
-def test_realtime_is_a_stepfun_model_kind():
+def test_realtime_is_a_dashscope_model_kind():
     from app.api.admin import model_registry
 
-    model_registry._validate_model_metadata("realtime", "per_million_tokens", provider="stepfun")
+    model_registry._validate_model_metadata("realtime", "per_million_tokens", provider="dashscope")
     with pytest.raises(Exception) as exc:
-        model_registry._validate_model_metadata("realtime", "per_10k_characters", provider="stepfun")
+        model_registry._validate_model_metadata("realtime", "per_10k_characters", provider="dashscope")
     assert getattr(exc.value, "status_code", None) == 400
 
 
 async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
-    """A call that reaches the pumps meters StepFun usage once at hang-up."""
+    """A call that reaches the pumps meters its usage once at hang-up."""
     from app.api.realtime import voice as endpoint
 
     agent = SimpleNamespace(id="agent-1", userId="user-1", status="active", gender="female")
     conv = SimpleNamespace(id="conv-1", userId="user-1", isDeleted=False, agent=agent, workspaceId=None)
-    principal = SimpleNamespace(role="user", user_id="user-1", expires_at=float("inf"))
     metered: list[dict] = []
     extracted: list[dict] = []
+    _endpoint_fixtures(monkeypatch, endpoint, conv)
 
     class FakeBridge:
         transcript_pairs = [{"role": "user", "text": "hi"}]
         message_ids = ["msg-u1", "msg-a1"]
-        mic_summary = "bytes=0 chunks=0 seconds=0.0 peak_dbfs=-inf rms_dbfs=-inf speech_turns=0"
-        usage = {"input": 5, "output": 2, "cached_input": 0, "responses": 1}
+        mic_summary = "bytes=0 chunks=0 seconds=0.0 peak_dbfs=-inf rms_dbfs=-inf speech_turns=0 echo_dropped=0"
+        usage = _CALL_USAGE
 
         async def aclose(self):
             pass
 
-    async def ok(*_, **__):
-        return True
-
     async def none(*_, **__):
         return None
-
-    async def find_unique(**_):
-        return conv
-
-    async def principal_for(*_):
-        return principal
-
-    async def context(**_):
-        return SimpleNamespace(name="阿宁"), "instructions", [], "cue"
-
-    async def lock(_):
-        return "lock-token"
-
-    async def configure(sock, *, voice, **_):
-        return voice
 
     async def record(usage, **kwargs):
         metered.append({"usage": usage, **kwargs})
 
-    monkeypatch.setattr(endpoint, "is_redis_healthy", lambda: True)
-    monkeypatch.setattr(endpoint, "offered_ticket", lambda _: "ticket")
-    monkeypatch.setattr(endpoint, "origin_allowed", lambda _: True)
-    monkeypatch.setattr(endpoint, "consume_ticket", principal_for)
-    monkeypatch.setattr(endpoint.db, "conversation", SimpleNamespace(find_unique=find_unique), raising=False)
-    monkeypatch.setattr(endpoint, "get_patience", ok)
-    monkeypatch.setattr(endpoint, "get_patience_zone", lambda _: "normal")
-    monkeypatch.setattr(endpoint, "_accounts_current", ok)
-    monkeypatch.setattr(endpoint.settings, "stepfun_api_key", "sk-test")
-    monkeypatch.setattr(endpoint, "acquire_call", lock)
     monkeypatch.setattr(endpoint, "release_call", none)
-    monkeypatch.setattr(endpoint, "load_call_context", context)
-    monkeypatch.setattr(endpoint, "ensure_agent_voice", AsyncMock(return_value="voice-tone-1"))
-    monkeypatch.setattr(endpoint, "default_voice_for_gender", AsyncMock(return_value="wenrounansheng"))
-    monkeypatch.setattr(endpoint, "get_effective_realtime_model", AsyncMock(return_value="stepaudio-2.5-realtime"))
-    monkeypatch.setattr(endpoint, "connect_stepfun", lambda *_: _FakeProviderConnection())
-    monkeypatch.setattr(endpoint, "configure_session", configure)
+    monkeypatch.setattr(endpoint, "ensure_agent_voice", AsyncMock(return_value="Serena"))
+    monkeypatch.setattr(endpoint, "configure_session", none)
     monkeypatch.setattr(endpoint, "_bridge", lambda **_: FakeBridge())
     monkeypatch.setattr(endpoint, "schedule_user_present", lambda _: None)
     monkeypatch.setattr(endpoint, "_run_pumps", none)
@@ -955,9 +955,10 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
     ws = _FakeVoiceSocket()
     await endpoint.voice_websocket(ws, "conv-1")
 
-    assert ws.sent[0]["type"] == "ready" and ws.sent[0]["voice"] == "voice-tone-1"
+    assert ws.sent[0]["type"] == "ready" and ws.sent[0]["voice"] == "Serena"
+    assert ws.sent[0]["model"] == "qwen3.8-omni-flash-realtime"
     assert metered == [{
-        "usage": FakeBridge.usage, "model": "stepaudio-2.5-realtime",
+        "usage": _CALL_USAGE, "model": "qwen3.8-omni-flash-realtime",
         "conversation_id": "conv-1", "agent_id": "agent-1", "user_id": "user-1",
     }]
     assert extracted == [{
@@ -972,13 +973,13 @@ async def test_call_usage_metering_failure_is_swallowed(monkeypatch, caplog):
 
     monkeypatch.setattr(usage_repo, "persist_usage", AsyncMock(side_effect=RuntimeError("db down")))
     await endpoint._record_call_usage(
-        {"input": 1, "output": 1, "cached_input": 0, "responses": 1},
+        _CALL_USAGE,
         model="m", conversation_id="conv-1", agent_id="a1", user_id="u1",
     )
     assert "usage metering failed" in caplog.text
 
 
-async def test_configure_session_seeds_history_and_returns_voice():
+async def test_configure_session_sends_config_then_seeds_history():
     from app.services.realtime_voice.provider import configure_session
 
     sock = _ScriptedProvider([{"type": "session.updated"}])
@@ -987,15 +988,24 @@ async def test_configure_session_seeds_history_and_returns_voice():
     async def send(event):
         await original_send(event)
         if event.get("type") == "conversation.item.create":
-            sock.inbox.append({"type": "conversation.item.created", "item": {"id": event["item"]["id"]}})
+            sock.inbox.append({"type": "conversation.item.created", "item": {"id": "srv", "role": "user"}})
 
     sock.send_event = send
-    voice = await configure_session(
-        sock, instructions="hi", voice="voice-tone-x",
-        history=[{"role": "user", "text": "你好"}], fallback_voice="wenrounansheng",
+    await configure_session(
+        sock, instructions="hi", voice="Serena",
+        history=[{"role": "user", "text": "你好"}], temperature=0.7,
     )
-    assert voice == "voice-tone-x"
     assert [e["type"] for e in sock.sent] == ["session.update", "conversation.item.create"]
+    assert sock.sent[0]["session"]["voice"] == "Serena"
+    assert sock.sent[0]["session"]["temperature"] == 0.7
+
+
+async def test_configure_session_reports_a_rejected_session():
+    from app.services.realtime_voice.provider import RealtimeSetupError, configure_session
+
+    sock = _ScriptedProvider([{"type": "error", "error": {"message": "bad session"}}])
+    with pytest.raises(RealtimeSetupError, match="bad session"):
+        await configure_session(sock, instructions="hi", voice="Serena", history=[])
 
 
 async def test_effective_realtime_model_reads_runtime_config(monkeypatch):
@@ -1005,5 +1015,5 @@ async def test_effective_realtime_model_reads_runtime_config(monkeypatch):
     monkeypatch.setattr(runtime_config, "_current_snapshot", runtime_config.ContextVar("s", default=None))
     monkeypatch.setattr(runtime_config, "_CACHE_LOADED", True)
     monkeypatch.setattr(runtime_config, "_AGENT_CACHE", {})
-    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realtimeModel": "stepaudio-3-realtime"})
-    assert await runtime_config.get_effective_realtime_model() == "stepaudio-3-realtime"
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realtimeModel": "qwen3.9-omni-flash-realtime"})
+    assert await runtime_config.get_effective_realtime_model() == "qwen3.9-omni-flash-realtime"

@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
 from app.config import settings
+from app.services.realtime_voice.billing import is_price_only
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.providers import (
@@ -62,11 +63,9 @@ _MEDIA_MODEL_PROVIDERS = {
     "asr": {
         "dashscope": ("dashscope_api_key", "DASHSCOPE_API_KEY"),
     },
-    "tts": {
-        "stepfun": ("stepfun_api_key", "STEPFUN_API_KEY"),
-    },
+    # Voice calls and voice messages: one DashScope realtime model.
     "realtime": {
-        "stepfun": ("stepfun_api_key", "STEPFUN_API_KEY"),
+        "dashscope": ("dashscope_api_key", "DASHSCOPE_API_KEY"),
     },
 }
 
@@ -303,7 +302,7 @@ async def _model_exists_for_provider(identifier: str, provider: str) -> bool:
 
 async def _media_model_exists(identifier: str, model_kind: str) -> bool:
     providers = set(_MEDIA_MODEL_PROVIDERS.get(model_kind, {}))
-    if not providers:
+    if not providers or is_price_only(identifier):
         return False
     row = await db.modelregistry.find_first(
         where={
@@ -421,7 +420,6 @@ async def _validate_payload_models(
     for field, model_kind in (
         ("vision_model", "vision"),
         ("asr_model", "asr"),
-        ("tts_model", "tts"),
         ("realtime_model", "realtime"),
     ):
         if field not in explicit:
@@ -455,6 +453,8 @@ async def list_options() -> dict[str, Any]:
     }
     for r in rows:
         model_kind = getattr(r, "modelKind", "llm")
+        if is_price_only(r.identifier):
+            continue
         if model_kind in media_by_kind:
             provider_models = media_by_kind[model_kind]
             if r.provider in provider_models:
@@ -477,11 +477,8 @@ async def list_options() -> dict[str, Any]:
         "local_small": local,
         "remote_chat": remote,
         "remote_small": remote,
-        "tts": [
-            identifier
-            for identifiers in media_by_kind["tts"].values()
-            for identifier in identifiers
-        ],
+        # Voice messages run on the realtime model; nothing to pick here.
+        "tts": [],
         "by_provider": by_provider,
         "providers": public_provider_options(),
         "media": media,

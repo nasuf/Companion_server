@@ -21,9 +21,9 @@ def _memory(memory_id: str, text: str, owner: str = "关于用户") -> dict[str,
 # MemorySlot
 # ---------------------------------------------------------------------------
 
-def test_slot_appends_a_block_and_skips_core_memories():
+def test_slot_note_holds_the_block_and_skips_core_memories():
     slot = MemorySlot("BASE\n你记得的关于用户的事实\n- 用户叫小明，在杭州上班")
-    assert slot.instructions() == slot._base
+    assert slot.note() == ""
     changed = slot.merge([
         _memory("m1", "用户叫小明，在杭州上班"),
         _memory("m2", "用户养了一只叫团子的橘猫"),
@@ -32,9 +32,10 @@ def test_slot_appends_a_block_and_skips_core_memories():
     ], turn=1)
     assert changed
     assert slot.lines == ["关于用户：用户养了一只叫团子的橘猫"]
-    text = slot.instructions()
-    assert text.startswith(slot._base + "\n\n【此刻相关的记忆】")
-    assert text.endswith("- 关于用户：用户养了一只叫团子的橘猫")
+    note = slot.note()
+    assert note.startswith("【此刻相关的记忆】")
+    assert note.endswith("- 关于用户：用户养了一只叫团子的橘猫")
+    assert "BASE" not in note
     assert not slot.merge([_memory("m2", "用户养了一只叫团子的橘猫")], turn=2)
 
 
@@ -43,12 +44,10 @@ def test_slot_keeps_recent_hits_first_and_expires_stale_ones():
     slot.merge([_memory("a", "A 事"), _memory("b", "B 事")], turn=1)
     slot.merge([_memory("c", "C 事"), _memory("a", "A 事")], turn=2)
     assert slot.lines == ["关于用户：C 事", "关于用户：A 事", "关于用户：B 事"]
-    # Turn 3: b was last hit on turn 1 and drops out; a and c survive.
     assert slot.expire(3)
     assert slot.lines == ["关于用户：C 事", "关于用户：A 事"]
     assert slot.expire(4)
-    assert slot.lines == []
-    assert slot.instructions() == "BASE"
+    assert slot.lines == [] and slot.note() == ""
     assert not slot.expire(5)
 
 
@@ -60,17 +59,16 @@ def test_slot_bounds_lines_and_characters():
     slot = MemorySlot("BASE", max_lines=3, char_budget=1000)
     slot.merge([_memory(str(i), f"第{i}件事") for i in range(6)], turn=1)
     assert len(slot.lines) == 3
-    # A single oversized line is still kept rather than leaving the block empty.
     slot = MemorySlot("BASE", char_budget=5)
     slot.merge([_memory("x", "一条很长很长的记忆")], turn=1)
     assert slot.lines == ["关于用户：一条很长很长的记忆"]
 
 
 # ---------------------------------------------------------------------------
-# VoiceBridge: retrieve on this turn, use from the next
+# VoiceBridge: memories first, then the reply
 # ---------------------------------------------------------------------------
 
-def _bridge(retrieve, *, instructions: str | None = "BASE", send=None):
+def _bridge(retrieve, *, instructions: str | None = "BASE", send=None, memory_wait_s=0.5):
     provider: list[dict] = []
     client: list[dict] = []
 
@@ -90,25 +88,56 @@ def _bridge(retrieve, *, instructions: str | None = "BASE", send=None):
         save_user_line=save,
         save_assistant_line=save,
         retrieval_timeout_s=0.2,
+        memory_wait_s=memory_wait_s,
         instructions=instructions,
     )
     return bridge, provider, client
 
 
-async def _user_says(bridge: VoiceBridge, text: str) -> None:
+_ITEMS = iter(range(10_000))
+
+
+async def _user_says(bridge: VoiceBridge, text: str, *, live: str | None = None) -> str:
+    """One full user turn as DashScope reports it; returns the item id."""
+    item = f"item_{next(_ITEMS)}"
+    await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": item})
+    await bridge.feed_provider_event({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "item_id": item, "text": live if live is not None else text, "stash": "",
+    })
+    await bridge.feed_provider_event({"type": "input_audio_buffer.speech_stopped", "item_id": item})
+    await asyncio.sleep(0)  # the final transcript lands ~0.2 s later in production
     await bridge.feed_provider_event({
         "type": "conversation.item.input_audio_transcription.completed",
-        "transcript": text,
+        "item_id": item, "transcript": text,
     })
-    if bridge._prefetch_task:
-        await bridge._prefetch_task
+    await _settle(bridge)
+    return item
 
 
-def _updates(provider: list[dict]) -> list[str]:
-    return [e["session"]["instructions"] for e in provider if e["type"] == "session.update"]
+async def _settle(bridge: VoiceBridge) -> None:
+    for task in (bridge._prefetch_task, bridge._reply_task, bridge._tool_task):
+        if task is not None and not task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
-async def test_each_turn_rewrites_the_block_without_touching_the_reply():
+async def _reply_done(bridge: VoiceBridge, text: str = "", status: str = "completed") -> None:
+    output = [{"type": "message", "content": [{"type": "audio", "transcript": text}]}] if text else []
+    await bridge.feed_provider_event({"type": "response.created"})
+    await bridge.feed_provider_event({"type": "response.done", "response": {"status": status, "output": output}})
+
+
+def _notes(provider: list[dict]) -> list[str]:
+    return [
+        e["item"]["content"][0]["text"] for e in provider
+        if e["type"] == "conversation.item.create" and e["item"].get("role") == "system"
+    ]
+
+
+async def test_reply_waits_for_this_turns_memories_and_carries_them_as_a_note():
     calls: list[tuple] = []
 
     async def retrieve(text, previous):
@@ -117,21 +146,35 @@ async def test_each_turn_rewrites_the_block_without_touching_the_reply():
 
     bridge, provider, _ = _bridge(retrieve)
     await _user_says(bridge, "我家猫最近不吃饭")
+    # Retrieval started from the live transcript when the user stopped; the
+    # matching final transcript did not start a second one.
     assert calls == [("我家猫最近不吃饭", None)]
-    [update] = provider
-    assert update["session"] == {"instructions": update["session"]["instructions"]}
-    assert "团子" in update["session"]["instructions"]
-    # Only instructions are sent: no response.create, no cancel.
-    assert {e["type"] for e in provider} == {"session.update"}
+    kinds = [e["type"] for e in provider]
+    assert kinds[-2:] == ["conversation.item.create", "response.create"]
+    [note] = _notes(provider)
+    assert "团子" in note and note.startswith("【此刻相关的记忆】")
+    assert not any(e["type"] == "session.update" for e in provider)
 
-    await bridge.feed_provider_event({"type": "response.done", "response": {
-        "status": "completed",
-        "output": [{"type": "message", "content": [{"type": "audio", "transcript": "团子怎么了？"}]}],
-    }})
+    # The provider echoes the note; it is deleted once the reply is done.
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "note_1", "role": "system", "type": "message", "content": [{"type": "input_text", "text": note}]}})
+    await _reply_done(bridge, "团子怎么了？")
+    assert provider[-1] == {"event_id": provider[-1]["event_id"], "type": "conversation.item.delete", "item_id": "note_1"}
+
     await _user_says(bridge, "那后来呢")
     assert calls[-1] == ("那后来呢", "团子怎么了？")
-    # Same memory again: the block text is unchanged, so nothing is resent.
-    assert len(_updates(provider)) == 1
+
+
+async def test_a_changed_final_transcript_restarts_retrieval():
+    calls: list[str] = []
+
+    async def retrieve(text, previous):
+        calls.append(text)
+        return []
+
+    bridge, _, _ = _bridge(retrieve)
+    await _user_says(bridge, "我下周要去乌鲁木齐出差", live="我下周要去")
+    assert calls == ["我下周要去", "我下周要去乌鲁木齐出差"]
 
 
 async def test_block_expires_after_turns_without_hits():
@@ -141,80 +184,42 @@ async def test_block_expires_after_turns_without_hits():
         return hits.pop(0)
 
     bridge, provider, _ = _bridge(retrieve)
-    for text in ("最近好累", "嗯", "今天下雨了", "晚饭吃了面"):
+    for text in ("最近好累", "今天天气不错", "今天下雨了", "晚饭吃了面"):
         await _user_says(bridge, text)
-    instructions = _updates(provider)
-    assert "考研" in instructions[0]
-    assert instructions[-1] == "BASE"
-    assert len(instructions) == 2
+        await _reply_done(bridge, f"回{text}")
+    notes = _notes(provider)
+    assert len(notes) == 3 and all("考研" in n for n in notes)
 
 
-async def test_a_retrieval_overtaken_by_the_next_turn_is_dropped():
-    release = asyncio.Event()
-    calls = 0
-
-    async def retrieve(text, previous):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            await release.wait()
-            return [_memory("old", "上一个话题")]
-        return [_memory("new", "这一轮的话题")]
-
-    bridge, provider, _ = _bridge(retrieve)
-    await bridge.feed_provider_event({
-        "type": "conversation.item.input_audio_transcription.completed", "transcript": "第一句",
-    })
-    first = bridge._prefetch_task
-    bridge._turn += 1  # the next user turn arrives while the first is in flight
-    release.set()
-    await first
-    assert _updates(provider) == []
-    await _user_says(bridge, "第二句")
-    assert "这一轮的话题" in _updates(provider)[-1]
-
-
-async def test_slow_or_failing_retrieval_keeps_the_call_going():
+async def test_slow_or_failing_retrieval_never_holds_the_reply():
     async def slow(text, previous):
         await asyncio.sleep(5)
         return []
 
-    bridge, provider, _ = _bridge(slow)
+    bridge, provider, _ = _bridge(slow, memory_wait_s=0.05)
     await _user_says(bridge, "你还记得吗")
-    assert provider == []
+    assert provider[-1]["type"] == "response.create" and _notes(provider) == []
 
     async def broken(text, previous):
         raise RuntimeError("vector store down")
 
     bridge, provider, _ = _bridge(broken)
     await _user_says(bridge, "你还记得吗")
-    assert provider == []
-
-    async def found(text, previous):
-        return [_memory("m1", "用户喜欢蓝色")]
-
-    async def send_fails(event):
-        raise RuntimeError("socket closed")
-
-    bridge, _, _ = _bridge(found, send=send_fails)
-    await _user_says(bridge, "我喜欢什么颜色")
-    assert bridge._slot.lines == ["关于用户：用户喜欢蓝色"]
+    assert provider[-1]["type"] == "response.create"
 
 
-async def test_without_instructions_or_after_close_nothing_is_rewritten():
+async def test_without_instructions_or_after_close_no_note_is_sent():
     async def found(text, previous):
         return [_memory("m1", "用户喜欢蓝色")]
 
     bridge, provider, _ = _bridge(found, instructions=None)
     await _user_says(bridge, "我喜欢什么颜色")
-    assert provider == []
+    assert _notes(provider) == [] and provider[-1]["type"] == "response.create"
 
     bridge, provider, _ = _bridge(found)
-    await bridge._refresh_slot([_memory("m1", "用户喜欢蓝色")], 0, 0.0)
-    assert len(provider) == 1
     await bridge.aclose()
-    await bridge._refresh_slot([_memory("m2", "新的")], 0, 0.0)
-    assert len(provider) == 1
+    await _user_says(bridge, "我喜欢什么颜色")
+    assert provider == []
 
 
 async def test_bridge_records_stored_message_ids_in_order():
@@ -417,7 +422,7 @@ async def test_history_is_acknowledged_by_count_not_client_id(caplog):
     from app.services.realtime_voice.provider import configure_session
 
     history = [{"role": "user", "text": "我叫小明"}, {"role": "assistant", "text": "你好小明"}]
-    # StepFun replies with its own ids (observed 2026-11-05).
+    # The provider replies with its own item ids.
     sock = _Provider([
         {"type": "conversation.item.created", "item": {"id": "srv-1", "role": "user"}},
         {"type": "rate_limits.updated"},
@@ -433,10 +438,9 @@ async def test_history_error_is_reported_without_failing_the_call(caplog):
     from app.services.realtime_voice.provider import configure_session
 
     sock = _Provider([{"type": "error", "error": {"message": "bad item"}}])
-    voice = await configure_session(
+    await configure_session(
         sock, instructions="hi", voice="v", history=[{"role": "user", "text": "你好"}],
     )
-    assert voice == "v"
     assert "history seed returned an error: bad item" in caplog.text
     assert "history seed incomplete, remaining=1" in caplog.text
 
@@ -460,7 +464,7 @@ def test_memory_lines_from_classified_memories_keep_raw_text_for_dedup():
 
 
 # ---------------------------------------------------------------------------
-# Microphone meter (diagnoses calls where StepFun never hears the user)
+# Microphone meter (diagnoses calls where the provider never hears the user)
 # ---------------------------------------------------------------------------
 
 async def test_mic_meter_reports_volume_once_after_three_seconds(caplog):
@@ -485,7 +489,7 @@ async def test_mic_meter_reports_volume_once_after_three_seconds(caplog):
     summary = bridge.mic_summary
     assert "chunks=16" in summary and "seconds=3.2" in summary
     assert "peak_dbfs=-6.0" in summary
-    assert summary.endswith("speech_turns=1")
+    assert summary.endswith("speech_turns=1 echo_dropped=0")
 
 
 def test_mic_meter_with_no_audio_reads_minus_infinity():
@@ -523,7 +527,7 @@ async def test_greeting_cue_is_deleted_after_the_greeting_and_never_stored():
 
     bridge, provider, _ = await _greeting_bridge()
     await bridge.feed_client_text('{"type": "greet"}')
-    # StepFun echoes the cue with its own id and an audio-typed part.
+    # The provider echoes the cue with its own id.
     await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
         "id": "srv-cue", "role": "user", "type": "message",
         "content": [{"type": "audio", "audio": "", "transcript": _GREET_CUE}]}})
@@ -549,6 +553,7 @@ async def test_failed_cue_delete_does_not_break_the_call(caplog):
             raise RuntimeError("socket closed")
 
     bridge, _, client = await _greeting_bridge(send=send)
+    await bridge.feed_client_text('{"type": "greet"}')
     await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
         "id": "srv-cue", "role": "user", "content": [{"type": "input_text", "text": _GREET_CUE}]}})
     await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed"}})
@@ -556,15 +561,27 @@ async def test_failed_cue_delete_does_not_break_the_call(caplog):
     assert client[-1]["type"] == "response.done"
 
 
-def test_greeting_cue_recognition_rejects_other_items():
-    from app.services.realtime_voice.bridge import VoiceBridge, _GREET_CUE
+async def test_only_the_greeting_cue_we_sent_is_recognised():
+    from app.services.realtime_voice.bridge import _GREET_CUE, _item_text
 
-    assert not VoiceBridge._is_greet_cue(None)
-    assert not VoiceBridge._is_greet_cue({"id": "x", "role": "assistant",
-                                          "content": [{"text": _GREET_CUE}]})
-    assert not VoiceBridge._is_greet_cue({"role": "user", "content": [{"text": _GREET_CUE}]})
-    assert not VoiceBridge._is_greet_cue({"id": "x", "role": "user", "content": "text"})
-    assert not VoiceBridge._is_greet_cue({"id": "x", "role": "user", "content": ["raw"]})
+    bridge, _, _ = await _greeting_bridge()
+    # Not sent yet: an identical user item is not taken for the cue.
+    for item in (
+        None, {"id": "x", "role": "user", "content": [{"text": _GREET_CUE}]},
+    ):
+        await bridge.feed_provider_event({"type": "conversation.item.created", "item": item})
+    assert bridge._greet_cue_id is None
+    await bridge.feed_client_text('{"type": "greet"}')
+    for item in (
+        {"id": "a", "role": "assistant", "content": [{"text": _GREET_CUE}]},
+        {"role": "user", "content": [{"text": _GREET_CUE}]},
+        {"id": "b", "role": "user", "content": "text"},
+        {"id": "c", "role": "user", "content": ["raw"]},
+    ):
+        await bridge.feed_provider_event({"type": "conversation.item.created", "item": item})
+    assert bridge._greet_cue_id is None
+    assert _item_text({"content": [{"transcript": "嗯"}]}) == "嗯"
+    assert _item_text({"content": "x"}) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -691,21 +708,18 @@ async def test_bridge_greets_with_the_cue_it_was_given():
     assert bridge._greet_cue_id == "srv-cue"
 
 
-@pytest.mark.parametrize("query,platform,threshold", [
-    ({"platform": "Android"}, "android", 300),
-    ({"platform": "ios"}, "ios", 2500),
-    ({"platform": "web"}, "unknown", 2500),
-    ({}, "unknown", 2500),
+@pytest.mark.parametrize("query,platform", [
+    ({"platform": "Android"}, "android"),
+    ({"platform": "ios"}, "ios"),
+    ({"platform": "web"}, "unknown"),
+    ({}, "unknown"),
 ])
-def test_android_calls_use_their_own_vad_threshold(monkeypatch, query, platform, threshold):
+def test_client_platform_is_logged_from_the_query(query, platform):
     from types import SimpleNamespace
 
     from app.api.realtime import voice as endpoint
 
-    monkeypatch.setattr(endpoint.settings, "stepfun_realtime_vad_threshold", 2500)
-    monkeypatch.setattr(endpoint.settings, "stepfun_realtime_vad_threshold_android", 300)
     assert endpoint._client_platform(SimpleNamespace(query_params=query)) == platform
-    assert endpoint._vad_threshold(platform) == threshold
     assert endpoint._client_platform(SimpleNamespace()) == "unknown"
 
 
@@ -717,7 +731,7 @@ def test_temperature_is_sent_and_clamped():
     from app.services.realtime_voice.protocol import session_update_event
 
     assert "temperature" not in session_update_event(instructions="t", voice="v")["session"]
-    for value, expected in ((0.7, 0.7), (-1, 0.0), (9, 2.0)):
+    for value, expected in ((0.7, 0.7), (-1, 0.0), (9, 1.99)):
         assert session_update_event(instructions="t", voice="v", temperature=value)["session"]["temperature"] == expected
 
 
@@ -764,14 +778,14 @@ def test_history_drops_lines_the_agent_already_said():
 
 def test_slot_names_avoided_lines_after_the_memory_block():
     slot = MemorySlot("BASE")
-    assert slot.instructions() == "BASE"
+    assert slot.note() == ""
     assert slot.avoid(" 第一句 ")
     assert not slot.avoid("第一句")
     assert not slot.avoid("  ")
     slot.merge([{"id": "m", "raw": "喜欢猫", "line": "关于用户：喜欢猫"}], 1)
     assert slot.avoid("第二句") and slot.avoid("第三句")
-    text = slot.instructions()
-    assert text.startswith("BASE\n\n【此刻相关的记忆】")
+    text = slot.note()
+    assert text.startswith("【此刻相关的记忆】")
     assert text.endswith("【别再重复】你这通电话里已经说过「第二句」、「第三句」，接下来换个说法或换个话题，不要再说这句。")
 
 
@@ -781,6 +795,14 @@ _REPEAT = "行吧，那我就当是受宠若惊了。不过你这奖励也太含
 async def _say(bridge, text):
     await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed", "output": [
         {"type": "message", "content": [{"type": "audio", "transcript": text}]}]}})
+
+
+async def _next_note(bridge, provider) -> str:
+    """The note sent with the reply to the next user turn ("" when none)."""
+    before = len(_notes(provider))
+    await _user_says(bridge, "嗯，然后呢")
+    notes = _notes(provider)
+    return notes[-1] if len(notes) > before else ""
 
 
 async def test_repeat_guard_names_a_near_identical_reply_once(caplog):
@@ -793,18 +815,18 @@ async def test_repeat_guard_names_a_near_identical_reply_once(caplog):
     await _say(bridge, _REPEAT)
     await _say(bridge, "对呀")
     await _say(bridge, "对呀")
-    assert not any(e["type"] == "session.update" for e in provider)
+    assert "repeat detected" not in caplog.text
     second = _REPEAT.replace("行吧", "行")
     await _say(bridge, second)
-    updates = [e for e in provider if e["type"] == "session.update"]
-    assert len(updates) == 1
-    assert f"已经说过「{second}」" in updates[0]["session"]["instructions"]
     assert "repeat detected" in caplog.text
+    assert f"已经说过「{second}」" in await _next_note(bridge, provider)
     await _say(bridge, second)
-    assert len([e for e in provider if e["type"] == "session.update"]) == 1
+    assert caplog.text.count("repeat detected") == 1
 
 
-async def test_repeat_guard_window_and_failure_paths(caplog):
+async def test_repeat_guard_window_and_without_a_slot(caplog):
+    caplog.set_level(logging.INFO, logger="app.services.realtime_voice.bridge")
+
     async def retrieve(text, previous):
         return []
 
@@ -812,19 +834,93 @@ async def test_repeat_guard_window_and_failure_paths(caplog):
     for line in (_REPEAT, "今天店里活儿挺多的一直忙到现在", "苏式焖肉面是我们这里的招牌", "你平时都喜欢吃些什么呀告诉我"):
         await _say(bridge, line)
     await _say(bridge, _REPEAT)  # fell out of the last three replies
-    assert not any(e["type"] == "session.update" for e in provider)
-
-    async def broken(event):
-        if event["type"] == "session.update":
-            raise RuntimeError("socket closed")
-
-    bridge, _, client = _bridge(retrieve, send=broken)
-    await _say(bridge, _REPEAT)
-    await _say(bridge, _REPEAT)
-    assert "repeat guard update failed" in caplog.text
-    assert client[-1]["type"] == "response.done"
+    assert "repeat detected" not in caplog.text
+    assert await _next_note(bridge, provider) == ""
 
     bridge, provider, _ = _bridge(retrieve, instructions=None)
     await _say(bridge, _REPEAT)
     await _say(bridge, _REPEAT)
-    assert not any(e["type"] == "session.update" for e in provider)
+    assert "repeat detected" not in caplog.text
+    await _user_says(bridge, "嗯")
+    assert _notes(provider) == []
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: client interrupt, error matching, note ids, stuck segments
+# ---------------------------------------------------------------------------
+
+async def test_client_interrupt_keeps_what_was_said_before_the_cut():
+    saved: list[tuple] = []
+
+    async def save_assistant(text, user_msg_id, interrupted):
+        saved.append((text, interrupted))
+        return "a1"
+
+    bridge, provider, client = _bridge(lambda *_: asyncio.sleep(0, []))
+    bridge._save_assistant_line = save_assistant
+    await _user_says(bridge, "讲个故事吧")
+    await bridge.feed_provider_event({"type": "response.created"})
+    await bridge.feed_provider_event({"type": "response.audio_transcript.delta", "delta": "从前有座山"})
+    await bridge.feed_client_text('{"type": "interrupt"}')
+    assert saved == [("从前有座山", True)]
+    assert client[-1] == {"type": "interrupted"}
+    # The cancelled reply's own transcript is not stored a second time.
+    await bridge.feed_provider_event({"type": "response.done", "response": {"status": "cancelled", "output": [
+        {"type": "message", "content": [{"type": "audio", "transcript": "从前有座山，山里有座庙"}]}]}})
+    assert saved == [("从前有座山", True)]
+    assert any(e["type"] == "response.cancel" for e in provider)
+
+
+async def test_only_an_error_for_the_reply_request_releases_it():
+    async def retrieve(text, previous):
+        return [_memory("m1", "用户在学吉他")]
+
+    bridge, provider, client = _bridge(retrieve)
+    await _user_says(bridge, "我今天练琴了")
+    create = provider[-1]
+    assert create["type"] == "response.create"
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "item_srv_note", "role": "system", "content": [{"type": "input_text", "text": "x"}]}})
+    # A late cancel from the previous reply fails: this reply stays pending.
+    await bridge.feed_provider_event({"type": "error", "error": {
+        "message": "no active response", "event_id": "evt_old_cancel"}})
+    assert bridge._responding and bridge._note_id == "item_srv_note"
+    assert client[-1]["type"] == "warning"
+    # The request itself failing frees the turn and drops its note.
+    await bridge.feed_provider_event({"type": "error", "error": {
+        "message": "bad request", "event_id": create["event_id"]}})
+    assert not bridge._responding
+    assert provider[-1]["type"] == "conversation.item.delete"
+    assert provider[-1]["item_id"] == "item_srv_note"
+
+
+async def test_note_id_is_taken_even_if_the_echoed_text_differs():
+    async def retrieve(text, previous):
+        return [_memory("m1", "用户喜欢爬山")]
+
+    bridge, provider, _ = _bridge(retrieve)
+    await _user_says(bridge, "周末去哪玩")
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "item_a", "role": "system", "content": [{"type": "input_text", "text": "（规范化后的文本）"}]}})
+    # A second system item in the same reply does not replace the first.
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "item_b", "role": "system", "content": []}})
+    await _reply_done(bridge, "去爬山吧")
+    deletes = [e["item_id"] for e in provider if e["type"] == "conversation.item.delete"]
+    assert deletes == ["item_a"]
+
+
+async def test_speech_without_a_stop_ends_after_the_cap(monkeypatch):
+    from app.services.realtime_voice import bridge as bridge_module
+
+    monkeypatch.setattr(bridge_module, "_SEGMENT_MAX_S", 0.01)
+    bridge, provider, _ = _bridge(lambda *_: asyncio.sleep(0, []))
+    await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "stuck"})
+    await bridge.feed_provider_event({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "item_id": "stuck", "text": "我想跟你说件事", "stash": ""})
+    assert bridge._user_speaking()
+    await asyncio.sleep(0.05)
+    await _settle(bridge)
+    assert not bridge._user_speaking()
+    assert provider[-1]["type"] == "response.create"

@@ -39,7 +39,9 @@ def test_resolve_falls_back_to_env_when_unset(loaded_caches):
     resolved = runtime_config.resolve_config_sync(agent_id=None)
     assert resolved.vision_model == settings.doubao_vision_model
     assert resolved.asr_model == settings.dashscope_asr_model
-    assert resolved.tts_model == settings.stepfun_tts_model == "stepaudio-2.5-tts"
+    # Voice messages follow the realtime model; no separate default exists.
+    assert resolved.tts_model == ""
+    assert resolved.realtime_model == settings.dashscope_realtime_model == "qwen3.8-omni-flash-realtime"
     assert resolved.tts_output_probability == settings.tts_output_probability
 
 
@@ -149,10 +151,13 @@ async def test_options_group_multimodal_models_by_kind_and_provider(monkeypatch)
             identifier="fun-asr", provider="dashscope", modelKind="asr",
         ),
         SimpleNamespace(
-            identifier="stepaudio-2.5-tts", provider="stepfun", modelKind="tts",
+            identifier="qwen-tts", provider="dashscope", modelKind="tts",
         ),
         SimpleNamespace(
-            identifier="qwen-tts", provider="dashscope", modelKind="tts",
+            identifier="qwen3.8-omni-flash-realtime", provider="dashscope", modelKind="realtime",
+        ),
+        SimpleNamespace(
+            identifier="qwen3.8-omni-flash-realtime:audio", provider="dashscope", modelKind="realtime",
         ),
     ]
     monkeypatch.setattr(
@@ -163,7 +168,6 @@ async def test_options_group_multimodal_models_by_kind_and_provider(monkeypatch)
     )
     monkeypatch.setattr(api_rc.settings, "ark_api_key", "ark-key")
     monkeypatch.setattr(api_rc.settings, "dashscope_api_key", "dash-key")
-    monkeypatch.setattr(api_rc.settings, "stepfun_api_key", "")
 
     options = await api_rc.list_options()
 
@@ -172,15 +176,14 @@ async def test_options_group_multimodal_models_by_kind_and_provider(monkeypatch)
         "doubao-vision",
     ]
     assert options["media"]["asr"]["by_provider"]["dashscope"] == ["fun-asr"]
-    # Retired DashScope TTS rows are no longer selectable.
-    assert options["media"]["tts"]["by_provider"] == {"stepfun": ["stepaudio-2.5-tts"]}
-    assert options["tts"] == ["stepaudio-2.5-tts"]
+    # Voice messages follow the realtime model; the price-only audio row is
+    # never selectable.
+    assert "tts" not in options["media"]
+    assert options["tts"] == []
+    assert options["media"]["realtime"]["by_provider"] == {"dashscope": ["qwen3.8-omni-flash-realtime"]}
     assert options["media"]["vision"]["providers"][0]["configured"] is True
-    assert options["media"]["tts"]["providers"][0]["configured"] is False
-    assert (
-        options["media"]["tts"]["providers"][0]["credential_env"]
-        == "STEPFUN_API_KEY"
-    )
+    realtime = options["media"]["realtime"]["providers"][0]
+    assert realtime["configured"] is True and realtime["credential_env"] == "DASHSCOPE_API_KEY"
 
 
 @pytest.mark.asyncio

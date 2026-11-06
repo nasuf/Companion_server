@@ -1,16 +1,14 @@
-"""Rolling "relevant memories" block at the end of a call's instructions.
+"""Rolling "relevant memories" note sent with each reply of a call.
 
-Server VAD starts a reply the moment the user stops talking, so nothing can
-be retrieved for that reply without delaying it. Instead each user turn's
-retrieval lands in this block, which the next replies read: "retrieve on
-this turn, use from the next". Follow-ups usually stay on the topic just
-retrieved, so the previous turn's memories already cover them.
+Each user turn's retrieval lands here; the bridge sends the rendered block
+as a system message just before the reply and deletes it once the reply is
+done. DashScope reads instructions changed mid-call only for later sessions,
+so a per-turn item is the only way to reach the very next reply (verified
+2026-11-06). Entries outlive their turn for ``ttl_turns`` turns, because
+follow-ups usually stay on the topic just retrieved.
 
-StepFun has no system conversation items (role=system is rejected) and no
-truncate, so the block lives in ``instructions`` and is replaced as a whole
-through a partial ``session.update`` (merged server-side, ~30 ms, does not
-disturb a reply in progress; verified 2026-11-05). Replacing the block is
-also the eviction: it stays bounded for a 28-minute call.
+The base instructions are fixed for the call; they are kept here only to
+skip memories already present in the core block.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ class _Entry:
 
 
 class MemorySlot:
-    """Owns the call's instructions: a fixed base plus the rolling block.
+    """The rolling memory block and the lines the agent should not repeat.
 
     Entries are keyed by memory id (or text). A memory hit again is
     refreshed; one not hit for ``ttl_turns`` user turns drops out. The block
@@ -64,8 +62,9 @@ class MemorySlot:
     def lines(self) -> list[str]:
         return [entry.line for entry in self._entries]
 
-    def instructions(self) -> str:
-        parts = [self._base, self._rendered]
+    def note(self) -> str:
+        """Per-reply context: the memory block and any lines not to repeat."""
+        parts = [self._rendered]
         if self._avoided:
             quoted = "、".join(f"「{line}」" for line in self._avoided)
             parts.append(f"【别再重复】你这通电话里已经说过{quoted}，接下来换个说法或换个话题，不要再说这句。")

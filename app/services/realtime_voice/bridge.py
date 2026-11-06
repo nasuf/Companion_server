@@ -1,19 +1,21 @@
-"""Voice call bridge: client audio ↔ StepFun provider ↔ memory tools.
+"""Voice call bridge: client audio ↔ DashScope Qwen-Omni realtime ↔ memory.
 
-With server_vad enabled, StepFun handles turn detection, barge-in and
-response triggering natively. This bridge:
-  1. Forwards client PCM to the provider
-  2. Retrieves memories in the background on each user transcript and puts
-     them in the instructions for the following replies (memory_slot.py);
-     the recall_memory tool is a fallback for explicit questions
-  4. Persists transcripts (extraction deferred to call end)
-  5. Relays audio deltas and status events to the client
+Server VAD finds the end of each user turn but neither replies nor cancels
+on its own (see protocol.py). For every turn the bridge:
+  1. starts memory retrieval as soon as the user stops talking, from the
+     live transcript;
+  2. drops turns that are only the agent's own voice leaking back into the
+     microphone, or a one-word backchannel while the agent is talking;
+  3. waits briefly for the retrieval, sends this turn's memories as a system
+     note, asks for the reply, and deletes the note once the reply is done;
+  4. persists transcripts (extraction runs at call end) and relays audio.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import math
@@ -23,6 +25,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from difflib import SequenceMatcher
 
+from app.services.realtime_voice.billing import split_usage
 from app.services.realtime_voice.instructions import format_turn_memories, spoken_key
 from app.services.realtime_voice.memory_slot import MemorySlot
 from app.services.realtime_voice.protocol import (
@@ -36,15 +39,13 @@ from app.services.realtime_voice.protocol import (
     parse_client_message,
     response_cancel_event,
     response_create_event,
-    session_instructions_event,
+    system_note_event,
 )
 
 logger = logging.getLogger(__name__)
 
-# StepFun answers a bare response.create with an empty reply (1 output
-# token), whatever the instructions say. A user-role cue item makes the agent
-# open the call (~0.6 s to first audio, verified 2026-11-05); it is deleted
-# once the greeting is done, so later turns and extraction never see it.
+# A bare response.create gives no greeting to answer, so a one-off user cue
+# makes the agent open the call; it is deleted once the greeting is done.
 # The endpoint passes a cue that knows how long ago the two last talked.
 _GREET_CUE = "（用户给你打来电话，你接起来先开口，简短自然地打个招呼。）"
 
@@ -55,9 +56,42 @@ _REPEAT_WINDOW = 3
 _REPEAT_RATIO = 0.8
 _REPEAT_MIN_CHARS = 8
 
-# ---------------------------------------------------------------------------
-# Callback type aliases
-# ---------------------------------------------------------------------------
+# Server VAD hears the agent's own voice leaking back from the speaker at any
+# threshold (2026-11-06), so speech that starts while the agent is audible is
+# held until its transcript shows whether it is the user or the echo. The
+# client plays audio after it is generated: playback is estimated from the
+# audio sent (plus the client's start-up buffer), and held for this tail.
+_CLIENT_LEAD_S = 0.25
+_ECHO_TAIL_S = 0.5
+# speech_started is placed on the local clock from its audio_start_ms; a
+# result further back than this means the provider counts differently.
+_MAX_VAD_LAG_S = 3.0
+# Echo cannot precede the agent's first audio; the speech start is only an
+# estimate, so the audible window opens this much earlier.
+_VAD_SLACK_S = 0.3
+# Share of a transcript's characters found, in order, in what the agent just
+# said. Recognition of echo swaps homophones ("喂，枫，你找我啊" came back as
+# "风，你找我啊", 0.8; 2026-11-06), so the bar sits below that.
+_ECHO_MATCH = 0.75
+# In the tail, only a transcript this long can be echo: a quick "吃了" right
+# after "你吃了吗" is an answer.
+_TAIL_ECHO_MIN_CHARS = 4
+# Characters of live transcript that confirm the user talks over the agent.
+# Echo from the speaker is often garbled ("喂，枫" heard as "外封",
+# 2026-11-06), so a short fragment that matches nothing proves nothing.
+_BARGE_IN_MIN_CHARS = 4
+# Longest stretch of user speech before the segment is ended without a stop.
+_SEGMENT_MAX_S = 60.0
+# Short words that do stop the agent: the user wants the floor. Other short
+# speech over the agent ("嗯", "对", "哈哈") is a backchannel or echo.
+_STOP_WORDS = frozenset({
+    "等等", "等一下", "等下", "等会", "等会儿", "停", "停一下", "停停", "打住", "别说了",
+    "不是", "不对", "什么", "慢着",
+})
+# A final transcript this close to its live preview keeps the retrieval
+# started from the preview.
+_SAME_QUERY_RATIO = 0.8
+
 SendProvider = Callable[[dict], Awaitable[None]]
 SendClient = Callable[[dict], Awaitable[None]]
 # (query, previous assistant line) -> memory_lines() entries
@@ -65,11 +99,40 @@ RetrieveMemories = Callable[[str, str | None], Awaitable[list[dict[str, str]]]]
 SaveUserLine = Callable[[str], Awaitable[str | None]]
 SaveAssistantLine = Callable[[str, str | None, bool], Awaitable[str | None]]
 
+def _echo_share(heard: str, said: str) -> float:
+    """Share of ``heard`` that appears, in order, in ``said`` (both keys)."""
+    if not heard or not said:
+        return 0.0
+    matcher = SequenceMatcher(None, heard, said, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / len(heard)
+
+
+class _Segment:
+    """One stretch of microphone speech found by server VAD."""
+
+    __slots__ = ("item_id", "mid_reply", "surfaced", "live", "query", "done")
+
+    def __init__(self, item_id: str | None, *, held: bool, mid_reply: bool = False) -> None:
+        self.item_id = item_id
+        # Started while the agent was playing (not just in the tail after it).
+        self.mid_reply = mid_reply
+        # The client was told (speech.started) and has stopped playback. Held
+        # segments (started while the agent was audible) wait for their live
+        # transcript: they may be the agent's own voice in the microphone.
+        self.surfaced = not held
+        self.live = ""
+        # Text the memory retrieval for this segment was started with.
+        self.query = ""
+        self.done = False
+
+
 class VoiceBridge:
     """Stateful bridge for one voice call.
 
     Thread safety: all public methods acquire ``_lock`` so concurrent
-    calls from the client pump and provider pump are serialized.
+    calls from the client pump and provider pump are serialized. Waiting
+    for memories happens in a task outside the lock, so audio keeps flowing.
     """
 
     def __init__(
@@ -80,7 +143,8 @@ class VoiceBridge:
         retrieve_memories: RetrieveMemories,
         save_user_line: SaveUserLine,
         save_assistant_line: SaveAssistantLine,
-        retrieval_timeout_s: float = 2.0,
+        retrieval_timeout_s: float = 1.5,
+        memory_wait_s: float = 0.6,
         instructions: str | None = None,
         greet_cue: str | None = None,
     ) -> None:
@@ -90,7 +154,8 @@ class VoiceBridge:
         self._save_user_line = save_user_line
         self._save_assistant_line = save_assistant_line
         self._retrieval_timeout_s = retrieval_timeout_s
-        # None: the session's instructions are never rewritten (tests, tools only).
+        self._memory_wait_s = memory_wait_s
+        # None: replies carry no memory note (tests, tools only).
         self._slot = MemorySlot(instructions) if instructions else None
         self._turn = 0
         self._last_assistant_text = ""
@@ -99,26 +164,57 @@ class VoiceBridge:
         self._lock = asyncio.Lock()
         self._closed = False
 
-        # Transcript tracking
-        self._user_text = ""
+        # Transcript tracking: speech segments by provider item id
+        self._segments: dict[str, _Segment] = {}
+        # Ended segments: a transcript arriving after the watchdog gave up
+        # on it must not become a second turn.
+        self._finished: deque[str] = deque(maxlen=32)
+        self._watchdogs: set[asyncio.Task] = set()
         self._user_message_id: str | None = None
         self._assistant_parts: list[str] = []
 
-        # Audio output tracking
+        # Reply and audio output tracking
         self._audio_seq = 0
         self._output_active = False
+        # A reply was requested and has not finished (covers the gap before
+        # response.created, so a second request is never sent alongside).
         self._responding = False
+        # A user turn was committed and has not been answered yet; the reply
+        # goes out once this turn's memories are in (or the wait ran out).
+        self._unanswered = False
+        self._memory_ready = False
+        # recall_memory is running between a reply and its follow-up.
+        self._tool_running = False
+        # response.created seen for the requested reply; an error before it
+        # means the reply never started.
+        self._reply_seen = False
+        # Waits for this turn's memories, then asks for the reply.
+        self._reply_task: asyncio.Task | None = None
+        # Runs recall_memory between a tool call and its follow-up reply.
+        self._tool_task: asyncio.Task | None = None
+        # Estimated client playback of the latest reply (monotonic seconds).
+        self._playback_started = 0.0
+        self._playback_until = 0.0
+        # Local time of the first microphone audio sent to the provider.
+        self._mic_t0: float | None = None
         # Set on barge-in: audio and the final transcript of the interrupted
         # response are dropped until the provider starts the next one.
         self._discarding = False
+
+        # Per-reply system note: text sent, then its provider item id.
+        self._note_text: str | None = None
+        self._note_id: str | None = None
+        # event_id of the pending response.create: an error naming another
+        # request (a late cancel, say) must not release this reply.
+        self._create_event_id: str | None = None
 
         # Greeting cue: sent, then its provider item id once created
         self._greet_cue = greet_cue or _GREET_CUE
         self._greet_cue_sent = False
         self._greet_cue_id: str | None = None
 
-        # Function call accumulation
-        self._pending_calls: dict[str, dict] = {}  # call_id -> {name, arguments}
+        # Tool calls of the current response, run once it is done
+        self._ready_calls: list[dict] = []
 
         # Most recent retrieval, for the recall_memory fallback
         self._prefetch_result: list[dict[str, str]] | None = None
@@ -132,9 +228,14 @@ class VoiceBridge:
         # Microphone input seen by the server, for diagnosing silent calls
         self._mic = _MicMeter()
         self._speech_turns = 0
+        self._echo_dropped = 0
 
-        # Provider token usage, summed over every response.done
-        self._usage = {"input": 0, "output": 0, "cached_input": 0, "responses": 0}
+        # Provider token usage per modality, summed over every response.done
+        self._usage = {
+            "input_text": 0, "input_audio": 0,
+            "output_text": 0, "output_audio": 0,
+            "responses": 0,
+        }
 
     # ------------------------------------------------------------------
     # Public entry points (all acquire lock)
@@ -151,7 +252,7 @@ class VoiceBridge:
             await self._feed_client_text(text)
 
     async def feed_provider_event(self, event: dict) -> None:
-        """Handle an event from the StepFun provider."""
+        """Handle an event from the DashScope realtime session."""
         async with self._lock:
             await self._feed_provider_event(event)
 
@@ -161,6 +262,9 @@ class VoiceBridge:
             return
         self._closed = True
         self._cancel_prefetch()
+        for task in (self._reply_task, self._tool_task, *self._watchdogs):
+            if task is not None and not task.done():
+                task.cancel()
 
     @property
     def message_ids(self) -> list[str]:
@@ -175,15 +279,18 @@ class VoiceBridge:
     @property
     def mic_summary(self) -> str:
         """One log line: how much microphone audio arrived and how loud."""
-        return f"{self._mic.summary()} speech_turns={self._speech_turns}"
+        return (
+            f"{self._mic.summary()} speech_turns={self._speech_turns}"
+            f" echo_dropped={self._echo_dropped}"
+        )
 
     @property
     def usage(self) -> dict[str, int]:
-        """Token usage StepFun reported for this call (billed per token)."""
+        """Token usage the provider reported for this call, per modality."""
         return dict(self._usage)
 
     # ------------------------------------------------------------------
-    # Audio forwarding (server_vad handles turn detection)
+    # Audio forwarding
     # ------------------------------------------------------------------
 
     async def _feed_audio(self, pcm: bytes) -> None:
@@ -192,6 +299,8 @@ class VoiceBridge:
         pcm = decode_client_pcm(pcm) or b""
         if not pcm:
             return
+        if self._mic_t0 is None:
+            self._mic_t0 = time.monotonic()
         if self._mic.add(pcm):
             logger.info("[realtime-voice] mic first 3s %s", self._mic.summary())
         await self._send_provider(append_audio_event(pcm))
@@ -231,25 +340,25 @@ class VoiceBridge:
             return
         kind = event.get("type")
 
-        # --- VAD events ---
+        # --- User speech (server VAD + live transcription) ---
         if kind == "input_audio_buffer.speech_started":
-            await self._on_speech_started()
+            await self._on_speech_started(event)
+            return
+        if kind == "conversation.item.input_audio_transcription.delta":
+            await self._on_transcription_delta(event)
             return
         if kind == "input_audio_buffer.speech_stopped":
-            await self._on_speech_stopped()
+            await self._on_speech_stopped(event)
             return
-
-        # --- User transcript ---
         if kind == "conversation.item.input_audio_transcription.completed":
-            transcript = event.get("transcript")
-            text = transcript.strip() if isinstance(transcript, str) else ""
-            await self._on_user_transcript(text)
+            await self._on_user_transcript(event)
             return
 
         # --- Response lifecycle ---
         if kind == "response.created":
+            # Replies are only ever requested by this bridge; mark defensively.
             self._responding = True
-            self._discarding = False
+            self._reply_seen = True
             return
         if kind == "response.audio.delta":
             await self._on_audio_delta(event.get("delta"))
@@ -259,115 +368,211 @@ class VoiceBridge:
             if isinstance(delta, str) and delta and not self._discarding:
                 self._assistant_parts.append(delta)
             return
-        if kind == "response.audio_transcript.done":
-            await self._on_assistant_transcript_done(event)
-            return
         if kind == "response.audio.done":
             if self._output_active:
                 self._output_active = False
                 await self._send_client({"type": "audio.done"})
             return
+        if kind == "response.function_call_arguments.done":
+            if not self._discarding and event.get("call_id"):
+                self._ready_calls.append({
+                    "call_id": str(event["call_id"]),
+                    "name": str(event.get("name") or ""),
+                    "arguments": str(event.get("arguments") or ""),
+                })
+            return
         if kind == "response.done":
             await self._on_response_done(event)
             return
 
-        # --- Function call events ---
+        # --- Items we add for one reply: greeting cue, memory note ---
         if kind == "conversation.item.created":
-            item = event.get("item")
-            if self._is_greet_cue(item, self._greet_cue):
-                self._greet_cue_id = item["id"]
-                return
-            if isinstance(item, dict) and item.get("type") == "function_call":
-                call_id = item.get("call_id") or ""
-                name = item.get("name") or ""
-                if call_id:
-                    self._pending_calls[call_id] = {"name": name, "arguments": ""}
-            return
-        if kind == "response.function_call_arguments.delta":
-            call_id = event.get("call_id") or ""
-            delta = event.get("delta") or ""
-            if call_id in self._pending_calls:
-                self._pending_calls[call_id]["arguments"] += delta
-            return
-        if kind == "response.function_call_arguments.done":
-            call_id = event.get("call_id") or ""
-            args_str = event.get("arguments") or ""
-            if call_id in self._pending_calls:
-                self._pending_calls[call_id]["arguments"] = args_str
-                await self._execute_tool_call(call_id)
+            await self._on_item_created(event.get("item"))
             return
 
-        # --- Errors ---
         if kind == "error":
             await self._on_provider_error(event)
             return
 
-    # ------------------------------------------------------------------
-    # VAD callbacks (from StepFun server_vad)
-    # ------------------------------------------------------------------
+    def _speech_time(self, event: dict) -> float:
+        """When the speech began, from the provider's own audio timeline.
 
-    async def _on_speech_started(self) -> None:
-        """Barge-in: stop the reply now and let the user finish.
-
-        The client drops its queued audio on speech.started. A reply still
-        being generated is cancelled here and its remaining audio is not
-        forwarded; one that already finished needs nothing server-side.
+        speech_started can arrive over a second after the speech it reports
+        (2026-11-06); the client streams in real time, so audio_start_ms
+        from the first audio sent places it on the local clock.
         """
+        now = time.monotonic()
+        start_ms = event.get("audio_start_ms")
+        if self._mic_t0 is None or not isinstance(start_ms, (int, float)) or start_ms < 0:
+            return now
+        at = self._mic_t0 + start_ms / 1000
+        # Outside a plausible lag the timeline is not the one assumed here.
+        return at if now - _MAX_VAD_LAG_S <= at <= now else now
+
+    def _agent_state(self, at: float | None = None) -> tuple[bool, bool]:
+        """(playing, in_tail) at ``at``: generating or playing, or just finished."""
+        now = time.monotonic() if at is None else at
+        started = self._playback_started
+        playing = bool(started) and started - _VAD_SLACK_S <= now < self._playback_until
+        in_tail = not playing and self._playback_until <= now < self._playback_until + _ECHO_TAIL_S
+        return playing, in_tail
+
+    def _agent_key(self) -> str:
+        # Echo is of what is playing: the reply in progress or the one before.
+        last = self._recent_replies[-1] if self._recent_replies else ""
+        return last + spoken_key("".join(self._assistant_parts))
+
+    # ------------------------------------------------------------------
+    # User speech: barge-in, echo and backchannel filtering
+    # ------------------------------------------------------------------
+
+    def _segment_for(self, event: dict) -> _Segment | None:
+        item_id = event.get("item_id")
+        return self._segments.get(item_id) if isinstance(item_id, str) else None
+
+    def _user_speaking(self) -> bool:
+        return any(seg.surfaced and not seg.done for seg in self._segments.values())
+
+    async def _on_speech_started(self, event: dict) -> None:
+        item_id = event.get("item_id") if isinstance(event.get("item_id"), str) else None
+        playing, in_tail = self._agent_state(self._speech_time(event))
+        segment = _Segment(item_id, held=playing or in_tail, mid_reply=playing)
+        if item_id:
+            self._segments[item_id] = segment
+            # Bounds a segment whose speech_stopped never comes, which would
+            # otherwise hold every later reply.
+            self._watch_segment(segment, after_s=_SEGMENT_MAX_S)
         self._speech_turns += 1
-        interrupted = self._output_active or self._responding
-        cancelled = False
-        if self._responding:
-            try:
-                await self._send_provider(response_cancel_event())
-                cancelled = True
-            except Exception:
-                logger.warning("[realtime-voice] cancel on barge-in failed")
-        # One line per detected user turn: shows whether VAD fired while the
-        # agent was talking and whether generation had to be cancelled.
+        if segment.surfaced:
+            if self._responding:
+                # The user talks before the reply is audible: stop it.
+                await self._barge_in(segment)
+            else:
+                # A pending reply waits until this segment ends
+                # (_maybe_reply): more words join the turn.
+                await self._send_client({"type": "speech.started"})
+        # Speech over the agent is held: it may be the agent's own voice
+        # coming back through the microphone. Live transcription decides.
+
+    async def _on_transcription_delta(self, event: dict) -> None:
+        segment = self._segment_for(event)
+        if segment is None:
+            return
+        segment.live = f"{event.get('text') or ''}{event.get('stash') or ''}"
+        if segment.surfaced:
+            return
+        key = spoken_key(segment.live)
+        if key in _STOP_WORDS or (
+            len(key) >= _BARGE_IN_MIN_CHARS and _echo_share(key, self._agent_key()) < _ECHO_MATCH
+        ):
+            await self._barge_in(segment)
+
+    async def _barge_in(self, segment: _Segment) -> None:
+        """The user talks over the agent: stop the reply and let them finish."""
+        segment.surfaced = True
+        generating = self._responding
+        cancelled = await self._cut_reply() if generating else False
+        self._output_active = False
+        self._playback_started = self._playback_until = 0.0
         logger.info(
             "[realtime-voice] speech started generating=%s cancelled=%s",
-            interrupted, cancelled,
+            generating, cancelled,
         )
-        if interrupted:
-            self._discarding = True
-        self._output_active = False
-        self._responding = False
-        # Save partial assistant transcript if interrupted
-        partial = "".join(self._assistant_parts).strip()
-        if partial and interrupted:
-            try:
-                self._remember_id(
-                    await self._save_assistant_line(partial, self._user_message_id, True),
-                )
-                self._collect_transcript("assistant", partial, interrupted=True)
-            except Exception:
-                logger.warning("[realtime-voice] interrupted transcript not stored")
-            self._assistant_parts = []
         await self._send_client({"type": "speech.started"})
 
-    async def _on_speech_stopped(self) -> None:
-        """User stopped speaking — StepFun will auto-commit and start response."""
+    async def _cut_reply(self) -> bool:
+        """Cancel the reply in progress and store what was said before the cut."""
+        cancelled = False
+        try:
+            await self._send_provider(response_cancel_event())
+            cancelled = True
+        except Exception:
+            logger.warning("[realtime-voice] cancel failed")
+        self._discarding = True
+        partial = "".join(self._assistant_parts).strip()
+        if partial:
+            await self._store_assistant(partial, interrupted=True)
+        self._assistant_parts = []
+        return cancelled
+
+    async def _on_speech_stopped(self, event: dict) -> None:
+        segment = self._segment_for(event)
+        if segment is None:
+            return
+        self._watch_segment(segment)
+        if not segment.surfaced:
+            return
         await self._send_client({"type": "speech.stopped"})
+        # Retrieval starts now, from the live transcript; the final one
+        # arrives about 0.2 s later and restarts it only if it differs.
+        if spoken_key(segment.live):
+            segment.query = segment.live
+            self._start_prefetch(segment.live)
 
-    # ------------------------------------------------------------------
-    # Transcript handling
-    # ------------------------------------------------------------------
+    def _watch_segment(self, segment: _Segment, *, after_s: float = 4) -> None:
+        """A stopped segment whose transcript never arrives still ends."""
+        async def watch() -> None:
+            await asyncio.sleep(after_s)
+            async with self._lock:
+                if not segment.done and segment.item_id in self._segments:
+                    logger.warning("[realtime-voice] transcript missing; using live text")
+                    await self._finish_segment(segment, segment.live.strip())
 
-    async def _on_user_transcript(self, text: str) -> None:
-        """User's speech was transcribed. Save it and prefetch memories."""
-        self._user_text = text
+        task = asyncio.create_task(watch())
+        self._watchdogs.add(task)
+        task.add_done_callback(self._watchdogs.discard)
+
+    async def _on_user_transcript(self, event: dict) -> None:
+        transcript = event.get("transcript")
+        text = transcript.strip() if isinstance(transcript, str) else ""
+        if event.get("item_id") in self._finished:
+            return
+        segment = self._segment_for(event)
+        if segment is None:
+            # No speech_started seen for it: treat as an ordinary user turn.
+            item_id = event.get("item_id") if isinstance(event.get("item_id"), str) else None
+            segment = _Segment(item_id, held=False)
+        await self._finish_segment(segment, text)
+
+    async def _finish_segment(self, segment: _Segment, text: str) -> None:
+        """The provider's final transcript for one stretch of speech."""
+        if segment.done:
+            return
+        segment.done = True
+        if segment.item_id:
+            self._segments.pop(segment.item_id, None)
+            self._finished.append(segment.item_id)
+        key = spoken_key(text)
+        if not segment.surfaced:
+            verdict = self._held_verdict(segment, key)
+            if verdict != "user":
+                if verdict == "echo" and key:
+                    self._echo_dropped += 1
+                logger.info("[realtime-voice] %s dropped len=%d", verdict, len(key))
+                await self._discard_item(segment.item_id)
+                await self._maybe_reply()
+                return
+            await self._barge_in(segment)
+        if not key:
+            await self._discard_item(segment.item_id)
+            await self._maybe_reply()
+            return
+
+        logger.info("[realtime-voice] user transcript len=%d", len(text))
         self._user_message_id = None
-        if text:
-            logger.info("[realtime-voice] user transcript len=%d", len(text))
-            try:
-                self._user_message_id = await self._save_user_line(text)
-                self._remember_id(self._user_message_id)
-            except Exception:
-                logger.warning("[realtime-voice] user transcript not stored")
-            self._collect_transcript("user", text)
-            # Never awaited here: the reply to this turn is already starting.
-            self._turn += 1
+        try:
+            self._user_message_id = await self._save_user_line(text)
+            self._remember_id(self._user_message_id)
+        except Exception:
+            logger.warning("[realtime-voice] user transcript not stored")
+        self._collect_transcript("user", text)
+        self._turn += 1
+        started = spoken_key(segment.query)
+        if not started or SequenceMatcher(None, started, key).ratio() < _SAME_QUERY_RATIO:
             self._start_prefetch(text)
+        self._unanswered = True
+        self._memory_ready = False
+        self._reply_task = asyncio.create_task(self._reply_when_ready(self._turn))
         if not self._closed:
             await self._send_client({
                 "type": "transcript.user",
@@ -375,46 +580,138 @@ class VoiceBridge:
                 "message_id": self._user_message_id,
             })
 
-    async def _on_assistant_transcript_done(self, event: dict) -> None:
-        """Full transcript of one assistant audio segment."""
-        text = assistant_transcript(event) or "".join(self._assistant_parts).strip()
-        if not text:
+    def _held_verdict(self, segment: _Segment, key: str) -> str:
+        """echo, backchannel or user, for speech that began over the agent."""
+        if not key:
+            return "echo"
+        if segment.mid_reply:
+            if key in _STOP_WORDS:
+                return "user"
+            if len(key) < _BARGE_IN_MIN_CHARS:
+                return "backchannel"
+            return "echo" if _echo_share(key, self._agent_key()) >= _ECHO_MATCH else "user"
+        # Tail after playback: the reply has finished, so compare with it.
+        last = self._recent_replies[-1] if self._recent_replies else ""
+        if _echo_share(key, last) < _ECHO_MATCH:
+            return "user"
+        # A short one is echo only if it is how the line ended ("饭呢" after
+        # "做晚饭呢"); "吃了" after "你吃了吗" is an answer.
+        if len(key) >= _TAIL_ECHO_MIN_CHARS or last.endswith(key):
+            return "echo"
+        return "user"
+
+    async def _discard_item(self, item_id: str | None) -> None:
+        """Remove a turn that gets no reply, so later replies never see it."""
+        if not item_id:
             return
-        # Don't overwrite if we already have the text from delta accumulation
-        self._assistant_parts = []
+        try:
+            await self._send_provider(item_delete_event(item_id))
+        except Exception:
+            logger.warning("[realtime-voice] discarded turn not removed")
+
+    # ------------------------------------------------------------------
+    # Replies: memories first, then speak
+    # ------------------------------------------------------------------
+
+    async def _reply_when_ready(self, turn: int) -> None:
+        """Wait (bounded) for this turn's retrieval, then ask for the reply."""
+        task = self._prefetch_task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=self._memory_wait_s)
+            except (TimeoutError, asyncio.CancelledError):
+                if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+                    raise
+            except Exception:
+                pass
+        async with self._lock:
+            if self._closed or turn != self._turn:
+                return
+            self._memory_ready = True
+            await self._maybe_reply()
+
+    async def _maybe_reply(self) -> None:
+        if (
+            self._closed
+            or not self._unanswered
+            or not self._memory_ready
+            or self._responding
+            or self._tool_running
+            or self._user_speaking()
+        ):
+            return
+        await self._request_reply()
+
+    async def _request_reply(self, *, with_note: bool = True) -> None:
+        note = self._slot.note() if with_note and self._slot is not None else ""
+        self._unanswered = False
+        self._responding = True
+        self._reply_seen = False
+        self._discarding = False
+        if note:
+            self._note_text = note
+            self._note_id = None
+            await self._send_provider(system_note_event(note))
+        create = response_create_event()
+        self._create_event_id = create["event_id"]
+        await self._send_provider(create)
+
+    # ------------------------------------------------------------------
+    # Provider-side items and the end of each reply
+    # ------------------------------------------------------------------
+
+    async def _on_item_created(self, item: object) -> None:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            return
+        text = _item_text(item)
+        if item.get("role") == "user" and text == self._greet_cue and self._greet_cue_sent:
+            self._greet_cue_id = item["id"]
+        elif item.get("role") == "system" and self._note_text and self._note_id is None:
+            # Notes are the only system items sent mid-call; DashScope
+            # replaces a client-chosen id, so take the one it reports.
+            self._note_id = item["id"]
+
+    async def _on_audio_delta(self, delta: object) -> None:
+        if self._discarding or not isinstance(delta, str) or not delta:
+            return
+        try:
+            pcm_bytes = len(base64.b64decode(delta, validate=True))
+        except (binascii.Error, ValueError):
+            return
+        if not self._output_active:
+            self._output_active = True
+            self._audio_seq = 0
+            await self._send_client({"type": "response.started"})
+        # Generation runs ahead of playback; track when the client will stop
+        # playing, so speech in the meantime is checked for echo.
+        now = time.monotonic()
+        if self._playback_until < now:
+            # A new stretch of playback: audible from roughly now (the client
+            # buffers briefly first).
+            self._playback_started = now
+            self._playback_until = now + _CLIENT_LEAD_S
+        self._playback_until += pcm_bytes / (SAMPLE_RATE * 2)
+        self._audio_seq += 1
+        await self._send_client({"type": "audio.delta", "seq": self._audio_seq, "audio": delta})
 
     async def _on_response_done(self, event: dict) -> None:
-        """Response finished — save complete assistant transcript."""
         self._responding = False
         self._output_active = False
         await self._drop_greet_cue()
+        await self._drop_note()
         text = assistant_transcript(event) or "".join(self._assistant_parts).strip()
         self._assistant_parts = []
-        if self._discarding:
+        discarded = self._discarding
+        if discarded:
             # The barge-in already stored what was said before the cut.
             self._discarding = False
             text = ""
-
-        status = ""
         response = event.get("response")
-        if isinstance(response, dict) and isinstance(response.get("status"), str):
-            status = response["status"]
-        interrupted = status in {"cancelled", "incomplete"}
+        status = response.get("status") if isinstance(response, dict) else None
+        interrupted = discarded or status in {"cancelled", "incomplete"}
         self._record_usage(response)
-
         if text:
-            logger.info(
-                "[realtime-voice] assistant transcript len=%d interrupted=%s",
-                len(text), interrupted,
-            )
-            try:
-                self._remember_id(
-                    await self._save_assistant_line(text, self._user_message_id, interrupted),
-                )
-                self._collect_transcript("assistant", text, interrupted=interrupted)
-                self._last_assistant_text = text
-            except Exception:
-                logger.warning("[realtime-voice] assistant transcript not stored")
+            await self._store_assistant(text, interrupted=interrupted)
             await self._guard_repeat(text)
             if not self._closed:
                 await self._send_client({
@@ -422,92 +719,85 @@ class VoiceBridge:
                     "text": text,
                     "interrupted": interrupted,
                 })
-
         await self._send_client({"type": "response.done", "interrupted": interrupted})
+        calls, self._ready_calls = self._ready_calls, []
+        if calls and not interrupted:
+            self._tool_running = True
+            self._tool_task = asyncio.create_task(self._run_tools(calls))
+            return
+        # A turn that arrived while this reply was going gets its own now.
+        await self._maybe_reply()
+
+    async def _store_assistant(self, text: str, *, interrupted: bool) -> None:
+        logger.info(
+            "[realtime-voice] assistant transcript len=%d interrupted=%s",
+            len(text), interrupted,
+        )
+        try:
+            self._remember_id(
+                await self._save_assistant_line(text, self._user_message_id, interrupted),
+            )
+            self._collect_transcript("assistant", text, interrupted=interrupted)
+            self._last_assistant_text = text
+        except Exception:
+            logger.warning("[realtime-voice] assistant transcript not stored")
+
+    async def _drop_note(self) -> None:
+        note_id, self._note_id, self._note_text = self._note_id, None, None
+        if not note_id:
+            return
+        try:
+            await self._send_provider(item_delete_event(note_id))
+        except Exception:
+            logger.warning("[realtime-voice] memory note not removed")
 
     def _record_usage(self, response: object) -> None:
         usage = response.get("usage") if isinstance(response, dict) else None
         if not isinstance(usage, dict):
             return
-        details = usage.get("input_token_details")
-        cached = details.get("cached_tokens") if isinstance(details, dict) else 0
-        for key, value in (
-            ("input", usage.get("input_tokens")),
-            ("output", usage.get("output_tokens")),
-            ("cached_input", cached),
-        ):
-            if isinstance(value, int) and value > 0:
-                self._usage[key] += value
+        for key, value in split_usage(usage).items():
+            self._usage[key] += value
         self._usage["responses"] += 1
 
     # ------------------------------------------------------------------
-    # Audio relay
+    # recall_memory tool
     # ------------------------------------------------------------------
 
-    async def _on_audio_delta(self, delta: object) -> None:
-        if self._discarding or not isinstance(delta, str) or not delta:
-            return
-        try:
-            base64.b64decode(delta, validate=True)
-        except Exception:
-            return
-        if not self._output_active:
-            self._output_active = True
-            self._audio_seq = 0
-            await self._send_client({"type": "response.started"})
-        self._audio_seq += 1
-        await self._send_client({
-            "type": "audio.delta",
-            "seq": self._audio_seq,
-            "audio": delta,
-        })
-
-    # ------------------------------------------------------------------
-    # Function call execution (recall_memory tool)
-    # ------------------------------------------------------------------
-
-    async def _execute_tool_call(self, call_id: str) -> None:
-        """Execute a pending tool call and return result to provider."""
-        call_info = self._pending_calls.pop(call_id, None)
-        if not call_info:
-            return
-
-        name = call_info["name"]
-        args_str = call_info["arguments"]
-        logger.info("[realtime-voice] tool_call name=%s call_id=%s", name, call_id[:16])
-
-        if name != "recall_memory":
-            # Unknown tool — return error to model
-            await self._send_provider(function_call_output_event(
-                call_id=call_id,
-                output=json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False),
-            ))
-            await self._send_provider(response_create_event())
-            return
-
-        # Parse the query argument
-        query = ""
-        try:
-            args = json.loads(args_str) if args_str else {}
-            query = str(args.get("query") or "")
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-        # Try prefetch cache first, then fetch
-        entries = await self._get_memories(query)
-        output = format_turn_memories(
-            [entry["line"] for entry in entries or []], char_budget=1600,
-        ) or "没有找到相关记忆。"
-
-        await self._send_provider(function_call_output_event(
-            call_id=call_id,
-            output=output,
-        ))
-        await self._send_provider(response_create_event())
+    async def _run_tools(self, calls: list[dict]) -> None:
+        """Answer each tool call, then ask for the follow-up reply."""
+        outputs: list[tuple[str, str]] = []
+        for call in calls:
+            call_id = call["call_id"]
+            logger.info("[realtime-voice] tool_call name=%s call_id=%s", call["name"], call_id[:16])
+            if call["name"] != "recall_memory":
+                outputs.append((call_id, json.dumps({"error": f"未知工具: {call['name']}"}, ensure_ascii=False)))
+                continue
+            query = ""
+            try:
+                args = json.loads(call["arguments"]) if call["arguments"] else {}
+                query = str(args.get("query") or "") if isinstance(args, dict) else ""
+            except (json.JSONDecodeError, TypeError):
+                pass
+            entries = await self._get_memories(query)
+            output = format_turn_memories(
+                [entry["line"] for entry in entries or []], char_budget=1600,
+            ) or "没有找到相关记忆。"
+            outputs.append((call_id, output))
+        async with self._lock:
+            self._tool_running = False
+            if self._closed:
+                return
+            for call_id, output in outputs:
+                await self._send_provider(function_call_output_event(call_id=call_id, output=output))
+            if self._unanswered:
+                # The user moved on; their new turn gets the reply, with the
+                # tool output already in context.
+                await self._maybe_reply()
+            elif not self._user_speaking() and not self._responding:
+                await self._request_reply(with_note=False)
 
     async def _get_memories(self, query: str) -> list[dict[str, str]] | None:
         """Get memories: use prefetch cache if available, else fetch live."""
-        # If prefetch is running for a similar query, wait for it
         if self._prefetch_task and not self._prefetch_task.done():
             try:
                 await asyncio.wait_for(asyncio.shield(self._prefetch_task), timeout=self._retrieval_timeout_s)
@@ -515,14 +805,10 @@ class VoiceBridge:
                 logger.warning("[realtime-voice] prefetch wait timed out")
             except Exception:
                 pass
-
-        # Use prefetch result if query is close enough
         if self._prefetch_result:
             result = self._prefetch_result
             self._prefetch_result = None
             return result
-
-        # Fresh retrieval
         try:
             return await asyncio.wait_for(
                 self._retrieve_memories(query, None),
@@ -536,7 +822,7 @@ class VoiceBridge:
             return None
 
     # ------------------------------------------------------------------
-    # Memory prefetch (background, on user transcript)
+    # Memory prefetch
     # ------------------------------------------------------------------
 
     def _start_prefetch(self, query: str) -> None:
@@ -544,11 +830,11 @@ class VoiceBridge:
         self._cancel_prefetch()
         self._prefetch_result = None
         self._prefetch_task = asyncio.create_task(
-            self._do_prefetch(query, self._last_assistant_text or None, self._turn),
+            self._do_prefetch(query, self._last_assistant_text or None),
         )
         self._prefetch_task.add_done_callback(self._prefetch_done)
 
-    async def _do_prefetch(self, query: str, previous: str | None, turn: int) -> None:
+    async def _do_prefetch(self, query: str, previous: str | None) -> None:
         started = time.monotonic()
         entries: list[dict[str, str]] = []
         try:
@@ -558,52 +844,26 @@ class VoiceBridge:
             ) or []
             self._prefetch_result = entries
         except TimeoutError:
-            logger.info("[realtime-voice] memory retrieval timed out turn=%d", turn)
+            logger.info("[realtime-voice] memory retrieval timed out")
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.debug("[realtime-voice] prefetch failed")
-        await self._refresh_slot(entries, turn, started)
+        async with self._lock:
+            self._refresh_slot(entries, started)
 
-    async def _refresh_slot(
-        self, entries: list[dict[str, str]], turn: int, started: float,
-    ) -> None:
-        """Rewrite the instructions' memory block when its text changed."""
-        if self._slot is None or self._closed or turn != self._turn:
+    def _refresh_slot(self, entries: list[dict[str, str]], started: float) -> None:
+        """Fold one retrieval into the rolling block read by the next reply."""
+        if self._slot is None or self._closed:
             return
+        # A retrieval that lands before this turn's transcript belongs to it.
+        turn = self._turn + (0 if self._unanswered or self._responding else 1)
         changed = self._slot.merge(entries, turn) if entries else self._slot.expire(turn)
-        if not changed:
-            return
-        try:
-            await self._send_provider(session_instructions_event(self._slot.instructions()))
-        except Exception:
-            logger.warning("[realtime-voice] memory block update failed")
-            return
         logger.info(
-            "[realtime-voice] memory block turn=%d hits=%d lines=%d ms=%d",
-            turn, len(entries), len(self._slot.lines),
+            "[realtime-voice] memory block turn=%d hits=%d lines=%d changed=%s ms=%d",
+            turn, len(entries), len(self._slot.lines), changed,
             round((time.monotonic() - started) * 1000),
         )
-
-    async def _guard_repeat(self, text: str) -> None:
-        """Name a repeated line in the instructions so the next reply avoids it.
-
-        The repeat itself is already spoken; this keeps it from a third time.
-        """
-        key = spoken_key(text)
-        repeated = len(key) >= _REPEAT_MIN_CHARS and any(
-            SequenceMatcher(None, key, earlier).ratio() >= _REPEAT_RATIO
-            for earlier in self._recent_replies
-        )
-        self._recent_replies.append(key)
-        if not repeated or self._slot is None or self._closed or not self._slot.avoid(text):
-            return
-        try:
-            await self._send_provider(session_instructions_event(self._slot.instructions()))
-        except Exception:
-            logger.warning("[realtime-voice] repeat guard update failed")
-            return
-        logger.info("[realtime-voice] repeat detected len=%d turn=%d", len(text), self._turn)
 
     def _prefetch_done(self, task: asyncio.Task) -> None:
         if task.cancelled():
@@ -617,6 +877,20 @@ class VoiceBridge:
             self._prefetch_task.cancel()
         self._prefetch_task = None
 
+    async def _guard_repeat(self, text: str) -> None:
+        """Name a repeated line in the next reply's note so it is avoided.
+
+        The repeat itself is already spoken; this keeps it from a third time.
+        """
+        key = spoken_key(text)
+        repeated = len(key) >= _REPEAT_MIN_CHARS and any(
+            SequenceMatcher(None, key, earlier).ratio() >= _REPEAT_RATIO
+            for earlier in self._recent_replies
+        )
+        self._recent_replies.append(key)
+        if repeated and self._slot is not None and self._slot.avoid(text):
+            logger.info("[realtime-voice] repeat detected len=%d turn=%d", len(text), self._turn)
+
     # ------------------------------------------------------------------
     # Client-initiated actions
     # ------------------------------------------------------------------
@@ -624,31 +898,18 @@ class VoiceBridge:
     async def _interrupt(self) -> None:
         """Client requests interruption."""
         if self._responding or self._output_active:
-            try:
-                await self._send_provider(response_cancel_event())
-            except Exception:
-                logger.warning("[realtime-voice] cancel failed")
+            await self._cut_reply()
             self._output_active = False
-            self._responding = False
+            self._playback_started = self._playback_until = 0.0
             await self._send_client({"type": "interrupted"})
 
     async def _greet(self) -> None:
         """Client requests an opening greeting: the agent speaks first."""
-        if self._responding or self._output_active or self._greet_cue_sent:
+        if self._responding or self._output_active or self._greet_cue_sent or self._unanswered:
             return
         self._greet_cue_sent = True
         await self._send_provider(history_item_event(item_id="greet_cue", role="user", text=self._greet_cue))
-        await self._send_provider(response_create_event())
-
-    @staticmethod
-    def _is_greet_cue(item: object, cue: str = _GREET_CUE) -> bool:
-        if not isinstance(item, dict) or item.get("role") != "user" or not item.get("id"):
-            return False
-        parts = item.get("content") if isinstance(item.get("content"), list) else []
-        return any(
-            isinstance(part, dict) and cue in (part.get("transcript"), part.get("text"))
-            for part in parts
-        )
+        await self._request_reply(with_note=False)
 
     async def _drop_greet_cue(self) -> None:
         cue_id, self._greet_cue_id = self._greet_cue_id, None
@@ -666,17 +927,29 @@ class VoiceBridge:
     async def _on_provider_error(self, event: dict) -> None:
         error = event.get("error")
         message = ""
+        source = None
         if isinstance(error, dict):
             raw = error.get("message")
             if isinstance(raw, str):
                 message = raw[:180]
+            source = error.get("event_id")
+        logger.warning("[realtime-voice] provider error: %s", message or "unknown")
+        if (
+            self._responding
+            and not self._reply_seen
+            and (not source or source == self._create_event_id)
+        ):
+            # The requested reply never started: free the turn so the next
+            # one is answered, and drop the note sent for it.
+            self._responding = False
+            await self._drop_note()
         await self._send_client({
             "type": "warning",
             "message": message or "语音服务返回了一个错误",
         })
 
     # ------------------------------------------------------------------
-    # Transcript collection (for end-of-call extraction)
+    # Transcript collection
     # ------------------------------------------------------------------
 
     def _remember_id(self, message_id: str | None) -> None:
@@ -693,10 +966,22 @@ class VoiceBridge:
         })
 
 
+def _item_text(item: dict) -> str:
+    parts = item.get("content") if isinstance(item.get("content"), list) else []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        for key in ("text", "transcript"):
+            value = part.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
 class _MicMeter:
     """Byte count and level of the client's PCM16, sampled every 8th sample.
 
-    A call where StepFun never reports speech is either missing audio
+    A call where the provider never reports speech is either missing audio
     (bytes=0) or too quiet for server VAD (low peak_dbfs); this tells which.
     """
 

@@ -249,7 +249,6 @@ async def test_api_only_lifespan_never_starts_scheduler(monkeypatch):
     from app.services.schedule_domain import holiday_cache
     from app.services.runtime.ws_manager import manager
     from app.services import agent_avatars
-    from app.services.speech_output import client as tts
     monkeypatch.setattr(settings, 'app_runtime_role', 'api')
     monkeypatch.setattr(settings, 'llm_process_count', None)
     monkeypatch.setattr(type(settings), 'validate_security_config', lambda self:None)
@@ -266,7 +265,6 @@ async def test_api_only_lifespan_never_starts_scheduler(monkeypatch):
     monkeypatch.setattr(runtime_config, 'load_caches', AsyncMock())
     monkeypatch.setattr(runtime_config, 'refresh_worker_config', lambda:asyncio.sleep(100))
     monkeypatch.setattr(agent_avatars, 'validate_avatar_assets', lambda:None)
-    monkeypatch.setattr(tts, 'close_tts_client', AsyncMock())
     monkeypatch.setattr(manager, 'start_subscriber', AsyncMock())
     monkeypatch.setattr(manager, 'stop_subscriber', AsyncMock())
     start, stop = MagicMock(), MagicMock()

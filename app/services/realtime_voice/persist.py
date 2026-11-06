@@ -118,7 +118,7 @@ def schedule_end_of_call_extraction(
 def _metadata(model: str) -> dict:
     return {
         "channel": "realtime_voice",
-        "provider": "stepfun",
+        "provider": "dashscope",
         "model": model,
     }
 

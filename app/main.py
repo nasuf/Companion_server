@@ -201,12 +201,6 @@ async def lifespan(app: FastAPI):
                 await ws_manager.stop_subscriber()
             except Exception as e:
                 logger.warning(f"WS subscriber shutdown failed: {e!r}")
-        try:
-            from app.services.speech_output.client import close_tts_client
-
-            await close_tts_client()
-        except Exception as e:
-            logger.warning(f"TTS client shutdown failed: {e!r}")
         from app.services.llm.usage_repo import drain_usage_writes
         await drain_usage_writes()
         try:

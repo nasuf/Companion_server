@@ -7,20 +7,21 @@ from app.db import db
 from app.services.speech_output.client import TTS_PROVIDER
 
 
-# Voice messages and realtime calls share one StepFun voice per agent; clones
-# made with this model are accepted by both endpoints.
-TTS_MODEL = "stepaudio-2.5-tts"
+# Voice messages and calls share one voice per agent: both run on the
+# realtime model the library is bound to, and clones target that model.
+TTS_MODEL = "qwen3.8-omni-flash-realtime"
 DEFAULT_SPEECH_RATE = 0.9
 
 
 async def resolve_agent_tts_model() -> str:
-    """The voice library and enrollment target one model, including clones."""
-    from app.services.runtime_config import get_effective_tts_model
+    """The realtime model, which must be the one the voice library targets."""
+    from app.config import settings
+    from app.services.runtime_config import get_effective_realtime_model
     from app.services.speech_output.client import SpeechSynthesisError
 
-    model = (await get_effective_tts_model()).strip()
+    model = ((await get_effective_realtime_model()) or settings.dashscope_realtime_model).strip()
     if model != TTS_MODEL:
-        raise SpeechSynthesisError(f"当前模型与 StepFun 音色库不兼容，请配置 {TTS_MODEL}")
+        raise SpeechSynthesisError(f"当前实时模型与音色库不兼容，请配置 {TTS_MODEL}")
     return model
 
 

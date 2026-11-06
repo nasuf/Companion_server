@@ -134,23 +134,21 @@ async def test_model_registry_exposes_multimodal_capabilities(monkeypatch):
     result = await model_registry.list_models()
 
     assert set(result["model_kinds"]) == {"llm", "vision", "asr", "tts", "realtime"}
-    assert result["model_kind_providers"]["realtime"] == ["stepfun"]
+    assert result["model_kind_providers"]["realtime"] == ["dashscope"]
     assert result["model_kind_providers"]["vision"] == ["ark"]
     assert result["model_kind_providers"]["asr"] == ["dashscope"]
-    assert result["model_kind_providers"]["tts"] == ["stepfun"]
-    stepfun = next(p for p in result["providers"] if p["id"] == "stepfun")
-    assert stepfun["credential_env"] == "STEPFUN_API_KEY"
-    assert stepfun["local"] is False
+    assert result["model_kind_providers"]["tts"] == ["dashscope"]
+    assert all(p["id"] != "stepfun" for p in result["providers"])
 
 
-def test_stepfun_is_a_tts_provider_but_never_an_llm_provider():
-    from app.services.llm.providers import provider_ids
-
-    model_registry._validate_model_metadata("tts", "per_10k_characters", provider="stepfun")
-    model_registry._validate_provider("stepfun")
-    assert "stepfun" not in provider_ids(admin_only=True)
+def test_voice_models_are_dashscope_only():
+    model_registry._validate_model_metadata("realtime", "per_million_tokens", provider="dashscope")
+    for kind, unit in (("realtime", "per_million_tokens"), ("tts", "per_10k_characters")):
+        with pytest.raises(Exception) as exc:
+            model_registry._validate_model_metadata(kind, unit, provider="stepfun")
+        assert getattr(exc.value, "status_code", None) == 400
     with pytest.raises(Exception) as exc:
-        model_registry._validate_model_metadata("tts", "per_10k_characters", provider="dashscope")
+        model_registry._validate_provider("stepfun")
     assert getattr(exc.value, "status_code", None) == 400
 
 
@@ -185,8 +183,8 @@ def test_instruction_uses_weighted_limit():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("seconds,kept", [(5, 5), (8, 8), (12, 10), (30, 10)])
-async def test_enrollment_audio_is_normalized_and_capped_at_ten_seconds(
+@pytest.mark.parametrize("seconds,kept", [(5, 5), (15, 15), (25, 20), (60, 20)])
+async def test_enrollment_audio_is_normalized_and_capped_at_twenty_seconds(
     monkeypatch, seconds, kept,
 ):
     pcm = struct.pack("<h", 5000) * (24_000 * seconds)
@@ -208,7 +206,7 @@ async def test_enrollment_audio_is_normalized_and_capped_at_ten_seconds(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("seconds", "active_ms", "error"),
-    [(4, 4_000, "5–10 秒"), (31, 31_000, "5–10 秒"), (8, 2_999, "人声太少")],
+    [(4, 4_000, "10–20 秒"), (61, 61_000, "10–20 秒"), (12, 2_999, "人声太少")],
 )
 async def test_enrollment_rejects_bad_length_or_mostly_silent_samples(
     monkeypatch, seconds, active_ms, error,
@@ -247,9 +245,9 @@ async def test_agent_tts_update_persists_every_runtime_parameter(monkeypatch):
                 [
                     {
                         "id": "profile-1",
-                        "voice_id": "elegantgentle-female",
-                        "provider": "stepfun",
-                        "model": "stepaudio-2.5-tts",
+                        "voice_id": "Serena",
+                        "provider": "dashscope",
+                        "model": "qwen3.8-omni-flash-realtime",
                         "enabled": True,
                     }
                 ],
@@ -259,7 +257,7 @@ async def test_agent_tts_update_persists_every_runtime_parameter(monkeypatch):
                         "name": "小伴",
                         "gender": "female",
                         "user_id": "user-1",
-                        "tts_voice_id": "elegantgentle-female",
+                        "tts_voice_id": "Serena",
                         "tts_rate": 1.2,
                         "tts_volume": 60,
                         "tts_instruction": "自然一点",
@@ -288,7 +286,7 @@ async def test_agent_tts_update_persists_every_runtime_parameter(monkeypatch):
 
     update_args = fake_db.execute_raw.await_args.args
     assert update_args[1:8] == (
-        "elegantgentle-female",
+        "Serena",
         1.2,
         60,
         "自然一点",
@@ -314,19 +312,42 @@ async def test_voice_profile_from_retired_provider_is_rejected(monkeypatch):
     assert exc.value.status_code == 422
 
 
-@pytest.mark.asyncio
-async def test_removing_a_clone_only_deletes_the_library_row(monkeypatch):
-    database = SimpleNamespace(
+def _clone_db():
+    return SimpleNamespace(
         query_raw=AsyncMock(side_effect=[
-            [{"id": "p1", "provider": "stepfun", "model": "stepaudio-2.5-tts",
-              "voice_id": "voice-tone-1", "source": "cloned", "enabled": False}],
+            [{"id": "p1", "provider": "dashscope", "model": "qwen3.8-omni-flash-realtime",
+              "voice_id": "qwen-omni-vc-companion-voice-1", "source": "cloned", "enabled": False}],
             [{"count": 0}],
         ]),
         execute_raw=AsyncMock(return_value=1),
     )
+
+
+@pytest.mark.asyncio
+async def test_removing_a_clone_deletes_it_at_dashscope_then_the_row(monkeypatch):
+    database = _clone_db()
+    remove = AsyncMock()
     monkeypatch.setattr(tts, "db", database)
+    monkeypatch.setattr(tts, "delete_cloned_voice", remove)
 
     assert await tts.delete_voice_profile("p1") == {"status": "ok"}
+    remove.assert_awaited_once_with("qwen-omni-vc-companion-voice-1")
     database.execute_raw.assert_awaited_once_with(
         "DELETE FROM tts_voice_profiles WHERE id = $1", "p1",
     )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_provider_deletion_keeps_the_row(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.services.speech_output.client import SpeechSynthesisError
+
+    database = _clone_db()
+    monkeypatch.setattr(tts, "db", database)
+    monkeypatch.setattr(tts, "delete_cloned_voice", AsyncMock(side_effect=SpeechSynthesisError("Throttling")))
+
+    with pytest.raises(HTTPException) as exc:
+        await tts.delete_voice_profile("p1")
+    assert exc.value.status_code == 502
+    database.execute_raw.assert_not_awaited()

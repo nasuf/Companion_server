@@ -12,29 +12,10 @@ DEFAULT_STYLE_INSTRUCTION = (
     "像随手发的微信语音，吐字松弛，自然连读，语气词轻读，"
     "停顿短，少重音，句尾轻收，保持原文。"
 )
-# Admin-facing budget, kept from the DashScope era (a Han character weighs 2).
-# 100 weighted characters stays well inside StepFun's 200-character
-# instruction limit even after the per-sentence mood clause is appended.
+# Admin-facing budget (a Han character weighs 2), with room left for the
+# per-sentence mood clause.
 MAX_INSTRUCTION_BILLABLE_CHARACTERS = 100
 logger = logging.getLogger(__name__)
-
-# stepaudio-2.5-tts treats text inside full-width parentheses as a delivery
-# cue and does not speak it (verified 2026-11-04; half-width parentheses are
-# read aloud).
-_EMOTION_TAGS = {
-    "高兴": "（开心地）",
-    "悲伤": "（难过地）",
-    "愤怒": "（生气地）",
-    "惊讶": "（惊讶地）",
-    "恐惧": "（害怕地）",
-    "厌恶": "（嫌弃地）",
-    "失望": "（失落地）",
-    "欣慰": "（温柔地）",
-    "感激": "（真诚地）",
-    "戏谑": "（调皮地）",
-}
-_LAUGH_CUE = "（轻笑）"
-_SIGH_CUE = "（叹气）"
 
 _EMOTION_STYLES = {
     "高兴": "开心轻快",
@@ -49,8 +30,9 @@ _EMOTION_STYLES = {
     "感激": "真诚感谢",
     "戏谑": "轻松俏皮",
 }
-# Strip legacy DashScope control tags the model may still emit; the planner
-# adds its own cues. Preserve ordinary square-bracket text (e.g. [项目名]).
+# Strip control tags the model may still emit from older prompts. The reader
+# speaks every character it is given, so cues travel in the instruction.
+# Preserve ordinary square-bracket text (e.g. [项目名]).
 _CONTROL_RE = re.compile(
     r"\[(?:sad|amazed|deep and loud shouting|trembling|angry|excited|sarcastic|"
     r"curious|like dracula|bored|tired|scornful|shouting|asmr|panicked|"
@@ -58,6 +40,7 @@ _CONTROL_RE = re.compile(
     r"very fast|gasp|sighing|clears throat|giggles|laughing|cough|snorts)\]",
     re.IGNORECASE,
 )
+_CUE_RE = re.compile(r"（(?:开心地|难过地|生气地|惊讶地|害怕地|嫌弃地|失落地|温柔地|真诚地|调皮地|轻笑|叹气)）")
 
 
 @dataclass(frozen=True)
@@ -114,7 +97,7 @@ def build_speech_plan(
     from app.services.emoji import limit_emojis
 
     clean_text = " ".join(
-        limit_emojis(_CONTROL_RE.sub("", text or ""), max_keep=0).split()
+        limit_emojis(_CUE_RE.sub("", _CONTROL_RE.sub("", text or "")), max_keep=0).split()
     )
     if not clean_text:
         raise ValueError("TTS text contains no speakable content")
@@ -128,22 +111,7 @@ def build_speech_plan(
         # Preserve the whole admin instruction, never silently truncate it.
         if instruction_billable_characters(combined) <= MAX_INSTRUCTION_BILLABLE_CHARACTERS:
             base = combined
-        # A single nonverbal event requires an explicit textual cue. No random
-        # laughter/breaths, and anxiety alone does not imply trembling.
-        cue = None
-        event = None
-        if label in {"高兴", "戏谑"}:
-            cue = re.match(r"^哈{2,}[，,。.!！\s]*", clean_text)
-            event = _LAUGH_CUE
-        elif label in {"悲伤", "失望", "焦虑"}:
-            cue = re.match(r"^唉[，,。…！!\s]+", clean_text)
-            event = _SIGH_CUE
-        if cue and clean_text[cue.end():].strip():
-            clean_text = f"{event}{clean_text[cue.end():]}"
-    return SpeechPlan(
-        text=decorate_text_with_emotion(clean_text, label, score, enabled=enabled, scale=1),
-        instruction=base,
-    )
+    return SpeechPlan(text=clean_text, instruction=base)
 
 
 def _weighted_length(text: str) -> int:
@@ -164,23 +132,3 @@ def resolve_style_instruction(value: str | None) -> str:
     ):
         raise ValueError("TTS instruction exceeds provider limit")
     return instruction
-
-
-def decorate_text_with_emotion(
-    text: str,
-    emotion: str | None,
-    intensity: int | float | None,
-    *,
-    enabled: bool,
-    scale: float,
-) -> str:
-    """Prefix one delivery cue without changing the displayed transcript."""
-    clean_text = (text or "").strip()
-    if not clean_text or not enabled:
-        return clean_text
-    label = (emotion or "中性").strip() or "中性"
-    score = emotion_score(intensity, scale)
-    if score < 70:
-        return clean_text
-    tag = _EMOTION_TAGS.get(label)
-    return f"{tag}{clean_text}" if tag else clean_text

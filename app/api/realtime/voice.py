@@ -1,8 +1,8 @@
 """Bidirectional voice calls over a dedicated websocket.
 
 Text chat stays on ``/ws/{conversation_id}``. This endpoint proxies PCM16 to
-StepFun's Realtime API with server_vad enabled, and uses the recall_memory
-tool for on-demand memory retrieval.
+DashScope's Qwen-Omni realtime model. Server VAD finds the end of each turn;
+the bridge fetches memories, then asks for the reply (bridge.py).
 
 Client handshake matches text chat: subprotocols ``companion.chat.v1`` and
 ``companion.ticket.<ticket>``. Audio is mono little-endian PCM16 at the
@@ -40,15 +40,16 @@ from app.services.realtime_voice.persist import (
     schedule_user_present,
 )
 from app.services.realtime_voice.protocol import SAMPLE_RATE
+from app.services.realtime_voice.billing import tokens_by_model
 from app.services.realtime_voice.provider import (
-    StepfunSetupError,
-    StepfunSocket,
+    RealtimeSetupError,
+    RealtimeSocket,
     configure_session,
-    connect_stepfun,
+    connect_realtime,
     realtime_url,
 )
 from app.services.runtime_config import get_effective_realtime_model
-from app.services.speech_output.voices import default_voice_for_gender, ensure_agent_voice
+from app.services.speech_output.voices import ensure_agent_voice
 from app.services.runtime.ws_auth import (
     CHAT_PROTOCOL,
     TicketInvalid,
@@ -62,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["realtime-voice"])
 
-# Max call duration: 28 minutes (StepFun limit is 30 min, leave 2 min buffer)
+# Max call duration: 28 minutes
 _MAX_CALL_SECONDS = 28 * 60
 # Warn client 60s before forced disconnect
 _EXPIRY_WARNING_SECONDS = 60
@@ -119,8 +120,8 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
 
     # --- Accept ---
     await websocket.accept(subprotocol=CHAT_PROTOCOL)
-    if not settings.stepfun_api_key.strip():
-        await _fail(websocket, "not_configured", "实时语音未配置，服务端需要 STEPFUN_API_KEY")
+    if not settings.dashscope_api_key.strip():
+        await _fail(websocket, "not_configured", "实时语音未配置，服务端需要 DASHSCOPE_API_KEY")
         return
 
     # --- Acquire per-conversation call lock ---
@@ -141,40 +142,32 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
             "[realtime-voice] call starting conv=%s user=%s agent=%s platform=%s",
             conversation_id[:8], conv.userId[:8], str(conv.agent.id)[:8], _client_platform(websocket),
         )
-        platform = _client_platform(websocket)
         persona, instructions, history, greet_cue = await load_call_context(
             agent=conv.agent,
             user_id=conv.userId,
             workspace_id=getattr(conv, "workspaceId", None),
             conversation_id=conversation_id,
         )
-        # Same StepFun voice as the agent's voice messages; the admin-chosen
-        # gender default covers a missing or rejected clone.
-        fallback_voice: str | None = None
+        # The agent's library voice, the same one its voice messages use.
         try:
-            fallback_voice = await default_voice_for_gender(getattr(conv.agent, "gender", None))
             voice = await ensure_agent_voice(conv.agent)
         except Exception:
             logger.warning("[realtime-voice] agent voice lookup failed", exc_info=True)
-            voice = fallback_voice
-        if not voice:
             await _fail(websocket, "not_configured", "音色库没有可用音色")
             return
-        logger.info("[realtime-voice] using voice=%s fallback=%s", voice, fallback_voice)
-        model = (await get_effective_realtime_model()) or "stepaudio-2.5-realtime"
-        url = realtime_url(settings.stepfun_realtime_url, model)
+        model = (await get_effective_realtime_model()) or settings.dashscope_realtime_model
+        logger.info("[realtime-voice] using voice=%s model=%s", voice, model)
 
-        async with connect_stepfun(url, settings.stepfun_api_key.strip()) as raw:
-            sock = StepfunSocket(raw)
-            voice = await configure_session(
+        async with connect_realtime(realtime_url(model), settings.dashscope_api_key.strip()) as raw:
+            sock = RealtimeSocket(raw)
+            await configure_session(
                 sock,
                 instructions=instructions,
                 voice=voice,
                 history=history,
-                silence_duration_ms=settings.stepfun_realtime_silence_ms,
-                energy_threshold=_vad_threshold(platform),
-                temperature=settings.stepfun_realtime_temperature,
-                fallback_voice=fallback_voice,
+                silence_duration_ms=settings.dashscope_realtime_silence_ms,
+                vad_threshold=settings.dashscope_realtime_vad_threshold,
+                temperature=settings.dashscope_realtime_temperature,
             )
             bridge = _bridge(
                 sock=sock,
@@ -203,7 +196,7 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 conversation_id=conversation_id,
                 token=token,
             )
-    except StepfunSetupError as exc:
+    except RealtimeSetupError as exc:
         logger.warning("[realtime-voice] setup failed: %s", exc)
         await _fail(websocket, "provider_unavailable", "实时语音暂时连不上")
     except Exception:
@@ -250,20 +243,18 @@ async def _record_call_usage(
     agent_id: str,
     user_id: str,
 ) -> None:
-    """One llm_usage row per call, priced from the model_registry realtime row."""
+    """One llm_usage row per call; text and audio tokens priced separately."""
     if not usage.get("responses"):
         return
     from app.services.llm.usage_repo import persist_usage
 
+    input_tokens = usage["input_text"] + usage["input_audio"]
+    output_tokens = usage["output_text"] + usage["output_audio"]
     summary = {
-        "tokens_by_model": {model: {
-            "input": usage["input"],
-            "output": usage["output"],
-            "cached_input": usage["cached_input"],
-        }},
-        "input_tokens": usage["input"],
-        "output_tokens": usage["output"],
-        "cached_input_tokens": usage["cached_input"],
+        "tokens_by_model": tokens_by_model(model, usage),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_input_tokens": 0,
         "call_count": usage["responses"],
         "web_search_calls": 0,
         "latency_ms_total": 0,
@@ -273,9 +264,10 @@ async def _record_call_usage(
         "circuit_open_count": 0,
     }
     logger.info(
-        "[realtime-voice] usage conv=%s responses=%d input=%d output=%d cached=%d",
-        conversation_id[:8], usage["responses"], usage["input"],
-        usage["output"], usage["cached_input"],
+        "[realtime-voice] usage conv=%s responses=%d input_text=%d input_audio=%d"
+        " output_text=%d output_audio=%d",
+        conversation_id[:8], usage["responses"], usage["input_text"],
+        usage["input_audio"], usage["output_text"], usage["output_audio"],
     )
     try:
         await persist_usage(
@@ -299,12 +291,6 @@ def _client_platform(websocket) -> str:
     params = getattr(websocket, "query_params", None) or {}
     value = str(params.get("platform") or "").strip().lower()
     return value if value in {"android", "ios"} else "unknown"
-
-
-def _vad_threshold(platform: str) -> int:
-    if platform == "android":
-        return settings.stepfun_realtime_vad_threshold_android
-    return settings.stepfun_realtime_vad_threshold
 
 
 _SHORT_FOLLOW_UP_CHARS = 8
@@ -383,7 +369,8 @@ def _bridge(
         retrieve_memories=retrieve,
         save_user_line=save_user,
         save_assistant_line=save_assistant,
-        retrieval_timeout_s=settings.stepfun_realtime_retrieval_timeout_s,
+        retrieval_timeout_s=settings.dashscope_realtime_retrieval_timeout_s,
+        memory_wait_s=settings.dashscope_realtime_memory_wait_s,
         instructions=instructions,
         greet_cue=greet_cue,
     )
@@ -441,7 +428,7 @@ async def _run_pumps(*, websocket, sock, bridge, conversation_id: str, token: st
                 return
 
     max_seconds = min(
-        settings.stepfun_realtime_max_seconds,
+        settings.dashscope_realtime_max_seconds,
         _MAX_CALL_SECONDS,
     )
 

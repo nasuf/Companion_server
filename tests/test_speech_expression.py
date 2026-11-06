@@ -22,8 +22,8 @@ def test_emotion_strength_changes_style_without_overacting():
     assert "略带开心轻快" in mild.instruction
     assert "带有开心轻快" in medium.instruction
     assert "明显开心轻快" in strong.instruction
-    assert weak.text == mild.text == medium.text == "我听着呢。"
-    assert strong.text == "（开心地）我听着呢。"
+    # The reader speaks every character, so the mood is only in the instruction.
+    assert weak.text == mild.text == medium.text == strong.text == "我听着呢。"
     assert all(style.instruction_billable_characters(p.instruction) <= 100 for p in (weak, mild, medium, strong))
 
 
@@ -34,7 +34,7 @@ def test_invalid_emotion_never_crashes_or_adds_controls(intensity, scale):
 
 
 def test_scale_and_switch_are_honored():
-    assert plan(intensity=40, scale=2).text.startswith("（开心地）")
+    assert "明显开心轻快" in plan(intensity=40, scale=2).instruction
     assert plan(intensity=90, scale=0).instruction == style.DEFAULT_STYLE_INSTRUCTION
     assert plan("哈哈，太棒了！", intensity=90, enabled=False).text == "哈哈，太棒了！"
 
@@ -46,17 +46,15 @@ def test_custom_instruction_is_never_truncated():
 
 
 @pytest.mark.parametrize("emotion", ["高兴", "戏谑"])
-def test_laughter_requires_explicit_cue(emotion):
-    result = plan("哈哈哈，居然被你猜中了，哈哈！", emotion, 50)
-    assert result.text == "（轻笑）居然被你猜中了，哈哈！"
-    assert "（轻笑）" not in plan("真开心！", emotion, 90).text
-    assert plan("哈哈", emotion, 50).text == "哈哈"
+def test_laughter_and_sighs_are_read_as_written(emotion):
+    assert plan("哈哈哈，居然被你猜中了，哈哈！", emotion, 50).text == "哈哈哈，居然被你猜中了，哈哈！"
+    assert plan("唉，有点担心明天。", "焦虑", 85).text == "唉，有点担心明天。"
 
 
-def test_sigh_and_anxiety_do_not_force_trembling():
-    assert plan("唉，有点担心明天。", "焦虑", 85).text == "（叹气）有点担心明天。"
-    assert plan("有点担心明天。", "焦虑", 85).text == "有点担心明天。"
-    assert plan("唉声叹气也没用。", "悲伤", 50).text == "唉声叹气也没用。"
+def test_old_stepfun_cues_are_never_read_aloud():
+    assert plan("（开心地）我听着呢。", "中性", 0).text == "我听着呢。"
+    assert plan("（轻笑）居然被你猜中了（叹气）", "中性", 0).text == "居然被你猜中了"
+    assert plan("（小声说）别告诉别人", "中性", 0).text == "（小声说）别告诉别人"
 
 
 def test_speech_cleanup_preserves_punctuation_but_removes_injected_controls():
@@ -110,9 +108,11 @@ async def test_emotion_detection_deadline_cancels_slow_classifier(monkeypatch):
 async def test_incompatible_runtime_model_is_rejected_before_synthesis(monkeypatch):
     from app.services import runtime_config
 
-    monkeypatch.setattr(runtime_config, "get_effective_tts_model", AsyncMock(return_value="qwen-audio-3.0-tts-plus"))
+    monkeypatch.setattr(runtime_config, "get_effective_realtime_model", AsyncMock(return_value="qwen3.5-omni-flash-realtime"))
     with pytest.raises(RuntimeError, match="不兼容"):
         await voices.resolve_agent_tts_model()
+    monkeypatch.setattr(runtime_config, "get_effective_realtime_model", AsyncMock(return_value=""))
+    assert await voices.resolve_agent_tts_model() == voices.TTS_MODEL
 
 
 @pytest.mark.asyncio

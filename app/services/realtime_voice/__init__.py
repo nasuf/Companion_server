@@ -1,13 +1,8 @@
-"""StepFun bidirectional voice calls.
+"""Bidirectional voice calls on DashScope's Qwen-Omni realtime model.
 
-This package is a separate socket from text chat. It does not change the
-chat orchestrator, DashScope ASR, or DashScope TTS.
-
-Architecture (v2, 2026-11):
-  - Server VAD enabled: StepFun handles turn detection, barge-in, and
-    response triggering natively for lowest latency.
-  - recall_memory tool: the model calls this when it needs specific facts,
-    rather than blocking every turn with memory retrieval.
-  - End-of-call extraction: transcripts are persisted as messages and
-    extracted via the standard text-chat watermark pipeline at call end.
+A separate socket from text chat. Server VAD finds the end of each turn;
+the bridge retrieves memories, filters echo and backchannels, then asks for
+the reply. Transcripts are stored as messages and extracted through the
+standard text-chat pipeline at call end. Voice messages run on the same
+model (speech_output/client.py), so an agent has one voice for both.
 """

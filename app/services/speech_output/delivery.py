@@ -71,8 +71,8 @@ async def prepare_voice_output(
         volume=tts_settings.volume,
         model=model,
     )
-    # Meter the successful provider call before local persistence. StepFun has
-    # already billed it even if disk/message delivery later fails.
+    # Meter the successful provider call before local persistence. DashScope
+    # has already billed it even if disk/message delivery later fails.
     await record_tts_usage(
         speech=speech,
         user_id=user_id,

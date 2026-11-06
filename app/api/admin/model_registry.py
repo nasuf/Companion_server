@@ -48,9 +48,11 @@ _BILLING_UNITS = {"per_million_tokens", "per_10k_characters"}
 _MODEL_KIND_PROVIDERS = {
     "vision": {"ark"},
     "asr": {"dashscope"},
-    "tts": {"stepfun"},
-    # Realtime voice calls, billed per token like an LLM.
-    "realtime": {"stepfun"},
+    # Historical speech-synthesis rows; voice messages now use the realtime model.
+    "tts": {"dashscope"},
+    # Voice calls and voice messages, billed per token like an LLM. A
+    # "<model>:audio" row carries the audio-token prices of that model.
+    "realtime": {"dashscope"},
 }
 
 

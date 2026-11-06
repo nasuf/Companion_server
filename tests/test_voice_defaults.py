@@ -14,8 +14,8 @@ from app.services.speech_output.client import SpeechSynthesisError, SynthesizedS
 
 def _profile(**overrides):
     return {
-        "id": "p1", "provider": "stepfun", "model": "stepaudio-2.5-tts",
-        "voice_id": "linjiajiejie", "gender": "female", "source": "system",
+        "id": "p1", "provider": "dashscope", "model": "qwen3.8-omni-flash-realtime",
+        "voice_id": "Serena", "gender": "female", "source": "system",
         "enabled": True, "is_default": False, "display_name": "邻家姐姐",
         **overrides,
     }
@@ -24,16 +24,16 @@ def _profile(**overrides):
 def _speech():
     return SynthesizedSpeech(
         audio=b"RIFFwav", mime="audio/wav", duration_milliseconds=1200,
-        model="stepaudio-2.5-tts", voice_id="linjiajiejie", request_id="trace-1",
+        model="qwen3.8-omni-flash-realtime", voice_id="Serena", request_id="trace-1",
         raw_characters=10, billable_characters=10, unit_price_cny=5.8, cost_cny=0.0058,
     )
 
 
 async def test_default_voice_is_read_from_the_library(monkeypatch):
-    query = AsyncMock(side_effect=[[{"voice_id": "wenrounansheng"}], [], [{"voice_id": ""}]])
+    query = AsyncMock(side_effect=[[{"voice_id": "Theo Calm"}], [], [{"voice_id": ""}]])
     monkeypatch.setattr(voices, "db", SimpleNamespace(query_raw=query))
-    assert await voices.default_voice_for_gender("male") == "wenrounansheng"
-    assert query.await_args.args[1:] == ("stepfun", "stepaudio-2.5-tts", "male")
+    assert await voices.default_voice_for_gender("male") == "Theo Calm"
+    assert query.await_args.args[1:] == ("dashscope", "qwen3.8-omni-flash-realtime", "male")
     assert "is_default = true" in query.await_args.args[0]
     assert await voices.default_voice_for_gender("女") is None
     assert query.await_args.args[3] == "female"
@@ -41,10 +41,10 @@ async def test_default_voice_is_read_from_the_library(monkeypatch):
 
 
 async def test_assignment_prefers_the_default_then_any_enabled_voice(monkeypatch):
-    query = AsyncMock(side_effect=[[{"voice_id": "linjiajiejie"}]])
+    query = AsyncMock(side_effect=[[{"voice_id": "Serena"}]])
     execute = AsyncMock(return_value=1)
     monkeypatch.setattr(voices, "db", SimpleNamespace(query_raw=query, execute_raw=execute))
-    assert await voices.assign_random_voice(agent_id="a1", gender="female") == "linjiajiejie"
+    assert await voices.assign_random_voice(agent_id="a1", gender="female") == "Serena"
     assert query.await_count == 1
 
     query = AsyncMock(side_effect=[[], [{"voice_id": "jingdiannvsheng"}]])
@@ -113,7 +113,7 @@ async def test_set_default_clears_the_previous_default_in_one_transaction(monkey
     assert await tts.set_default_voice_profile("p1") == {"voices": voices_list}
     clear, mark = tx.execute_raw.await_args_list
     assert "is_default = false" in clear.args[0]
-    assert clear.args[1:] == ("stepfun", "stepaudio-2.5-tts", "female", "p1")
+    assert clear.args[1:] == ("dashscope", "qwen3.8-omni-flash-realtime", "female", "p1")
     assert "is_default = true" in mark.args[0] and mark.args[1] == "p1"
 
 
@@ -145,7 +145,7 @@ async def test_default_clone_cannot_be_removed(monkeypatch):
 
 async def test_library_preview_uses_the_bare_voice_and_bills_the_admin(monkeypatch):
     monkeypatch.setattr(tts, "db", SimpleNamespace(query_raw=AsyncMock(return_value=[_profile(enabled=False)])))
-    monkeypatch.setattr(tts, "resolve_agent_tts_model", AsyncMock(return_value="stepaudio-2.5-tts"))
+    monkeypatch.setattr(tts, "resolve_agent_tts_model", AsyncMock(return_value="qwen3.8-omni-flash-realtime"))
     synthesize = AsyncMock(return_value=_speech())
     record = AsyncMock()
     monkeypatch.setattr(tts, "synthesize_speech", synthesize)
@@ -156,8 +156,8 @@ async def test_library_preview_uses_the_bare_voice_and_bills_the_admin(monkeypat
     assert response.body == b"RIFFwav"
     assert response.headers["X-TTS-Cost-CNY"] == "0.005800"
     assert synthesize.await_args.kwargs == {
-        "text": tts.VOICE_SAMPLE_TEXT, "voice_id": "linjiajiejie", "instruction": None,
-        "rate": 0.9, "volume": 50, "model": "stepaudio-2.5-tts",
+        "text": tts.VOICE_SAMPLE_TEXT, "voice_id": "Serena", "instruction": None,
+        "rate": 0.9, "volume": 50, "model": "qwen3.8-omni-flash-realtime",
     }
     assert record.await_args.kwargs["user_id"] == "admin-1"
     assert record.await_args.kwargs["agent_id"] is None
@@ -178,7 +178,7 @@ async def test_library_preview_reports_provider_failure(monkeypatch):
 def _agent_row(probability):
     return {
         "id": "agent-1", "name": "小伴", "gender": "female", "user_id": "u1",
-        "tts_voice_id": "linjiajiejie", "tts_rate": 0.9, "tts_volume": 50,
+        "tts_voice_id": "Serena", "tts_rate": 0.9, "tts_volume": 50,
         "tts_instruction": None, "tts_auto_emotion": True, "tts_emotion_scale": 1.0,
         "tts_output_probability": probability,
     }

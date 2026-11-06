@@ -33,6 +33,7 @@ from app.services.speech_output.policy import effective_tts_probability
 from app.services.speech_output.usage import record_tts_usage
 from app.services.speech_output.voice_enrollment import (
     create_cloned_voice,
+    delete_cloned_voice,
     prepare_enrollment_audio,
 )
 from app.services.speech_output.voices import (
@@ -347,7 +348,13 @@ async def delete_voice_profile(profile_id: str) -> dict[str, str]:
     )
     if int(count_rows[0].get("count") or 0) > 0:
         raise HTTPException(status_code=409, detail="该音色仍被 Agent 使用")
-    # StepFun has no delete-voice API: this only removes the library entry.
+    # Delete at DashScope first: a library row without a provider voice is
+    # harmless, a provider voice without a row is a leaked clone slot.
+    try:
+        await delete_cloned_voice(str(current.get("voice_id") or ""))
+    except SpeechSynthesisError as exc:
+        logger.warning("[TTS-VOICE] provider deletion failed: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     await db.execute_raw(
         "DELETE FROM tts_voice_profiles WHERE id = $1",
         profile_id,
@@ -413,19 +420,21 @@ async def clone_voice_profile(
             str(admin.get("sub") or ""),
         )
     except Exception as exc:
-        # StepFun cannot delete voices, so the clone (already billed) survives.
-        # Log its id so an operator can register it by hand.
+        # Roll the clone back so the account's clone slots do not leak.
         logger.exception(
-            "[TTS-VOICE] enrollment persistence failed; orphaned provider voice_id=%s"
-            " gender=%s display_name=%s request_id=%s",
+            "[TTS-VOICE] enrollment persistence failed; deleting provider voice_id=%s",
             result.voice_id,
-            gender,
-            clean_display_name[:80],
-            result.request_id,
         )
+        try:
+            await delete_cloned_voice(result.voice_id)
+        except SpeechSynthesisError:
+            logger.exception(
+                "[TTS-VOICE] orphaned provider voice_id=%s gender=%s display_name=%s request_id=%s",
+                result.voice_id, gender, clean_display_name[:80], result.request_id,
+            )
         raise HTTPException(
             status_code=503,
-            detail="音色已在 StepFun 创建但保存失败，请联系管理员登记该音色",
+            detail="音色保存失败，请重试",
         ) from exc
     logger.info("[TTS-VOICE] enrollment created voice_id=%s", result.voice_id)
     return dict(rows[0])

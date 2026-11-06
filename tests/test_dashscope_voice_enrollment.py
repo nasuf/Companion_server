@@ -1,7 +1,8 @@
-"""StepFun voice cloning: upload the reference WAV, then create the voice."""
+"""DashScope voice cloning: one clone for the realtime model, deletable."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 
 import httpx
@@ -11,71 +12,99 @@ from app.services.speech_output import voice_enrollment
 from app.services.speech_output.client import SpeechSynthesisError
 
 
-FILES = "https://stepfun.test/v1/files"
-VOICES = "https://stepfun.test/v1/audio/voices"
+CUSTOMIZATION = "https://ws-test.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/customization"
 
 
 @pytest.fixture(autouse=True)
 def configured(monkeypatch):
-    monkeypatch.setattr(voice_enrollment.settings, "stepfun_api_key", "sk-test")
-    monkeypatch.setattr(voice_enrollment.settings, "stepfun_files_endpoint", FILES)
-    monkeypatch.setattr(voice_enrollment.settings, "stepfun_voices_endpoint", VOICES)
+    monkeypatch.setattr(voice_enrollment.settings, "dashscope_api_key", "sk-test")
+    monkeypatch.setattr(voice_enrollment.settings, "dashscope_workspace_id", "ws-test")
 
 
-def stepfun(*, upload=None, clone=None, calls=None):
-    upload = upload or (lambda request: httpx.Response(200, json={"id": "file-1"}))
-    clone = clone or (lambda request: httpx.Response(
-        200, json={"id": "voice-tone-1"}, headers={"x-trace-id": "trace-1"},
-    ))
-
+def dashscope(respond, calls=None):
     def handle(request):
         if calls is not None:
             calls.append(request)
-        return upload(request) if str(request.url) == FILES else clone(request)
+        return respond(request)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handle))
 
 
-async def test_clone_uploads_the_sample_then_creates_the_voice():
+def created(voice="qwen-omni-vc-companion-voice-1", request_id="req-1"):
+    body = {"output": {"voice": voice, "target_model": "qwen3.8-omni-flash-realtime"}, "usage": {"count": 1}}
+    if request_id:
+        body["request_id"] = request_id
+    return lambda request: httpx.Response(200, json=body)
+
+
+async def test_clone_targets_the_realtime_model_with_the_sample_inline():
     calls: list[httpx.Request] = []
-    async with stepfun(calls=calls) as client:
+    async with dashscope(created(), calls) as client:
         result = await voice_enrollment.create_cloned_voice(audio=b"RIFF-wav", client=client)
 
-    assert result == voice_enrollment.EnrollmentResult("voice-tone-1", "trace-1")
-    upload, clone = calls
-    assert upload.headers["Authorization"] == "Bearer sk-test"
-    assert b'name="purpose"\r\n\r\nstorage' in upload.content
-    assert b"RIFF-wav" in upload.content
-    assert json.loads(clone.content) == {"model": "stepaudio-2.5-tts", "file_id": "file-1"}
+    assert result == voice_enrollment.EnrollmentResult("qwen-omni-vc-companion-voice-1", "req-1")
+    (request,) = calls
+    assert str(request.url) == CUSTOMIZATION
+    assert request.headers["Authorization"] == "Bearer sk-test"
+    body = json.loads(request.content)
+    assert body["model"] == "qwen-voice-enrollment"
+    assert body["parameters"] == {"voice_clone_mode": "normal"}
+    assert body["input"]["action"] == "create"
+    assert body["input"]["target_model"] == "qwen3.8-omni-flash-realtime"
+    assert body["input"]["preferred_name"] == "companion"
+    assert body["input"]["audio"]["data"] == "data:audio/wav;base64," + base64.b64encode(b"RIFF-wav").decode()
 
 
-async def test_clone_without_trace_header_has_no_request_id():
-    async with stepfun(clone=lambda r: httpx.Response(200, json={"id": "voice-tone-2"})) as client:
+async def test_shared_endpoint_without_a_workspace(monkeypatch):
+    monkeypatch.setattr(voice_enrollment.settings, "dashscope_workspace_id", " ")
+    calls: list[httpx.Request] = []
+    async with dashscope(created(request_id=None), calls) as client:
         result = await voice_enrollment.create_cloned_voice(audio=b"wav", client=client)
     assert result.request_id is None
+    assert str(calls[0].url) == "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/customization"
 
 
 async def test_clone_requires_a_key():
-    voice_enrollment.settings.stepfun_api_key = " "
+    voice_enrollment.settings.dashscope_api_key = " "
     with pytest.raises(SpeechSynthesisError, match="not configured"):
         await voice_enrollment.create_cloned_voice(audio=b"wav")
 
 
-@pytest.mark.parametrize(("upload", "clone", "match"), [
-    (lambda r: httpx.Response(413, json={"error": {"type": "file_too_large", "message": "big"}}),
-     None, "file upload file_too_large: big"),
-    (lambda r: httpx.Response(500, content=b"<html>"), None, "file upload http_500: request failed"),
-    (lambda r: httpx.Response(200, json={"object": "file"}), None, "did not return a file id"),
-    (lambda r: httpx.Response(200, content=b"not json"), None, "file upload returned invalid JSON"),
-    (lambda r: httpx.Response(200, json=["file-1"]), None, "file upload returned invalid payload"),
-    (None, lambda r: httpx.Response(400, json={"error": {"type": "file_id_invalid"}}),
-     "voice enrollment file_id_invalid: request failed"),
-    (None, lambda r: httpx.Response(200, json={"object": "audio.voice"}), "did not return a voice id"),
+@pytest.mark.parametrize(("respond", "match"), [
+    (lambda r: httpx.Response(400, json={"code": "InvalidParameter", "message": "bad audio"}),
+     "voice enrollment InvalidParameter: bad audio"),
+    (lambda r: httpx.Response(500, content=b"<html>"), "voice enrollment http_500: request failed"),
+    (lambda r: httpx.Response(200, json={"output": {}}), "did not return a voice"),
+    (lambda r: httpx.Response(200, content=b"not json"), "returned invalid JSON"),
+    (lambda r: httpx.Response(200, json=["voice"]), "returned invalid payload"),
 ])
-async def test_provider_failures_are_reported(upload, clone, match):
-    async with stepfun(upload=upload, clone=clone) as client:
+async def test_provider_failures_are_reported(respond, match):
+    async with dashscope(respond) as client:
         with pytest.raises(SpeechSynthesisError, match=match):
             await voice_enrollment.create_cloned_voice(audio=b"wav", client=client)
+
+
+async def test_delete_removes_the_voice_and_tolerates_one_already_gone():
+    calls: list[httpx.Request] = []
+    async with dashscope(lambda r: httpx.Response(200, json={"request_id": "r"}), calls) as client:
+        await voice_enrollment.delete_cloned_voice("qwen-omni-vc-x", client=client)
+    assert json.loads(calls[0].content) == {
+        "model": "qwen-voice-enrollment", "input": {"action": "delete", "voice": "qwen-omni-vc-x"},
+    }
+    gone = lambda r: httpx.Response(400, json={"code": "BadRequest.VoiceNotFound", "message": "Voice not found."})
+    async with dashscope(gone) as client:
+        await voice_enrollment.delete_cloned_voice("qwen-omni-vc-x", client=client)
+
+
+@pytest.mark.parametrize("respond", [
+    lambda r: httpx.Response(400, json={"code": "InvalidParameter", "message": "bad"}),
+    lambda r: httpx.Response(400, content=b"<html>"),
+    lambda r: httpx.Response(503, json={"code": "Throttling"}),
+])
+async def test_delete_failures_are_reported(respond):
+    async with dashscope(respond) as client:
+        with pytest.raises(SpeechSynthesisError, match="voice deletion"):
+            await voice_enrollment.delete_cloned_voice("qwen-omni-vc-x", client=client)
 
 
 async def test_network_failure_is_reported_and_owned_client_closed(monkeypatch):
@@ -86,6 +115,7 @@ async def test_network_failure_is_reported_and_owned_client_closed(monkeypatch):
         raise httpx.ConnectError("offline")
 
     def create(**kwargs):
+        kwargs.pop("trust_env", None)
         client = real_client(transport=httpx.MockTransport(handle), **kwargs)
         clients.append(client)
         return client

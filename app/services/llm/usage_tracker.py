@@ -25,7 +25,7 @@ UsageScope = Literal[
     # Image understanding / speech, which run before the chat turn opens its
     # own session (ws.py handles attachments first), so they get their own row.
     "chat_media",
-    # One row per realtime voice call, from StepFun's response.done usage.
+    # One row per realtime voice call, from the provider's response.done usage.
     "realtime_voice",
 ]
 

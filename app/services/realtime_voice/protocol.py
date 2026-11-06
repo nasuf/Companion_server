@@ -1,7 +1,11 @@
-"""StepFun realtime event builders.
+"""DashScope Qwen-Omni realtime event builders.
 
-Audio: mono PCM16 little-endian, 24 kHz.
-Server VAD enabled — StepFun handles turn detection natively.
+Audio: mono PCM16 little-endian, 24 kHz, both directions.
+Server VAD detects the end of a turn but does not reply on its own
+(create_response false): the bridge fetches memories first, then asks for
+the reply. It does not cancel replies on its own either (interrupt_response
+false): the bridge decides whether speech over the agent is a barge-in or
+the agent's own voice leaking back into the microphone.
 """
 
 from __future__ import annotations
@@ -11,6 +15,8 @@ import binascii
 import json
 import uuid
 from typing import Any
+
+from app.config import settings
 
 SAMPLE_RATE = 24000
 MAX_CLIENT_PCM_BYTES = 256 * 1024
@@ -56,44 +62,34 @@ def session_update_event(
     instructions: str,
     voice: str,
     silence_duration_ms: int = 600,
-    prefix_padding_ms: int = 500,
-    energy_threshold: int | None = None,
+    vad_threshold: float = 0.5,
     temperature: float | None = None,
     enable_memory_tool: bool = True,
 ) -> dict[str, Any]:
-    """Server VAD + optional recall_memory tool."""
-    tools: list[dict[str, Any]] = []
-    if enable_memory_tool:
-        tools.append(RECALL_MEMORY_TOOL)
+    """Full session config: server VAD without auto reply, input transcription."""
     session: dict[str, Any] = {
         "modalities": ["text", "audio"],
         "instructions": instructions,
         "voice": voice,
-        "input_audio_format": "pcm16",
-        "output_audio_format": "pcm16",
+        "audio": {
+            "input": {"format": {"type": "pcm", "sample_rate": SAMPLE_RATE}},
+            "output": {"format": {"type": "pcm", "sample_rate": SAMPLE_RATE}},
+        },
         "turn_detection": {
             "type": "server_vad",
-            "silence_duration_ms": silence_duration_ms,
-            "prefix_padding_ms": prefix_padding_ms,
+            "threshold": max(-1.0, min(1.0, float(vad_threshold))),
+            "silence_duration_ms": max(200, min(6000, int(silence_duration_ms))),
+            "create_response": False,
+            "interrupt_response": False,
         },
+        "input_audio_transcription": {"model": settings.dashscope_realtime_transcription_model},
     }
-    if energy_threshold is not None:
-        session["turn_detection"]["energy_awakeness_threshold"] = max(0, min(5000, int(energy_threshold)))
     if temperature is not None:
-        session["temperature"] = max(0.0, min(2.0, float(temperature)))
-    if tools:
-        session["tools"] = tools
+        session["temperature"] = max(0.0, min(1.99, float(temperature)))
+    if enable_memory_tool:
+        session["tools"] = [RECALL_MEMORY_TOOL]
         session["tool_choice"] = "auto"
     return {"event_id": event_id(), "type": "session.update", "session": session}
-
-
-def session_instructions_event(instructions: str) -> dict[str, Any]:
-    """Partial session.update: StepFun merges it, keeping tools, VAD and voice."""
-    return {
-        "event_id": event_id(),
-        "type": "session.update",
-        "session": {"instructions": instructions},
-    }
 
 
 def history_item_event(*, item_id: str, role: str, text: str) -> dict[str, Any]:
@@ -104,6 +100,25 @@ def history_item_event(*, item_id: str, role: str, text: str) -> dict[str, Any]:
             "id": item_id,
             "type": "message",
             "role": role,
+            "content": [{"type": "input_text", "text": text}],
+        },
+    }
+
+
+def system_note_event(text: str) -> dict[str, Any]:
+    """A system message placed just before a reply.
+
+    DashScope reads instructions changed mid-call only for later sessions,
+    not the next reply (0 of 5 replies used a memory added that way, 4 of 4
+    used it from a system item; 2026-11-06), so per-turn context travels as
+    an item that the bridge deletes once the reply is done.
+    """
+    return {
+        "event_id": event_id(),
+        "type": "conversation.item.create",
+        "item": {
+            "type": "message",
+            "role": "system",
             "content": [{"type": "input_text", "text": text}],
         },
     }

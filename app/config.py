@@ -115,22 +115,37 @@ class Settings(BaseSettings):
     )
     dashscope_asr_model: str = "fun-asr-flash-2026-06-15"
     dashscope_asr_timeout_s: float = 30.0
-    # Assistant text-to-speech (voice messages) and voice cloning run on
-    # StepFun with STEPFUN_API_KEY, so a cloned voice is shared with realtime
-    # calls. Cloned voices must come from stepaudio-2.5-tts.
-    stepfun_tts_endpoint: str = "https://api.stepfun.com/v1/audio/speech"
-    stepfun_tts_model: str = "stepaudio-2.5-tts"
-    stepfun_tts_timeout_s: float = 60.0
-    stepfun_tts_max_bytes: int = 8 * 1024 * 1024
-    stepfun_tts_max_concurrency: int = 16
-    stepfun_files_endpoint: str = "https://api.stepfun.com/v1/files"
-    stepfun_voices_endpoint: str = "https://api.stepfun.com/v1/audio/voices"
+    # Voice calls, voice messages and voice cloning all run on one DashScope
+    # realtime model (DASHSCOPE_API_KEY), so an agent has one voice id for
+    # both: voice messages are the call model reading the reply aloud.
+    # With DASHSCOPE_WORKSPACE_ID set, requests use the workspace endpoint
+    # (recommended by DashScope); otherwise the shared endpoint.
+    dashscope_workspace_id: str = ""
+    dashscope_realtime_model: str = "qwen3.8-omni-flash-realtime"
+    dashscope_realtime_transcription_model: str = "qwen3-asr-flash-realtime"
+    # server_vad threshold (-1..1). Speech from -30 to -50 dBFS was detected
+    # at every value from 0.5 to 0.99, and the agent's own voice leaking back
+    # was detected at all of them too (2026-11-06): echo is filtered by
+    # transcript instead (bridge.py), not by this threshold.
+    dashscope_realtime_vad_threshold: float = 0.5
+    dashscope_realtime_silence_ms: int = 600
+    # Sampling temperature; DashScope's default for this model is 0.6.
+    dashscope_realtime_temperature: float = 0.7
+    # How long a reply may wait for this turn's memory retrieval after the
+    # user's transcript arrives. Retrieval starts when the user stops
+    # speaking, about 0.2 s before the transcript; past this, the reply goes
+    # out with the memories already in hand.
+    dashscope_realtime_memory_wait_s: float = 0.6
+    dashscope_realtime_retrieval_timeout_s: float = 1.5
+    dashscope_realtime_max_seconds: int = 28 * 60
+    # Voice messages: one realtime session reads one reply aloud.
+    tts_timeout_s: float = 30.0
+    tts_max_concurrency: int = 16
+    tts_max_bytes: int = 8 * 1024 * 1024
     tts_voice_enrollment_max_bytes: int = 15 * 1024 * 1024
     # Safe rollout default. The admin SystemConfig value overrides this at
     # runtime and is constrained to 0..100.
     tts_output_probability: int = 0
-    # stepaudio-2.5-tts list price: 580 CNY per million characters.
-    tts_price_cny_per_10k_chars: float = 5.8
     chat_voice_min_seconds: float = 0.5
     chat_voice_max_seconds: int = 60
     chat_voice_max_requests_per_minute: int = 20
@@ -140,32 +155,6 @@ class Settings(BaseSettings):
     # Base64 adds roughly 33%; 2 MiB of source audio stays well below the
     # provider's 10 MB encoded-payload limit.
     chat_voice_max_bytes: int = 2 * 1024 * 1024
-
-    # StepFun bidirectional realtime voice. Blank key disables only the
-    # /ws/voice endpoint; text chat and DashScope ASR/TTS stay unchanged.
-    # Key: https://platform.stepfun.com → API keys. Env: STEPFUN_API_KEY.
-    stepfun_api_key: str = ""
-    stepfun_realtime_url: str = "wss://api.stepfun.com/v1/realtime"
-    stepfun_realtime_model: str = "stepaudio-2.5-realtime"
-    # Official realtime demo captures and plays 24 kHz mono PCM16.
-    stepfun_realtime_sample_rate: int = 24000
-    stepfun_realtime_silence_ms: int = 600
-    # server_vad energy_awakeness_threshold (0-5000, provider default 2500).
-    # Lower lets quieter barge-in through echo cancellation, at the risk of
-    # the agent's own speaker audio counting as the user talking.
-    stepfun_realtime_vad_threshold: int = 2500
-    # Android's communication capture reaches only about -30 dBFS even with
-    # AGC, where 2500 drops most words. 300 keeps -30/-34 dBFS speech whole
-    # and still ignores -44 dBFS (echo residue) and noise up to -34 dBFS
-    # (StepFun probe with synthesized speech, 2026-11-05).
-    stepfun_realtime_vad_threshold_android: int = 300
-    # StepFun's default sampling is nearly greedy: the same context gave the
-    # same reply 3 times out of 4, and calls repeated a line word for word.
-    # 0.7 gave 4 distinct replies in 4; 1.2 started to ramble (2026-11-05).
-    stepfun_realtime_temperature: float = 0.7
-    stepfun_realtime_transcript_timeout_s: float = 2.5
-    stepfun_realtime_retrieval_timeout_s: float = 1.5
-    stepfun_realtime_max_seconds: int = 28 * 60
 
     # DeepSeek direct API (OpenAI-compatible)
     deepseek_api_key: str = ""

@@ -27,8 +27,8 @@ async def test_gender_pool_excludes_disabled_voices_and_keeps_existing_binding(m
                 voice_id TEXT PRIMARY KEY, gender TEXT, enabled BOOLEAN,
                 display_name TEXT,
                 is_default BOOLEAN NOT NULL DEFAULT false,
-                provider TEXT DEFAULT 'stepfun',
-                model TEXT DEFAULT 'stepaudio-2.5-tts'
+                provider TEXT DEFAULT 'dashscope',
+                model TEXT DEFAULT 'qwen3.8-omni-flash-realtime'
             ) ON COMMIT DROP""")
             await tx.execute_raw("""INSERT INTO tts_voice_profiles
                 (voice_id,gender,enabled) VALUES
@@ -85,8 +85,8 @@ async def test_new_agents_bind_to_the_admin_chosen_default(monkeypatch):
             await tx.execute_raw("""CREATE TEMP TABLE tts_voice_profiles (
                 voice_id TEXT PRIMARY KEY, gender TEXT, enabled BOOLEAN,
                 is_default BOOLEAN NOT NULL DEFAULT false,
-                provider TEXT DEFAULT 'stepfun',
-                model TEXT DEFAULT 'stepaudio-2.5-tts'
+                provider TEXT DEFAULT 'dashscope',
+                model TEXT DEFAULT 'qwen3.8-omni-flash-realtime'
             ) ON COMMIT DROP""")
             await tx.execute_raw(
                 'CREATE UNIQUE INDEX ON tts_voice_profiles (provider, model, gender) WHERE is_default'

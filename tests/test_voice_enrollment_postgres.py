@@ -56,6 +56,8 @@ async def postgres_enrollment(monkeypatch):
                 return_value=b"normalized-wav",
             ))
             monkeypatch.setattr(tts, "create_cloned_voice", create)
+            remove = AsyncMock()
+            monkeypatch.setattr(tts, "delete_cloned_voice", remove)
             app = FastAPI()
             app.include_router(tts.router)
             app.dependency_overrides[tts.require_admin_jwt] = lambda: {"sub": "admin-test"}
@@ -63,7 +65,7 @@ async def postgres_enrollment(monkeypatch):
                 transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
                 base_url="http://test",
             ) as client:
-                yield SimpleNamespace(client=client, db=transaction, create=create)
+                yield SimpleNamespace(client=client, db=transaction, create=create, remove=remove)
     finally:
         await database.disconnect()
 
@@ -103,14 +105,14 @@ async def test_clone_persists_consent_timestamp_and_appears_in_library(
     assert len(stored) == 1
     assert stored[0]["consent_type"] == "timestamp without time zone"
     assert stored[0]["id"] == row["id"]
-    assert (stored[0]["provider"], stored[0]["model"]) == ("stepfun", "stepaudio-2.5-tts")
+    assert (stored[0]["provider"], stored[0]["model"]) == ("dashscope", "qwen3.8-omni-flash-realtime")
     library = await flow.client.get("/admin-api/tts/voices")
     assert library.status_code == 200
     assert library.json()["voices"][0]["voice_id"] == "cloned-test"
     assert library.json()["voices"][0]["agent_count"] == 0
 
 
-async def test_database_rejection_reports_the_orphaned_provider_voice(
+async def test_database_rejection_rolls_the_provider_clone_back(
     postgres_enrollment,
 ):
     flow = postgres_enrollment
@@ -120,4 +122,5 @@ async def test_database_rejection_reports_the_orphaned_provider_voice(
     response = await upload(flow)
 
     assert response.status_code == 503
-    assert "联系管理员登记" in response.json()["detail"]
+    assert response.json()["detail"] == "音色保存失败，请重试"
+    flow.remove.assert_awaited_once()

@@ -7,14 +7,13 @@ import wave
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import httpx
 import pytest
 
 from app.services.speech_output import client as tts_client
 from app.services.speech_output import voices
 from app.services.speech_output.policy import VoiceContext, should_generate_voice
 from app.services.speech_output.style import (
-    decorate_text_with_emotion,
+    build_speech_plan,
     instruction_billable_characters,
     resolve_style_instruction,
 )
@@ -30,30 +29,45 @@ def _wav_bytes(*, seconds: float = 0.25, rate: int = 24000) -> bytes:
     return buffer.getvalue()
 
 
-def test_billable_characters_follow_stepfun_rules():
-    # Han characters count once; every two other characters count once.
+def test_billable_characters_count_han_once_and_others_half():
     assert tts_client.count_billable_characters("你好 A1。") == 2 + 2
     assert tts_client.count_billable_characters("你好A") == 2 + 1
     assert tts_client.count_billable_characters("") == 0
 
 
-def test_volume_maps_onto_stepfun_range():
-    assert tts_client.provider_volume(50) == 1.0
-    assert tts_client.provider_volume(100) == 2.0
-    assert tts_client.provider_volume(0) == 0.1
+@pytest.mark.parametrize(("rate", "expected"), [
+    (0.5, "语速偏慢。"), (0.9, "语速稍慢。"), (1.0, ""), (1.1, "语速稍快。"), (1.5, "语速偏快。"),
+])
+def test_rate_becomes_part_of_the_reading_instruction(rate, expected):
+    assert tts_client.rate_instruction(rate) == expected
 
 
-def test_wav_duration_uses_actual_frames():
+def test_volume_scales_pcm_and_clips():
+    pcm = struct.pack("<3h", 1000, -1000, 30000)
+    assert tts_client.apply_volume(pcm, 50) == pcm
+    assert struct.unpack("<3h", tts_client.apply_volume(pcm, 100)) == (2000, -2000, 32767)
+    assert struct.unpack("<3h", tts_client.apply_volume(pcm, 0)) == (0, 0, 0)
+    assert tts_client.apply_volume(b"", 80) == b""
+
+
+def test_wav_duration_and_framing():
     assert tts_client.wav_duration_milliseconds(_wav_bytes(seconds=0.25)) == 250
+    wav = tts_client.wav_bytes(b"\x00\x00" * 12_000)
+    assert tts_client.wav_duration_milliseconds(wav) == 500
+    with pytest.raises(tts_client.SpeechSynthesisError):
+        tts_client.wav_duration_milliseconds(b"not a wav")
+    with pytest.raises(tts_client.SpeechSynthesisError, match="empty"):
+        tts_client.wav_duration_milliseconds(tts_client.wav_bytes(b""))
 
 
-def test_wav_duration_handles_streaming_length_sentinel():
-    audio = bytearray(_wav_bytes(seconds=0.5))
-    struct.pack_into("<I", audio, 4, 0xFFFFFFFF)
-    data_offset = audio.index(b"data")
-    struct.pack_into("<I", audio, data_offset + 4, 0xFFFFFFFF)
-
-    assert tts_client.wav_duration_milliseconds(bytes(audio)) == 500
+@pytest.mark.parametrize(("spoken", "text", "ok"), [
+    ("刚下班到家，累瘫了。", "刚下班到家，累瘫了", True),
+    ("3点的会改到4点半了。", "3点的会改到4点半了，你记得别迟到。", False),
+    ("我挺好的，就是有点想你了。", "刚下班到家，累瘫了。你今天怎么样？", False),
+    ("", "你好", False),
+])
+def test_read_back_must_match_the_text(spoken, text, ok):
+    assert tts_client.read_back_matches(spoken, text) is ok
 
 
 @pytest.mark.parametrize(
@@ -150,75 +164,10 @@ def test_style_instruction_prioritizes_natural_conversation():
     assert "自然连读" in instruction
     assert "少重音" in instruction
     assert instruction_billable_characters(instruction) <= 100
-    assert (
-        decorate_text_with_emotion(
-            "别这样。",
-            "愤怒",
-            80,
-            enabled=True,
-            scale=1.0,
-        )
-        == "（生气地）别这样。"
-    )
-
-
-@pytest.mark.asyncio
-async def test_synthesize_sends_stepfun_payload_and_returns_metering(monkeypatch):
-    audio = _wav_bytes(seconds=0.5)
-    captured = {}
-
-    async def handle(request):
-        captured["endpoint"] = str(request.url)
-        captured["authorization"] = request.headers["Authorization"]
-        captured["payload"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            headers={"x-trace-id": "tts-request-1", "content-type": "audio/wav"},
-            content=audio,
-        )
-
-    monkeypatch.setattr(tts_client.settings, "stepfun_api_key", "tts-key")
-    monkeypatch.setattr(tts_client.settings, "stepfun_tts_endpoint", "https://tts.example/api")
-    monkeypatch.setattr(tts_client.settings, "stepfun_tts_max_bytes", 1024 * 1024)
-
-    async def fake_model():
-        return "stepaudio-test"
-
-    monkeypatch.setattr(tts_client, "get_effective_tts_model", fake_model)
-    monkeypatch.setattr(
-        tts_client,
-        "get_tts_pricing",
-        lambda model: {
-            "unit_price_cny": 5.8,
-            "billing_unit": "per_10k_characters",
-        },
-    )
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
-        result = await tts_client.synthesize_speech(
-            text="你好",
-            voice_id="elegantgentle-female",
-            instruction="自然表达",
-            rate=1.2,
-            volume=60,
-            client=http,
-        )
-
-    assert captured["endpoint"] == "https://tts.example/api"
-    assert captured["authorization"] == "Bearer tts-key"
-    assert captured["payload"] == {
-        "model": "stepaudio-test",
-        "input": "你好",
-        "voice": "elegantgentle-female",
-        "response_format": "wav",
-        "sample_rate": 24000,
-        "speed": 1.2,
-        "volume": 1.2,
-        "instruction": "自然表达",
-    }
-    assert result.duration_milliseconds == 500
-    assert result.request_id == "tts-request-1"
-    assert result.billable_characters == 2
-    assert result.cost_cny == pytest.approx(2 * 5.8 / 10_000)
+    plan = build_speech_plan("（生气地）别这样。", "愤怒", 80, instruction=None, enabled=True, scale=1.0)
+    # Cues travel in the instruction: the reader would speak them aloud.
+    assert plan.text == "别这样。"
+    assert plan.instruction.endswith("本句明显生气严肃。")
 
 
 @pytest.mark.asyncio
