@@ -127,13 +127,14 @@ async def test_realtime_voice_usage_is_reported_as_its_own_category():
     assert records[0]["data"]["input_tokens"] == 81
 
 
-@pytest.mark.asyncio
-async def test_voice_messages_are_priced_only_with_both_realtime_rows(monkeypatch):
+def test_voice_messages_are_priced_only_with_both_realtime_rows(monkeypatch):
     from app.services import runtime_config
 
     model = "qwen-admin-override-realtime"
     row = {"input": 1.5, "output": 4.5}
-    monkeypatch.setattr(runtime_config, "get_effective_realtime_model", AsyncMock(return_value=model))
+    monkeypatch.setattr(
+        runtime_config, "resolve_config_sync", lambda agent_id=None: SimpleNamespace(realtime_model=model),
+    )
     monkeypatch.setattr(runtime_config, "_current_snapshot", SimpleNamespace(get=lambda: None))
     for prices, missing in (
         ({model: row, model + ":audio": row}, False),
@@ -142,4 +143,4 @@ async def test_voice_messages_are_priced_only_with_both_realtime_rows(monkeypatc
         ({}, True),
     ):
         monkeypatch.setattr(runtime_config, "_PRICING_CACHE", prices)
-        assert await costs.voice_prices_missing() is missing
+        assert costs.voice_prices_missing() is missing

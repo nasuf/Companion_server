@@ -278,13 +278,16 @@ async def compute(tx, day: date, now: datetime) -> None:
         )
 
 
-async def voice_prices_missing() -> bool:
+def voice_prices_missing() -> bool:
     """Voice messages are billed per token on the realtime model; with no
-    activity, "priced" means both of its price rows are registered."""
-    from app.services.realtime_voice.billing import audio_price_key
-    from app.services.runtime_config import get_effective_realtime_model, get_pricing
+    activity, "priced" means both of its price rows are registered.
 
-    model = (await get_effective_realtime_model()) or settings.dashscope_realtime_model
+    Reads the cached configuration, like get_pricing: no database round trip.
+    """
+    from app.services.realtime_voice.billing import audio_price_key
+    from app.services.runtime_config import get_pricing, resolve_config_sync
+
+    model = resolve_config_sync(agent_id=None).realtime_model or settings.dashscope_realtime_model
     return get_pricing(model) is None or get_pricing(audio_price_key(model)) is None
 
 
@@ -365,7 +368,7 @@ async def read_costs(
     categories["search"]["unpriced"] |= float(settings.web_search_price_cny_per_k) <= 0
     categories["asr"]["unpriced"] |= float(settings.asr_price_cny_per_second) <= 0
     if not categories["tts"]["request_count"]:
-        categories["tts"]["unpriced"] |= await voice_prices_missing()
+        categories["tts"]["unpriced"] |= voice_prices_missing()
     for offset in range((end - start).days + 1):
         daily[str(start + timedelta(days=offset))]
     total = blank()
