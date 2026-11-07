@@ -167,6 +167,11 @@ class TestPersona:
         )
         assert "通话刚开始" in text
         assert "recall_memory" in text
+        # Voice baseline: without it the model acted lively personas and
+        # emotional lines out as rushed and tearful (2026-11-07 probe: pitch
+        # spread 228 Hz → 162 Hz with it, neutral lines unchanged).
+        assert "平时语速放松、音量适中" in text
+        assert "幅度不超过平常聊天" in text
 
     def test_build_instructions_patience_medium(self):
         dynamic = DynamicContext(patience_zone="medium")
