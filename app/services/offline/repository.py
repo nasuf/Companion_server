@@ -553,7 +553,7 @@ async def list_activities(user_id: str, workspace_id: str | None = None) -> list
 
 async def expire_inactive_events(user_id: str) -> None:
     # Arrival/evidence remain intact; a started journey can still be archived.
-    await db.execute_raw("""
+    rows = await db.query_raw("""
         UPDATE offline_activity_recommendations
         SET status='expired', updated_at=CURRENT_TIMESTAMP,
             next_companion_at=NULL, companion_claim_token=NULL, companion_claimed_at=NULL
@@ -561,7 +561,14 @@ async def expire_inactive_events(user_id: str) -> None:
           AND status IN ('pending','accepted','ignored') AND reached=FALSE
           AND (COALESCE(expires_at,ends_at) <= CURRENT_TIMESTAMP
                OR discovery_metadata->'event'->>'status' IN ('cancelled','postponed','unavailable'))
+        RETURNING id
     """, user_id)
+    if rows:
+        # 用户接受过/不考虑过的活动过期了: 它的状态记忆改成"过期了，没去"
+        from app.services.offline.activity_memory import schedule_sync
+
+        for row in rows:
+            schedule_sync(row["id"], user_id)
 
 
 async def get_cancelled_activity_plans(user_id: str, workspace_id: str | None) -> list[dict]:

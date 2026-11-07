@@ -46,7 +46,7 @@ from app.services.offline.chat_emit import (
     insert_user_activity_card,
     insert_user_component_message,
 )
-from app.services.offline.memory_hooks import remember_user_event
+from app.services.offline.activity_memory import archive_for_user, schedule_sync as sync_activity_memory
 from app.services.offline.copy_trace import record_final_copy
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,8 @@ async def clear_all_activities(user_id: str) -> dict[str, int]:
     for item in media:
         activity_media_storage.delete_media_file(item.storage_key)
     activity_media_storage.delete_user_media_files(user_id, keep_gift_images=True)
+    # 活动没了, 记着它的状态记忆也收起来 (归档可恢复; 链接随活动级联删除)
+    await archive_for_user(user_id)
     return await repo.clear_user_activities(user_id)
 
 
@@ -379,6 +381,7 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
         updated = await repo.update_activity_status(activity_id, user_id, "accepted")
     if not updated:
         raise HTTPException(status_code=404, detail="Activity not found")
+    sync_activity_memory(activity_id, user_id)
     await repo.create_activity_feedback(
         recommendation_id=activity_id,
         user_id=user_id,
@@ -457,11 +460,7 @@ async def ignore_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             ctx["workspace_id"],
             repo.next_activity_due(datetime.now(UTC), accepted_delta_days=3),
         )
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=activity.get("workspace_id"),
-        text=f"用户暂时忽略了线下活动推荐：{activity['title']}",
-    )
+    sync_activity_memory(activity_id, user_id)
     return OfflineActivityItem(**updated)
 
 
@@ -611,11 +610,7 @@ async def arrive_activity(
     fire_background(shooting_conditions.generate_items_for_activity(updated))
     # The database transition registers a durable arrival receipt. A bounded
     # scheduler dispatches it; LLM/TTS and message delivery never block this API.
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=activity.get("workspace_id"),
-        text=f"用户确认到达线下活动地点：{activity['title']}",
-    )
+    sync_activity_memory(activity_id, user_id)
     return OfflineActivityItem(**updated)
 
 
@@ -668,11 +663,7 @@ async def archive_activity(user_id: str, activity_id: str) -> OfflineActivityIte
             trigger_type="offline_activity_archived_card",
             status_label="已收好",
         )
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=activity.get("workspace_id"),
-        text=f"用户收好了线下活动的回忆：{activity['title']}",
-    )
+    sync_activity_memory(activity_id, user_id)
     return OfflineActivityItem(**await _with_completion_feedback(updated))
 
 
@@ -690,6 +681,7 @@ async def auto_archive_due_activities() -> dict[str, int]:
             )
             if not updated:
                 continue  # 并发下已被手动归档
+            sync_activity_memory(activity["id"], activity["user_id"])
             await _ensure_journey_note(updated)
             ctx = await repo.resolve_user_context(
                 activity["user_id"], activity.get("workspace_id")
@@ -966,15 +958,8 @@ async def complete_activity(
             source_id=activity_id,
             trigger_type="offline_activity_completed",
         )
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=activity.get("workspace_id"),
-        text=(
-            f"用户完成了线下活动「{activity['title']}」。"
-            f"分享内容：{text}"
-            + ("（包含语音）" if audio else "")
-        ),
-    )
+    # 用户分享的原话已作为用户消息落库, 照常进聊天抽取; 活动本身的状态由同步函数写
+    sync_activity_memory(activity_id, user_id)
     updated = await _with_completion_feedback(updated)
     return OfflineActivityItem(**updated)
 
@@ -1014,4 +999,5 @@ async def delete_activity(user_id: str, activity_id: str) -> dict:
         return {'ok': True}
     if not await repo.cancel_unstarted_activity(activity_id, user_id):
         raise HTTPException(status_code=409, detail="已经到达的旅途请收好回忆，不能删除待出行记录")
+    sync_activity_memory(activity_id, user_id)
     return {'ok': True}

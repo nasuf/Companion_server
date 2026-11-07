@@ -188,7 +188,7 @@ async def test_accept_activity_allows_reaccepting_ignored_activity(monkeypatch):
     monkeypatch.setattr(activity_service.repo, "update_next_activity_due", AsyncMock())
     monkeypatch.setattr(activity_service, "emit_assistant", emit)
     monkeypatch.setattr(activity_service, "insert_user_activity_card", insert_card)
-    monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
+    monkeypatch.setattr(activity_service, "sync_activity_memory", lambda *_: None)
 
     result = await activity_service.accept_activity("user-1", "activity-1")
 
@@ -243,7 +243,7 @@ async def test_ignore_activity_emits_ignored_activity_card(monkeypatch):
     monkeypatch.setattr(activity_service.repo, "update_next_activity_due", AsyncMock())
     monkeypatch.setattr(activity_service, "emit_assistant", AsyncMock())
     monkeypatch.setattr(activity_service, "insert_user_activity_card", insert_card)
-    monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
+    monkeypatch.setattr(activity_service, "sync_activity_memory", lambda *_: None)
 
     result = await activity_service.ignore_activity("user-1", "activity-1")
 
@@ -303,7 +303,7 @@ async def test_complete_activity_emits_completed_card_with_share_metadata(monkey
     monkeypatch.setattr(activity_service, "insert_user_component_message", insert_share)
     monkeypatch.setattr(activity_service, "emit_assistant", AsyncMock())
     monkeypatch.setattr(activity_service, "insert_user_activity_card", insert_card)
-    monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
+    monkeypatch.setattr(activity_service, "sync_activity_memory", lambda *_: None)
 
     result = await activity_service.complete_activity(
         "user-1",

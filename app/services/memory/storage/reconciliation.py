@@ -35,11 +35,13 @@ def _is_write_protected(record: MemoryRecord) -> bool:
     - knowledge_seed rows: admin-published template knowledge (公司/产品/活动
       facts). Only the admin append/sync pipeline may manage them; chat-time
       writes must never merge into or rewrite them.
+    - activity_record rows: rewritten from the activity's current state by
+      offline/activity_memory.py; a merge would detach them from the activity.
 
     Containment-gated enrichment stays allowed for non-seed, non-singleton L1
     (richer restatements of learned facts).
     """
-    if getattr(record, "provenance", None) in ("profile_seed", "knowledge_seed"):
+    if getattr(record, "provenance", None) in ("profile_seed", "knowledge_seed", "activity_record"):
         return True
     return record.level == 1 and is_singleton(record.mainCategory, record.subCategory)
 

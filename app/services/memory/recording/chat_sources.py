@@ -19,6 +19,11 @@ def excluded_from_chat_extraction(message: dict) -> bool:
         return True
     if metadata.get("real_world_type") == "gift":
         return True
+    # 系统替用户插的活动卡片 ("活动卡片：X") 不是用户说的话; 活动状态由
+    # offline/activity_memory 按活动记录写进记忆
+    card = metadata.get("component_card")
+    if message.get("role") == "user" and isinstance(card, dict) and card.get("type") == "offline_activity":
+        return True
     if message.get("role") == "assistant":
         # Offline-activity copy is business text about the user's outing in the
         # user's city ("头疼好些了，去清凉山走走"). Self-memory extraction turned it

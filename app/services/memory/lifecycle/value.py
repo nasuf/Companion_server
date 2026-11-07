@@ -112,7 +112,8 @@ WARM_DEMOTE_AT = 0.42    # L2 → L3
 # 推演只演值和层级的纯函数 (apply_usage), 闸门不在其中: 推演里 L1/L2 都可检索,
 # 闸门不改变它度量的东西。
 L1_PROMOTION_MIN_CONTRIBUTION_DAYS = 3
-AI_CHAT_DERIVED_PROVENANCE = frozenset({"ai_authored", "daily_summary", "consolidated"})
+# activity_record (线下活动的状态记忆) 由活动记录改写, 内容会随状态变; 不能升成 AI 的 L1 事实
+AI_CHAT_DERIVED_PROVENANCE = frozenset({"ai_authored", "daily_summary", "consolidated", "activity_record"})
 
 
 def l1_promotion_allowed(

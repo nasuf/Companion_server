@@ -41,7 +41,7 @@ async def journey(flow, monkeypatch):
     monkeypatch.setattr(notifications, 'notify_agent_message_created', AsyncMock())
     monkeypatch.setattr(activity_companion, 'start_opening_segment', AsyncMock())
     monkeypatch.setattr(service, 'fire_background', lambda c: c.close())
-    monkeypatch.setattr(service, 'remember_user_event', lambda **k: None)
+    monkeypatch.setattr(service, "sync_activity_memory", lambda *_: None)
     monkeypatch.setattr(service, '_arrival_guide_text', AsyncMock(return_value='到了呀，慢慢逛'))
     monkeypatch.setattr(service, 'settings', type('Settings', (), {
         'offline_arrival_require_geocode': False, 'offline_arrival_radius_m': 200,

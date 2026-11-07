@@ -551,8 +551,11 @@ async def test_home_counts_door_gifts_and_activity_reset_keeps_gift_images(monke
     delete_files = Mock(return_value=0)
     monkeypatch.setattr(activity_service.activity_media_storage, "delete_user_media_files", delete_files)
     monkeypatch.setattr(activity_service.repo, "clear_user_activities", AsyncMock(return_value={}))
+    archive = AsyncMock(return_value=0)
+    monkeypatch.setattr(activity_service, "archive_for_user", archive)
     await activity_service.clear_all_activities("user-1")
     delete_files.assert_called_once_with("user-1", keep_gift_images=True)
+    archive.assert_awaited_once_with("user-1")  # 活动清空时, 对应的活动记忆一起归档
 
 
 @pytest.mark.asyncio

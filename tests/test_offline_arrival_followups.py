@@ -27,7 +27,7 @@ async def arrival(origins, redis, monkeypatch):
     monkeypatch.setattr(policy, 'should_generate_voice', AsyncMock(return_value=False))
     monkeypatch.setattr(activity_service, '_guard_event', AsyncMock())
     monkeypatch.setattr(activity_service.shooting_conditions, 'generate_items_for_activity', AsyncMock())
-    monkeypatch.setattr(activity_service, 'remember_user_event', lambda **kw: None)
+    monkeypatch.setattr(activity_service, "sync_activity_memory", lambda *_: None)
     monkeypatch.setattr(activity_service, '_arrival_guide_text', AsyncMock(return_value='已经到啦，慢慢逛。'))
     monkeypatch.setattr(activity_companion, 'start_opening_segment', AsyncMock())
     monkeypatch.setattr(notifications, 'notify_agent_message_created', AsyncMock())

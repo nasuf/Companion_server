@@ -35,7 +35,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(activity_service, "insert_user_activity_card", AsyncMock())
     monkeypatch.setattr(activity_service, "emit_assistant", AsyncMock())
     monkeypatch.setattr(activity_service, "emit_activity_card", AsyncMock())
-    monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
+    monkeypatch.setattr(activity_service, "sync_activity_memory", lambda *_: None)
     monkeypatch.setattr(
         activity_service.repo,
         "find_other_reached_activity",
