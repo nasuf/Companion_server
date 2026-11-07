@@ -31,7 +31,7 @@ from app.redis_client import is_redis_healthy
 from app.services.interaction.boundary import get_patience, get_patience_zone
 from app.services.realtime_voice.bridge import VoiceBridge
 from app.services.realtime_voice.context import load_call_context
-from app.services.realtime_voice.instructions import memory_lines
+from app.services.realtime_voice.instructions import clock_line, memory_lines
 from app.services.realtime_voice.lock import acquire_call, refresh_call, release_call
 from app.services.realtime_voice.persist import (
     save_assistant_transcript,
@@ -373,6 +373,7 @@ def _bridge(
         memory_wait_s=settings.dashscope_realtime_memory_wait_s,
         instructions=instructions,
         greet_cue=greet_cue,
+        clock_line=clock_line,
     )
 
 

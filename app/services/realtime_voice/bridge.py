@@ -80,6 +80,8 @@ _TAIL_ECHO_MIN_CHARS = 4
 # Echo from the speaker is often garbled ("喂，枫" heard as "外封",
 # 2026-11-06), so a short fragment that matches nothing proves nothing.
 _BARGE_IN_MIN_CHARS = 4
+# A requested reply normally starts within a second.
+_REPLY_START_TIMEOUT_S = 8.0
 # Longest stretch of user speech before the segment is ended without a stop.
 _SEGMENT_MAX_S = 60.0
 # Short words that do stop the agent: the user wants the floor. Other short
@@ -147,6 +149,7 @@ class VoiceBridge:
         memory_wait_s: float = 0.6,
         instructions: str | None = None,
         greet_cue: str | None = None,
+        clock_line: Callable[[], str] | None = None,
     ) -> None:
         self._send_provider = send_provider
         self._send_client = send_client
@@ -157,6 +160,9 @@ class VoiceBridge:
         self._memory_wait_s = memory_wait_s
         # None: replies carry no memory note (tests, tools only).
         self._slot = MemorySlot(instructions) if instructions else None
+        # Current time for each reply's note; the call instructions only
+        # carry the hour at connect time.
+        self._clock_line = clock_line
         self._turn = 0
         self._last_assistant_text = ""
         self._recent_replies: deque[str] = deque(maxlen=_REPEAT_WINDOW)
@@ -204,9 +210,16 @@ class VoiceBridge:
         # Per-reply system note: text sent, then its provider item id.
         self._note_text: str | None = None
         self._note_id: str | None = None
-        # event_id of the pending response.create: an error naming another
-        # request (a late cancel, say) must not release this reply.
+        # event_id of the pending response.create; a reply that has not
+        # started within _REPLY_START_TIMEOUT_S is released (errors are not
+        # matched to requests: DashScope omits event_id on most of them).
         self._create_event_id: str | None = None
+        # Barge-in before response.created: DashScope rejects that cancel,
+        # so it is sent once the reply has started.
+        self._cancel_pending = False
+        # Item deletes wait while a reply is generating: deleting an item it
+        # builds on closes the session ("previous item id does not exist").
+        self._pending_deletes: list[tuple[str, str]] = []
 
         # Greeting cue: sent, then its provider item id once created
         self._greet_cue = greet_cue or _GREET_CUE
@@ -359,6 +372,9 @@ class VoiceBridge:
             # Replies are only ever requested by this bridge; mark defensively.
             self._responding = True
             self._reply_seen = True
+            if self._cancel_pending:
+                self._cancel_pending = False
+                await self._send_cancel()
             return
         if kind == "response.audio.delta":
             await self._on_audio_delta(event.get("delta"))
@@ -483,17 +499,24 @@ class VoiceBridge:
     async def _cut_reply(self) -> bool:
         """Cancel the reply in progress and store what was said before the cut."""
         cancelled = False
-        try:
-            await self._send_provider(response_cancel_event())
-            cancelled = True
-        except Exception:
-            logger.warning("[realtime-voice] cancel failed")
+        if self._responding and not self._reply_seen:
+            self._cancel_pending = True
+        else:
+            cancelled = await self._send_cancel()
         self._discarding = True
         partial = "".join(self._assistant_parts).strip()
         if partial:
             await self._store_assistant(partial, interrupted=True)
         self._assistant_parts = []
         return cancelled
+
+    async def _send_cancel(self) -> bool:
+        try:
+            await self._send_provider(response_cancel_event())
+            return True
+        except Exception:
+            logger.warning("[realtime-voice] cancel failed")
+            return False
 
     async def _on_speech_stopped(self, event: dict) -> None:
         segment = self._segment_for(event)
@@ -602,12 +625,23 @@ class VoiceBridge:
 
     async def _discard_item(self, item_id: str | None) -> None:
         """Remove a turn that gets no reply, so later replies never see it."""
+        await self._delete_item(item_id, "discarded turn")
+
+    async def _delete_item(self, item_id: str | None, what: str) -> None:
         if not item_id:
+            return
+        if self._responding:
+            self._pending_deletes.append((item_id, what))
             return
         try:
             await self._send_provider(item_delete_event(item_id))
         except Exception:
-            logger.warning("[realtime-voice] discarded turn not removed")
+            logger.warning("[realtime-voice] %s not removed", what)
+
+    async def _flush_deletes(self) -> None:
+        pending, self._pending_deletes = self._pending_deletes, []
+        for item_id, what in pending:
+            await self._delete_item(item_id, what)
 
     # ------------------------------------------------------------------
     # Replies: memories first, then speak
@@ -643,11 +677,12 @@ class VoiceBridge:
         await self._request_reply()
 
     async def _request_reply(self, *, with_note: bool = True) -> None:
-        note = self._slot.note() if with_note and self._slot is not None else ""
+        note = self._reply_note() if with_note else ""
         self._unanswered = False
         self._responding = True
         self._reply_seen = False
         self._discarding = False
+        self._cancel_pending = False
         if note:
             self._note_text = note
             self._note_id = None
@@ -655,6 +690,36 @@ class VoiceBridge:
         create = response_create_event()
         self._create_event_id = create["event_id"]
         await self._send_provider(create)
+        self._watch_reply_start(create["event_id"])
+
+    def _reply_note(self) -> str:
+        parts = [self._clock_line() if self._clock_line else ""]
+        parts.append(self._slot.note() if self._slot is not None else "")
+        return "\n\n".join(part for part in parts if part)
+
+    def _watch_reply_start(self, create_id: str) -> None:
+        """Release a requested reply that never starts, so the call goes on."""
+        async def watch() -> None:
+            await asyncio.sleep(_REPLY_START_TIMEOUT_S)
+            async with self._lock:
+                if (
+                    self._closed
+                    or not self._responding
+                    or self._reply_seen
+                    or self._create_event_id != create_id
+                ):
+                    return
+                logger.warning("[realtime-voice] reply did not start; released")
+                self._responding = False
+                self._cancel_pending = False
+                await self._flush_deletes()
+                await self._drop_greet_cue()
+                await self._drop_note()
+                await self._maybe_reply()
+
+        task = asyncio.create_task(watch())
+        self._watchdogs.add(task)
+        task.add_done_callback(self._watchdogs.discard)
 
     # ------------------------------------------------------------------
     # Provider-side items and the end of each reply
@@ -697,6 +762,8 @@ class VoiceBridge:
     async def _on_response_done(self, event: dict) -> None:
         self._responding = False
         self._output_active = False
+        self._cancel_pending = False
+        await self._flush_deletes()
         await self._drop_greet_cue()
         await self._drop_note()
         text = assistant_transcript(event) or "".join(self._assistant_parts).strip()
@@ -744,12 +811,7 @@ class VoiceBridge:
 
     async def _drop_note(self) -> None:
         note_id, self._note_id, self._note_text = self._note_id, None, None
-        if not note_id:
-            return
-        try:
-            await self._send_provider(item_delete_event(note_id))
-        except Exception:
-            logger.warning("[realtime-voice] memory note not removed")
+        await self._delete_item(note_id, "memory note")
 
     def _record_usage(self, response: object) -> None:
         usage = response.get("usage") if isinstance(response, dict) else None
@@ -913,12 +975,7 @@ class VoiceBridge:
 
     async def _drop_greet_cue(self) -> None:
         cue_id, self._greet_cue_id = self._greet_cue_id, None
-        if not cue_id:
-            return
-        try:
-            await self._send_provider(item_delete_event(cue_id))
-        except Exception:
-            logger.warning("[realtime-voice] greeting cue not removed")
+        await self._delete_item(cue_id, "greeting cue")
 
     # ------------------------------------------------------------------
     # Error handling
@@ -927,22 +984,15 @@ class VoiceBridge:
     async def _on_provider_error(self, event: dict) -> None:
         error = event.get("error")
         message = ""
-        source = None
         if isinstance(error, dict):
             raw = error.get("message")
             if isinstance(raw, str):
                 message = raw[:180]
-            source = error.get("event_id")
+        # Never releases the pending reply: most errors carry no event_id,
+        # and a rejected cancel looks like any other. Freeing the reply here
+        # deleted its note mid-generation and DashScope closed the call
+        # (2026-11-07). _watch_reply_start covers a reply that never starts.
         logger.warning("[realtime-voice] provider error: %s", message or "unknown")
-        if (
-            self._responding
-            and not self._reply_seen
-            and (not source or source == self._create_event_id)
-        ):
-            # The requested reply never started: free the turn so the next
-            # one is answered, and drop the note sent for it.
-            self._responding = False
-            await self._drop_note()
         await self._send_client({
             "type": "warning",
             "message": message or "语音服务返回了一个错误",

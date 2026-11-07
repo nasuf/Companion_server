@@ -209,6 +209,22 @@ def history_turns(messages: list[dict], *, limit: int = 8, char_limit: int = 300
 _REPEAT_KEY_CHARS = 8
 
 
+def clock_line() -> str:
+    """Current time to the minute, sent with each reply of a call.
+
+    The call instructions carry only the hour at connect time, and earlier
+    calls' history may hold a time the agent once said ("七点零二分"),
+    which it repeated as current on 2026-11-07.
+    """
+    from app.services.time_domain.clock import get_current_time
+
+    ti = get_current_time()
+    return (
+        f"【现在的时间】{ti.now.month}月{ti.now.day}日 {ti.weekday} {ti.now:%H:%M}。"
+        "说到时间、时段或作息以这个为准；之前对话里提到的时间可能已经过时。"
+    )
+
+
 def spoken_key(text: str) -> str:
     """Text without punctuation and spaces, for comparing spoken lines."""
     return re.sub(r"[\W_]+", "", text)

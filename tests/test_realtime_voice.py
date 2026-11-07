@@ -424,10 +424,15 @@ class TestVoiceBridge:
         await bridge.feed_provider_event({
             "type": "conversation.item.input_audio_transcription.completed", "item_id": "e1", "transcript": "店里特别忙一下午做了。"})
         assert client_sent == []
+        # Deleted once the reply is done: deleting during generation can
+        # close the DashScope session.
+        assert provider_sent == []
+        await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed"}})
         assert [e["type"] for e in provider_sent] == ["conversation.item.delete"]
         assert provider_sent[0]["item_id"] == "e1"
         assert "echo_dropped=1" in bridge.mic_summary
-        assert bridge.transcript_pairs == []
+        # Only the agent's own reply was recorded, not its echo.
+        assert [p["role"] for p in bridge.transcript_pairs] == ["assistant"]
 
     @pytest.mark.asyncio
     async def test_a_backchannel_over_the_agent_gets_no_reply(self):
@@ -436,9 +441,10 @@ class TestVoiceBridge:
         await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "b1"})
         await bridge.feed_provider_event({
             "type": "conversation.item.input_audio_transcription.completed", "item_id": "b1", "transcript": "嗯。"})
+        await bridge.feed_provider_event({"type": "response.done", "response": {"status": "completed"}})
         assert [e["type"] for e in provider_sent] == ["conversation.item.delete"]
         assert not any(e["type"] == "speech.started" for e in client_sent[1:])
-        assert bridge.transcript_pairs == []
+        assert [p["role"] for p in bridge.transcript_pairs] == ["assistant"]
 
     @pytest.mark.asyncio
     async def test_a_short_answer_right_after_the_agent_is_the_user(self):
@@ -484,6 +490,7 @@ class TestVoiceBridge:
         """Client-initiated interrupt cancels provider response."""
         bridge, provider_sent, client_sent = self._make_bridge()
         bridge._responding = True
+        bridge._reply_seen = True
         bridge._output_active = True
 
         await bridge.feed_client_text('{"type": "interrupt"}')

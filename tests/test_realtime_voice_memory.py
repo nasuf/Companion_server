@@ -871,27 +871,93 @@ async def test_client_interrupt_keeps_what_was_said_before_the_cut():
     assert any(e["type"] == "response.cancel" for e in provider)
 
 
-async def test_only_an_error_for_the_reply_request_releases_it():
+async def test_barge_in_before_the_reply_starts_keeps_the_call_alive():
+    """2026-11-07: the user spoke right as a reply was requested. The cancel
+    was rejected ("Cannot cancel response before response.created"), the
+    error freed the reply and deleted its note, and DashScope closed the call
+    ("previous item id does not exist")."""
     async def retrieve(text, previous):
         return [_memory("m1", "用户在学吉他")]
 
     bridge, provider, client = _bridge(retrieve)
     await _user_says(bridge, "我今天练琴了")
-    create = provider[-1]
-    assert create["type"] == "response.create"
+    assert provider[-1]["type"] == "response.create"
     await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
         "id": "item_srv_note", "role": "system", "content": [{"type": "input_text", "text": "x"}]}})
-    # A late cancel from the previous reply fails: this reply stays pending.
+    sent = len(provider)
+    await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "late"})
+    # No cancel before response.created; nothing deleted.
+    assert provider[sent:] == []
     await bridge.feed_provider_event({"type": "error", "error": {
-        "message": "no active response", "event_id": "evt_old_cancel"}})
+        "message": "Cannot cancel response before response.created"}})
     assert bridge._responding and bridge._note_id == "item_srv_note"
     assert client[-1]["type"] == "warning"
-    # The request itself failing frees the turn and drops its note.
-    await bridge.feed_provider_event({"type": "error", "error": {
-        "message": "bad request", "event_id": create["event_id"]}})
+    # The cancel goes out once the reply exists.
+    await bridge.feed_provider_event({"type": "response.created"})
+    assert [e["type"] for e in provider[sent:]] == ["response.cancel"]
+    # The note is deleted only after the reply is done.
+    await bridge.feed_provider_event({"type": "response.done", "response": {"status": "cancelled"}})
+    deletes = [e["item_id"] for e in provider[sent:] if e["type"] == "conversation.item.delete"]
+    assert deletes == ["item_srv_note"]
+
+
+async def test_a_reply_that_never_starts_is_released(monkeypatch):
+    from app.services.realtime_voice import bridge as bridge_module
+
+    monkeypatch.setattr(bridge_module, "_REPLY_START_TIMEOUT_S", 0.01)
+
+    async def retrieve(text, previous):
+        return [_memory("m1", "用户在学吉他")]
+
+    bridge, provider, _ = _bridge(retrieve)
+    await _user_says(bridge, "我今天练琴了")
+    await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
+        "id": "item_srv_note", "role": "system", "content": []}})
+    await asyncio.sleep(0.05)
     assert not bridge._responding
-    assert provider[-1]["type"] == "conversation.item.delete"
-    assert provider[-1]["item_id"] == "item_srv_note"
+    assert provider[-1] == {"event_id": provider[-1]["event_id"],
+                            "type": "conversation.item.delete", "item_id": "item_srv_note"}
+    # A reply that did start is left alone.
+    await _user_says(bridge, "弹了一小时")
+    await bridge.feed_provider_event({"type": "response.created"})
+    await asyncio.sleep(0.05)
+    assert bridge._responding
+
+
+async def test_each_reply_note_carries_the_current_time():
+    async def retrieve(text, previous):
+        return []
+
+    provider: list[dict] = []
+
+    async def send(event):
+        provider.append(event)
+
+    async def save(*_):
+        return "msg"
+
+    async def client(_):
+        pass
+
+    bridge = VoiceBridge(
+        send_provider=send, send_client=client, retrieve_memories=retrieve,
+        save_user_line=save, save_assistant_line=save, retrieval_timeout_s=0.2,
+        memory_wait_s=0.05, instructions="BASE", clock_line=lambda: "【现在的时间】07:16",
+    )
+    await _user_says(bridge, "现在几点了")
+    assert _notes(provider) == ["【现在的时间】07:16"]
+
+
+def test_clock_line_is_to_the_minute(monkeypatch):
+    from datetime import datetime
+    from app.services.realtime_voice import instructions
+    from app.services.time_domain import clock
+
+    now = datetime(2026, 11, 7, 7, 16)
+    monkeypatch.setattr(clock, "get_current_time", lambda: clock.TimeInfo(
+        now=now, date=now.date(), weekday="星期六", is_weekend=True, timestamp_ms=0))
+    line = instructions.clock_line()
+    assert line.startswith("【现在的时间】11月7日 星期六 07:16。")
 
 
 async def test_note_id_is_taken_even_if_the_echoed_text_differs():
