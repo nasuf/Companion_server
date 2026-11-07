@@ -676,7 +676,7 @@ async def test_call_context_returns_a_gap_aware_cue(monkeypatch):
                "createdAt": datetime.now(timezone.utc) - timedelta(seconds=30)}]
 
     async def gather(**_):
-        return [], [], recent, DynamicContext()
+        return [], [], recent, DynamicContext(), ["2026-11-04 推荐「江边旧址」：对方放进了待出行，还没去"]
 
     monkeypatch.setattr(context, "_gather_all", gather)
     agent = SimpleNamespace(name="阿宁", gender="female")
@@ -685,6 +685,7 @@ async def test_call_context_returns_a_gap_aware_cue(monkeypatch):
     assert history == [{"role": "assistant", "text": "下次聊"}]
     assert "就在刚才（打电话）" in instructions
     assert "刚挂断又马上打回来" in cue
+    assert "推荐「江边旧址」" in instructions and "只按这份记录说" in instructions
 
 
 async def test_bridge_greets_with_the_cue_it_was_given():

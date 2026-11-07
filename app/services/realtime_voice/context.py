@@ -34,7 +34,7 @@ async def load_call_context(
     """
     (
         user_memories, ai_memories, recent,
-        dynamic,
+        dynamic, activity_history,
     ) = await _gather_all(
         agent=agent,
         user_id=user_id,
@@ -51,6 +51,7 @@ async def load_call_context(
         has_history=bool(history),
         dynamic=dynamic,
         last_contact=last_contact_line(gap, was_call=was_call),
+        activity_history=activity_history,
     )
     return persona, instructions, history, greeting_cue(gap, was_call=was_call)
 
@@ -130,7 +131,7 @@ async def _gather_all(
     user_id: str,
     workspace_id: str | None,
     conversation_id: str,
-) -> tuple[list, list, list, DynamicContext]:
+) -> tuple[list, list, list, DynamicContext, list[str]]:
     """Parallel load of all call setup data."""
     agent_id = getattr(agent, "id", None)
     results = await asyncio.gather(
@@ -142,6 +143,7 @@ async def _gather_all(
             user_id=user_id,
             conversation_id=conversation_id,
         ),
+        _activity_history(user_id, workspace_id),
         return_exceptions=True,
     )
     user_memories = _or_empty(results[0], "user core memories")
@@ -150,7 +152,20 @@ async def _gather_all(
     dynamic = results[3] if isinstance(results[3], DynamicContext) else DynamicContext()
     if isinstance(results[3], BaseException):
         logger.warning("[realtime-voice] dynamic context failed: %s", results[3])
-    return user_memories, ai_memories, recent, dynamic
+    activity_history = _or_empty(results[4], "activity recommendations")
+    return user_memories, ai_memories, recent, dynamic, activity_history
+
+
+async def _activity_history(user_id: str, workspace_id: str | None) -> list[str]:
+    """推荐过的线下活动 (VOICE01.10): 开场注入一次; 没推荐过就不注入, 通话规则已要求不编。"""
+    from app.services.offline import recommendation_history
+    from app.services.offline.module_settings import is_activity_enabled
+
+    if not await is_activity_enabled():
+        return []
+    return recommendation_history.render_lines(
+        await recommendation_history.load_recent(user_id, workspace_id)
+    )
 
 
 def _or_empty(value, label: str):

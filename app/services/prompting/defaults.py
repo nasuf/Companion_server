@@ -160,6 +160,17 @@ CHAT_LOCATION_CONTEXT_SECTION_PROMPT = (
     "- 对方这句话里明确说了自己在哪，以对方说的为准；手机定位只是参考，对方可能正好在外地。"
 )
 
+# 「你推荐过的活动」段 (VOICE01.10): 用户问起推荐过的地方/活动时, 把推荐记录原样给模型。
+# 记忆里没有这些推荐 (AI 活动文案不进抽取), 不给就只能编。{lines} 由代码按推荐记录填入。
+CHAT_ACTIVITY_RECOMMENDATION_HISTORY_PROMPT = (
+    "下面是你给对方推荐过的线下活动，来自推荐记录，新的在前：\n"
+    "{lines}\n"
+    "- 对方问你推荐过什么、去过哪里时，只按这份记录回答，用自己的话说，不要照读。"
+    "记录里没有的地点和活动，就说没推荐过或不记得，不要编。\n"
+    "- 状态以这里为准：没回应、不考虑、已取消、已过期的，都不能说成对方去过或打算去。\n"
+    "- 对方没问起推荐时，不要主动列举这些活动。"
+)
+
 CHAT_OFFLINE_ACTIVITY_SECTION_PROMPT = (
     "你正在陪 TA 进行一次线下外出：{activity}（地点：{location}）。{status_line}\n"
     "{progress_line}\n"

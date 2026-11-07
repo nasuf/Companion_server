@@ -34,6 +34,7 @@ from app.services.prompting.defaults import (
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
     CHAT_LOCATION_CONTEXT_SECTION_PROMPT,
+    CHAT_ACTIVITY_RECOMMENDATION_HISTORY_PROMPT,
     CHAT_OFFLINE_ACTIVITY_SECTION_PROMPT,
     CHAT_REPLY_EMOTION_MARKER_PROMPT,
     REPLY_COUNT_VARIATION_PROMPT,
@@ -549,6 +550,13 @@ PROMPT_DEFINITIONS = [
         "泄露拍摄物品/任务目标/通关(spec §3.1/§6 不披露)。占位符: "
         "{activity} {location} {status_line} {progress_line} {safe_hint}.",
         CHAT_OFFLINE_ACTIVITY_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.activity_recommendation_history_section", "推荐过的线下活动", "聊天热路径", "聊天",
+        "【工程扩展】VOICE01.10: 用户问起推荐过的地方/活动/去过哪里时注入主回复的「你推荐过的活动」段,"
+        " 内容取自推荐记录 (offline_activity_recommendations) 的日期、标题、地点与当前状态, 不经记忆。"
+        "只按记录回答、没有就直说, 未回应/取消/过期不能说成去过。占位符: {lines}.",
+        CHAT_ACTIVITY_RECOMMENDATION_HISTORY_PROMPT,
     ),
     PromptDefinition(
         "chat.relationship_stage_section", "关系阶段段落", "聊天热路径", "聊天",

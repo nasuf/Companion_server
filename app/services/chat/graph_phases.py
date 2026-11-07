@@ -869,6 +869,30 @@ def _finish_main_messages(ctx, services, system_prompt, reply_messages):
     return chat_messages
 
 
+async def _load_activity_history(ctx) -> list[str] | None:
+    """用户这句像在问推荐过的活动/去过哪时, 从推荐记录读 (VOICE01.10); 否则 None。"""
+    from app.services.offline import recommendation_history
+
+    if not recommendation_history.asks_about_recommendations(ctx.user_message):
+        return None
+    diag = ctx.response_diagnostics.setdefault("activity_history", {"asked": True})
+    try:
+        from app.services.offline.module_settings import is_activity_enabled
+
+        if not await is_activity_enabled():
+            diag["status"] = "module_disabled"
+            return None
+        rows = await recommendation_history.load_recent(ctx.user_id, ctx.workspace_id)
+    except Exception as exc:
+        ctx.services.logger.warning(f"[activity-history] read failed: {type(exc).__name__}")
+        diag["status"] = "read_failed"
+        return None
+    lines = recommendation_history.render_lines(rows)
+    diag.update(status="injected", records=len(lines))
+    # 没有推荐记录也要明说, 否则模型会照常编一个地方出来
+    return lines or ["（还没有给对方推荐过任何线下活动）"]
+
+
 async def prepare_reply(ctx):
     services = ctx.services
     patience_instruction = await services.get_patience_prompt_instruction(
@@ -910,6 +934,7 @@ async def prepare_reply(ctx):
         ctx.agent, ctx.user_id, ctx.workspace_id
     )
     ctx.response_diagnostics["location_context"] = ctx.location_context.diagnostics()
+    ctx.activity_history = await _load_activity_history(ctx)
     ctx.last_reply_count = (
         await services.load_last_reply_count(ctx.conversation_id)
         if ctx.conversation_id
@@ -1040,6 +1065,7 @@ async def prepare_reply(ctx):
             gift_context=ctx.gift_context,
             offline_activity=offline_activity,
             location_context=ctx.location_context,
+            activity_history=ctx.activity_history,
             last_reply_count=ctx.last_reply_count,
             repeated_phrases=repeated_phrases,
             previous_reply=previous_reply,
@@ -1257,8 +1283,11 @@ async def generate_reply(ctx):
         temporal_evidence=ctx.temporal_evidence,
         temporal_validity_records=getattr(ctx, "temporal_validity_records", None),
         timeline=ctx.fetched.timeline,
+        activity_history=ctx.activity_history,
         # 问到双方在哪时必须走带「你们各自在哪」段的主 prompt, tier 轻量 prompt 没有它
         force_main_prompt=bool(ctx.offering_context)
+        # 问到推荐过的活动: 主 prompt 才有「你推荐过的活动」段
+        or ctx.activity_history is not None
         or bool(ctx.continuation_lines)
         or bool(getattr(ctx, "temporal_computation", ""))
         or services.asks_about_user_location(ctx.user_message),

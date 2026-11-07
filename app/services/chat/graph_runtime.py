@@ -89,6 +89,8 @@ class ChatFrame:
     l3_task: asyncio.Task | None = None
     last_reply_count: Any = None
     location_context: Any = None
+    # 推荐过的线下活动 (VOICE01.10); 只在用户问起时加载, None = 本轮不注入
+    activity_history: list[str] | None = None
     location_share_context: bool = None
     max_reply_count: Any = None
     max_total: Any = None

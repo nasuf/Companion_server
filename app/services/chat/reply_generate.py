@@ -261,6 +261,7 @@ async def generate_reply(
     timeline: str | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
+    activity_history: list[str] | None = None,
     needs_web_search: bool = False,
     web_search_location: dict[str, str] | None = None,
     diagnostics: dict[str, Any] | None = None,
@@ -403,6 +404,11 @@ async def generate_reply(
                     ] += "\n出行计划取消记录（当前业务状态）：" + json.dumps(
                         cancelled, ensure_ascii=False
                     )
+            # 时间回忆分支也可能接住"上次推荐我去哪了": 推荐记录同样经 context 给它
+            if activity_history:
+                base_params["context"] += "\n你推荐过的线下活动（推荐记录）：\n" + "\n".join(
+                    f"- {line}" for line in activity_history
+                )
             personality_section = await _build_personality_section(agent)
             base_params["personality_brief"] = (
                 personality_section.body

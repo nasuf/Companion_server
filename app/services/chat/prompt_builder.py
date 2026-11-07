@@ -698,6 +698,19 @@ async def _build_offline_activity_section(
     )
 
 
+async def _build_activity_history_section(lines: list[str] | None) -> _PromptBody | None:
+    """「你推荐过的活动」: 推荐记录由 offline/recommendation_history 给, 规则在模板里。"""
+    if not lines:
+        return None
+    tpl = await _get_optional_prompt("chat.activity_recommendation_history_section")
+    if tpl is None:
+        return None
+    return _PromptBody(
+        _render_section(tpl, {"lines": "\n".join(f"- {line}" for line in lines)}),
+        "chat.activity_recommendation_history_section",
+    )
+
+
 # Phase 6: 删除 _build_relational_context_section + _build_graph_context_section.
 # 实证依据:
 # - relational_context: 注入"先接情绪/不要长解释" 等泛指令, 跟 SYSTEM_BASE
@@ -750,6 +763,8 @@ async def build_system_prompt(
     offline_activity: dict[str, Any] | None = None,
     # 双方所在地 (chat/location_context.LocationContext)，注入「你们各自在哪」段。
     location_context: Any = None,
+    # 推荐过的线下活动 (offline/recommendation_history.render_lines), 用户问起时注入「你推荐过的活动」段。
+    activity_history: list[str] | None = None,
     last_reply_count: int | None = None,
     # 最近几次回复里已出现 ≥2 次的句子 (chat/reply_repetition), 注入「避免重复」段.
     repeated_phrases: list[str] | None = None,
@@ -1101,6 +1116,16 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "你记得的事情")
+
+    # 只在用户问起推荐/去过哪的轮次出现, 放在轮级快变区, 不打穿前面的缓存前缀
+    history = await _build_activity_history_section(activity_history)
+    if history:
+        _append_section(
+            sections, components, "你推荐过的活动", history.body,
+            prompt_key=history.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "你推荐过的活动")
 
     red_packet = await _build_red_packet_section(red_packet_context, intimacy_stage)
     if red_packet:

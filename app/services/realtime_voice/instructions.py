@@ -80,6 +80,7 @@ def build_instructions(
     has_history: bool,
     dynamic: DynamicContext | None = None,
     last_contact: str = "",
+    activity_history: list[str] | None = None,
     budget: int = INSTRUCTION_BUDGET,
 ) -> str:
     head = _persona_block(persona)
@@ -93,6 +94,9 @@ def build_instructions(
     user_keep, user_extra = _split_memories(user_memories)
     ai_keep, ai_extra = _split_memories(ai_memories)
     dynamic_block = _dynamic_block(dynamic) if dynamic else ""
+    if activity_history:
+        # 推荐记录不进记忆 (VOICE01.10), 随动态段放在最后; 超预算时先删记忆, 不删这份记录
+        dynamic_block = "\n\n".join(b for b in (dynamic_block, _activity_block(activity_history)) if b)
     while True:
         text = _assemble(head, opening, user_keep, user_extra, ai_keep, ai_extra, dynamic_block)
         if len(text) <= budget:
@@ -289,6 +293,15 @@ def _assemble(
     if dynamic_block:
         parts.append(dynamic_block)
     return "\n\n".join(parts)
+
+
+def _activity_block(lines: list[str]) -> str:
+    return (
+        "你给用户推荐过的线下活动（推荐记录，新的在前）：\n"
+        + "\n".join(f"- {line}" for line in lines)
+        + "\n用户问你推荐过什么、去过哪里时只按这份记录说，没有的就说没推荐过；"
+        "没回应、取消、过期的不能说成去过。用户没问起就不要主动提。"
+    )
 
 
 def _dynamic_block(ctx: DynamicContext | None) -> str:
