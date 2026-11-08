@@ -3308,6 +3308,23 @@ model OfflineGiftMemory {
   @@map("offline_gift_memories")
   @@ignore
 }
+model RealtimeCallSession {
+  id             String   @id
+  userId         String   @map("user_id")
+  workspaceId    String?  @map("workspace_id")
+  conversationId String   @map("conversation_id")
+  agentId        String   @map("agent_id")
+  platform       String   @default("unknown")
+  model          String   @default("")
+  startedAt      DateTime @map("started_at") @db.Timestamptz
+  endedAt        DateTime @map("ended_at") @db.Timestamptz
+  durationS      Float    @default(0) @map("duration_s")
+  stats          Json     @default("{}")
+  @@index([startedAt(sort: Desc)], map: "realtime_call_sessions_started_idx")
+  @@index([userId, startedAt(sort: Desc)], map: "realtime_call_sessions_user_idx")
+  @@map("realtime_call_sessions")
+  @@ignore
+}
 model QualityRepetitionCase {
   id String @id
   caseSet String @map("case_set")

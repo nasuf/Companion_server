@@ -281,6 +281,7 @@ from app.api.realtime.voice import router as voice_ws_router
 from app.api.realtime.admin_inbox import router as admin_inbox_router
 from app.api.admin.takeovers import router as admin_takeovers_router
 from app.api.admin.prompts import router as admin_prompts_router
+from app.api.admin.realtime_calls import router as admin_realtime_calls_router
 from app.api.admin.holidays import router as admin_holidays_router
 from app.api.public.auth import router as auth_router
 from app.api.admin.users import router as admin_users_router
@@ -356,6 +357,7 @@ app.include_router(voice_ws_router)
 app.include_router(admin_inbox_router)
 app.include_router(admin_takeovers_router)
 app.include_router(admin_prompts_router)
+app.include_router(admin_realtime_calls_router)
 app.include_router(admin_holidays_router)
 app.include_router(auth_router)
 app.include_router(admin_authenticity_router)

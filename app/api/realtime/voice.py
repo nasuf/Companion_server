@@ -169,6 +169,7 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 vad_threshold=settings.dashscope_realtime_vad_threshold,
                 temperature=settings.dashscope_realtime_temperature,
             )
+            from app.services.realtime_voice.call_stats import CallStats
             bridge = _bridge(
                 sock=sock,
                 websocket=websocket,
@@ -178,6 +179,11 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 model=model,
                 instructions=instructions,
                 greet_cue=greet_cue,
+                stats=CallStats(
+                    platform=_client_platform(websocket), model=model,
+                    vad_threshold=settings.dashscope_realtime_vad_threshold,
+                    silence_ms=settings.dashscope_realtime_silence_ms,
+                ),
             )
             await websocket.send_json({
                 "type": "ready",
@@ -216,6 +222,12 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 conversation_id=conversation_id,
                 agent_id=str(conv.agent.id),
                 user_id=conv.userId,
+            )
+            from app.services.realtime_voice.call_stats import persist as persist_call_stats
+            await persist_call_stats(
+                bridge.stats, bridge.stats_summary,
+                user_id=conv.userId, workspace_id=getattr(conv, "workspaceId", None),
+                conversation_id=conversation_id, agent_id=str(conv.agent.id),
             )
             # End-of-call: trigger memory extraction via standard pipeline
             try:
@@ -307,7 +319,11 @@ def _bridge(
     model,
     instructions: str | None = None,
     greet_cue: str | None = None,
+    stats=None,
 ) -> VoiceBridge:
+    from app.services.realtime_voice.call_stats import CallStats
+
+    stats = stats or CallStats()
 
     async def retrieve(text: str, previous: str | None) -> list[dict[str, str]]:
         from app.services.chat.memory_usage import submit_memory_usage
@@ -330,6 +346,7 @@ def _bridge(
         entries = memory_lines(memories if isinstance(memories, list) else [])
         selected_ids = [entry["id"] for entry in entries if entry["id"]]
         candidates = list(found.get("candidate_ids") or []) if isinstance(found, dict) else []
+        stats.retrieval_result(candidates=len(candidates), selected=len(entries))
         if selected_ids or candidates:
             try:
                 submit_memory_usage(
@@ -374,6 +391,7 @@ def _bridge(
         instructions=instructions,
         greet_cue=greet_cue,
         clock_line=clock_line,
+        stats=stats,
     )
 
 

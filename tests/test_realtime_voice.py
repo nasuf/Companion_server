@@ -935,14 +935,31 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
     extracted: list[dict] = []
     _endpoint_fixtures(monkeypatch, endpoint, conv)
 
+    from app.services.realtime_voice import call_stats
+
+    built: dict = {}
+
     class FakeBridge:
         transcript_pairs = [{"role": "user", "text": "hi"}]
         message_ids = ["msg-u1", "msg-a1"]
         mic_summary = "bytes=0 chunks=0 seconds=0.0 peak_dbfs=-inf rms_dbfs=-inf speech_turns=0 echo_dropped=0"
         usage = _CALL_USAGE
+        stats_summary = {"schema_version": 1}
+
+        def __init__(self, stats):
+            self.stats = stats
 
         async def aclose(self):
             pass
+
+    def make_bridge(**kwargs):
+        built.update(kwargs)
+        return FakeBridge(kwargs["stats"])
+
+    stored: list = []
+
+    async def store(stats, summary, **kwargs):
+        stored.append((stats, summary, kwargs))
 
     async def none(*_, **__):
         return None
@@ -953,7 +970,8 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
     monkeypatch.setattr(endpoint, "release_call", none)
     monkeypatch.setattr(endpoint, "ensure_agent_voice", AsyncMock(return_value="Serena"))
     monkeypatch.setattr(endpoint, "configure_session", none)
-    monkeypatch.setattr(endpoint, "_bridge", lambda **_: FakeBridge())
+    monkeypatch.setattr(endpoint, "_bridge", make_bridge)
+    monkeypatch.setattr(call_stats, "persist", store)
     monkeypatch.setattr(endpoint, "schedule_user_present", lambda _: None)
     monkeypatch.setattr(endpoint, "_run_pumps", none)
     monkeypatch.setattr(endpoint, "_record_call_usage", record)
@@ -972,6 +990,11 @@ async def test_finished_call_meters_usage_and_schedules_extraction(monkeypatch):
         "user_id": "user-1", "workspace_id": None, "conversation_id": "conv-1",
         "agent_id": "agent-1", "message_ids": ["msg-u1", "msg-a1"],
     }]
+    # The call's diagnostics carry the environment it ran in, and are stored once at hang-up.
+    stats = built["stats"]
+    assert (stats.model, stats.vad_threshold, stats.silence_ms) == ("qwen3.8-omni-flash-realtime", 0.5, 600)
+    assert stored == [(stats, {"schema_version": 1}, {
+        "user_id": "user-1", "workspace_id": None, "conversation_id": "conv-1", "agent_id": "agent-1"})]
 
 
 async def test_call_usage_metering_failure_is_swallowed(monkeypatch, caplog):

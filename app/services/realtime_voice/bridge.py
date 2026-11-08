@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable
 from difflib import SequenceMatcher
 
 from app.services.realtime_voice.billing import split_usage
+from app.services.realtime_voice.call_stats import CallStats
 from app.services.realtime_voice.instructions import format_turn_memories, is_small_talk, spoken_key
 from app.services.realtime_voice.memory_slot import MemorySlot
 from app.services.realtime_voice.protocol import (
@@ -114,7 +115,7 @@ def _echo_share(heard: str, said: str) -> float:
 class _Segment:
     """One stretch of microphone speech found by server VAD."""
 
-    __slots__ = ("item_id", "mid_reply", "surfaced", "live", "query", "done")
+    __slots__ = ("item_id", "mid_reply", "surfaced", "live", "query", "done", "stopped_at")
 
     def __init__(self, item_id: str | None, *, held: bool, mid_reply: bool = False) -> None:
         self.item_id = item_id
@@ -128,6 +129,8 @@ class _Segment:
         # Text the memory retrieval for this segment was started with.
         self.query = ""
         self.done = False
+        # When server VAD reported the end of this speech (monotonic seconds).
+        self.stopped_at: float | None = None
 
 
 class VoiceBridge:
@@ -151,6 +154,7 @@ class VoiceBridge:
         instructions: str | None = None,
         greet_cue: str | None = None,
         clock_line: Callable[[], str] | None = None,
+        stats: CallStats | None = None,
     ) -> None:
         self._send_provider = send_provider
         self._send_client = send_client
@@ -164,6 +168,8 @@ class VoiceBridge:
         # Current time for each reply's note; the call instructions only
         # carry the hour at connect time.
         self._clock_line = clock_line
+        # Per-call diagnostics (VOICE01.01); the endpoint stores them at call end.
+        self.stats = stats or CallStats()
         self._turn = 0
         # The turn being answered is only small talk: its reply gets no memories.
         self._quiet_turn = False
@@ -292,6 +298,14 @@ class VoiceBridge:
     def transcript_pairs(self) -> list[dict]:
         """Collected user/assistant transcript pairs for end-of-call extraction."""
         return list(self._transcript_pairs)
+
+    @property
+    def stats_summary(self) -> dict:
+        """This call's diagnostics, for the realtime_call_sessions row."""
+        return self.stats.summary(
+            turns=self._turn, speech_turns=self._speech_turns, echo_dropped=self._echo_dropped,
+            memory_skipped=self._memory_skipped, mic=self._mic.as_dict(), usage=dict(self._usage),
+        )
 
     @property
     def mic_summary(self) -> str:
@@ -490,6 +504,8 @@ class VoiceBridge:
     async def _barge_in(self, segment: _Segment) -> None:
         """The user talks over the agent: stop the reply and let them finish."""
         segment.surfaced = True
+        if self._responding or self._output_active:
+            self.stats.barge_ins += 1
         generating = self._responding
         cancelled = await self._cut_reply() if generating else False
         self._output_active = False
@@ -526,6 +542,7 @@ class VoiceBridge:
         segment = self._segment_for(event)
         if segment is None:
             return
+        segment.stopped_at = time.monotonic()
         self._watch_segment(segment)
         if not segment.surfaced:
             return
@@ -593,6 +610,7 @@ class VoiceBridge:
             logger.warning("[realtime-voice] user transcript not stored")
         self._collect_transcript("user", text)
         self._turn += 1
+        self.stats.turn_ended(segment.stopped_at)
         started = spoken_key(segment.query)
         if not started or SequenceMatcher(None, started, key).ratio() < _SAME_QUERY_RATIO:
             self._start_prefetch(text)
@@ -704,6 +722,7 @@ class VoiceBridge:
         parts = [self._clock_line() if self._clock_line else ""]
         if self._slot is not None:
             parts.append(self._slot.note(with_memories=not self._quiet_turn))
+            self.stats.reply_note(0 if self._quiet_turn else len(self._slot.lines))
             if not self._quiet_turn:
                 self._slot.mark_shown()
         return "\n\n".join(part for part in parts if part)
@@ -755,6 +774,7 @@ class VoiceBridge:
         except (binascii.Error, ValueError):
             return
         if not self._output_active:
+            self.stats.first_audio()
             self._output_active = True
             self._audio_seq = 0
             await self._send_client({"type": "response.started"})
@@ -839,6 +859,7 @@ class VoiceBridge:
     async def _run_tools(self, calls: list[dict]) -> None:
         """Answer each tool call, then ask for the follow-up reply."""
         outputs: list[tuple[str, str]] = []
+        self.stats.tool_calls += len(calls)
         for call in calls:
             call_id = call["call_id"]
             logger.info("[realtime-voice] tool_call name=%s call_id=%s", call["name"], call_id[:16])
@@ -923,7 +944,9 @@ class VoiceBridge:
                 timeout=self._retrieval_timeout_s,
             ) or []
             self._prefetch_result = entries
+            self.stats.retrieval(time.monotonic() - started)
         except TimeoutError:
+            self.stats.retrieval(time.monotonic() - started, timed_out=True)
             logger.info("[realtime-voice] memory retrieval timed out")
         except asyncio.CancelledError:
             raise
@@ -968,6 +991,8 @@ class VoiceBridge:
             for earlier in self._recent_replies
         )
         self._recent_replies.append(key)
+        if repeated:
+            self.stats.repeats += 1
         if repeated and self._slot is not None and self._slot.avoid(text):
             logger.info("[realtime-voice] repeat detected len=%d turn=%d", len(text), self._turn)
 
@@ -978,6 +1003,7 @@ class VoiceBridge:
     async def _interrupt(self) -> None:
         """Client requests interruption."""
         if self._responding or self._output_active:
+            self.stats.client_interrupts += 1
             await self._cut_reply()
             self._output_active = False
             self._playback_started = self._playback_until = 0.0
@@ -1080,6 +1106,12 @@ class _MicMeter:
             return True
         return False
 
+    def as_dict(self) -> dict:
+        """Same numbers as summary(), for the per-call stats row; dBFS null when silent."""
+        rms = math.sqrt(self._sum_squares / self._samples) if self._samples else 0.0
+        return {"seconds": round(self.bytes / (SAMPLE_RATE * 2), 1), "chunks": self.chunks,
+                "peak_dbfs": _dbfs_value(self._peak), "rms_dbfs": _dbfs_value(rms)}
+
     def summary(self) -> str:
         seconds = self.bytes / (SAMPLE_RATE * 2)
         rms = math.sqrt(self._sum_squares / self._samples) if self._samples else 0.0
@@ -1087,6 +1119,10 @@ class _MicMeter:
             f"bytes={self.bytes} chunks={self.chunks} seconds={seconds:.1f} "
             f"peak_dbfs={_dbfs(self._peak)} rms_dbfs={_dbfs(rms)}"
         )
+
+
+def _dbfs_value(value: float) -> float | None:
+    return round(20 * math.log10(value / 32768), 1) if value > 0 else None
 
 
 def _dbfs(value: float) -> str:

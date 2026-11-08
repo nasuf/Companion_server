@@ -1082,3 +1082,24 @@ async def test_small_talk_before_the_last_turn_is_answered_keeps_its_memories():
     await bridge._maybe_reply()
     assert _notes(provider) and "考研" in _notes(provider)[-1]
     assert bridge.mic_summary.endswith("memory_skipped=0")
+
+
+# ---------------------------------------------------------------------------
+# VOICE01.01: the bridge feeds per-call diagnostics
+# ---------------------------------------------------------------------------
+
+async def test_bridge_counts_retrieval_injection_and_small_talk_into_stats():
+    async def retrieve(text, previous):
+        return [_memory("m1", "用户在准备考研")]
+
+    bridge, provider, _ = _bridge(retrieve)
+    await _user_says(bridge, "最近复习好累")
+    await _reply_done(bridge, "辛苦啦")
+    await _user_says(bridge, "嗯")  # small talk: no retrieval, no memories
+    await _reply_done(bridge, "在呢")
+    summary = bridge.stats_summary
+    assert summary["retrieval"]["count"] == 1
+    assert summary["injection"]["replies"] == 2 and summary["injection"]["replies_with_memories"] == 1
+    assert summary["injection"]["small_talk_skipped"] == 1
+    assert summary["turns"]["answered"] == 2
+    assert summary["environment"]["mic"]["peak_dbfs"] is None  # no audio fed
