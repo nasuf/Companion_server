@@ -177,7 +177,7 @@ async def test_a_changed_final_transcript_restarts_retrieval():
     assert calls == ["我下周要去", "我下周要去乌鲁木齐出差"]
 
 
-async def test_block_expires_after_turns_without_hits():
+async def test_a_memory_hit_once_goes_out_with_two_replies_then_rests():
     hits = [[_memory("m1", "用户在准备考研")], [], [], []]
 
     async def retrieve(text, previous):
@@ -188,7 +188,7 @@ async def test_block_expires_after_turns_without_hits():
         await _user_says(bridge, text)
         await _reply_done(bridge, f"回{text}")
     notes = _notes(provider)
-    assert len(notes) == 3 and all("考研" in n for n in notes)
+    assert len(notes) == 2 and all("考研" in n for n in notes)
 
 
 async def test_slow_or_failing_retrieval_never_holds_the_reply():
@@ -489,7 +489,7 @@ async def test_mic_meter_reports_volume_once_after_three_seconds(caplog):
     summary = bridge.mic_summary
     assert "chunks=16" in summary and "seconds=3.2" in summary
     assert "peak_dbfs=-6.0" in summary
-    assert summary.endswith("speech_turns=1 echo_dropped=0")
+    assert summary.endswith("speech_turns=1 echo_dropped=0 memory_skipped=0")
 
 
 def test_mic_meter_with_no_audio_reads_minus_infinity():
@@ -991,3 +991,94 @@ async def test_speech_without_a_stop_ends_after_the_cap(monkeypatch):
     await _settle(bridge)
     assert not bridge._user_speaking()
     assert provider[-1]["type"] == "response.create"
+
+
+# ---------------------------------------------------------------------------
+# VOICE01.03: small talk, per-turn cap, memories that keep coming back
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    # Spoken on production calls, 2026-11-04 to 11-07
+    "喂喂喂喂。", "嗯。", "哈喽哈喽", "能听到吗？能听到吗？", "我听得清", "测试", "嗯拜拜",
+    "对的对的对的", "可以可以可以", "好吧好吧好吧", "Hello在吗", "喂喂喂，你在吗", "嗯，对对对",
+])
+def test_small_talk_is_recognised(text):
+    from app.services.realtime_voice.instructions import is_small_talk
+
+    assert is_small_talk(text)
+
+
+@pytest.mark.parametrize("text", [
+    "", "。", "你在干嘛呢", "哈喽你在干嘛呀", "嗯我还没想好呢", "没呢信号挺好呢", "你推荐过我吗",
+    "妈妈", "嗯，然后呢", "测试结果怎么样了", "喂" * 21,
+])
+def test_turns_with_content_are_not_small_talk(text):
+    from app.services.realtime_voice.instructions import is_small_talk
+
+    assert not is_small_talk(text)
+
+
+def test_slot_takes_at_most_three_new_memories_per_turn():
+    slot = MemorySlot("BASE")
+    slot.merge([_memory(str(i), f"第{i}件事") for i in range(6)], turn=1)
+    assert slot.lines == ["关于用户：第0件事", "关于用户：第1件事", "关于用户：第2件事"]
+    slot.merge([_memory(str(i), f"第{i}件事") for i in range(3, 6)], turn=2)
+    assert len(slot.lines) == 4 and slot.lines[0] == "关于用户：第3件事"
+
+
+def test_a_memory_shown_twice_rests_until_it_expires_then_can_return():
+    slot = MemorySlot("BASE", ttl_turns=2)
+    for turn in (1, 2):
+        slot.merge([_memory("t", "用户在测试信号")], turn=turn)
+        assert slot.lines == ["关于用户：用户在测试信号"]
+        slot.mark_shown()
+    # Hit again on turns 3 and 4: still held back, and the hits keep it alive.
+    for turn in (3, 4):
+        slot.merge([_memory("t", "用户在测试信号"), _memory("c", "用户养了猫")], turn=turn)
+        assert slot.lines == ["关于用户：用户养了猫"]
+    slot.expire(6)
+    slot.merge([_memory("t", "用户在测试信号")], turn=7)
+    assert slot.lines == ["关于用户：用户在测试信号"]
+
+
+def test_note_without_memories_keeps_the_avoided_lines():
+    slot = MemorySlot("BASE")
+    slot.merge([_memory("m", "用户养了猫")], turn=1)
+    slot.avoid("同一句话")
+    quiet = slot.note(with_memories=False)
+    assert "养了猫" not in quiet and quiet.startswith("【别再重复】")
+
+
+async def test_small_talk_retrieves_nothing_and_its_reply_carries_no_memories():
+    queries = []
+
+    async def retrieve(text, previous):
+        queries.append(text)
+        return [_memory("m1", "用户在准备考研")]
+
+    bridge, provider, _ = _bridge(retrieve)
+    await _user_says(bridge, "最近复习好累")
+    await _reply_done(bridge, "辛苦啦")
+    await _user_says(bridge, "喂喂喂喂")
+    await _reply_done(bridge, "在呢")
+    await _user_says(bridge, "嗯")
+    await _reply_done(bridge, "怎么啦")
+    assert queries == ["最近复习好累"]
+    assert len(_notes(provider)) == 1 and "考研" in _notes(provider)[0]
+    assert bridge.mic_summary.endswith("memory_skipped=2")
+
+
+async def test_small_talk_before_the_last_turn_is_answered_keeps_its_memories():
+    async def retrieve(text, previous):
+        return [_memory("m1", "用户在准备考研")]
+
+    bridge, provider, _ = _bridge(retrieve)
+    # The agent is still finishing an earlier reply, so neither turn is answered yet.
+    bridge._responding = True
+    await _user_says(bridge, "最近复习好累")
+    await _user_says(bridge, "嗯")
+    assert not _notes(provider)
+    bridge._responding = False
+    await bridge._maybe_reply()
+    assert _notes(provider) and "考研" in _notes(provider)[-1]
+    assert bridge.mic_summary.endswith("memory_skipped=0")

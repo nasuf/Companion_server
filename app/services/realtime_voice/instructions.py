@@ -234,6 +234,29 @@ def spoken_key(text: str) -> str:
     return re.sub(r"[\W_]+", "", text)
 
 
+# Call checks, greetings, backchannels and goodbyes. On 2026-11-07 "嗯。" and
+# "喂喂喂喂。" each brought six memories into the reply, and "测试" pulled in
+# memories about a test signal that the agent then kept bringing up. A turn
+# made only of these words gets no new memories.
+_SMALL_TALK = sorted({
+    "喂", "哈喽", "哈罗", "hello", "hi", "嗨", "你好", "您好", "在吗", "你在吗", "在不在", "在没在", "人呢",
+    "能听到吗", "能听见吗", "听得到吗", "听得见吗", "听得清吗", "听到了吗", "听见了吗",
+    "听得到", "听得见", "听得清", "听到了", "听见了", "能听到", "能听见", "我听得到", "我听得见", "我听得清",
+    "测试",
+    "嗯", "嗯呢", "哦", "噢", "喔", "啊", "呃", "额", "哎", "哈", "嘿", "好", "好的", "好吧", "好嘞", "行", "行吧",
+    "对", "对的", "对呀", "对啊", "是", "是的", "是啊", "可以", "收到", "明白", "知道了",
+    "拜拜", "再见", "晚安",
+}, key=len, reverse=True)
+_SMALL_TALK_RE = re.compile("(?:" + "|".join(map(re.escape, _SMALL_TALK)) + ")+")
+_SMALL_TALK_MAX_CHARS = 20
+
+
+def is_small_talk(text: str) -> bool:
+    """True when a spoken turn is nothing but small-talk words, repeated or mixed."""
+    key = spoken_key(text).lower()
+    return bool(key) and len(key) <= _SMALL_TALK_MAX_CHARS and bool(_SMALL_TALK_RE.fullmatch(key))
+
+
 # Gap buckets for the opening line. A call redialled within minutes is the
 # same conversation; after a few hours the agent should not say "刚才".
 _JUST_NOW_S = 5 * 60

@@ -7,7 +7,8 @@ on its own (see protocol.py). For every turn the bridge:
   2. drops turns that are only the agent's own voice leaking back into the
      microphone, or a one-word backchannel while the agent is talking;
   3. waits briefly for the retrieval, sends this turn's memories as a system
-     note, asks for the reply, and deletes the note once the reply is done;
+     note (none for small talk such as "喂喂" or "嗯"), asks for the reply,
+     and deletes the note once the reply is done;
   4. persists transcripts (extraction runs at call end) and relays audio.
 """
 
@@ -26,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from difflib import SequenceMatcher
 
 from app.services.realtime_voice.billing import split_usage
-from app.services.realtime_voice.instructions import format_turn_memories, spoken_key
+from app.services.realtime_voice.instructions import format_turn_memories, is_small_talk, spoken_key
 from app.services.realtime_voice.memory_slot import MemorySlot
 from app.services.realtime_voice.protocol import (
     SAMPLE_RATE,
@@ -164,6 +165,8 @@ class VoiceBridge:
         # carry the hour at connect time.
         self._clock_line = clock_line
         self._turn = 0
+        # The turn being answered is only small talk: its reply gets no memories.
+        self._quiet_turn = False
         self._last_assistant_text = ""
         self._recent_replies: deque[str] = deque(maxlen=_REPEAT_WINDOW)
 
@@ -242,6 +245,7 @@ class VoiceBridge:
         self._mic = _MicMeter()
         self._speech_turns = 0
         self._echo_dropped = 0
+        self._memory_skipped = 0  # small-talk turns that injected no memories
 
         # Provider token usage per modality, summed over every response.done
         self._usage = {
@@ -294,7 +298,7 @@ class VoiceBridge:
         """One log line: how much microphone audio arrived and how loud."""
         return (
             f"{self._mic.summary()} speech_turns={self._speech_turns}"
-            f" echo_dropped={self._echo_dropped}"
+            f" echo_dropped={self._echo_dropped} memory_skipped={self._memory_skipped}"
         )
 
     @property
@@ -528,9 +532,8 @@ class VoiceBridge:
         await self._send_client({"type": "speech.stopped"})
         # Retrieval starts now, from the live transcript; the final one
         # arrives about 0.2 s later and restarts it only if it differs.
-        if spoken_key(segment.live):
+        if spoken_key(segment.live) and self._start_prefetch(segment.live):
             segment.query = segment.live
-            self._start_prefetch(segment.live)
 
     def _watch_segment(self, segment: _Segment, *, after_s: float = 4) -> None:
         """A stopped segment whose transcript never arrives still ends."""
@@ -593,6 +596,10 @@ class VoiceBridge:
         started = spoken_key(segment.query)
         if not started or SequenceMatcher(None, started, key).ratio() < _SAME_QUERY_RATIO:
             self._start_prefetch(text)
+        # Small talk after a turn still waiting for its reply keeps that turn's memories.
+        self._quiet_turn = is_small_talk(text) and not self._unanswered
+        if self._quiet_turn:
+            self._memory_skipped += 1
         self._unanswered = True
         self._memory_ready = False
         self._reply_task = asyncio.create_task(self._reply_when_ready(self._turn))
@@ -693,8 +700,12 @@ class VoiceBridge:
         self._watch_reply_start(create["event_id"])
 
     def _reply_note(self) -> str:
+        """Note for the reply about to be requested; counts the memories as shown."""
         parts = [self._clock_line() if self._clock_line else ""]
-        parts.append(self._slot.note() if self._slot is not None else "")
+        if self._slot is not None:
+            parts.append(self._slot.note(with_memories=not self._quiet_turn))
+            if not self._quiet_turn:
+                self._slot.mark_shown()
         return "\n\n".join(part for part in parts if part)
 
     def _watch_reply_start(self, create_id: str) -> None:
@@ -887,14 +898,21 @@ class VoiceBridge:
     # Memory prefetch
     # ------------------------------------------------------------------
 
-    def _start_prefetch(self, query: str) -> None:
-        """Retrieve for this user turn in the background; newest turn wins."""
+    def _start_prefetch(self, query: str) -> bool:
+        """Retrieve for this user turn in the background; newest turn wins.
+
+        Small talk retrieves nothing and leaves an earlier turn's retrieval running.
+        """
+        if is_small_talk(query):
+            logger.info("[realtime-voice] memory skipped: small talk len=%d", len(query))
+            return False
         self._cancel_prefetch()
         self._prefetch_result = None
         self._prefetch_task = asyncio.create_task(
             self._do_prefetch(query, self._last_assistant_text or None),
         )
         self._prefetch_task.add_done_callback(self._prefetch_done)
+        return True
 
     async def _do_prefetch(self, query: str, previous: str | None) -> None:
         started = time.monotonic()
