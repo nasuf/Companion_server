@@ -296,3 +296,27 @@ async def apply_temporal_repair(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="temporal_repair_source_changed") from exc
+
+
+@router.get("/lifecycle/inventory")
+async def memory_lifecycle_inventory(
+    user_id: str | None = Query(None, max_length=200),
+    workspace_id: str | None = Query(None, max_length=200),
+    side: str | None = Query(None, pattern="^(user|ai)$"),
+    _: dict = Depends(require_admin_jwt),
+) -> dict:
+    """当前记忆库存: 按层级/来源/归档分布, 每侧计数带分母和采样时刻 (O01.05.V03)。"""
+    from app.services.memory.lifecycle_diagnostics import inventory
+    return await inventory(user_id=user_id, workspace_id=workspace_id, side=side)
+
+
+@router.get("/lifecycle/maintenance")
+async def memory_lifecycle_maintenance(
+    user_id: str | None = Query(None, max_length=200),
+    workspace_id: str | None = Query(None, max_length=200),
+    days: int = Query(7, ge=1, le=90),
+    _: dict = Depends(require_admin_jwt),
+) -> dict:
+    """维护作业 (hygiene / l3_compression) 近窗口进度 (O01.05.V03)。"""
+    from app.services.memory.lifecycle_diagnostics import maintenance
+    return await maintenance(user_id=user_id, workspace_id=workspace_id, days=days)
