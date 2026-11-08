@@ -75,6 +75,14 @@ def note_served(revisions: dict[str, int]) -> None:
     fire_background(_record(changed))
 
 
+def note_served_safely(revisions: dict[str, int]) -> None:
+    """note_served for call sites on the prompt read path: evidence never breaks serving a prompt."""
+    try:
+        note_served(revisions)
+    except Exception as exc:
+        logger.debug("[PROMPT-PROPAGATION] note failed: %s", type(exc).__name__)
+
+
 async def _record(revisions: dict[str, int]) -> None:
     try:
         redis = await get_redis()

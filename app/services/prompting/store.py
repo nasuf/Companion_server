@@ -362,8 +362,8 @@ async def get_prompt_text(key: str) -> str:
         if row:
             await _sync_cache(row)
         # 证据: 本 worker 这次实际按哪个 revision 服务了该 key (O01.03.V01)。
-        from app.services.prompting.propagation import note_served
-        note_served({key: row.revision if row else 0})
+        from app.services.prompting.propagation import note_served_safely
+        note_served_safely({key: getattr(row, "revision", 0) if row else 0})
 
     from app.services.prompting.reply_prefix import (
         REPLY_PROMPT_KEYS, PROACTIVE_REPLY_PROMPT_KEYS, PROACTIVE_COMMON_KEY,

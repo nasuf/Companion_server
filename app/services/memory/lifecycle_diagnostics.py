@@ -92,9 +92,9 @@ async def maintenance(*, user_id: str | None = None, workspace_id: str | None = 
     """维护作业 (hygiene / l3_compression) 近 days 天的运行进度。"""
     days = max(1, min(days, _MAX_WINDOW_DAYS))
     since = datetime.now(UTC) - timedelta(days=days)
-    # created_at 是不带时区的 UTC 时间戳; 参数按文本传入, 显式转换
-    clauses = ["created_at >= ($1::timestamptz AT TIME ZONE 'UTC')"]
-    params: list = [since.isoformat()]
+    # created_at 是不带时区的 UTC 时间戳: 参数按不带时区的 UTC 文本比较
+    clauses = ["created_at >= $1::timestamp"]
+    params: list = [since.replace(tzinfo=None).isoformat()]
     if user_id:
         params.append(user_id)
         clauses.append(f"user_id = ${len(params)}")

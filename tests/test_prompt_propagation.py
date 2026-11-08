@@ -280,3 +280,27 @@ async def test_admin_prompt_list_returns_propagation(monkeypatch):
         {"revision": 3, "workers": 1, "last_seen": "t"}]
     # 老的响应没有这个字段: 默认显示未验证, 而不是报错
     assert missing.propagation.propagation == "unverified" and missing.propagation.served_revisions == []
+
+
+def test_evidence_failure_never_breaks_serving_a_prompt(monkeypatch):
+    def boom(_revisions):
+        raise RuntimeError("no event loop")
+
+    monkeypatch.setattr(prop, "note_served", boom)
+    prop.note_served_safely({"k": 1})  # swallowed
+
+
+@pytest.mark.asyncio
+async def test_rows_without_a_revision_still_serve(monkeypatch):
+    # Older fakes and partial rows carry no revision; the read must not fail on evidence.
+    from types import SimpleNamespace as Row
+
+    from app.services.prompting import store
+
+    noted = []
+    monkeypatch.setattr(prop, "note_served", noted.append)
+    row = Row(isEnabled=True, content="hi", id="p", key="memory.relevance")
+    monkeypatch.setattr(store, "db", Row(prompttemplate=Row(find_unique=AsyncMock(return_value=row))))
+    monkeypatch.setattr(store, "_sync_cache", AsyncMock(return_value=True))
+    assert "hi" in await store.get_prompt_text("memory.relevance")
+    assert noted == [{"memory.relevance": 0}]
