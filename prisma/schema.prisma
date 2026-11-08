@@ -3296,6 +3296,18 @@ model OfflineActivityMemory {
   @@map("offline_activity_memories")
   @@ignore
 }
+model OfflineGiftMemory {
+  giftId       String   @id @map("gift_id")
+  userId       String   @map("user_id")
+  workspaceId  String?  @map("workspace_id")
+  userMemoryId String?  @map("user_memory_id")
+  aiMemoryId   String?  @map("ai_memory_id")
+  stateKey     String   @default("") @map("state_key")
+  updatedAt    DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  @@index([userId], map: "offline_gift_memories_user_idx")
+  @@map("offline_gift_memories")
+  @@ignore
+}
 model QualityRepetitionCase {
   id String @id
   caseSet String @map("case_set")

@@ -228,12 +228,12 @@ async def test_create_gift_resumes_pending_address_task(monkeypatch):
     emit_gift_card = AsyncMock(return_value="msg-sent")
     monkeypatch.setattr(gift_service, "emit_gift_card", emit_gift_card)
     remember = Mock()
-    monkeypatch.setattr(gift_service.gift_memory, "remember_gift_sent", remember)
+    monkeypatch.setattr(gift_service.gift_memory, "schedule_sync", remember)
 
     result = await gift_service.create_gift_for_user(user_id="user-1", workspace_id="workspace-1")
 
     assert result == fulfilled
-    remember.assert_called_once_with("user-1", "workspace-1", fulfilled)
+    remember.assert_called_once_with(fulfilled["id"], "user-1")
     select_gift.assert_awaited_once_with("user-1", "workspace-1", 3_000)
     purchase.assert_awaited_once()
     sync_tracking.assert_awaited_once()

@@ -203,7 +203,7 @@ async def _finish_manual_send(
     if not await gift_repo.gift_notice_sent(gift_id, data.user_id, "gift_sent"):
         notification, message = await _announce_sent(data.user_id, gift, ctx)
         if notification == "sent":
-            gift_memory.remember_gift_sent(data.user_id, ctx["workspace_id"], gift)
+            gift_memory.schedule_sync(gift.get("id"), data.user_id)
     logger.info(
         "[gift-admin] manual gift sent gift_id=%s user_id=%s notification=%s",
         gift_id,
@@ -317,7 +317,7 @@ async def cancel_gift(admin_id: str, gift_id: str, reason: str) -> AdminGiftDeta
         raise HTTPException(status_code=409, detail="已签收或已关闭的礼物不能撤销")
     if await gift_repo.gift_notice_sent(gift_id, gift["user_id"], "gift_sent"):
         # 用户已经被告知有礼物在路上：AI 的记忆里也要知道它不会到了。
-        gift_memory.remember_gift_cancelled(gift["user_id"], gift.get("workspace_id"), gift)
+        gift_memory.schedule_sync(gift_id, gift["user_id"])
     logger.info(
         "[gift-admin] gift cancelled gift_id=%s",
         gift_id,

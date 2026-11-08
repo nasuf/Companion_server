@@ -11,6 +11,7 @@ import pytest
 from app.services.memory.recording.chat_sources import excluded_from_chat_extraction
 from app.services.memory.storage import embedding
 from app.services.offline import activity_memory as am
+from app.services.offline import record_memory as rm
 from tests.test_service_health_postgres import world  # noqa: F401
 
 DAY = datetime(2026, 11, 4, 2, tzinfo=UTC)  # 北京时间 11-04 10:00
@@ -70,7 +71,7 @@ def test_activity_cards_inserted_for_the_user_are_not_extracted():
 @pytest.fixture
 async def scene(world, monkeypatch):
     database, conv, space, user, _ = world
-    monkeypatch.setattr(am, "db", database)
+    monkeypatch.setattr(rm, "db", database)
     monkeypatch.setattr(embedding, "generate_embedding", AsyncMock(return_value=[0.01] * 1024))
     agent = (await database.conversation.find_unique(where={"id": conv})).agentId
     ids: list[str] = []
@@ -204,7 +205,7 @@ async def test_changes_during_the_embedding_call_are_not_written_stale(scene, mo
     monkeypatch.setattr(embedding, "generate_embedding", slow_embedding)
     assert await am.sync(ident, user) == "written"
     assert (await memories(ident))["user"]["content"].endswith("没去")
-    monkeypatch.setattr(am, "_write", AsyncMock(return_value="raced"))
+    monkeypatch.setattr(rm, "_write", AsyncMock(return_value="raced"))
     assert await am.sync(ident, user) == "raced"
 
 
@@ -219,20 +220,20 @@ async def test_missing_activity_and_clearing_all_activities(scene, monkeypatch):
     pairs = [await memories(ident) for ident in (first, second)]
     assert all(m["is_archived"] for pair in pairs for m in pair.values())
     assert await am.archive_for_user(user) == 0
-    monkeypatch.setattr(am, "_load", AsyncMock(return_value=None))
-    assert await am._write(first, user, None, {}) == "missing"
+    kind = am.KIND.__class__(**{**am.KIND.__dict__, "load": AsyncMock(return_value=None)})
+    assert await rm._write(kind, first, user, None, {}) == "missing"
 
 
 async def test_background_sync_logs_and_never_raises(monkeypatch):
     scheduled = []
-    monkeypatch.setattr(am, "fire_background", lambda coro: scheduled.append(coro))
+    monkeypatch.setattr(rm, "fire_background", lambda coro: scheduled.append(coro))
     am.schedule_sync(None, "u")
     am.schedule_sync("a", "u")
     assert len(scheduled) == 1
-    monkeypatch.setattr(am, "sync", AsyncMock(side_effect=RuntimeError("db down")))
+    monkeypatch.setattr(rm, "sync", AsyncMock(side_effect=RuntimeError("db down")))
     await scheduled[0]  # 失败只记日志
-    monkeypatch.setattr(am, "sync", AsyncMock(return_value="written"))
-    await am._sync_logged("a", "u")
+    monkeypatch.setattr(rm, "sync", AsyncMock(return_value="written"))
+    await rm._sync_logged(am.KIND, "a", "u")
 
 
 @pytest.mark.parametrize("side,provenance,content,reason", [

@@ -169,7 +169,7 @@ def _patch_create(monkeypatch, *, address=ADDRESS, inserted=(None, True)):
     emit = AsyncMock(return_value="msg-1")
     monkeypatch.setattr(svc, "emit_gift_card", emit)
     remember = Mock()
-    monkeypatch.setattr(svc.gift_memory, "remember_gift_sent", remember)
+    monkeypatch.setattr(svc.gift_memory, "schedule_sync", remember)
     monkeypatch.setattr(svc, "gift_detail", AsyncMock(side_effect=lambda gift_id: {"id": gift_id}))
     monkeypatch.setattr(svc, "AdminGiftActionResponse", lambda **kw: kw)
     return insert, add_events, emit, paid, remember
@@ -193,7 +193,7 @@ async def test_manual_gift_is_created_as_mystery_with_initial_tracking(monkeypat
     assert [e["status"] for e in add_events.await_args.args[1]] == ["ordered", "shipping"]
     paid.assert_awaited_once()
     assert emit.await_args.kwargs["trigger_type"] == "gift_sent"
-    assert remember.call_args.args[:2] == ("user-1", CTX["workspace_id"])
+    assert remember.call_args.args == ("a" * 32, "user-1")
     assert result["notification"] == "sent"
 
 

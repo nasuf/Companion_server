@@ -56,6 +56,7 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from app.services.memory.provenance import RECORD_PROVENANCES
 from app.services.memory.taxonomy import l1_promotion_requirement
 
 logger = logging.getLogger(__name__)
@@ -112,8 +113,8 @@ WARM_DEMOTE_AT = 0.42    # L2 → L3
 # 推演只演值和层级的纯函数 (apply_usage), 闸门不在其中: 推演里 L1/L2 都可检索,
 # 闸门不改变它度量的东西。
 L1_PROMOTION_MIN_CONTRIBUTION_DAYS = 3
-# activity_record (线下活动的状态记忆) 由活动记录改写, 内容会随状态变; 不能升成 AI 的 L1 事实
-AI_CHAT_DERIVED_PROVENANCE = frozenset({"ai_authored", "daily_summary", "consolidated", "activity_record"})
+# 活动/礼物的状态记忆 (RECORD_PROVENANCES) 由业务记录改写, 内容会随状态变; 不能升成 AI 的 L1 事实
+AI_CHAT_DERIVED_PROVENANCE = frozenset({"ai_authored", "daily_summary", "consolidated", *RECORD_PROVENANCES})
 
 
 def l1_promotion_allowed(

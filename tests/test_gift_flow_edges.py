@@ -207,7 +207,7 @@ def _patch_create(monkeypatch, *, user=True, workspaces=(WORKSPACE,), ctx=CTX, i
     emit = AsyncMock(return_value="msg")
     monkeypatch.setattr(svc, "emit_gift_card", emit)
     remember = Mock()
-    monkeypatch.setattr(svc.gift_memory, "remember_gift_sent", remember)
+    monkeypatch.setattr(svc.gift_memory, "schedule_sync", remember)
     return insert, add_events, emit, remember
 
 
@@ -301,11 +301,11 @@ async def test_cancel_trims_reason(monkeypatch):
     notice = AsyncMock(return_value=True)
     monkeypatch.setattr(svc.gift_repo, "gift_notice_sent", notice)
     forget = Mock()
-    monkeypatch.setattr(svc.gift_memory, "remember_gift_cancelled", forget)
+    monkeypatch.setattr(svc.gift_memory, "schedule_sync", forget)
     await svc.cancel_gift("admin-1", "g", "  寄错了  ")
     cancel.assert_awaited_once_with("g", "寄错了")
     # 用户已被告知有礼物在路上：AI 记忆里也要记下它不会到了。
-    assert forget.call_args.args[0] == "user-1"
+    assert forget.call_args.args == ("g", "user-1")
 
     forget.reset_mock()
     notice.return_value = False

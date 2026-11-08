@@ -43,15 +43,19 @@ REFLECTED = "reflected"
 # 线下活动的状态记忆 (offline/activity_memory.py): 由活动记录按当前状态改写, 一个活动
 # 一对行。合并/压缩不能碰它们, 否则下一次状态变化就找不到、改不到了。
 ACTIVITY_RECORD = "activity_record"
+# AI 寄给用户的礼物的状态记忆 (offline/gift_memory.py), 同上: 一份礼物一对行, 随礼物状态改写。
+GIFT_RECORD = "gift_record"
+# 由业务记录改写的行: 写入期合并、L3 压缩都不碰, 也不升成 AI 的 L1 事实。
+RECORD_PROVENANCES = frozenset({ACTIVITY_RECORD, GIFT_RECORD})
 
 VALID_PROVENANCES = frozenset({
     PROFILE_SEED, KNOWLEDGE_SEED, USER_STATED, AI_AUTHORED, DAILY_SUMMARY,
-    CONSOLIDATED, REFLECTED, ACTIVITY_RECORD,
+    CONSOLIDATED, REFLECTED, *RECORD_PROVENANCES,
 })
 
 # 有损压缩不该套在这些上面。CONSOLIDATED 本身就是压缩产物 (再压一次是复合损失);
 # REFLECTED 已不再产生新行, 留在这里是让存量的归档行即使被恢复也不会被压。
-COMPRESSION_EXEMPT = frozenset({CONSOLIDATED, REFLECTED, ACTIVITY_RECORD})
+COMPRESSION_EXEMPT = frozenset({CONSOLIDATED, REFLECTED, *RECORD_PROVENANCES})
 
 
 def normalize_provenance(value: str | None) -> str | None:

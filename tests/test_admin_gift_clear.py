@@ -31,6 +31,7 @@ def test_clear_requires_admin_and_uses_jwt_owner(api_client, auth_header, monkey
 async def test_service_reports_actual_counts_and_propagates_failure(monkeypatch):
     clear = AsyncMock(side_effect=[COUNTS, RuntimeError('unavailable')])
     monkeypatch.setattr(gift_repository, 'clear_user_gifts', clear)
+    monkeypatch.setattr(gift_service.gift_memory, 'archive_for_user', AsyncMock(return_value=0))
     assert await gift_service.clear_all_gifts('owner') == COUNTS
     with pytest.raises(RuntimeError, match='unavailable'):
         await gift_service.clear_all_gifts('owner')
@@ -46,6 +47,7 @@ async def gift_db(monkeypatch):
     db = Prisma(datasource={'url': url}, http={'trust_env': False})
     await db.connect()
     monkeypatch.setattr('app.db.db', db)
+    monkeypatch.setattr('app.services.offline.record_memory.db', db)
     monkeypatch.setattr(gift_repository, 'db', db)
     users, agents, spaces, convs = [], [], [], []
     try:

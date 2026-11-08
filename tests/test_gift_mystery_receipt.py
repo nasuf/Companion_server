@@ -157,7 +157,7 @@ def _patch_receipt(monkeypatch, *, current, cas_result, reread=None):
     emit = AsyncMock(return_value="msg-1")
     monkeypatch.setattr(gift_service, "emit_assistant", emit)
     remember = Mock()
-    monkeypatch.setattr(gift_service.gift_memory, "remember_gift_received", remember)
+    monkeypatch.setattr(gift_service.gift_memory, "schedule_sync", remember)
     return add_events, emit, remember
 
 
@@ -185,9 +185,8 @@ async def test_user_confirms_receipt_reveals_gift_once(monkeypatch):
     reply = emit.await_args.kwargs
     assert reply["trigger_type"] == "gift_received_reply"
     assert reply["message"] == "是桂花乌龙茶，记得你爱花香"
-    # 签收记忆带上礼物和揭晓时说的话（为什么送）。
-    assert remember.call_args.args[2]["gift_name"] == "桂花乌龙茶"
-    assert remember.call_args.kwargs["reveal_message"] == "是桂花乌龙茶，记得你爱花香"
+    # 签收触发状态记忆改写（礼物名、揭晓时说的话从消息表读回）。
+    assert remember.call_args.args == ("gift-1", "user-1")
 
 
 @pytest.mark.asyncio
@@ -202,9 +201,7 @@ async def test_receipt_is_remembered_even_when_the_chat_is_unreachable(monkeypat
     # 签收已经成功：聊天发不出去，记忆照样要写（工作区取礼物自己的）。
     assert result.gift.revealed is True and result.assistant_message is None
     emit.assert_not_awaited()
-    args, kwargs = remember.call_args
-    assert args[1] == _gift("delivered").get("workspace_id")
-    assert kwargs == {"agent_name": None, "reveal_message": None}
+    assert remember.call_args.args == ("gift-1", "user-1")
 
 
 @pytest.mark.asyncio

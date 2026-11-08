@@ -92,6 +92,7 @@ async def delete_address(user_id: str) -> None:
 
 
 async def clear_all_gifts(user_id: str) -> dict[str, int]:
+    await gift_memory.archive_for_user(user_id)  # 链接随礼物级联删除, 记忆先收起来
     result = await gift_repo.clear_user_gifts(user_id)
     logger.info("[offline] admin gift clear user_id=%s counts=%s", user_id, result)
     return result
@@ -548,7 +549,7 @@ async def _fulfill_gift(
             trace_id=tracer.safe_trace_id,
         )
     if sent_message_id:  # 用户真的收到了「有礼物在路上」，AI 才记得自己寄过
-        gift_memory.remember_gift_sent(user_id, ctx["workspace_id"], gift)
+        gift_memory.schedule_sync(gift.get("id"), user_id)
     return gift
 
 
@@ -721,6 +722,7 @@ async def notify_shipped_once(user_id: str, gift: dict[str, Any]) -> str:
                 message=message,
                 trace_id=tracer.safe_trace_id,
             )
+            gift_memory.schedule_sync(gift.get("id"), user_id)
             return "sent" if message_id else "failed"
     except Exception as exc:
         logger.warning("[offline] gift shipped notify failed gift_id=%s: %s", gift.get("id"), exc)
@@ -809,13 +811,8 @@ async def _confirm_receipt(
         logger.warning("[offline] gift received context failed gift_id=%s: %s", gift_id, exc)
         ctx = None
     assistant = await _announce_received(user_id, updated, ctx)
-    gift_memory.remember_gift_received(
-        user_id,
-        (ctx or {}).get("workspace_id") or updated.get("workspace_id"),
-        updated,
-        agent_name=(ctx or {}).get("agent_name"),
-        reveal_message=assistant,
-    )
+    # 签收：揭晓时说的话由 gift_received_reply 卡片写进消息表，sync 从那里读回。
+    gift_memory.schedule_sync(gift_id, user_id)
     return updated, assistant, False
 
 
