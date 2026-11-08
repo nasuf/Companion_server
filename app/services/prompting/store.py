@@ -361,6 +361,9 @@ async def get_prompt_text(key: str) -> str:
         content = row.content if row else definition.default_text
         if row:
             await _sync_cache(row)
+        # 证据: 本 worker 这次实际按哪个 revision 服务了该 key (O01.03.V01)。
+        from app.services.prompting.propagation import note_served
+        note_served({key: row.revision if row else 0})
 
     from app.services.prompting.reply_prefix import (
         REPLY_PROMPT_KEYS, PROACTIVE_REPLY_PROMPT_KEYS, PROACTIVE_COMMON_KEY,
@@ -419,8 +422,16 @@ async def list_prompts() -> list[dict]:
     by_history = {}
     for version in history:
         by_history.setdefault(version.promptKey, []).append(version)
-    return [_response(d, by_key.get(d.key), publication=_publication_metadata(
-        by_key.get(d.key), by_history.get(d.key, []), numbers)) for d in PROMPT_DEFINITIONS]
+    from app.services.prompting.propagation import observed_revisions, propagation_status
+    observed = await observed_revisions()
+    out = []
+    for d in PROMPT_DEFINITIONS:
+        row = by_key.get(d.key)
+        response = _response(d, row, publication=_publication_metadata(
+            row, by_history.get(d.key, []), numbers))
+        response["propagation"] = propagation_status(row.revision if row else 0, observed.get(d.key))
+        out.append(response)
+    return out
 
 
 async def _attach_eval_to_version(version_id: str, prompt_key: str, change_type: str) -> None:

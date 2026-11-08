@@ -21,6 +21,21 @@ class PromptTemplateResponse(BaseModel):
     content_version_type: Literal["default", "web", "unverified"] = "unverified"
     web_version: int | None = None
     content_version_id: str | None = None
+    propagation: "PromptPropagationStatus" = Field(default_factory=lambda: PromptPropagationStatus())
+
+
+
+class PromptServedRevision(BaseModel):
+    revision: int
+    workers: int
+    last_seen: str | None = None
+
+
+class PromptPropagationStatus(BaseModel):
+    """实际生效证据: worker 读到的 revision 与 DB 当前 revision 的对比 (O01.03.V01)。"""
+    propagation: Literal["verified", "stale", "unverified"] = "unverified"
+    served_revisions: list[PromptServedRevision] = Field(default_factory=list)
+    sampled_at: str | None = None
 
 
 class PromptTemplateWriteGuard(BaseModel):

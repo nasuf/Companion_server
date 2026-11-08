@@ -69,6 +69,8 @@ _TTS_PRICING_CACHE: dict[str, dict[str, float | str]] = {}
 _CACHE_LOADED = False
 _CACHE_REVISION = -1
 _PROMPTS_CACHE: dict = {}
+# 当前快照里每个提示词的 revision, 只用于生效证据 (prompting/propagation.py)
+_PROMPT_REVISIONS: dict[str, int] = {}
 _current_snapshot: ContextVar[ConfigurationSnapshot | None] = ContextVar("configuration_snapshot", default=None)
 # 防并发 ensure_loaded 触发 N 次 load_caches (每次都打 DB)
 _LOAD_LOCK = asyncio.Lock()
@@ -149,6 +151,8 @@ async def load_caches() -> None:
 async def _load_caches_unlocked() -> None:
     """Read a consistent DB view and retain the last complete view on failure."""
     global _GLOBAL_CACHE, _AGENT_CACHE, _PRICING_CACHE, _TTS_PRICING_CACHE, _CACHE_LOADED, _CACHE_REVISION, _PROMPTS_CACHE
+    global _PROMPT_REVISIONS
+    from app.services.prompting.propagation import note_served
     new_pricing: dict[str, dict[str, float]] = {}
     new_tts_pricing: dict[str, dict[str, float | str]] = {}
     try:
@@ -211,6 +215,7 @@ async def _load_caches_unlocked() -> None:
             logger.error("[RUNTIME-CONFIG] initial load failed (%s); startup blocked", type(exc).__name__)
             raise RuntimeConfigurationUnavailable("Initial database configuration unavailable") from None
         logger.warning("[RUNTIME-CONFIG] refresh failed (%s); retaining last complete snapshot", type(exc).__name__)
+        note_served(_PROMPT_REVISIONS)  # 仍按旧快照提供提示词: 照实续报, 后台据此显示滞后
         return
     _GLOBAL_CACHE = new_global
     _AGENT_CACHE = new_agent
@@ -219,6 +224,9 @@ async def _load_caches_unlocked() -> None:
     _PROMPTS_CACHE = new_prompts
     _CACHE_REVISION = revision
     _CACHE_LOADED = True
+    # 证据: 本 worker 的聊天从这一刻起按这些 revision 取提示词 (O01.03.V01)。
+    _PROMPT_REVISIONS = {row.key: row.revision for row in prompts}
+    note_served(_PROMPT_REVISIONS)
     logger.debug(
         f"[RUNTIME-CONFIG] loaded: global={bool(_GLOBAL_CACHE)} "
         f"overrides={len(_AGENT_CACHE)} pricing={len(_PRICING_CACHE)}"
