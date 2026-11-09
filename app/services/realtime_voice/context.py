@@ -12,6 +12,7 @@ from app.services.realtime_voice.instructions import (
     DynamicContext,
     PersonaFacts,
     build_instructions,
+    earlier_session_note,
     greeting_cue,
     history_turns,
     last_contact_line,
@@ -19,6 +20,10 @@ from app.services.realtime_voice.instructions import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The recap is usually cached (text chat builds the same one at the same
+# gap); a fresh one took 0.9-1.2 s on qwen3.5-flash (2026-11-09).
+_RECAP_TIMEOUT_S = 2.0
 
 
 async def load_call_context(
@@ -42,13 +47,20 @@ async def load_call_context(
         conversation_id=conversation_id,
     )
     persona = persona_from_agent(agent)
-    history = history_turns(recent)
     gap, was_call = _last_contact(recent)
+    earlier, current = _split_sessions(recent)
+    # Only the current session is replayed word for word; an earlier one
+    # reaches the model as its recap (see earlier_session_note).
+    history = history_turns(current)
+    if earlier:
+        ago = _seconds_since(earlier[-1].get("createdAt"))
+        recap = await _earlier_recap(conversation_id, earlier, ago)
+        history = [{"role": "system", "text": earlier_session_note(recap, ago)}, *history]
     instructions = build_instructions(
         persona,
         user_memories,
         ai_memories,
-        has_history=bool(history),
+        has_history=bool(recent),
         dynamic=dynamic,
         last_contact=last_contact_line(gap, was_call=was_call),
         activity_history=activity_history,
@@ -180,13 +192,52 @@ def _last_contact(recent: list[dict]) -> tuple[float | None, bool]:
     if not recent:
         return None, False
     last = recent[-1]
-    created = last.get("createdAt")
+    return _seconds_since(last.get("createdAt")), last.get("channel") == "realtime_voice"
+
+
+def _aware(created) -> datetime | None:
     if not isinstance(created, datetime):
-        return None, False
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    gap = max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
-    return gap, last.get("channel") == "realtime_voice"
+        return None
+    return created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+
+
+def _seconds_since(created) -> float | None:
+    at = _aware(created)
+    return None if at is None else max(0.0, (datetime.now(timezone.utc) - at).total_seconds())
+
+
+def _split_sessions(recent: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(earlier, current): current is what was said since the last pause of
+    RECAP_GAP_SECONDS or more, the boundary text chat uses for its recap."""
+    from app.services.chat.session_recap import RECAP_GAP_SECONDS
+
+    times = [_aware(m.get("createdAt")) for m in recent]
+    if not recent or times[-1] is None:
+        return [], recent
+    if (_seconds_since(times[-1]) or 0) >= RECAP_GAP_SECONDS:
+        return recent, []
+    for index in range(len(recent) - 1, 0, -1):
+        before, after = times[index - 1], times[index]
+        if before and after and (after - before).total_seconds() >= RECAP_GAP_SECONDS:
+            return recent[:index], recent[index:]
+    return [], recent
+
+
+async def _earlier_recap(conversation_id: str, earlier: list[dict], ago: float | None) -> str | None:
+    """The text-chat "上次聊到" recap of the earlier session; None if unavailable.
+
+    A recap still running at the timeout is left to finish in the background,
+    so it lands in the shared cache for the next call or text reply.
+    """
+    from app.services.chat.session_recap import get_or_build_session_recap
+    from app.services.runtime.tasks import fire_background
+
+    task = fire_background(get_or_build_session_recap(conversation_id, earlier, gap_seconds=ago))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=_RECAP_TIMEOUT_S)
+    except Exception as exc:  # TimeoutError included: the call opens without it
+        logger.warning("[realtime-voice] earlier-session recap unavailable: %s", type(exc).__name__)
+        return None
 
 
 async def _recent_messages(conversation_id: str) -> list[dict]:
@@ -205,6 +256,7 @@ async def _recent_messages(conversation_id: str) -> list[dict]:
         if metadata.get("component_card"):
             continue  # activity cards are UI, not something either side said
         messages.append({
+            "id": getattr(row, "id", None),  # recap cache anchor
             "role": row.role,
             "content": row.content or "",
             "createdAt": row.createdAt,

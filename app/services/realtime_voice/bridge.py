@@ -154,6 +154,8 @@ class VoiceBridge:
         instructions: str | None = None,
         greet_cue: str | None = None,
         clock_line: Callable[[], str] | None = None,
+        voice_hint: Callable[[], str] | None = None,
+        earlier_replies: list[str] | None = None,
         stats: CallStats | None = None,
     ) -> None:
         self._send_provider = send_provider
@@ -168,6 +170,8 @@ class VoiceBridge:
         # Current time for each reply's note; the call instructions only
         # carry the hour at connect time.
         self._clock_line = clock_line
+        # Voice baseline repeated with every reply (static instructions fade).
+        self._voice_hint = voice_hint
         # Per-call diagnostics (VOICE01.01); the endpoint stores them at call end.
         self.stats = stats or CallStats()
         self._turn = 0
@@ -175,6 +179,13 @@ class VoiceBridge:
         self._quiet_turn = False
         self._last_assistant_text = ""
         self._recent_replies: deque[str] = deque(maxlen=_REPEAT_WINDOW)
+        # The agent's lines from the seeded history count as said for the
+        # repeat check only (echo checks use _recent_replies): on 2026-11-09
+        # it reused a 2-day-old apology word for word.
+        self._earlier_replies = [
+            key for key in (spoken_key(line) for line in earlier_replies or [])
+            if len(key) >= _REPEAT_MIN_CHARS
+        ]
 
         self._lock = asyncio.Lock()
         self._closed = False
@@ -701,8 +712,8 @@ class VoiceBridge:
             return
         await self._request_reply()
 
-    async def _request_reply(self, *, with_note: bool = True) -> None:
-        note = self._reply_note() if with_note else ""
+    async def _request_reply(self, *, with_memories: bool = True) -> None:
+        note = self._reply_note(with_memories=with_memories)
         self._unanswered = False
         self._responding = True
         self._reply_seen = False
@@ -717,14 +728,21 @@ class VoiceBridge:
         await self._send_provider(create)
         self._watch_reply_start(create["event_id"])
 
-    def _reply_note(self) -> str:
-        """Note for the reply about to be requested; counts the memories as shown."""
+    def _reply_note(self, *, with_memories: bool = True) -> str:
+        """Note for the reply about to be requested; counts the memories as shown.
+
+        The greeting and tool follow-ups carry no memory block but still get
+        the time and the voice hint: the 2026-11-09 greeting, sent without a
+        note, opened a Monday call with "周末还在加班".
+        """
         parts = [self._clock_line() if self._clock_line else ""]
-        if self._slot is not None:
+        if self._slot is not None and with_memories:
             parts.append(self._slot.note(with_memories=not self._quiet_turn))
             self.stats.reply_note(0 if self._quiet_turn else len(self._slot.lines))
             if not self._quiet_turn:
                 self._slot.mark_shown()
+        if self._voice_hint:
+            parts.append(self._voice_hint())
         return "\n\n".join(part for part in parts if part)
 
     def _watch_reply_start(self, create_id: str) -> None:
@@ -762,9 +780,14 @@ class VoiceBridge:
         if item.get("role") == "user" and text == self._greet_cue and self._greet_cue_sent:
             self._greet_cue_id = item["id"]
         elif item.get("role") == "system" and self._note_text and self._note_id is None:
-            # Notes are the only system items sent mid-call; DashScope
-            # replaces a client-chosen id, so take the one it reports.
-            self._note_id = item["id"]
+            # DashScope replaces a client-chosen id but echoes the text as
+            # sent (2 of 2, 2026-11-09). Matching on text keeps a late ack of
+            # a seeded system item (the earlier-session note) from being
+            # taken for this reply's note and deleted in its place.
+            if text == self._note_text:
+                self._note_id = item["id"]
+            else:
+                logger.info("[realtime-voice] system item is not this reply's note")
 
     async def _on_audio_delta(self, delta: object) -> None:
         if self._discarding or not isinstance(delta, str) or not delta:
@@ -888,7 +911,7 @@ class VoiceBridge:
                 # tool output already in context.
                 await self._maybe_reply()
             elif not self._user_speaking() and not self._responding:
-                await self._request_reply(with_note=False)
+                await self._request_reply(with_memories=False)
 
     async def _get_memories(self, query: str) -> list[dict[str, str]] | None:
         """Get memories: use prefetch cache if available, else fetch live."""
@@ -988,7 +1011,7 @@ class VoiceBridge:
         key = spoken_key(text)
         repeated = len(key) >= _REPEAT_MIN_CHARS and any(
             SequenceMatcher(None, key, earlier).ratio() >= _REPEAT_RATIO
-            for earlier in self._recent_replies
+            for earlier in (*self._recent_replies, *self._earlier_replies)
         )
         self._recent_replies.append(key)
         if repeated:
@@ -1015,7 +1038,7 @@ class VoiceBridge:
             return
         self._greet_cue_sent = True
         await self._send_provider(history_item_event(item_id="greet_cue", role="user", text=self._greet_cue))
-        await self._request_reply(with_note=False)
+        await self._request_reply(with_memories=False)
 
     async def _drop_greet_cue(self) -> None:
         cue_id, self._greet_cue_id = self._greet_cue_id, None

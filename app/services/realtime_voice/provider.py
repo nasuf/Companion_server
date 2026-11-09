@@ -139,7 +139,7 @@ async def configure_session(
         if (
             event.get("type") == "conversation.item.created"
             and isinstance(item, dict)
-            and item.get("role") in {"user", "assistant"}
+            and item.get("role") in {"user", "assistant", "system"}
         ):
             remaining -= 1
     if remaining:

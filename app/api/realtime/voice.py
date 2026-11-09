@@ -31,7 +31,7 @@ from app.redis_client import is_redis_healthy
 from app.services.interaction.boundary import get_patience, get_patience_zone
 from app.services.realtime_voice.bridge import VoiceBridge
 from app.services.realtime_voice.context import load_call_context
-from app.services.realtime_voice.instructions import clock_line, memory_lines
+from app.services.realtime_voice.instructions import clock_line, memory_lines, turn_voice_hint
 from app.services.realtime_voice.lock import acquire_call, refresh_call, release_call
 from app.services.realtime_voice.persist import (
     save_assistant_transcript,
@@ -179,6 +179,7 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
                 model=model,
                 instructions=instructions,
                 greet_cue=greet_cue,
+                earlier_replies=[t["text"] for t in history if t["role"] == "assistant"],
                 stats=CallStats(
                     platform=_client_platform(websocket), model=model,
                     vad_threshold=settings.dashscope_realtime_vad_threshold,
@@ -319,6 +320,7 @@ def _bridge(
     model,
     instructions: str | None = None,
     greet_cue: str | None = None,
+    earlier_replies: list[str] | None = None,
     stats=None,
 ) -> VoiceBridge:
     from app.services.realtime_voice.call_stats import CallStats
@@ -390,7 +392,9 @@ def _bridge(
         memory_wait_s=settings.dashscope_realtime_memory_wait_s,
         instructions=instructions,
         greet_cue=greet_cue,
+        earlier_replies=earlier_replies,
         clock_line=clock_line,
+        voice_hint=turn_voice_hint,
         stats=stats,
     )
 

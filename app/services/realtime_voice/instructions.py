@@ -27,7 +27,8 @@ _SPOKEN_RULES = """你正在和用户实时语音通话。
 - 姓名、年龄、职业、城市，以及下面写明的记忆，都是事实。没有写到的具体事实不要编；想不起来就说不记得。
 - 用户的记忆是用户的经历，你的记忆是你自己的经历。不要把两边的城市、职业或身份说反。
 - 每次回答前，系统消息【此刻相关的记忆】里会放上和刚才聊的内容有关的记忆。相关就自然带出来，用你自己的话说，不要照读，也不要提到“记忆”这两个字。
-- 用户明确问起以前的事，而上面都没有写到时，再调用 recall_memory 工具；日常寒暄、接话、情绪回应不需要调用。""".strip()
+- 用户明确问起以前的事，而上面都没有写到时，再调用 recall_memory 工具；日常寒暄、接话、情绪回应不需要调用。
+- 被用户指出说错了，轻松认一句就接着聊，不要连声道歉、不要自责，也不要解释自己的声音或语气。""".strip()
 
 
 @dataclass(frozen=True)
@@ -230,6 +231,39 @@ def clock_line() -> str:
     )
 
 
+# Ride-along with every reply's note: static instructions are forgotten over
+# turns (Style Amnesia). On 2026-11-09 the agent, once rushed, stayed rushed
+# and tearful for the rest of the call.
+_TURN_VOICE_HINT = "（语气平稳、放松，像平常打电话；别越说越快、越说越冲，也别带哭腔。）"
+
+
+def turn_voice_hint() -> str:
+    return _TURN_VOICE_HINT
+
+
+def earlier_session_note(recap: str | None, gap_seconds: float) -> str:
+    """The only trace of an earlier session that a call is seeded with.
+
+    Earlier sessions are summarised, not replayed. Seeded verbatim, a
+    Saturday call's "周末还在加班" opened a Monday call and its apology was
+    repeated word for word (2026-11-09); models condition on their own
+    earlier lines (arXiv 2509.09677). OpenAI's realtime context guide also
+    keeps only recent turns verbatim and replaces older ones with a summary.
+    """
+    from app.services.time_domain.clock import get_current_time
+
+    ti = get_current_time()
+    now = f"{ti.now.month}月{ti.now.day}日 {ti.weekday} {ti.now:%H:%M}"
+    lines = [f"【上次聊天】大约 {format_gap_text(gap_seconds)}前。"]
+    if recap:
+        lines.append(recap)
+    lines.append(
+        f"这只是帮你记起聊过什么，是过去的事，不是现在正在发生的；现在是 {now}。"
+        "开口别把过去的话题说成此刻的事，也不要照搬以前说过的话；对方提了新事情就跟着新话题走。"
+    )
+    return "\n".join(lines)
+
+
 def spoken_key(text: str) -> str:
     """Text without punctuation and spaces, for comparing spoken lines."""
     return re.sub(r"[\W_]+", "", text)
@@ -284,7 +318,10 @@ def greeting_cue(gap_seconds: float | None, *, was_call: bool) -> str:
         return "（你们刚才还在文字聊天，用户这会儿直接打来电话。你接起来先开口，顺着刚才聊的说一句。）"
     if gap_seconds < _EARLIER_S:
         return f"（用户隔了 {format_gap_text(gap_seconds)}又给你打来电话。你接起来先开口，像熟人一样简短地打个招呼。）"
-    return f"（距离上次聊天已经 {format_gap_text(gap_seconds)}了，用户给你打来电话。你接起来先开口打个招呼，可以顺着上次聊到的事问一句。）"
+    return (
+        f"（距离上次聊天已经 {format_gap_text(gap_seconds)}了，用户给你打来电话。你接起来先开口打个招呼；"
+        "上次聊到的事已经过去了，想提就当作过去的事问一句，别说成正在发生。）"
+    )
 
 
 # ---------------------------------------------------------------------------

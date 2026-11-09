@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -648,10 +649,11 @@ async def test_recent_messages_skip_cards_and_keep_time_and_channel(monkeypatch)
 
     at = datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc)
     rows = [
-        SimpleNamespace(role="assistant", content="喂", createdAt=at, metadata={"channel": "realtime_voice"}),
-        SimpleNamespace(role="assistant", content="活动卡片：咖啡馆", createdAt=at, metadata={"component_card": {"type": "x"}}),
-        SimpleNamespace(role="user", content="  ", createdAt=at, metadata=None),
-        SimpleNamespace(role="user", content="在吗", createdAt=at, metadata=None),
+        SimpleNamespace(id="r4", role="assistant", content="喂", createdAt=at, metadata={"channel": "realtime_voice"}),
+        SimpleNamespace(id="r3", role="assistant", content="活动卡片：咖啡馆", createdAt=at,
+                        metadata={"component_card": {"type": "x"}}),
+        SimpleNamespace(id="r2", role="user", content="  ", createdAt=at, metadata=None),
+        SimpleNamespace(id="r1", role="user", content="在吗", createdAt=at, metadata=None),
     ]
 
     async def find_many(**kwargs):
@@ -660,8 +662,9 @@ async def test_recent_messages_skip_cards_and_keep_time_and_channel(monkeypatch)
 
     monkeypatch.setattr(context.db, "message", SimpleNamespace(find_many=find_many), raising=False)
     assert await context._recent_messages("conv") == [
-        {"role": "user", "content": "在吗", "createdAt": at, "channel": None},
-        {"role": "assistant", "content": "喂", "createdAt": at, "channel": "realtime_voice"},
+        # The id anchors the earlier-session recap cache.
+        {"id": "r1", "role": "user", "content": "在吗", "createdAt": at, "channel": None},
+        {"id": "r4", "role": "assistant", "content": "喂", "createdAt": at, "channel": "realtime_voice"},
     ]
 
 
@@ -884,7 +887,7 @@ async def test_barge_in_before_the_reply_starts_keeps_the_call_alive():
     await _user_says(bridge, "我今天练琴了")
     assert provider[-1]["type"] == "response.create"
     await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
-        "id": "item_srv_note", "role": "system", "content": [{"type": "input_text", "text": "x"}]}})
+        "id": "item_srv_note", "role": "system", "content": [{"type": "input_text", "text": _notes(provider)[-1]}]}})
     sent = len(provider)
     await bridge.feed_provider_event({"type": "input_audio_buffer.speech_started", "item_id": "late"})
     # No cancel before response.created; nothing deleted.
@@ -913,7 +916,7 @@ async def test_a_reply_that_never_starts_is_released(monkeypatch):
     bridge, provider, _ = _bridge(retrieve)
     await _user_says(bridge, "我今天练琴了")
     await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
-        "id": "item_srv_note", "role": "system", "content": []}})
+        "id": "item_srv_note", "role": "system", "content": [{"type": "input_text", "text": _notes(provider)[-1]}]}})
     await asyncio.sleep(0.05)
     assert not bridge._responding
     assert provider[-1] == {"event_id": provider[-1]["event_id"],
@@ -961,20 +964,21 @@ def test_clock_line_is_to_the_minute(monkeypatch):
     assert line.startswith("【现在的时间】11月7日 星期六 07:16。")
 
 
-async def test_note_id_is_taken_even_if_the_echoed_text_differs():
+async def test_note_id_is_matched_by_its_text():
+    """DashScope echoes item text as sent (2 of 2, 2026-11-09). A late ack of
+    a seeded system item (the earlier-session note) is not this reply's note."""
     async def retrieve(text, previous):
         return [_memory("m1", "用户喜欢爬山")]
 
     bridge, provider, _ = _bridge(retrieve)
     await _user_says(bridge, "周末去哪玩")
     await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
-        "id": "item_a", "role": "system", "content": [{"type": "input_text", "text": "（规范化后的文本）"}]}})
-    # A second system item in the same reply does not replace the first.
+        "id": "item_a", "role": "system", "content": [{"type": "input_text", "text": "【上次聊天】大约 1 天前。"}]}})
     await bridge.feed_provider_event({"type": "conversation.item.created", "item": {
-        "id": "item_b", "role": "system", "content": []}})
+        "id": "item_b", "role": "system", "content": [{"type": "input_text", "text": _notes(provider)[-1]}]}})
     await _reply_done(bridge, "去爬山吧")
     deletes = [e["item_id"] for e in provider if e["type"] == "conversation.item.delete"]
-    assert deletes == ["item_a"]
+    assert deletes == ["item_b"]  # the seeded earlier-session note stays
 
 
 async def test_speech_without_a_stop_ends_after_the_cap(monkeypatch):
@@ -1103,3 +1107,188 @@ async def test_bridge_counts_retrieval_injection_and_small_talk_into_stats():
     assert summary["injection"]["small_talk_skipped"] == 1
     assert summary["turns"]["answered"] == 2
     assert summary["environment"]["mic"]["peak_dbfs"] is None  # no audio fed
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-09: a Monday call opened with "周末还在加班" and copied an old apology
+# ---------------------------------------------------------------------------
+
+def _freeze_clock(monkeypatch, now):
+    from app.services.time_domain import clock
+
+    weekdays = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+    monkeypatch.setattr(clock, "get_current_time", lambda: clock.TimeInfo(
+        now=now, date=now.date(), weekday=weekdays[now.weekday()], is_weekend=now.weekday() >= 5,
+        timestamp_ms=0))
+
+
+def _rows(*spec):
+    """(role, text, hours_ago) -> message rows as _recent_messages returns them."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    return [{"id": f"m{i}", "role": role, "content": text, "createdAt": now - timedelta(hours=hours)}
+            for i, (role, text, hours) in enumerate(spec)]
+
+
+def test_sessions_split_at_a_three_hour_pause():
+    from app.services.realtime_voice.context import _split_sessions
+
+    rows = _rows(("user", "周末还在加班？", 50), ("assistant", "周末加班有点崩溃", 50),
+                 ("user", "在吗", 0.5), ("assistant", "在呢", 0.4))
+    earlier, current = _split_sessions(rows)
+    assert [m["id"] for m in earlier] == ["m0", "m1"] and [m["id"] for m in current] == ["m2", "m3"]
+    # Last message long ago: all of it is an earlier session.
+    earlier, current = _split_sessions(rows[:2])
+    assert len(earlier) == 2 and current == []
+    # One continuous session, or no usable times: nothing is summarised.
+    assert _split_sessions(rows[2:]) == ([], rows[2:])
+    untimed = [{**m, "createdAt": None} for m in rows]
+    assert _split_sessions(untimed) == ([], untimed)
+    assert _split_sessions([]) == ([], [])
+
+
+async def test_an_earlier_session_is_seeded_as_its_recap_never_verbatim(monkeypatch):
+    from app.services.realtime_voice import context
+    from app.services.realtime_voice.instructions import DynamicContext
+
+    rows = _rows(("user", "怎么周末还在加班", 43), ("assistant", "抱歉，我刚才确实有点急。可能是想到工作的事，语气没控制好。", 43))
+
+    async def gather(**_):
+        return [], [], rows, DynamicContext(), []
+
+    asked: list = []
+
+    async def recap(conversation_id, earlier, ago):
+        asked.append((conversation_id, [m["id"] for m in earlier], round(ago / 3600)))
+        return "[历史对话 11-07] 聊到周末加班"
+
+    monkeypatch.setattr(context, "_gather_all", gather)
+    monkeypatch.setattr(context, "_earlier_recap", recap)
+    _, instructions, history, cue = await context.load_call_context(
+        agent=SimpleNamespace(name="阿宁", gender="female"), user_id="u", workspace_id=None, conversation_id="c")
+    assert asked == [("c", ["m0", "m1"], 43)]
+    [note] = history
+    assert note["role"] == "system" and note["text"].startswith("【上次聊天】大约 1 天前。")
+    assert "聊到周末加班" in note["text"] and "是过去的事" in note["text"]
+    assert "抱歉" not in note["text"] and "下面已经有你们聊过的内容" in instructions
+    assert "当作过去的事" in cue
+
+
+async def test_recap_failure_or_timeout_leaves_only_the_time_note(monkeypatch, caplog):
+    from app.services.chat import session_recap
+    from app.services.realtime_voice import context
+    from app.services.realtime_voice.instructions import earlier_session_note
+
+    finished: list[str] = []
+
+    async def slow(*_, **__):
+        await asyncio.sleep(0.05)
+        finished.append("cached")
+        return "late recap"
+
+    monkeypatch.setattr(session_recap, "get_or_build_session_recap", slow)
+    monkeypatch.setattr(context, "_RECAP_TIMEOUT_S", 0.01)
+    assert await context._earlier_recap("c", _rows(("user", "x", 5)), 5 * 3600) is None
+    assert "earlier-session recap unavailable: TimeoutError" in caplog.text
+    # The slow recap is not cancelled: it finishes and reaches the cache.
+    await asyncio.sleep(0.1)
+    assert finished == ["cached"]
+    note = earlier_session_note(None, 5 * 3600)
+    assert note.startswith("【上次聊天】大约 5 小时前。\n这只是帮你记起")
+
+
+def test_earlier_session_note_pins_the_present(monkeypatch):
+    from app.services.realtime_voice.instructions import earlier_session_note
+
+    _freeze_clock(monkeypatch, datetime(2026, 11, 9, 10, 11))
+    note = earlier_session_note("[历史对话] 聊到加班", 43 * 3600)
+    assert "现在是 11月9日 星期一 10:11" in note
+    assert "不要照搬以前说过的话" in note and "跟着新话题走" in note
+
+
+async def test_seeded_system_items_are_acknowledged(caplog):
+    from app.services.realtime_voice.provider import configure_session
+
+    history = [{"role": "system", "text": "【以下是11月7日 星期六的对话】"},
+               {"role": "user", "text": "我叫小明"}]
+    sock = _Provider([
+        {"type": "conversation.item.created", "item": {"id": "srv-1", "role": "system"}},
+        {"type": "conversation.item.created", "item": {"id": "srv-2", "role": "user"}},
+    ])
+    await configure_session(sock, instructions="hi", voice="v", history=history)
+    assert "history seed incomplete" not in caplog.text
+
+
+async def test_greeting_reply_gets_the_time_and_voice_hint_but_no_memories():
+    async def retrieve(text, previous):
+        return [_memory("m1", "用户周末常加班")]
+
+    provider: list[dict] = []
+
+    async def send(event):
+        provider.append(event)
+
+    async def save(*_):
+        return "msg"
+
+    async def client(_):
+        pass
+
+    bridge = VoiceBridge(
+        send_provider=send, send_client=client, retrieve_memories=retrieve,
+        save_user_line=save, save_assistant_line=save, retrieval_timeout_s=0.2,
+        memory_wait_s=0.05, instructions="BASE",
+        clock_line=lambda: "【现在的时间】11月9日 星期一 10:11。", voice_hint=lambda: "（语气平稳）",
+    )
+    await bridge.feed_client_text('{"type": "greet"}')
+    assert [e["type"] for e in provider] == [
+        "conversation.item.create", "conversation.item.create", "response.create"]
+    assert _notes(provider) == ["【现在的时间】11月9日 星期一 10:11。\n\n（语气平稳）"]
+    await _reply_done(bridge, "喂，枫！")
+    # An ordinary turn carries time, memories and the hint, in that order.
+    await _user_says(bridge, "周末你干嘛了")
+    note = _notes(provider)[-1]
+    assert note.startswith("【现在的时间】") and note.endswith("（语气平稳）")
+    assert "用户周末常加班" in note
+
+
+def test_voice_hint_and_spoken_rules_cover_drift_and_being_corrected():
+    from app.services.realtime_voice.instructions import (
+        PersonaFacts, build_instructions, greeting_cue, turn_voice_hint)
+
+    assert "别越说越快" in turn_voice_hint() and "别带哭腔" in turn_voice_hint()
+    persona = PersonaFacts("阿宁", "", "女生", 27, "", "", "", "", "", "", "")
+    text = build_instructions(persona, [], [], has_history=True)
+    assert "被用户指出说错了，轻松认一句就接着聊" in text
+    assert "当作过去的事" in greeting_cue(2 * 86400, was_call=True)
+
+
+async def test_a_line_copied_from_an_earlier_call_counts_as_a_repeat():
+    async def retrieve(text, previous):
+        return []
+
+    provider: list[dict] = []
+
+    async def send(event):
+        provider.append(event)
+
+    async def save(*_):
+        return "msg"
+
+    async def client(_):
+        pass
+
+    apology = "抱歉，我刚才确实有点急。可能是想到工作的事，语气没控制好。"
+    bridge = VoiceBridge(
+        send_provider=send, send_client=client, retrieve_memories=retrieve,
+        save_user_line=save, save_assistant_line=save, retrieval_timeout_s=0.2,
+        memory_wait_s=0.05, instructions="BASE", earlier_replies=[apology, "嗯"],
+    )
+    # Seeded lines are not the agent's last reply: echo checks ignore them.
+    assert list(bridge._recent_replies) == []
+    await _user_says(bridge, "你的声音怎么这么急促呀")
+    await _reply_done(bridge, apology)
+    assert bridge.stats.repeats == 1
+    await _user_says(bridge, "没事")
+    assert "【别再重复】" in _notes(provider)[-1] and apology in _notes(provider)[-1]
