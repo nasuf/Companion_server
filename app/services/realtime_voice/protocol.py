@@ -23,17 +23,22 @@ MAX_CLIENT_PCM_BYTES = 256 * 1024
 
 # ---------------------------------------------------------------------------
 # recall_memory tool — the model calls this when it needs concrete facts.
-# Most casual turns skip it entirely; only "需要具体事实" triggers a call.
+# The description names the trigger and forbids answering from impression
+# first (VOICE01.05). 2026-11-09 text replay, production session config, 4
+# recall questions and 3 small-talk lines x5: the old wording called the tool
+# 8/20 and invented an answer 4 times ("当然记得，你家猫叫团团"); this one
+# calls 17/20, invents 0, and still calls 0/15 on small talk. Suggesting a
+# "我想想啊" lead-in was dropped: the model said it and then did not call.
 # ---------------------------------------------------------------------------
 RECALL_MEMORY_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "recall_memory",
         "description": (
-            "回忆与用户当前话题相关的记忆。"
-            "当你需要回忆和用户之间的某件事、用户的某个偏好或事实、"
-            "或者你自己的经历时调用。"
-            "不需要每句话都调用，只在确实需要具体事实时使用。"
+            "查你和用户之间以前的事。用户问起以前聊过或发生过的事"
+            "（比如“你还记得我家猫叫什么吗”“我上次说周末去哪了”“你给我推荐过什么”），"
+            "而系统消息和上文里都没有写到答案时，必须先调用这个工具，拿到结果再回答，"
+            "不要先凭印象回答。日常寒暄、接话、情绪回应不要调用。查不到就照实说不记得，不要编。"
         ),
         "parameters": {
             "type": "object",

@@ -20,6 +20,7 @@ from app.services.memory.storage.entity_repo import (
     record_preferences_for_memory,
     record_topics_for_memory,
 )
+from app.services.memory.recording.call_noise import CALL_CHANNEL, call_noise
 from app.services.memory.recording.extraction import extract_memories
 from app.services.memory.recording.filter import should_extract_memory
 from app.services.memory.recording.pre_filter import (
@@ -257,11 +258,12 @@ async def process_memory_pipeline(user_id: str, new_conversation: str, *,
     context_conversation: str = "", statement_time: datetime | None = None,
     side: Side = "user", workspace_id: str | None = None,
     evidence_message_ids: list[str] | None = None, evidence_conversation_id: str | None = None,
-    prev_ai_line: str | None = None) -> list[str]:
+    prev_ai_line: str | None = None, source_channel: str | None = None) -> list[str]:
     kwargs = dict(user_id=user_id, new_conversation=new_conversation,
         context_conversation=context_conversation, statement_time=statement_time, side=side,
         workspace_id=workspace_id, evidence_message_ids=evidence_message_ids,
-        evidence_conversation_id=evidence_conversation_id, prev_ai_line=prev_ai_line)
+        evidence_conversation_id=evidence_conversation_id, prev_ai_line=prev_ai_line,
+        source_channel=source_channel)
     if evidence_conversation_id and evidence_message_ids:
         from app.services.memory.recording import receipts
         kwargs['workspace_id'] = await resolve_workspace_id(workspace_id=workspace_id, user_id=user_id)
@@ -293,6 +295,7 @@ async def _process_memory_pipeline(
     evidence_message_ids: list[str] | None = None,
     evidence_conversation_id: str | None = None,
     prev_ai_line: str | None = None,
+    source_channel: str | None = None,
     _durable_batch: dict | None = None,
 ) -> list[str]:
     """Run the full memory extraction and storage pipeline for one side.
@@ -433,6 +436,11 @@ async def _process_memory_pipeline(
                     await record_skip(write_token, fingerprint({'policy_skip': mem}))
             write_phase = "preparing"
             content = mem.get("content", "")
+            if source_channel == CALL_CHANNEL and (noise := call_noise(side, content)):
+                # VOICE01.04: 通话本身的状态、提问和此刻状态不是事实
+                logger.info(f"[MEM-{side}] skipped call noise ({noise}): {content[:40]}")
+                await skip_fact()
+                continue
             from app.services.persona_grounding import generated_stable_self_claim
             if side == "ai" and generated_stable_self_claim(content):
                 logger.info("[MEM-ai] skipped stable self-claim regardless of category")

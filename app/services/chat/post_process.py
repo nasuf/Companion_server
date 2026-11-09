@@ -555,6 +555,7 @@ async def _pipeline_with_watermark(
             prev_ai_line=_ai_line_before(
                 recent, new_target_msgs[0] if new_target_msgs else None
             ),
+            source_channel=_shared_channel(new_target_msgs),
         )
     except MemoryExtractionError as exc:
         return outcome("disabled" if exc.kind == "prompt_disabled" else "failed", exc.kind,
@@ -569,6 +570,12 @@ async def _pipeline_with_watermark(
         except MemoryProgressError as exc:
             return outcome("failed", exc.reason, len(stored_ids), "unknown")
     return outcome("completed", "processed", len(stored_ids), progress)
+
+
+def _shared_channel(messages: list[dict]) -> str | None:
+    """来源消息共同的 channel (都是通话转写时为 realtime_voice); 混合或缺失返回 None。"""
+    channels = {(m.get("metadata") or {}).get("channel") for m in messages}
+    return channels.pop() if len(channels) == 1 else None
 
 
 def _parse_ts(m: dict) -> datetime | None:
