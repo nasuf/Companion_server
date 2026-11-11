@@ -61,6 +61,10 @@ class ChatFrame:
     classified_memories: list = None
     continuation_lines: list[str] = None
     continuation_task: asyncio.Task | None = None
+    # 语义复读检查 (reply_repetition/semantic.py): 生成后开始算的向量任务与比对用的上一轮气泡
+    semantic_repetition_task: asyncio.Task | None = None
+    semantic_repetition_previous: list[str] = None
+    semantic_repetition_started: float = 0.0
     continuation_not_spawned: str | None = None
     contradiction_inquiry: str | None = None
     covered_until_user_ts: Any = None

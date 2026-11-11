@@ -44,6 +44,8 @@ UTC = timezone.utc
 _LLM_TIMEOUT_S = 6.0
 # 主回复已经准备好时最多再等这么久: 承接句是锦上添花, 不能把整轮回复拖慢
 _AWAIT_BUDGET_S = 3.0
+# 诊断里过渡句原文的上限: 过渡句本身是一句话, 截断只防异常长的输出撑大消息元数据
+_TRANSITION_TEXT_CHARS = 80
 # 跳话题过渡句的固定套话 ("突然换话题" / "突然问这个" / "怎么突然问我…")
 _STOCK_TRANSITION = re.compile(r"突然(?:换(?:了个?)?话题|问|聊起|说起|提起)")
 
@@ -60,6 +62,8 @@ class TopicContinuation:
     # 跳话题过渡句的结果: said / same_topic / filtered / stock_dropped / quota_used /
     # state_unavailable / unrecorded / error; 上一轮已完结时为 None
     transition: str | None = None
+    # 实际说出的过渡句原文 (只有 said 时有), 进诊断供抽检是否又成了套话
+    transition_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,7 +76,11 @@ class ContinuationSkip:
 
 
 def record_topic_continuation(diagnostics: dict[str, Any], status: str, **fields: Any) -> None:
-    """One bounded record per reply; never contains message or generated text.
+    """One bounded record per reply; never contains the user's text.
+
+    The only generated text is the transition line actually sent (transition_text,
+    clipped): it is already a bubble in the conversation, and without it the
+    "has it become a stock phrase again" check cannot be sampled (CHAT01.10.7).
 
     status: applied / not_spawned / user_low / patience_low / offering_turn /
     timeout / error / nothing_to_continue.
@@ -222,6 +230,7 @@ async def build_topic_continuation(
     # 过渡句每次会话限次 (默认 1): 不限次时同一个用户 4 天听到 11 次"突然换话题"
     transition_allowed = state is not None and state.transition_available
     transition = "state_unavailable" if state is None else "quota_used"
+    transition_text = None
     if transition_allowed:
         tasks.append(_transition_line(conversation, user_message=user_message, personality=personality))
     results = list(await asyncio.gather(*tasks, return_exceptions=True))
@@ -234,6 +243,7 @@ async def build_topic_continuation(
             # 记不上账就不说: 宁可少一句, 不能因为计数丢了反复说
             if line and not await note_transition(conversation_id):
                 line, transition = None, "unrecorded"
+            transition_text = line
             results[-1] = line
     lines = [r for r in results if isinstance(r, str) and r]
     failed = [r for r in results if isinstance(r, BaseException)]
@@ -249,7 +259,7 @@ async def build_topic_continuation(
         },
     )
     return TopicContinuation(cue, lines, reason=reason, failed_lines=len(failed),
-                             transition=transition)
+                             transition=transition, transition_text=transition_text)
 
 
 async def await_topic_continuation(
@@ -282,6 +292,8 @@ async def await_topic_continuation(
             unfinished=result.cue.unfinished, n_lines=len(result.lines),
             failed_lines=result.failed_lines, gap_seconds=int(result.cue.gap_seconds),
             transition=result.transition,
+            **({"transition_text": result.transition_text[:_TRANSITION_TEXT_CHARS]}
+               if result.transition_text else {}),
         )
         return result
     if isinstance(result, ContinuationSkip):

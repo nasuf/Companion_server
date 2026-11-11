@@ -27,6 +27,16 @@ PARAMS = (
     {'key': 'backstop_verbatim_overlap', 'label': '普通轮次的删除界值', 'kind': 'ratio', 'default': 0.8,
      'minimum': 0.6, 'maximum': 1.0, 'unit': '相邻两字重合比例',
      'description': '对方说了新内容时，只删几乎原样照抄的气泡。'},
+    {'key': 'semantic_enabled', 'label': '语义复读检查', 'kind': 'bool', 'default': False,
+     'description': '用本地向量比对这一轮和前三轮 AI 的气泡，意思几乎相同（换了说法）的那条发出前删掉。'
+                    '保护规则同上：不删光、对方在问或让你再说一遍时不删。'},
+    {'key': 'semantic_similarity', 'label': '语义复读判定界值', 'kind': 'ratio', 'default': 0.9,
+     'minimum': 0.8, 'maximum': 0.99, 'unit': '向量余弦相似度',
+     'description': '2026-11-04~10 生产 938 轮校准：0.90 时判对 91%、覆盖 15% 的复读、触发 3.4% 轮次；'
+                    '0.85 时判对 83%、覆盖 25%。调低会多删，也会多误删。'},
+    {'key': 'semantic_rollout_pct', 'label': '语义复读检查灰度比例', 'kind': 'int', 'default': 0,
+     'minimum': 0, 'maximum': 100, 'unit': '% 用户',
+     'description': '打开开关后，按用户固定分桶只对这部分用户生效；0 表示谁都不生效。'},
     {'key': 'breaker_rate', 'label': '重写熔断比例', 'kind': 'ratio', 'default': 0.05,
      'minimum': 0.01, 'maximum': 0.5, 'unit': '最近 1 小时重写轮次 / 主回复轮次',
      'description': '超过这个比例就自动停止重写（提示段和删除照旧），并发一次告警。'},
@@ -89,6 +99,9 @@ class Policy:
     backstop_enabled: bool
     backstop_overlap: float
     backstop_verbatim_overlap: float
+    semantic_enabled: bool
+    semantic_similarity: float
+    semantic_rollout_pct: int
     breaker_rate: float
     breaker_min_turns: int
     revision: str

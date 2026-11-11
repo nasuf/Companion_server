@@ -18,6 +18,14 @@ from app.services.chat.reply_repetition.rules import (
 )
 
 DIAGNOSTICS_VERSION = 1
+# 诊断里记下被删 / 被重写掉的原文 (AI 生成的, 不含用户原话), 供抽检误删 (CHAT01.10.7)。
+# 条数和长度有上限, 不让元数据无界增长。
+_TEXT_SAMPLES = 4
+_TEXT_CHARS = 120
+
+
+def _clip_texts(texts: list[str]) -> list[str]:
+    return [t[:_TEXT_CHARS] for t in texts[:_TEXT_SAMPLES]]
 
 
 def _diagnostics(ctx, policy: Policy) -> dict:
@@ -78,6 +86,7 @@ async def rewrite_if_restated(ctx, services, generate_kwargs, policy: Policy | N
                                             threshold=policy.rewrite_overlap)[2]:
         record["rewrite"] = ctx.response_diagnostics["restated_retry"] = "still_restated"
         return
+    record["rewritten_from"] = _clip_texts(list(ctx.replies))
     ctx.replies, ctx.reply_emotion_pre = replies, emotion
     record["rewrite"] = ctx.response_diagnostics["restated_retry"] = "rewritten"
 
@@ -107,9 +116,9 @@ def drop_restated(ctx, policy: Policy | None = None) -> None:
     lead = lead if ctx.replies[: len(lead)] == lead else []
     rule = ({"threshold": policy.backstop_overlap} if situation
             else {"threshold": policy.backstop_verbatim_overlap, "whole_turn": False})
-    body, dropped, all_restated = drop_restated_bubbles(
-        ctx.replies[len(lead):], previous, ctx.user_message, **rule
-    )
+    candidates = ctx.replies[len(lead):]
+    body, dropped, all_restated = drop_restated_bubbles(candidates, previous, ctx.user_message, **rule)
+    dropped_texts = _removed(candidates, body) if dropped else []
     if dropped:
         ctx.replies = [*lead, *body]
         ctx.reply_emotion_pre = None  # emotion / sticker must follow the text actually sent
@@ -121,4 +130,17 @@ def drop_restated(ctx, policy: Policy | None = None) -> None:
         "max_overlap": round(max((restated_overlap(r, previous) for r in body), default=0.0), 2),
     }
     ctx.response_diagnostics["restated_bubbles"] = outcome
-    record["backstop"] = {**outcome, "threshold": rule["threshold"]}
+    record["backstop"] = {**outcome, "threshold": rule["threshold"],
+                         **({"dropped_texts": _clip_texts(dropped_texts)} if dropped_texts else {})}
+
+
+def _removed(before: list[str], after: list[str]) -> list[str]:
+    """before 里没留在 after 中的那几条 (按顺序, 重复的句子逐个对)。"""
+    remaining = list(after)
+    removed = []
+    for text in before:
+        if remaining and remaining[0] == text:
+            remaining.pop(0)
+        else:
+            removed.append(text)
+    return removed

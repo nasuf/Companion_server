@@ -199,6 +199,9 @@ async def test_fully_restated_draft_is_rewritten_once(monkeypatch):
     assert ctx.replies == ["嫩江的雪看着好有氛围", "你那边下雪会冷吗"]
     assert ctx.response_diagnostics["restated_retry"] == "rewritten"
     assert calls[0][-1] == {"role": "system", "content": "重写这一轮"}
+    # 被重写掉的初稿原文记进诊断, 供抽检 (CHAT01.10.7)
+    assert ctx.response_diagnostics["reply_repetition"]["rewritten_from"] == [
+        "嫩江都下雪了", "我这边还二十度左右呢", "温差也太大了"]
 
     # 不是复述就不重写
     calls.clear()
@@ -257,6 +260,9 @@ def test_backstop_keeps_the_continuation_line_and_records_diagnostics():
     assert ctx.reply_emotion_pre is None
     diag = ctx.response_diagnostics["restated_bubbles"]
     assert diag["situation"] == "ack" and diag["dropped"] == 1 and diag["previous_bubbles"] == 2
+    # 被删掉的那条原文记进复读诊断 (承接句不算被删)
+    assert ctx.response_diagnostics["reply_repetition"]["backstop"]["dropped_texts"] == [
+        "那你要是喝到好喝的 一定要跟我说啊"]
 
     # 对方说了新内容: 只拦几乎原样的句子, 换个说法的不动
     ctx = _Ctx(["那你要是喝到好喝的 一定要跟我说啊"], previous, user_message="我明天去买")
@@ -264,6 +270,7 @@ def test_backstop_keeps_the_continuation_line_and_records_diagnostics():
     review.drop_restated(ctx, DEFAULT_POLICY)
     assert ctx.replies == ["那你要是喝到好喝的 一定要跟我说啊"]
     assert ctx.response_diagnostics["restated_bubbles"]["situation"] == "other"
+    assert "dropped_texts" not in ctx.response_diagnostics["reply_repetition"]["backstop"]
 
 
 def test_ordinary_turn_drops_a_bubble_copied_from_the_previous_turn():
@@ -308,6 +315,11 @@ def test_policy_defaults_are_the_shipped_behaviour_and_patches_validate():
     p = DEFAULT_POLICY
     assert (p.rewrite_enabled, p.rewrite_overlap, p.backstop_enabled, p.backstop_overlap) == (True, 0.6, True, 0.6)
     assert p.backstop_verbatim_overlap == VERBATIM_OVERLAP and p.valid
+    # 语义复读检查默认关闭、灰度 0: 上线不改变任何人的回复
+    assert (p.semantic_enabled, p.semantic_similarity, p.semantic_rollout_pct) == (False, 0.9, 0)
+    for bad in ({"semantic_similarity": 0.5}, {"semantic_rollout_pct": 101}, {"semantic_rollout_pct": 5.5}):
+        with pytest.raises(ValueError):
+            repetition_policy.apply_patch({}, bad)
     patched = repetition_policy.apply_patch({}, {"rewrite_enabled": False, "backstop_overlap": 0.7})
     assert patched == {"rewrite_enabled": False, "backstop_overlap": 0.7}
     # Back to the default or None removes the override
@@ -467,3 +479,11 @@ def test_backstop_skips_crisis_turns_and_reports_an_invalid_stored_policy():
     review.drop_restated(ctx, repetition_policy.resolve({"backstop_overlap": "high"}))
     record = ctx.response_diagnostics["reply_repetition"]
     assert record["backstop"] == {"skipped": "not_applicable"} and record["stored_policy_valid"] is False
+
+
+def test_removed_texts_are_matched_in_order_and_clipped():
+    assert review._removed(["甲", "乙", "甲", "丙"], ["甲", "丙"]) == ["乙", "甲"]
+    assert review._removed(["甲"], ["甲"]) == []
+    long = "长" * 300
+    clipped = review._clip_texts([long] * 6)
+    assert len(clipped) == review._TEXT_SAMPLES and all(len(t) == review._TEXT_CHARS for t in clipped)

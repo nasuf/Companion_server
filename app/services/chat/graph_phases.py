@@ -10,6 +10,7 @@ from __future__ import annotations
 from app.services.chat.memory_usage import submit_memory_usage
 from app.services.chat import reply_repetition
 from app.services.chat.reply_repetition import review as repetition_review
+from app.services.chat.reply_repetition import semantic as semantic_repetition
 from app.services.time_domain.query import resolve_temporal_query
 from app.services.time_domain.context import prepare_reply_time, dated_dialogue, build_turn_clock, scope_event_memories, render_event_scope, dated_active_dialogue
 from app.services.time_domain.followup import guard_optional_questions
@@ -895,9 +896,21 @@ async def _load_activity_history(ctx) -> list[str] | None:
 
 async def prepare_reply(ctx):
     services = ctx.services
+    # LAT01.02: 这一步各段耗时 (毫秒), 进诊断 prepare_reply_ms; 刻意停顿单列, 不算处理
+    steps: dict[str, float] = {}
+    ctx.response_diagnostics["prepare_reply_ms"] = steps
+    mark = services.perf_counter()
+
+    def lap(name: str) -> None:
+        nonlocal mark
+        now = services.perf_counter()
+        steps[name] = round((now - mark) * 1000, 1)
+        mark = now
+
     patience_instruction = await services.get_patience_prompt_instruction(
         ctx.cached_patience
     )
+    lap("patience")
     ctx.contradiction_inquiry: str | None = None
     if ctx.memory_relevance in ("strong", "medium"):
         try:
@@ -929,17 +942,21 @@ async def prepare_reply(ctx):
                 )
         except Exception as e:
             services.logger.warning(f"Contradiction detection failed: {e}")
+        lap("contradiction")
     # 双方所在地: 主 prompt、联网检索、地点校验共用这一份 (读失败退回"不知道")
     ctx.location_context = await services.load_location_context(
         ctx.agent, ctx.user_id, ctx.workspace_id
     )
     ctx.response_diagnostics["location_context"] = ctx.location_context.diagnostics()
+    lap("location")
     ctx.activity_history = await _load_activity_history(ctx)
+    lap("activity_history")
     ctx.last_reply_count = (
         await services.load_last_reply_count(ctx.conversation_id)
         if ctx.conversation_id
         else None
     )
+    lap("last_reply_count")
     if ctx.relational_context:
         ctx.reply_count = 1
         ctx.allow_count_variation = False
@@ -960,6 +977,7 @@ async def prepare_reply(ctx):
             ctx.fetched.l3_trigger_label = l3_trigger_label
         except (services.asyncio.CancelledError, Exception) as e:
             services.logger.warning(f"L3 awakening failed: {e}")
+        lap("l3_await")
     ctx.response_diagnostics.update(
         {
             "memory_relevance": ctx.memory_relevance,
@@ -1103,6 +1121,7 @@ async def prepare_reply(ctx):
         candidate_ids=candidate_ids,
         fire_background=services._fire_background,
     )
+    lap("memory_usage")
     from app.services.interaction.chat_management import (
         clamp_reply_delay_seconds,
     )
@@ -1131,6 +1150,7 @@ async def prepare_reply(ctx):
             # Intentional pacing; reply timing reports it apart from processing.
             with ctx.owner.timing.deliberate_wait():
                 await services.asyncio.sleep(actual_sleep)
+    lap("deliberate_pause")
     if ctx.relational_context:
         # 用户正低落/抱怨: 先接情绪, 不提旧话题
         topic_continuation = None
@@ -1140,6 +1160,7 @@ async def prepare_reply(ctx):
             ctx.continuation_task, ctx.response_diagnostics,
             not_spawned_detail=ctx.continuation_not_spawned,
         )
+    lap("topic_continuation_await")
     ctx.continuation_lines = topic_continuation.lines if topic_continuation else []
     if ctx.continuation_lines:
         ctx.max_reply_count = max(
@@ -1301,6 +1322,8 @@ async def generate_reply(ctx):
         ctx.reply_emotion_pre,
     ) = await services._generate_reply(**generate_kwargs)
     await repetition_review.rewrite_if_restated(ctx, services, generate_kwargs)
+    # 向量在后台算, 和回复规范化并行; 发出前 (normalize_reply) 再判定
+    semantic_repetition.start(ctx)
     if getattr(ctx, "temporal_validity_records", None):
         from app.services.time_domain.validity_context import assertions_still_available
 
@@ -1440,6 +1463,7 @@ async def normalize_reply(ctx):
         ] = followup_decision
     if not historical_answer:
         repetition_review.drop_restated(ctx)
+        await semantic_repetition.apply(ctx)
     ctx.full_response = " ".join(ctx.replies)
     if ctx.reply_emotion_pre is not None:
         reply_emotion = ctx.reply_emotion_pre

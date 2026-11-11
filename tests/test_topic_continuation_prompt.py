@@ -312,6 +312,8 @@ async def test_natural_transition_mentioning_sudden_is_kept(monkeypatch, llm):
 async def test_return_line_then_transition_line(monkeypatch, llm):
     result = await _run(monkeypatch)
     assert result.lines == ["忙完啦～", "面试的事等会儿再跟我说说"]
+    # 实际说出的过渡句原文留给诊断, 承接句不算
+    assert result.transition == "said" and result.transition_text == "面试的事等会儿再跟我说说"
     ret = llm.calls["chat.topic_continuation_return"]["params"]
     assert ret["user_msg"] == "今天吃了火锅"
     assert ret["ai_last_send_time"].endswith("19:35")  # UTC+8
@@ -331,6 +333,7 @@ async def test_same_topic_gets_no_transition(monkeypatch, llm):
     llm.outputs["chat.topic_jump_detect"] = "接续"
     result = await _run(monkeypatch)
     assert result.lines == ["忙完啦～"]
+    assert result.transition_text is None
     assert "chat.topic_continuation_jump" not in llm.calls
 
 
