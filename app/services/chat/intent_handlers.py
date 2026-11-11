@@ -1681,6 +1681,10 @@ async def _cancel_active_reminders(
         except Exception:
             pass  # changelog 失败不阻塞主流程
 
+    # 取消了就不该再留着"要提醒他…"这条打算 (与 App 里删除提醒同口径);
+    # 只记下本次真正归档的, 撤回时只恢复这些
+    archived = await _archive_cancelled_reminder_memories(target)
+
     # undo state: 1 小时内可恢复
     if conversation_id and target:
         try:
@@ -1695,6 +1699,7 @@ async def _cancel_active_reminders(
                         "action_type": t.actionType,
                         "action_data": dict(t.actionData or {}),
                         "ai_agent_id": t.aiAgentId,
+                        "memory_archived": t.id in archived,
                     }
                     for t in target
                 ],
@@ -1708,6 +1713,63 @@ async def _cancel_active_reminders(
         f"undo window 1h"
     )
     return n
+
+
+async def _archive_cancelled_reminder_memories(triggers: list) -> set[str]:
+    """归档被取消提醒的记忆, 返回本次由 live 变为归档的 trigger id。
+
+    已经归档的 (例如之前在 App 里删过) 不算, 撤回时也就不会被误恢复。
+    """
+    from app.services.memory.storage import repo as memory_repo
+    from app.services.reminder.scheduling import archive_reminder_memory
+
+    archived: set[str] = set()
+    for t in triggers:
+        data = t.actionData or {}
+        memory_id = data.get("memory_id")
+        side = data.get("memory_side") or "user"
+        if not isinstance(memory_id, str) or side not in ("user", "ai"):
+            continue
+        try:
+            record = await memory_repo.find_unique(memory_id)
+        except Exception as e:
+            logger.warning(f"[REMINDER-CANCEL] archive lookup failed: {type(e).__name__}")
+            continue
+        if record is None or getattr(record, "isArchived", False):
+            continue
+        if await archive_reminder_memory(
+            memory_id=memory_id, side=side, reason=f"cancelled_by_user:trigger={t.id}",
+        ):
+            archived.add(t.id)
+    return archived
+
+
+async def _restore_cancelled_reminder_memories(triggers: list[dict]) -> int:
+    """撤回取消时, 把本次取消归档的提醒记忆恢复回来。"""
+    from app.services.memory.storage import repo as memory_repo
+    from app.services.memory.storage.persistence import log_memory_changelog
+
+    restored = 0
+    for t in triggers:
+        data = t.get("action_data") or {}
+        memory_id = data.get("memory_id")
+        side = data.get("memory_side") or "user"
+        if not t.get("memory_archived") or not isinstance(memory_id, str) or side not in ("user", "ai"):
+            continue
+        try:
+            record = await memory_repo.find_unique(memory_id)
+            if record is None:
+                continue
+            await memory_repo.update(memory_id, source=side, isArchived=False)
+            restored += 1
+            await log_memory_changelog(
+                record.userId, memory_id, "reminder_unarchived",
+                new_value=f"cancel_undone:trigger={t.get('trigger_id')}",
+                workspace_id=record.workspaceId,
+            )
+        except Exception as e:
+            logger.warning(f"[REMINDER-UNDO] memory restore failed: {type(e).__name__}")
+    return restored
 
 
 async def _undo_recent_cancel(*, conversation_id: str) -> int:
@@ -1726,6 +1788,7 @@ async def _undo_recent_cancel(*, conversation_id: str) -> int:
         return 0
     n = await reactivate_reminder_triggers(triggers)
     if n > 0:
+        await _restore_cancelled_reminder_memories(triggers)
         await clear_cancel_undo(conversation_id)
     logger.info(
         f"[REMINDER-UNDO] reactivated {n}/{len(triggers)} trigger(s) "

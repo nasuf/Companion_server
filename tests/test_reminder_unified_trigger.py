@@ -1731,3 +1731,78 @@ async def test_reschedule_wrapper_rejects_replaced_targets_or_time():
                                 ([{"id":"m","source":"ai"}],ticket["new_time"])):
             assert await d.apply_reschedule("u",candidates,time,agent_id="a",workspace_id="w",conversation_id="c",ticket=ticket)==0
         write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_cancel_archives_reminder_memory_and_undo_restores_it():
+    """B01.08: 聊天里取消提醒要归档"要提醒他…"那条记忆 (与 App 删除同口径);
+    撤回只恢复这次归档的, 之前就已归档的不动。"""
+    from app.services.chat import intent_handlers as ih
+
+    def _trig(tid, mid):
+        return SimpleNamespace(id=tid, triggerTime=None, actionType="reminder", aiAgentId="a1",
+                               actionData={"memory_id": mid, "memory_side": "user"})
+
+    live, gone = _trig("t-live", "m-live"), _trig("t-gone", "m-gone")
+    records = {
+        "m-live": SimpleNamespace(userId="u1", workspaceId="w1", isArchived=False),
+        "m-gone": SimpleNamespace(userId="u1", workspaceId="w1", isArchived=True),
+    }
+    archived_calls, updates, saved = [], [], {}
+
+    async def _archive(*, memory_id, side, reason):
+        archived_calls.append(memory_id)
+        return True
+
+    async def _save_undo(*, conversation_id, triggers):
+        saved["triggers"] = triggers
+
+    with (
+        patch("app.services.reminder.scheduling.find_active_reminder_triggers",
+              new_callable=AsyncMock, return_value=[live, gone]),
+        patch.object(ih, "_paused_reminders", new_callable=AsyncMock, return_value=[]),
+        patch("app.services.reminder.scheduling.deactivate_reminder_triggers",
+              new_callable=AsyncMock, return_value=2),
+        patch("app.services.reminder.scheduling.save_cancel_undo", side_effect=_save_undo),
+        patch("app.services.reminder.scheduling.archive_reminder_memory", side_effect=_archive),
+        patch("app.services.memory.storage.repo.find_unique",
+              new_callable=AsyncMock, side_effect=lambda mid: records[mid]),
+        patch("app.services.memory.storage.persistence.log_memory_changelog", new_callable=AsyncMock),
+    ):
+        n = await ih._cancel_active_reminders(user_id="u1", agent_id="a1", conversation_id="c1")
+
+    assert n == 2
+    assert archived_calls == ["m-live"]
+    flags = {t["trigger_id"]: t["memory_archived"] for t in saved["triggers"]}
+    assert flags == {"t-live": True, "t-gone": False}
+
+    async def _update(memory_id, **kwargs):
+        updates.append((memory_id, kwargs))
+
+    with (
+        patch("app.services.reminder.scheduling.load_cancel_undo",
+              new_callable=AsyncMock, return_value={"triggers": saved["triggers"]}),
+        patch("app.services.reminder.scheduling.reactivate_reminder_triggers",
+              new_callable=AsyncMock, return_value=2),
+        patch("app.services.reminder.scheduling.clear_cancel_undo", new_callable=AsyncMock),
+        patch("app.services.memory.storage.repo.find_unique",
+              new_callable=AsyncMock, side_effect=lambda mid: records[mid]),
+        patch("app.services.memory.storage.repo.update", side_effect=_update),
+        patch("app.services.memory.storage.persistence.log_memory_changelog", new_callable=AsyncMock),
+    ):
+        assert await ih._undo_recent_cancel(conversation_id="c1") == 2
+
+    assert updates == [("m-live", {"source": "user", "isArchived": False})]
+
+
+@pytest.mark.asyncio
+async def test_chat_cancel_archive_failure_does_not_block_cancel():
+    """记忆查不到 / 归档失败只是少归档一条, 取消本身照常完成。"""
+    from app.services.chat import intent_handlers as ih
+
+    trig = SimpleNamespace(id="t1", actionData={"memory_id": "m1", "memory_side": "user"})
+    with patch("app.services.memory.storage.repo.find_unique",
+               new_callable=AsyncMock, side_effect=RuntimeError("db down")):
+        assert await ih._archive_cancelled_reminder_memories([trig]) == set()
+    no_memory = SimpleNamespace(id="t2", actionData={"memory_side": "user"})
+    assert await ih._archive_cancelled_reminder_memories([no_memory]) == set()
