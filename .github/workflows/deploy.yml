@@ -271,6 +271,10 @@ jobs:
             TENCENT_SMS_SIGN_NAME=${{ vars.TENCENT_SMS_SIGN_NAME }}
             TENCENT_SMS_TEMPLATE_ID=${{ vars.TENCENT_SMS_TEMPLATE_ID }}
             TENCENT_SMS_REGION=${{ vars.TENCENT_SMS_REGION || 'ap-guangzhou' }}
+            REALNAME_MODE=${{ vars.REALNAME_MODE || 'off' }}
+            TENCENT_REALNAME_SECRET_ID=${{ secrets.TENCENT_REALNAME_SECRET_ID }}
+            TENCENT_REALNAME_SECRET_KEY=${{ secrets.TENCENT_REALNAME_SECRET_KEY }}
+            REALNAME_HASH_KEY=${{ secrets.REALNAME_HASH_KEY }}
             MEAL_STAFF_KEY=${{ secrets.MEAL_STAFF_KEY }}
             MEAL_STAFF_JWT_EXPIRY_HOURS=${{ vars.MEAL_STAFF_JWT_EXPIRY_HOURS || '12' }}
             MEAL_QR_TTL_SECONDS=${{ vars.MEAL_QR_TTL_SECONDS || '60' }}
