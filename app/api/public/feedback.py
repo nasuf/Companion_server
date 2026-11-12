@@ -18,11 +18,15 @@ async def submit_user_feedback(
     occurred_at: str | None = Form(default=None),
     app_version: str | None = Form(default=None),
     platform: str | None = Form(default=None),
+    # feedback = 意见反馈; report = 投诉举报。旧版 App 不传, 按意见反馈处理
+    category: str = Form(default="feedback"),
     images: list[UploadFile] = File(default=[]),
     user: dict = Depends(require_user),
 ):
     body = (content or "").strip()
     contact_value = (contact or "").strip()
+    if category not in ("feedback", "report"):
+        raise HTTPException(status_code=400, detail="invalid_category")
     if len(body) < 5:
         raise HTTPException(status_code=400, detail="content_too_short")
     if not contact_value:
@@ -43,6 +47,7 @@ async def submit_user_feedback(
                 "imageKeys": image_keys,
                 "appVersion": (app_version or "").strip() or None,
                 "platform": (platform or "").strip() or None,
+                "category": category,
             })
     except Exception:
         for key in image_keys:

@@ -18,6 +18,7 @@ class UserFeedbackItem(BaseModel):
     occurred_at: str | None = None
     image_urls: list[str] = Field(default_factory=list)
     status: str
+    category: str = "feedback"
     app_version: str | None = None
     platform: str | None = None
     created_at: str

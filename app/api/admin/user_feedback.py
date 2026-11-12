@@ -17,6 +17,11 @@ router = APIRouter(prefix="/admin-api/user-feedback", tags=["admin-user-feedback
 _ALLOWED_STATUSES = {"open", "read", "resolved"}
 
 
+def _category(row) -> str:
+    value = getattr(row, "category", None)
+    return value if value in ("feedback", "report") else "feedback"
+
+
 def _serialize(
     row,
     *,
@@ -43,6 +48,7 @@ def _serialize(
             storage.build_media_url(key, admin=admin_media) for key in image_keys
         ],
         status=row.status,
+        category=_category(row),
         app_version=row.appVersion,
         platform=row.platform,
         created_at=row.createdAt.isoformat(),
@@ -53,6 +59,7 @@ def _serialize(
 @router.get("", response_model=UserFeedbackListResponse)
 async def list_user_feedback(
     status: str | None = Query(default=None),
+    category: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     _: dict = Depends(require_admin_jwt),
@@ -63,6 +70,10 @@ async def list_user_feedback(
         if normalized not in _ALLOWED_STATUSES:
             raise HTTPException(status_code=400, detail="invalid_status")
         where["status"] = normalized
+    if category:
+        if category not in ("feedback", "report"):
+            raise HTTPException(status_code=400, detail="invalid_category")
+        where["category"] = category
     total = await db.userfeedback.count(where=where or None)
     rows = await db.userfeedback.find_many(
         where=where or None,

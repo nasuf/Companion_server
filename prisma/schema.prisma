@@ -1164,6 +1164,8 @@ model UserFeedback {
   occurredAt String?  @map("occurred_at")
   imageKeys  String[] @map("image_keys")
   status     String   @default("open") // open | read | resolved
+  // feedback = 意见反馈; report = 投诉举报 (合规要求的投诉渠道, 后台单独筛选)
+  category   String   @default("feedback")
   appVersion String?  @map("app_version")
   platform   String?
   createdAt  DateTime @default(now()) @map("created_at")
@@ -1171,6 +1173,7 @@ model UserFeedback {
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([status, createdAt(sort: Desc)])
+  @@index([category, createdAt(sort: Desc)], map: "user_feedback_category_created_idx")
   @@map("user_feedback")
 }
 

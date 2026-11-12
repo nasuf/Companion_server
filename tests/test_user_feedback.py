@@ -95,3 +95,29 @@ def test_feedback_database_failure_removes_new_files(api_client, auth_header, mo
         api_client.post("/users/me/feedback", data={"content":"合成反馈内容", "contact":"synthetic"},
             files=[("images", ("image.jpg", _jpeg_bytes(), "image/jpeg"))], headers=auth_header("user-1"))
     remove.assert_called_once_with("user-1_new.jpg")
+
+
+def test_feedback_category_defaults_and_report(api_client, auth_header, monkeypatch):
+    """投诉举报走同一接口, category=report; 旧版 App 不传按意见反馈; 非法值拒绝。"""
+    from app.api.public import feedback as feedback_api
+
+    created: list[dict] = []
+    fake_db = MagicMock()
+
+    async def fake_create(*, data):
+        row = MagicMock()
+        row.id = "fb-2"
+        row.createdAt = MagicMock(isoformat=lambda: "2026-11-12T12:00:00+00:00")
+        created.append(data)
+        return row
+
+    fake_db.userfeedback.create = fake_create
+    monkeypatch.setattr(feedback_api, "db", fake_db)
+    base = {"content": "这个角色说了不当内容", "contact": "13800000000"}
+    assert api_client.post("/users/me/feedback", data=base, headers=auth_header("user-1")).status_code == 200
+    assert created[-1]["category"] == "feedback"
+    assert api_client.post("/users/me/feedback", data={**base, "category": "report"},
+                           headers=auth_header("user-1")).status_code == 200
+    assert created[-1]["category"] == "report"
+    bad = api_client.post("/users/me/feedback", data={**base, "category": "spam"}, headers=auth_header("user-1"))
+    assert bad.status_code == 400 and len(created) == 2
