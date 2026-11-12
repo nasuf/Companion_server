@@ -390,3 +390,14 @@ async def test_user_scope_only_gates_listed_accounts(store, monkeypatch):
     monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realnamePolicy": {
         "mode": "id_card", "scope": "all", "user_ids": []}})
     assert await realname.chat_block_reason("u2") == "id_card"
+
+
+@pytest.mark.asyncio
+async def test_minor_lock_keeps_only_digest(store):
+    minor = _born(date(2011, 3, 4))
+    assert await realname.verify("u1", name="张三", id_number=minor) == "minor"
+    row = store.rows["u1"]
+    assert row["id_digest"] and row["is_adult"] is False
+    for key in ("masked_name", "name_encrypted", "id_number_encrypted", "birth_date",
+                "gender", "region_code", "province"):
+        assert row[key] is None, key

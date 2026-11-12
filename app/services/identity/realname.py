@@ -11,7 +11,8 @@
         旧版 App 用户不受影响)
 管理员豁免。
 
-存储 (2026-11-12 用户决定全部入库, 仅用于内部用户分析): 证件号解析出的出生日期、
+存储 (2026-11-12 用户决定全部入库, 仅用于内部用户分析; 仅限核验通过的成年人,
+判定未成年的账号只保留证件摘要与锁定状态): 证件号解析出的出生日期、
 性别、户籍地区码与省份明文存; 姓名与证件号只存 AES-GCM 密文, 密钥由
 REALNAME_HASH_KEY 派生, 库里没有明文。另存 HMAC 摘要保证一张证只认证一个账号 (防止
 拿家长证件给多个账号用)。判定为未成年后账号锁定, 换一张证也不能重来, 只有管理员能重置。
@@ -338,8 +339,8 @@ async def _record(user_id: str, *, status: str, name: str | None, digest: str | 
         encrypt(id_number) if id_number else None)
 
 
-async def _record_claim(user_id: str, *, status: str, name: str, digest: str, adult: bool,
-                        id_number: str) -> None:
+async def _record_claim(user_id: str, *, status: str, name: str | None, digest: str, adult: bool,
+                        id_number: str | None) -> None:
     """写入占用证件的一行。两个账号同时用同一张证时, 唯一索引让后到的失败 → id_in_use。"""
     try:
         await _record(user_id, status=status, name=name, digest=digest, adult=adult, reason=None,
@@ -380,8 +381,10 @@ async def verify(user_id: str, *, name: str, id_number: str) -> str:
         raise RealnameError("id_in_use")
     # 未成年直接按证件号判定, 不必再调核验接口 (也就不为未成年人的信息付费外发)
     if age_on(clean_id, _today()) < ADULT_AGE:
-        await _record_claim(user_id, status=MINOR, name=clean_name, digest=digest, adult=False,
-                            id_number=clean_id)
+        # 未成年人的个人信息不保存 (不满 14 岁需监护人同意, 我们没有): 只留证件摘要
+        # 与锁定状态, 用来防止换一个账号再用同一张证注册
+        await _record_claim(user_id, status=MINOR, name=None, digest=digest, adult=False,
+                            id_number=None)
         logger.info("Realname minor blocked", extra={"event": "realname_verified", "outcome": "minor"})
         return MINOR
     matched = True if _mock_enabled() else await _tencent_check(clean_name, clean_id)
