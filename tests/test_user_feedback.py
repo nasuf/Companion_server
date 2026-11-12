@@ -121,3 +121,19 @@ def test_feedback_category_defaults_and_report(api_client, auth_header, monkeypa
     assert created[-1]["category"] == "report"
     bad = api_client.post("/users/me/feedback", data={**base, "category": "spam"}, headers=auth_header("user-1"))
     assert bad.status_code == 400 and len(created) == 2
+
+
+def test_admin_list_filters_by_category(api_client, auth_header, monkeypatch):
+    from app.api.admin import user_feedback as admin_feedback
+
+    fake_db = MagicMock()
+    fake_db.userfeedback.count = AsyncMock(return_value=0)
+    fake_db.userfeedback.find_many = AsyncMock(return_value=[])
+    monkeypatch.setattr(admin_feedback, "db", fake_db)
+    headers = auth_header("admin-1", role="admin")
+    assert api_client.get("/admin-api/user-feedback?category=report", headers=headers).status_code == 200
+    assert fake_db.userfeedback.count.await_args.kwargs["where"] == {"category": "report"}
+    assert api_client.get("/admin-api/user-feedback?category=spam", headers=headers).status_code == 400
+    row = MagicMock(category="report")
+    assert admin_feedback._category(row) == "report"
+    assert admin_feedback._category(MagicMock(category=None)) == "feedback"

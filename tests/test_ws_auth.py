@@ -427,3 +427,18 @@ def test_delivery_frames_use_ticket_actor_not_client_scope(secured_ws,monkeypatc
         assert socket.receive_json()=={'type':'pong'}
     assert [c.args[1:3] for c in callback.await_args_list]==[('owner','conv'),('owner','conv')]
     ws._handle_message.assert_not_called()
+
+
+def test_realname_gate_blocks_ticket_and_socket(secured_ws, monkeypatch):
+    """实名门槛: 发凭证时 403 带缺的步骤; 凭证发出后门槛才生效 (后台刚开启) 时 WS 以 4403 拒绝。"""
+    from app.services.identity import realname
+    s = secured_ws
+    monkeypatch.setattr(realname, 'chat_block_reason', AsyncMock(return_value='id_card'))
+    r = s.client.post('/chat/conv/ws-ticket', headers={'Authorization': 'Bearer '+create_jwt('owner', 'user')})
+    assert r.status_code == 403
+    assert r.json()['detail'] == {'reason': 'realname_required', 'step': 'id_card', 'message': '请先完成实名认证'}
+    assert not s.redis.values
+    monkeypatch.setattr(realname, 'chat_block_reason', AsyncMock(return_value=None))
+    ticket = mint(s)
+    monkeypatch.setattr(realname, 'chat_block_reason', AsyncMock(return_value='minor_blocked'))
+    denied(s, protocols(ticket), code=4403)

@@ -314,7 +314,7 @@ model ChatWorkspace {
   realWorldGifts           RealWorldGift[]
   realWorldTriggerState    RealWorldTriggerState?
   interactionDays          WorkspaceInteractionDay[]
-  memoryDailyReviews       MemoryDailyReview[]
+  memoryDailyReviews       MemoryDailyReview[] @ignore
 
   agentRuns                AgentRun[] @ignore
 
@@ -391,7 +391,7 @@ model Message {
   bugReports     BugReport[]
   attachments    ChatMessageAttachment[]
   linkCards      ChatLinkCard[]
-  memoryUsageReceipts MemoryUsageReceipt[]
+  memoryUsageReceipts MemoryUsageReceipt[] @ignore
 
   runtimeEvents  RuntimeOutbox[] @ignore
 
@@ -1488,6 +1488,8 @@ model MemoryUsageReceipt {
   // created_at) WHERE contributed 在 migration 20261022090000 手写 (Prisma 不支持
   // partial index DSL), 改 schema 重生成时勿丢 —— L1 晋升闸门靠它按记忆计天数。
   @@map("memory_usage_receipts")
+  // SQL-only (lazy_update / l1 promotion use raw SQL); ignored for the generated-type budget.
+  @@ignore
 }
 
 model MemoryDailyReview {
@@ -1503,6 +1505,8 @@ model MemoryDailyReview {
   @@unique([workspaceId, localDate])
   @@index([createdAt], map: "memory_daily_reviews_retention_idx")
   @@map("memory_daily_reviews")
+  // SQL-only; ignored for the generated-type budget.
+  @@ignore
 }
 
 model MemoryRepairItem {
@@ -2507,6 +2511,8 @@ model OfflinePlaceCatalog {
 
   @@index([expiresAt], map: "offline_place_catalog_expiry_idx")
   @@map("offline_place_catalog")
+  // SQL-only (no client access); ignored to keep generated types under the 8 MiB worker budget.
+  @@ignore
 }
 
 // Database triggers advance this counter for all configuration writers.
@@ -2515,6 +2521,8 @@ model ConfigurationRevision {
   revision BigInt @default(1)
 
   @@map("configuration_revisions")
+  // SQL-only (read in runtime_config via raw SQL); ignored for the generated-type budget.
+  @@ignore
 }
 
 // R01.02 additive foundation. No production queue/checkpointer consumes these
