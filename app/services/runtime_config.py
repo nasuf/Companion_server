@@ -167,7 +167,8 @@ async def _load_caches_unlocked() -> None:
             revision_rows = await tx.query_raw(
                 "SELECT revision, (SELECT chat_context_policy FROM system_config WHERE id=1) AS chat_context_policy, "
                 "(SELECT reply_repetition_policy FROM system_config WHERE id=1) AS reply_repetition_policy, "
-                "(SELECT realtime_model FROM system_config WHERE id=1) AS realtime_model "
+                "(SELECT realtime_model FROM system_config WHERE id=1) AS realtime_model, "
+                "(SELECT realname_policy FROM system_config WHERE id=1) AS realname_policy "
                 "FROM configuration_revisions WHERE scope='models'"
             )
         revision = int(revision_rows[0]["revision"])
@@ -175,6 +176,7 @@ async def _load_caches_unlocked() -> None:
         new_global = _row_to_dict(sys_row)
         new_global["chatContextPolicy"] = revision_rows[0].get("chat_context_policy")
         new_global["replyRepetitionPolicy"] = revision_rows[0].get("reply_repetition_policy")
+        new_global["realnamePolicy"] = revision_rows[0].get("realname_policy")
         if revision_rows[0].get("realtime_model"):
             new_global["realtimeModel"] = revision_rows[0]["realtime_model"]
         new_agent = {row.agentId: _row_to_dict(row) for row in overrides}
@@ -384,6 +386,14 @@ def reply_repetition_policy_overrides() -> dict:
     glob = (snapshot.global_config if snapshot else _GLOBAL_CACHE) or {}
     raw = glob.get("replyRepetitionPolicy")
     return raw if isinstance(raw, dict) else _EMPTY_POLICY
+
+
+def realname_policy_overrides() -> dict | None:
+    """后台实名开关; None = 从未在后台保存过, 由环境变量 REALNAME_MODE 兜底。"""
+    snapshot = _current_snapshot.get()
+    glob = (snapshot.global_config if snapshot else _GLOBAL_CACHE) or {}
+    raw = glob.get("realnamePolicy")
+    return raw if isinstance(raw, dict) else None
 
 
 def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:

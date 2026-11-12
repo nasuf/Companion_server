@@ -2409,6 +2409,8 @@ model SystemConfig {
   replyRepetitionPolicy          Json?    @map("reply_repetition_policy") @ignore
   // SQL-only: realtime voice call model (model_registry kind 'realtime').
   realtimeModel                  String?  @map("realtime_model") @ignore
+  // SQL-only: 实名门槛 {mode, scope, user_ids} (services/identity/realname.py)。null = 环境变量兜底。
+  realnamePolicy                 Json?    @map("realname_policy") @ignore
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String?  @map("default_template_agent_id")
@@ -3321,10 +3323,27 @@ model UserIdentityVerification {
   failureReason String?   @map("failure_reason")
   attempts      Int       @default(0)
   verifiedAt    DateTime? @map("verified_at") @db.Timestamptz
+  // 由证件号解析; 姓名与证件号只存 AES-GCM 密文 (密钥由 REALNAME_HASH_KEY 派生)
+  birthDate          DateTime? @map("birth_date") @db.Date
+  gender             String?
+  regionCode         String?   @map("region_code")
+  province           String?
+  nameEncrypted      String?   @map("name_encrypted")
+  idNumberEncrypted  String?   @map("id_number_encrypted")
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz
   @@index([status, updatedAt(sort: Desc)], map: "user_identity_verifications_status_idx")
   @@map("user_identity_verifications")
+  @@ignore
+}
+// 实名开关的修改记录 (app/api/admin/realname_policy.py)。SQL-only.
+model RealnamePolicyChange {
+  id        String   @id
+  adminId   String?  @map("admin_id")
+  changes   Json
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([createdAt(sort: Desc)], map: "realname_policy_changes_created_at_idx")
+  @@map("realname_policy_changes")
   @@ignore
 }
 model RealtimeCallSession {

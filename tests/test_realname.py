@@ -67,10 +67,13 @@ def store(monkeypatch, settings):
     async def execute_raw(sql, *args):
         if sql.startswith("DELETE"):
             return 1 if rows.pop(args[0], None) else 0
-        _id, uid, status, masked, digest, adult, provider, reason = args
+        (_id, uid, status, masked, digest, adult, provider, reason,
+         birth, gender, region, province, name_enc, id_enc) = args
         prev = rows.get(uid, {}).get("attempts", 0)
         rows[uid] = dict(status=status, masked_name=masked, id_digest=digest, is_adult=adult,
-                         provider=provider, failure_reason=reason, attempts=prev + 1)
+                         provider=provider, failure_reason=reason, attempts=prev + 1,
+                         birth_date=birth, gender=gender, region_code=region, province=province,
+                         name_encrypted=name_enc, id_number_encrypted=id_enc)
         return 1
 
     async def find_first(*, where):
@@ -314,3 +317,76 @@ async def test_concurrent_claim_of_same_id_maps_to_in_use(store, monkeypatch):
         await realname.verify("u1", name="张三", id_number=ADULT_ID)
     assert calls == ["verified", "rejected"]
     assert store.rows["u1"]["failure_reason"] == "id_in_use"
+
+
+@pytest.mark.asyncio
+async def test_verified_profile_is_stored_and_identity_is_encrypted(store):
+    assert await realname.verify("u1", name="张三", id_number=ADULT_ID) == "verified"
+    row = store.rows["u1"]
+    assert (row["birth_date"], row["gender"], row["region_code"], row["province"]) == (
+        "1949-12-31", "female", "110105", "北京")
+    # 姓名和证件号只有密文, 能用同一把派生密钥解开
+    assert "张三" not in row["name_encrypted"] and ADULT_ID not in row["id_number_encrypted"]
+    assert realname.decrypt(row["name_encrypted"]) == "张三"
+    assert realname.decrypt(row["id_number_encrypted"]) == ADULT_ID
+
+
+@pytest.mark.asyncio
+async def test_rejected_attempt_stores_no_identity(store, monkeypatch, settings):
+    monkeypatch.setattr(realname, "_mock_enabled", lambda: False)
+    monkeypatch.setattr(settings, "tencent_realname_secret_id", "id")
+    monkeypatch.setattr(settings, "tencent_realname_secret_key", "key")
+    monkeypatch.setattr(realname, "_tencent_check", AsyncMock(return_value=False))
+    with pytest.raises(realname.RealnameError, match="mismatch"):
+        await realname.verify("u1", name="张三", id_number=ADULT_ID)
+    row = store.rows["u1"]
+    assert row["name_encrypted"] is None and row["id_number_encrypted"] is None
+    assert row["birth_date"] is None and row["gender"] is None
+
+
+def test_id_profile_gender_and_province():
+    male = _with_check("44030619900101123")  # 第 17 位 3 → 男
+    info = realname.profile_of(male)
+    assert (info.gender, info.province, info.region_code) == ("male", "广东", "440306")
+    assert realname.profile_of(_with_check("99000019900101124")).province is None
+
+
+def test_ciphertext_is_randomized_and_tamper_evident():
+    a, b = realname.encrypt("张三"), realname.encrypt("张三")
+    assert a != b and a.startswith("v1:")
+    broken = a[:-4] + ("AAAA" if not a.endswith("AAAA") else "BBBB")
+    with pytest.raises(Exception):
+        realname.decrypt(broken)
+
+
+def test_policy_parsing_and_fallback(monkeypatch, settings):
+    from app.services import runtime_config
+
+    assert realname.parse_policy({"mode": "id_card", "scope": "users", "user_ids": ["a"]}) == \
+        realname.Policy("id_card", "users", frozenset({"a"}), "admin")
+    for bad in (None, [], {"mode": "strict"}, {"mode": "phone", "scope": "some"},
+                {"mode": "phone", "user_ids": "a"}, {"mode": "phone", "user_ids": [""]}):
+        assert realname.parse_policy(bad) is None
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {})
+    assert realname.policy() == realname.Policy("id_card")  # 没保存过: 环境变量兜底
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE",
+                        {"realnamePolicy": {"mode": "off", "scope": "all", "user_ids": []}})
+    assert realname.policy().mode == "off"  # 后台保存过就以后台为准, 环境变量不再生效
+
+
+@pytest.mark.asyncio
+async def test_user_scope_only_gates_listed_accounts(store, monkeypatch):
+    from app.services import runtime_config
+
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realnamePolicy": {
+        "mode": "id_card", "scope": "users", "user_ids": ["u1"]}})
+    assert await realname.chat_block_reason("u1") == "id_card"
+    # 名单外 (例如还在用旧版 App 的内测用户) 照常使用, 也不能主动去核验
+    assert await realname.chat_block_reason("u2") is None
+    assert (await realname.load_state("u2")).required == []
+    with pytest.raises(realname.RealnameError, match="not_required"):
+        await realname.verify("u2", name="张三", id_number=ADULT_ID)
+    assert await realname.verify("u1", name="张三", id_number=ADULT_ID) == "verified"
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realnamePolicy": {
+        "mode": "id_card", "scope": "all", "user_ids": []}})
+    assert await realname.chat_block_reason("u2") == "id_card"

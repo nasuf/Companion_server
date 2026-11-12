@@ -299,6 +299,7 @@ from app.api.admin.runtime_config import router as admin_runtime_config_router
 from app.api.admin.proactive_tuning import router as admin_proactive_tuning_router
 from app.api.admin.chat_context_policy import router as admin_chat_context_policy_router
 from app.api.admin.reply_repetition_policy import router as admin_reply_repetition_policy_router
+from app.api.admin.realname_policy import router as admin_realname_policy_router
 from app.api.admin.model_registry import router as admin_model_registry_router
 from app.api.admin.memory_repairs import router as admin_memory_repairs_router
 from app.api.admin.runtime_jobs import router as admin_runtime_jobs_router
@@ -375,6 +376,7 @@ app.include_router(admin_runtime_config_router)
 app.include_router(admin_proactive_tuning_router)
 app.include_router(admin_chat_context_policy_router)
 app.include_router(admin_reply_repetition_policy_router)
+app.include_router(admin_realname_policy_router)
 app.include_router(admin_model_registry_router)
 app.include_router(admin_memory_repairs_router)
 app.include_router(admin_runtime_jobs_router)

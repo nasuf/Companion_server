@@ -443,6 +443,18 @@ async def delete_unlinked_rows(tx: Any, uid: str, scope: dict) -> None:
         uid,
     )
     await tx.execute_raw(
+        "UPDATE realname_policy_changes SET admin_id='[deleted]' WHERE admin_id=$1",
+        uid,
+    )
+    # 实名指定用户名单里的这个账号一并移除 (名单是系统配置, 不是账号行)
+    await tx.execute_raw(
+        """UPDATE system_config SET realname_policy = jsonb_set(realname_policy, '{user_ids}',
+             COALESCE((SELECT jsonb_agg(e) FROM jsonb_array_elements(realname_policy->'user_ids') e
+                       WHERE e <> to_jsonb($1::text)), '[]'::jsonb))
+           WHERE id=1 AND realname_policy->'user_ids' ? $1""",
+        uid,
+    )
+    await tx.execute_raw(
         "UPDATE vip_activation_codes SET created_by=NULL WHERE created_by=$1",
         uid,
     )
