@@ -169,6 +169,8 @@ class AuthResponse(BaseModel):
     # 实名门槛还差的步骤, 按顺序: phone / id_card / minor_blocked。空 = 可以聊天。
     realname_required: list[str] = []
     realname_mode: str = "off"
+    # 这次登录撤销了冷静期内的注销申请; 客户端据此提示「已撤销注销」
+    deletion_cancelled: bool = False
 
 
 class RealnameVerifyRequest(BaseModel):
@@ -176,3 +178,8 @@ class RealnameVerifyRequest(BaseModel):
     id_number: str = Field(min_length=18, max_length=18)
     # 单独同意收集身份证信息 (个人信息保护法: 敏感个人信息单独同意); 必须为 true
     consent: bool
+
+
+class AccountDeletionRequest(BaseModel):
+    # 已绑手机号的账号必填短信验证码
+    code: str | None = Field(default=None, max_length=6)

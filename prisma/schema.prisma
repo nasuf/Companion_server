@@ -52,6 +52,9 @@ model User {
   status                   String                          @default("active")
   archivedAt               DateTime?                       @map("archived_at")
   lastSeenAt               DateTime?                       @map("last_seen_at")
+  // 自助注销冷静期: 申请时间与到期删除时间 (services/account_deletion.py)。NULL = 未申请
+  deletionRequestedAt      DateTime?                       @map("deletion_requested_at")
+  deletionDueAt            DateTime?                       @map("deletion_due_at")
   // 用户自设的昵称与头像。此前两者只存在于 auth_identities.raw_profile
   // (provider=wechat), 手机号 / 密码账号根本没有存储位 —— 生产上 47 个用户里
   // 有 12 个改不了。这两列是所有身份类型共用的权威值, 微信 rawProfile 退化为

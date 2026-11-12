@@ -42,6 +42,7 @@ from app.services.notifications.capsules import scan_ready_capsule_notifications
 from app.services.notifications.dispatcher import dispatch_due_notifications
 from app.services.music_status import scan_music_schedule_transitions
 from app.services.last_will import dispatch_pending_last_will_deliveries, scan_due_last_wills
+from app.services.account_deletion import purge_due as purge_due_account_deletions
 from app.services.offline.activity_companion import scan_activity_companions
 from app.services.offline.activity_service import auto_archive_due_activities
 from app.services.offline.scheduler import scan_offline_triggers
@@ -690,6 +691,16 @@ def register_scheduler_jobs(scheduler):
         # D2: 多实例错峰 — 无 jitter 时所有实例同刻抢分布式锁 (thundering herd).
         # ±3s 不影响 reminder 最坏延迟量级 (15s → 18s), 换取锁竞争均摊.
         jitter=3,
+    )
+
+    scheduler.add_job(
+        _run_account_deletion_purge,
+        "interval",
+        minutes=30,
+        id="account_deletion_purge",
+        replace_existing=True,
+        max_instances=1,
+        jitter=120,
     )
 
     scheduler.add_job(
@@ -1366,6 +1377,19 @@ async def _run_trigger_scan():
             _job_failed("Trigger scan", e)
 
     await _run_distributed_job("trigger_scan", 120, _body)
+
+
+async def _run_account_deletion_purge():
+    """冷静期满的自助注销申请: 彻底删除账号全部数据。"""
+    async def _body():
+        try:
+            stats = await purge_due_account_deletions()
+            if stats.get("due"):
+                logger.info(f"Account deletion purge: {stats}")
+        except Exception as e:
+            _job_failed("Account deletion purge", e)
+
+    await _run_distributed_job("account_deletion_purge", 1800, _body)
 
 
 async def _run_last_will_scan():

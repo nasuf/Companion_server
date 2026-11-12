@@ -9,6 +9,7 @@ from app.models.auth import (
     AuthResponse,
     ClaimH5AgentRequest,
     LoginRequest,
+    AccountDeletionRequest,
     PhoneBindRequest,
     RealnameVerifyRequest,
     RegisterRequest,
@@ -85,6 +86,10 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
 
     from app.services.identity import realname
 
+    from app.services import account_deletion
+
+    # 冷静期内任何一次登录 (含恢复会话) 都撤销注销申请
+    deletion_cancelled = await account_deletion.cancel_on_login(user)
     phone, wechat_bound = await get_identity_summary(user.id)
     realname_state = await realname.load_state(user.id, role=user.role)
     workspace = await get_active_workspace(user_id=user.id)
@@ -129,6 +134,7 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
         wechat_bound=wechat_bound,
         realname_required=realname_state.required,
         realname_mode=realname_state.mode,
+        deletion_cancelled=deletion_cancelled,
     )
 
 
@@ -705,3 +711,27 @@ async def realname_verify(data: RealnameVerifyRequest, request: Request,
                              outcome=result)
     state = await realname.load_state(payload["sub"], role=payload.get("role"))
     return {"mode": state.mode, "status": state.status, "required": state.required}
+
+
+_DELETION_ERRORS = {
+    "unavailable": (409, "账号状态异常，请稍后再试"),
+    "protected": (403, "该账号不能自助注销"),
+    "bad_code": (400, "验证码错误或已过期"),
+}
+
+
+@router.post("/account/deletion")
+async def request_account_deletion(data: AccountDeletionRequest, request: Request,
+                                   payload: dict = Depends(require_user)):
+    """申请注销: 7 天冷静期, 期间重新登录即撤销; 到期删除全部数据。"""
+    from app.services import account_deletion
+
+    try:
+        due = await account_deletion.request_deletion(payload["sub"], code=data.code)
+    except account_deletion.DeletionError as exc:
+        code, detail = _DELETION_ERRORS.get(exc.reason, (400, "注销申请失败"))
+        raise HTTPException(status_code=code, detail=detail) from None
+    audit_auth_request_event("account_deletion_requested", request, user_id=payload["sub"],
+                             outcome="requested")
+    return {"deletion_due_at": due.isoformat() + "Z",
+            "cooldown_days": account_deletion.COOLDOWN.days}

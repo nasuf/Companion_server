@@ -255,6 +255,8 @@ def _serialize_admin_user(
         "counts_as_internal": bool(getattr(user, "isInternal", False)) or user.role == "admin",
         "created_at": str(user.createdAt),
         "status": getattr(user, "status", "active"),
+        # 自助注销冷静期的到期删除时间; None = 未申请
+        "deletion_due_at": str(user.deletionDueAt) if getattr(user, "deletionDueAt", None) else None,
         "archived_at": str(user.archivedAt)
         if getattr(user, "archivedAt", None)
         else None,
