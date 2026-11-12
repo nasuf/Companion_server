@@ -94,8 +94,9 @@ async def cancel_on_login(user) -> bool:
     return bool(rows)
 
 
-async def pending(user_id: str) -> bool:
-    rows = await db.query_raw(
+async def pending(user_id: str, *, database=None) -> bool:
+    """调用方传入自己的数据库句柄 (推送分发、主动消息门槛), 与其所在事务/替身一致。"""
+    rows = await (database or db).query_raw(
         "SELECT deletion_due_at IS NOT NULL AS pending FROM users WHERE id=$1", user_id)
     return bool(rows) and rows[0].get("pending") is True
 

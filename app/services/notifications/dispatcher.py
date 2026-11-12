@@ -110,11 +110,6 @@ async def _dispatch_one(row: Any) -> None:
         if not admin:
             await _mark_status(event_id, "suppressed", "admin_access_revoked")
             return
-    if not admin_alert:
-        from app.services import account_deletion
-        if await account_deletion.pending(user_id):
-            await _mark_status(event_id, "suppressed", "deletion_pending")
-            return
     if not admin_alert and await is_user_foreground(
         user_id=user_id,
         workspace_id=str(workspace_id) if workspace_id else None,

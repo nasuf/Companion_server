@@ -153,20 +153,26 @@ async def test_endpoint_maps_errors(monkeypatch):
 async def test_proactive_and_push_suppressed_during_cooldown(monkeypatch):
     from app.services.proactive import gates
     from app.services.identity import realname
-    from app.services.notifications import dispatcher
 
     monkeypatch.setattr(gates.db, "query_raw", AsyncMock(return_value=[{"status": "active"}]))
     monkeypatch.setattr(realname, "chat_block_reason", AsyncMock(return_value=None))
-    monkeypatch.setattr(ad, "pending", AsyncMock(return_value=True))
+    monkeypatch.setattr(ad, "pending", AsyncMock(return_value=True))  # noqa
     gate = await gates.check_workspace(SimpleNamespace(workspace_id="w", user_id="u1"))
     assert (gate.action, gate.reason) == ("stop", "deletion_pending")
 
-    marked = []
-    monkeypatch.setattr(dispatcher, "_mark_status", AsyncMock(side_effect=lambda *a: marked.append(a)))
-    monkeypatch.setattr(dispatcher, "is_user_foreground", AsyncMock(return_value=False))
-    await dispatcher._dispatch_one({"id": "e1", "userId": "u1", "workspaceId": "w", "conversationId": "c",
-                                    "type": "chat_reply"})
-    assert marked == [("e1", "suppressed", "deletion_pending")]
+    # 推送: 冷静期过滤写在设备查询里, 不额外查库
+    from app.services.notifications import devices
+    seen = []
+
+    async def query_raw(sql, *args):
+        seen.append(sql)
+        return []
+
+    monkeypatch.setattr(devices, "db", SimpleNamespace(query_raw=query_raw))
+    assert await devices.list_enabled_jpush_devices(user_id="u1") == []
+    assert await devices.list_enabled_apns_devices(user_id="u1") == []
+    assert await devices.list_enabled_apns_devices(user_id="u1", environment="production") == []
+    assert all("deletion_due_at IS NOT NULL" in q for q in seen) and len(seen) == 3
 
 
 @pytest.mark.asyncio
@@ -180,18 +186,12 @@ async def test_pending_is_false_for_unrelated_rows_and_unknown_users(users):
 async def test_push_and_gate_pass_when_not_pending(monkeypatch):
     from app.services.proactive import gates
     from app.services.identity import realname
-    from app.services.notifications import dispatcher
 
     monkeypatch.setattr(gates.db, "query_raw", AsyncMock(return_value=[{"status": "active"}]))
     monkeypatch.setattr(realname, "chat_block_reason", AsyncMock(return_value=None))
     monkeypatch.setattr(ad, "pending", AsyncMock(return_value=False))
     assert await gates.check_workspace(SimpleNamespace(workspace_id="w", user_id="u1")) is None
-    marked = []
-    monkeypatch.setattr(dispatcher, "_mark_status", AsyncMock(side_effect=lambda *a: marked.append(a)))
-    monkeypatch.setattr(dispatcher, "is_user_foreground", AsyncMock(return_value=True))
-    await dispatcher._dispatch_one({"id": "e2", "userId": "u1", "workspaceId": "w", "conversationId": "c",
-                                    "type": "chat_reply"})
-    assert marked == [("e2", "suppressed", "app_foreground")]
+
 
 
 @pytest.mark.asyncio
@@ -237,3 +237,10 @@ async def test_send_code_endpoint_maps_sms_errors(monkeypatch):
         with pytest.raises(HTTPException) as e:
             await auth.send_account_deletion_code(req, payload={"sub": "u1"})
         assert e.value.status_code == status
+
+
+@pytest.mark.asyncio
+async def test_pending_uses_the_callers_database():
+    caller = SimpleNamespace(query_raw=AsyncMock(return_value=[{"pending": True}]))
+    assert await ad.pending("u1", database=caller) is True
+    caller.query_raw.assert_awaited_once()

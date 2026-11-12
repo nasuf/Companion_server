@@ -82,7 +82,7 @@ async def check_workspace(state: ProactiveStateRecord) -> Gate | None:
     if await realname.chat_block_reason(state.user_id):
         return Gate("stop", "realname_required")
     from app.services import account_deletion
-    if await account_deletion.pending(state.user_id):
+    if await account_deletion.pending(state.user_id, database=db):
         return Gate("stop", "deletion_pending")
     return None
 

@@ -126,6 +126,8 @@ async def list_enabled_apns_devices(
               AND provider = 'apns'
               AND enabled = TRUE
               AND environment = $2
+              AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = push_devices.user_id
+                              AND u.deletion_due_at IS NOT NULL)
             ORDER BY last_seen_at DESC
             """,
             user_id,
@@ -140,6 +142,8 @@ async def list_enabled_apns_devices(
               AND platform = 'ios'
               AND provider = 'apns'
               AND enabled = TRUE
+              AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = push_devices.user_id
+                              AND u.deletion_due_at IS NOT NULL)
             ORDER BY last_seen_at DESC
             """,
             user_id,
@@ -159,7 +163,11 @@ async def list_enabled_jpush_devices(*, user_id: str) -> list[PushDevice]:
     rows = await db.query_raw(
         """SELECT id, token, environment, bundle_id AS "bundleId"
         FROM push_devices WHERE user_id = $1 AND platform = 'android'
-        AND provider = 'jpush' AND enabled = TRUE ORDER BY last_seen_at DESC LIMIT 100""",
+        AND provider = 'jpush' AND enabled = TRUE
+        -- 自助注销冷静期内不推送 (services/account_deletion.py)
+        AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = push_devices.user_id
+                        AND u.deletion_due_at IS NOT NULL)
+        ORDER BY last_seen_at DESC LIMIT 100""",
         user_id,
     )
     return [PushDevice(str(_field(row, "id")), str(_field(row, "token")),
