@@ -30,6 +30,18 @@ def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+async def send_code(user_id: str, *, client_ip: str | None) -> bool:
+    """给账号已绑定的手机号发注销验证码。没绑手机号返回 False (不需要验证码)。"""
+    from app.services import sms
+    from app.services.phone_auth import PHONE_PROVIDER
+
+    phone = await db.authidentity.find_first(where={"userId": user_id, "provider": PHONE_PROVIDER})
+    if phone is None:
+        return False
+    await sms.send_login_code(phone.providerAccountId, client_ip=client_ip)
+    return True
+
+
 async def request_deletion(user_id: str, *, code: str | None) -> datetime:
     """登记注销申请, 返回到期时间 (UTC)。"""
     from app.services import sms

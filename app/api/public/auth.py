@@ -735,3 +735,19 @@ async def request_account_deletion(data: AccountDeletionRequest, request: Reques
                              outcome="requested")
     return {"deletion_due_at": due.isoformat() + "Z",
             "cooldown_days": account_deletion.COOLDOWN.days}
+
+
+@router.post("/account/deletion/code")
+async def send_account_deletion_code(request: Request, payload: dict = Depends(require_user)):
+    """给已绑定的手机号发注销验证码 (客户端只有打码后的号码)。"""
+    from app.services import account_deletion, sms
+
+    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+        request.client.host if request.client else "")
+    try:
+        sent = await account_deletion.send_code(payload["sub"], client_ip=client_ip or None)
+    except sms.SmsRateLimited:
+        raise HTTPException(status_code=429, detail="发送太频繁，请稍后再试") from None
+    except sms.SmsSendError:
+        raise HTTPException(status_code=502, detail="短信发送失败，请稍后重试") from None
+    return {"sent": sent, "code_required": sent}

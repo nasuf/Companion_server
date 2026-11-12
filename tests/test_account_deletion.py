@@ -210,3 +210,30 @@ async def test_scheduler_job_logs_and_survives_failure(monkeypatch):
     monkeypatch.setattr(sch, "purge_due_account_deletions", AsyncMock(side_effect=RuntimeError("db")))
     await sch._run_account_deletion_purge()
     assert failed == ["Account deletion purge"]
+
+
+@pytest.mark.asyncio
+async def test_send_code_to_bound_phone_only(users, monkeypatch):
+    send = AsyncMock()
+    monkeypatch.setattr("app.services.sms.send_login_code", send)
+    assert await ad.send_code("u1", client_ip="1.2.3.4") is True
+    send.assert_awaited_once_with("13800000000", client_ip="1.2.3.4")
+    users.phones.pop("u1")
+    assert await ad.send_code("u1", client_ip=None) is False
+
+
+@pytest.mark.asyncio
+async def test_send_code_endpoint_maps_sms_errors(monkeypatch):
+    from unittest.mock import MagicMock
+    from app.api.public import auth
+    from app.services import sms
+
+    req = MagicMock(); req.headers = {"x-forwarded-for": "9.9.9.9"}
+    monkeypatch.setattr(ad, "send_code", AsyncMock(return_value=True))
+    assert await auth.send_account_deletion_code(req, payload={"sub": "u1"}) == {"sent": True, "code_required": True}
+    ad.send_code.assert_awaited_once_with("u1", client_ip="9.9.9.9")
+    for exc, status in ((sms.SmsRateLimited("cooldown"), 429), (sms.SmsSendError("x"), 502)):
+        monkeypatch.setattr(ad, "send_code", AsyncMock(side_effect=exc))
+        with pytest.raises(HTTPException) as e:
+            await auth.send_account_deletion_code(req, payload={"sub": "u1"})
+        assert e.value.status_code == status
