@@ -903,6 +903,10 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     if principal.expires_at <= time.time():
         await websocket.close(code=4401, reason="session_expired")
         return
+    from app.services.identity import realname
+    if await realname.chat_block_reason(user_id, role=principal.role):
+        await websocket.close(code=4403, reason="realname_required")
+        return
 
     # 绑定整个 WS 连接生命周期的 context — 内层 message handler / 派生的所有
     # asyncio.create_task / fire_background 自动继承

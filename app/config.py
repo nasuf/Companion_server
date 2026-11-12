@@ -347,6 +347,21 @@ class Settings(BaseSettings):
     # {1} contact name, {2} inactivity days, {3} will content preview (<=20 chars).
     tencent_sms_last_will_template_id: str = ""
     tencent_sms_region: str = "ap-guangzhou"
+    # Real-name gate (拟人化互动服务管理暂行办法: identify and exclude minors).
+    # off = no gate; phone = SMS-verified phone required before chatting;
+    # id_card = phone + name/ID two-factor check, adults only. Admins are exempt.
+    realname_mode: str = "off"
+    # Local/dev only: accept any well-formed ID without calling Tencent. Ignored
+    # (treated as False) in production, like sms_mock_enabled.
+    realname_mock_enabled: bool = False
+    # HMAC key for the stored ID-number digest (one ID binds one account). The
+    # raw number is never stored. Must stay stable: rotating it breaks dedupe.
+    realname_hash_key: str = ""
+    # CAM sub-account scoped to faceid:IdCardVerification only.
+    tencent_realname_secret_id: str = ""
+    tencent_realname_secret_key: str = ""
+    tencent_realname_region: str = "ap-guangzhou"
+    realname_daily_attempts: int = 5
     # Master switch for last-will contact SMS (dispatch + admin test). Off until the
     # dedicated Tencent template is approved.
     last_will_sms_enabled: bool = False
@@ -621,6 +636,24 @@ class Settings(BaseSettings):
                 "Unsafe production config: WECHAT_JSSDK_ALLOWED_ORIGINS requires "
                 "WECHAT_H5_APP_ID and WECHAT_H5_APP_SECRET."
             )
+
+        mode = self.realname_mode.strip().lower()
+        if mode not in {"off", "phone", "id_card"}:
+            raise RuntimeError("Unsafe production config: REALNAME_MODE must be off, phone or id_card.")
+        if mode in {"phone", "id_card"} and not self.sms_enabled:
+            raise RuntimeError("Unsafe production config: REALNAME_MODE requires SMS_ENABLED=true.")
+        if mode == "id_card":
+            missing = [name for name, value in (
+                ("REALNAME_HASH_KEY", self.realname_hash_key.strip()),
+                ("TENCENT_REALNAME_SECRET_ID", self.tencent_realname_secret_id.strip()),
+                ("TENCENT_REALNAME_SECRET_KEY", self.tencent_realname_secret_key.strip()),
+            ) if not value]
+            if missing or len(self.realname_hash_key.strip()) < 32:
+                raise RuntimeError(
+                    "Unsafe production config: REALNAME_MODE=id_card requires "
+                    + (", ".join(missing) if missing else "REALNAME_HASH_KEY of at least 32 characters")
+                    + "."
+                )
 
         if self.apple_iap_enabled:
             missing = [

@@ -826,3 +826,22 @@ async def delete_user(
             detail="用户删除未完成，未确认全部在线数据清理成功。请刷新查看账号状态，排查后重试。",
         ) from exc
     return {"ok": True, "stats": stats}
+
+
+@router.get("/realname/summary")
+async def realname_summary(days: int = Query(30, ge=1, le=90), _: dict = Depends(require_admin_jwt)):
+    """实名门槛概况: 档位、核验服务是否配置、手机号绑定率、核验状态分布与近期失败原因。"""
+    from app.services.identity import realname
+
+    return await realname.summary(days=days)
+
+
+@router.post("/{user_id}/realname/reset")
+async def realname_reset(user_id: str, claims: dict = Depends(require_admin_jwt)):
+    """管理员重置实名 (如证件被冒用的申诉); 用户下次需重新认证。"""
+    from app.services.identity import realname
+
+    removed = await realname.admin_reset(user_id)
+    logger.info("Admin reset realname", extra={"event": "realname_admin_reset",
+                                               "user_id": user_id, "outcome": str(removed)})
+    return {"reset": bool(removed)}

@@ -78,6 +78,9 @@ async def check_workspace(state: ProactiveStateRecord) -> Gate | None:
         return Gate("stop", "workspace_missing")
     if str(rows[0].get("status") or "archived") != "active":
         return Gate("stop", "workspace_inactive")
+    from app.services.identity import realname
+    if await realname.chat_block_reason(state.user_id):
+        return Gate("stop", "realname_required")
     return None
 
 

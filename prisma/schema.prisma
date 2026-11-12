@@ -3308,6 +3308,25 @@ model OfflineGiftMemory {
   @@map("offline_gift_memories")
   @@ignore
 }
+// COMP 实名: one row per user; raw ID number never stored (id_digest = HMAC).
+// SQL-only (services/identity/realname.py), hence @@ignore.
+model UserIdentityVerification {
+  id            String    @id
+  userId        String    @unique @map("user_id")
+  status        String
+  maskedName    String?   @map("masked_name")
+  idDigest      String?   @map("id_digest")
+  isAdult       Boolean?  @map("is_adult")
+  provider      String    @default("tencent")
+  failureReason String?   @map("failure_reason")
+  attempts      Int       @default(0)
+  verifiedAt    DateTime? @map("verified_at") @db.Timestamptz
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+  @@index([status, updatedAt(sort: Desc)], map: "user_identity_verifications_status_idx")
+  @@map("user_identity_verifications")
+  @@ignore
+}
 model RealtimeCallSession {
   id             String   @id
   userId         String   @map("user_id")

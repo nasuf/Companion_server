@@ -110,6 +110,11 @@ async def erased_pair(monkeypatch, tmp_path):
                 }
             )
             await redis.set("sms:code:" + phone, "synthetic-code")
+            await database.execute_raw(
+                "INSERT INTO user_identity_verifications (id, user_id, status, masked_name, "
+                "id_digest, is_adult) VALUES ($1, $2, 'verified', '张*', $3, true)",
+                str(uuid4()), user.id, uuid4().hex,
+            )
             offline_trace = uuid4().hex
             await database.tracerun.create(
                 data={

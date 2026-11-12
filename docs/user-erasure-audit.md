@@ -54,6 +54,7 @@
 | `agent_wallets` | `user_id` |
 | `ai_agents` | `user_id` |
 | `auth_identities` | `user_id` |
+| `user_identity_verifications` | `user_id` (实名核验结果；不存身份证号原文，只存 HMAC 摘要与脱敏姓名) |
 | `bug_reports` | `reporter_id`, `resolved_by_id` |
 | `chat_link_cards` | `user_id` |
 | `chat_message_attachments` | `user_id` |

@@ -166,3 +166,13 @@ class AuthResponse(BaseModel):
     # Binding state for the account-settings UI (phone masked at the API layer).
     phone: str | None = None
     wechat_bound: bool = False
+    # 实名门槛还差的步骤, 按顺序: phone / id_card / minor_blocked。空 = 可以聊天。
+    realname_required: list[str] = []
+    realname_mode: str = "off"
+
+
+class RealnameVerifyRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=20)
+    id_number: str = Field(min_length=18, max_length=18)
+    # 单独同意收集身份证信息 (个人信息保护法: 敏感个人信息单独同意); 必须为 true
+    consent: bool

@@ -74,6 +74,18 @@ async def _persist_user_message(
     return saved.id
 
 
+
+async def require_realname(user: dict) -> None:
+    """实名门槛 (services/identity/realname.py); 403 detail 带缺的步骤供客户端跳转。"""
+    from app.services.identity import realname
+
+    reason = await realname.chat_block_reason(str(user.get("sub")), role=user.get("role"))
+    if reason:
+        raise HTTPException(status_code=403, detail={
+            "reason": "realname_required", "step": reason,
+            "message": "未满18周岁不能使用本服务" if reason == "minor_blocked" else "请先完成实名认证"})
+
+
 @router.post("/{conversation_id}/ws-ticket", dependencies=[Depends(require_redis)])
 async def websocket_ticket(conversation_id: str, request: Request, response: Response,
                            user: dict = Depends(require_user)):
@@ -94,6 +106,7 @@ async def websocket_ticket(conversation_id: str, request: Request, response: Res
         raise HTTPException(status_code=403, detail="Conversation agent owner mismatch")
     if conv.agent.status == "provisioning":
         raise HTTPException(status_code=503, detail="AI 正在初始化中，请稍等...")
+    await require_realname(user)
     try:
         result = await issue_ticket(conversation_id, user)
     except TicketInvalid:
@@ -131,6 +144,7 @@ async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(req
         raise HTTPException(status_code=404, detail="Conversation agent not found")
     if conv.agent.userId != conv.userId:
         raise HTTPException(status_code=403, detail="Conversation agent owner mismatch")
+    await require_realname(user)
 
     # 阻断: agent 还在初始化中（人生经历生成未完成）
     if conv.agent and conv.agent.status == "provisioning":

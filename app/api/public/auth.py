@@ -10,6 +10,7 @@ from app.models.auth import (
     ClaimH5AgentRequest,
     LoginRequest,
     PhoneBindRequest,
+    RealnameVerifyRequest,
     RegisterRequest,
     SmsLoginRequest,
     SmsSendRequest,
@@ -82,7 +83,10 @@ def _mask_phone(phone: str | None) -> str | None:
 async def _build_auth_response(user, token: str) -> AuthResponse:
     from app.services.phone_auth import get_identity_summary
 
+    from app.services.identity import realname
+
     phone, wechat_bound = await get_identity_summary(user.id)
+    realname_state = await realname.load_state(user.id, role=user.role)
     workspace = await get_active_workspace(user_id=user.id)
     agent = None
     conversation = None
@@ -123,6 +127,8 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
         conversation_id=conversation.id if conversation else None,
         phone=_mask_phone(phone),
         wechat_bound=wechat_bound,
+        realname_required=realname_state.required,
+        realname_mode=realname_state.mode,
     )
 
 
@@ -656,3 +662,46 @@ async def offline(payload: dict = Depends(require_user)):
     """
     await remove_online(payload["sub"])
     return {"ok": True}
+
+
+_REALNAME_ERRORS = {
+    "not_required": (409, "当前不需要实名认证"),
+    "not_configured": (503, "实名认证服务暂未开放"),
+    "phone_required": (409, "请先绑定手机号"),
+    "invalid_name": (400, "请填写身份证上的姓名"),
+    "invalid_id_number": (400, "身份证号格式不正确"),
+    "rate_limited": (429, "今日认证次数已达上限，请明天再试"),
+    "id_in_use": (409, "该身份证已认证其他账号"),
+    "mismatch": (400, "姓名与身份证号不一致"),
+    "provider_unavailable": (502, "实名认证服务暂时不可用，请稍后再试"),
+}
+
+
+@router.get("/realname")
+async def realname_status(payload: dict = Depends(require_user)):
+    """当前实名门槛状态; 客户端据此决定跳转绑定手机号 / 实名 / 未成年拦截页。"""
+    from app.services.identity import realname
+
+    state = await realname.load_state(payload["sub"], role=payload.get("role"))
+    return {"mode": state.mode, "status": state.status, "required": state.required}
+
+
+@router.post("/realname/verify")
+async def realname_verify(data: RealnameVerifyRequest, request: Request,
+                          payload: dict = Depends(require_user)):
+    """姓名 + 身份证号二要素核验。未满 18 岁返回 status=minor (账号锁定在拦截页)。"""
+    from app.services.identity import realname
+
+    if data.consent is not True:
+        raise HTTPException(status_code=400, detail="请先同意收集身份信息")
+    try:
+        result = await realname.verify(payload["sub"], name=data.name, id_number=data.id_number)
+    except realname.RealnameError as exc:
+        code, detail = _REALNAME_ERRORS.get(exc.reason, (400, "实名认证失败"))
+        audit_auth_request_event("realname_verify_failed", request, user_id=payload["sub"],
+                                 outcome=exc.reason)
+        raise HTTPException(status_code=code, detail=detail) from None
+    audit_auth_request_event("realname_verify_" + result, request, user_id=payload["sub"],
+                             outcome=result)
+    state = await realname.load_state(payload["sub"], role=payload.get("role"))
+    return {"mode": state.mode, "status": state.status, "required": state.required}

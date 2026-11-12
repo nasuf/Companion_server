@@ -35,17 +35,21 @@ def _hmac_sha256(key: bytes, msg: str) -> bytes:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
 
 
-def _tc3_authorization(payload: str, timestamp: int) -> str:
-    """Build the TC3-HMAC-SHA256 Authorization header for SendSms."""
-    secret_id = settings.tencent_sms_secret_id.strip()
-    secret_key = settings.tencent_sms_secret_key.strip()
+def tc3_authorization(
+    payload: str, timestamp: int, *, host: str, service: str, secret_id: str, secret_key: str,
+) -> str:
+    """TC3-HMAC-SHA256 Authorization header for a JSON POST to a Tencent Cloud API.
+
+    Shared by SMS and the real-name check (services/identity/realname.py): both
+    sign `POST /` with the same two headers, only host/service/credentials differ.
+    """
     date = datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d")
 
-    # 1. Canonical request. SendSms uses POST / with JSON body; the signed
-    #    headers set must match the headers actually sent.
+    # 1. Canonical request. POST / with JSON body; the signed headers set must
+    #    match the headers actually sent.
     hashed_payload = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     canonical_headers = (
-        f"content-type:application/json; charset=utf-8\nhost:{_HOST}\n"
+        f"content-type:application/json; charset=utf-8\nhost:{host}\n"
     )
     signed_headers = "content-type;host"
     canonical_request = (
@@ -53,7 +57,7 @@ def _tc3_authorization(payload: str, timestamp: int) -> str:
     )
 
     # 2. String to sign.
-    credential_scope = f"{date}/{_SERVICE}/tc3_request"
+    credential_scope = f"{date}/{service}/tc3_request"
     hashed_canonical = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
     string_to_sign = (
         f"TC3-HMAC-SHA256\n{timestamp}\n{credential_scope}\n{hashed_canonical}"
@@ -61,7 +65,7 @@ def _tc3_authorization(payload: str, timestamp: int) -> str:
 
     # 3. Signature chain.
     secret_date = _hmac_sha256(f"TC3{secret_key}".encode("utf-8"), date)
-    secret_service = _hmac_sha256(secret_date, _SERVICE)
+    secret_service = _hmac_sha256(secret_date, service)
     secret_signing = _hmac_sha256(secret_service, "tc3_request")
     signature = hmac.new(
         secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256
@@ -70,6 +74,15 @@ def _tc3_authorization(payload: str, timestamp: int) -> str:
     return (
         f"TC3-HMAC-SHA256 Credential={secret_id}/{credential_scope}, "
         f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+
+
+def _tc3_authorization(payload: str, timestamp: int) -> str:
+    """Build the TC3-HMAC-SHA256 Authorization header for SendSms."""
+    return tc3_authorization(
+        payload, timestamp, host=_HOST, service=_SERVICE,
+        secret_id=settings.tencent_sms_secret_id.strip(),
+        secret_key=settings.tencent_sms_secret_key.strip(),
     )
 
 

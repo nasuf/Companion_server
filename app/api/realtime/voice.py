@@ -117,6 +117,10 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
     if not await _accounts_current(principal, conv.userId):
         await websocket.close(code=4401, reason="authentication_required")
         return
+    from app.services.identity import realname
+    if await realname.chat_block_reason(principal.user_id, role=principal.role):
+        await websocket.close(code=4403, reason="realname_required")
+        return
 
     # --- Accept ---
     await websocket.accept(subprotocol=CHAT_PROTOCOL)
