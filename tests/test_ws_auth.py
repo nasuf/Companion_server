@@ -442,3 +442,23 @@ def test_realname_gate_blocks_ticket_and_socket(secured_ws, monkeypatch):
     ticket = mint(s)
     monkeypatch.setattr(realname, 'chat_block_reason', AsyncMock(return_value='minor_blocked'))
     denied(s, protocols(ticket), code=4403)
+
+
+def test_realname_rechecked_on_every_message(secured_ws, monkeypatch):
+    """连接建立后后台重置实名或加进名单: 下一条消息就以 4403 关闭, 不进入回复流程。"""
+    from app.services.identity import realname
+    s = secured_ws
+    gate = AsyncMock(return_value=None)
+    monkeypatch.setattr(realname, 'chat_block_reason', gate)
+    ticket = mint(s)
+    with s.client.websocket_connect('/ws/conv', subprotocols=protocols(ticket)) as socket:
+        socket.send_json({'type': 'ping'})
+        assert socket.receive_json() == {'type': 'pong'}
+        gate.return_value = 'id_card'
+        socket.send_json({'type': 'ping'})  # ping 不受影响, 只拦消息
+        assert socket.receive_json() == {'type': 'pong'}
+        socket.send_json({'type': 'message', 'data': {'message': 'hello', 'client_id': 'c1'}})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+    assert closed.value.code == 4403
+    ws._handle_message.assert_not_called()

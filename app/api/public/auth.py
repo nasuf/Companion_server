@@ -689,7 +689,8 @@ async def realname_status(payload: dict = Depends(require_user)):
     from app.services.identity import realname
 
     state = await realname.load_state(payload["sub"], role=payload.get("role"))
-    return {"mode": state.mode, "status": state.status, "required": state.required}
+    return {"mode": state.mode, "status": state.status, "required": state.required,
+            "record": await realname.record_of(payload["sub"])}
 
 
 @router.post("/realname/verify")

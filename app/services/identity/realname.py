@@ -180,6 +180,10 @@ def mask_name(name: str) -> str:
     return name[0] + "*" * (len(name) - 1)
 
 
+def mask_id_number(id_number: str) -> str:
+    return id_number[0] + "*" * (len(id_number) - 2) + id_number[-1]
+
+
 def _secret() -> bytes:
     key = settings.realname_hash_key.strip()
     if not key:
@@ -403,6 +407,26 @@ async def verify(user_id: str, *, name: str, id_number: str) -> str:
     return VERIFIED
 
 
+async def record_of(user_id: str) -> dict | None:
+    """用户自己的认证记录 (隐私中心展示), 与门槛是否对他生效无关。只给打码后的姓名和证件号。"""
+    rows = await db.query_raw(
+        "SELECT status, masked_name, id_number_encrypted, verified_at "
+        "FROM user_identity_verifications WHERE user_id=$1", user_id)
+    if not rows:
+        return None
+    row = rows[0]
+    masked_id = None
+    if row.get("id_number_encrypted"):
+        try:
+            masked_id = mask_id_number(decrypt(row["id_number_encrypted"]))
+        except Exception:  # 密钥轮换等解不开时只是不展示证件号
+            logger.warning("Realname record decrypt failed user=%s", user_id)
+    verified_at = row.get("verified_at")
+    return {"status": row["status"], "masked_name": row.get("masked_name"),
+            "masked_id_number": masked_id,
+            "verified_at": verified_at.isoformat() if hasattr(verified_at, "isoformat") else verified_at}
+
+
 async def admin_reset(user_id: str) -> int:
     """管理员重置 (例如证件被冒用的申诉): 删掉这一行, 用户可重新认证。"""
     return int(await db.execute_raw(
@@ -410,16 +434,18 @@ async def admin_reset(user_id: str) -> int:
 
 
 async def summary(*, days: int = 30) -> dict:
-    """后台统计: 有界聚合, 不返回姓名、证件摘要或单个用户明细。"""
+    """后台统计: 有界聚合, 不返回姓名、证件摘要或单个用户明细。
+
+    管理员账号也计入: 内部账号会被加进名单走查, 认证了就要能在统计里看到。"""
     days = max(1, min(int(days), 90))
     users = await db.query_raw(
         """SELECT count(*) AS active_users,
              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM auth_identities a
                WHERE a.user_id=u.id AND a.provider='phone')) AS phone_bound
-           FROM users u WHERE u.status='active' AND u.role<>'admin' AND u.archived_at IS NULL""")
+           FROM users u WHERE u.status='active' AND u.archived_at IS NULL""")
     statuses = await db.query_raw(
         """SELECT v.status, count(*) AS n FROM user_identity_verifications v
-           JOIN users u ON u.id=v.user_id WHERE u.status='active' AND u.role<>'admin'
+           JOIN users u ON u.id=v.user_id WHERE u.status='active'
            GROUP BY v.status""")
     failures = await db.query_raw(
         """SELECT failure_reason AS reason, count(*) AS n FROM user_identity_verifications
@@ -431,7 +457,7 @@ async def summary(*, days: int = 30) -> dict:
              CASE WHEN v.birth_date IS NULL THEN NULL
                   ELSE date_part('year', age(CURRENT_DATE, v.birth_date))::int END AS age
            FROM user_identity_verifications v JOIN users u ON u.id=v.user_id
-           WHERE v.status='verified' AND u.status='active' AND u.role<>'admin'
+           WHERE v.status='verified' AND u.status='active'
            LIMIT 100000""")
     genders: dict[str, int] = {}
     provinces: dict[str, int] = {}

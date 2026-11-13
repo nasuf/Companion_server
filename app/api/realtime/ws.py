@@ -1012,6 +1012,10 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     await handle_delivery_frame(websocket, principal.user_id, conversation_id, raw)
 
                 elif msg_type == "message":
+                    # 连接建立后门槛才变 (后台重置实名 / 加进名单): 每条消息都要再查一次
+                    if await realname.chat_block_reason(user_id, role=principal.role):
+                        await websocket.close(code=4403, reason="realname_required")
+                        break
                     payload = raw.get("data") or {}
                     if sql_chat_ingress_enabled():
                         from app.services.runtime.chat_entrypoint import handle_sql_chat_frame

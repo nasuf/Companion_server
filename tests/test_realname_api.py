@@ -226,8 +226,10 @@ async def test_user_status_and_verify_endpoints(monkeypatch):
     state = realname.RealnameState("id_card", True, None)
     monkeypatch.setattr(realname, "load_state", AsyncMock(return_value=state))
     monkeypatch.setattr(auth, "audit_auth_request_event", MagicMock())
+    monkeypatch.setattr(realname, "record_of", AsyncMock(return_value=None))
     user = {"sub": "u1", "role": "user"}
-    assert await auth.realname_status(payload=user) == {"mode": "id_card", "status": None, "required": ["id_card"]}
+    assert await auth.realname_status(payload=user) == {
+        "mode": "id_card", "status": None, "required": ["id_card"], "record": None}
 
     body = RealnameVerifyRequest(name="张三", id_number=ADULT_ID, consent=False)
     with pytest.raises(HTTPException) as e:
@@ -249,3 +251,35 @@ async def test_user_status_and_verify_endpoints(monkeypatch):
     assert (await auth.realname_verify(body, request=MagicMock(), payload=user))["required"] == []
     auth.audit_auth_request_event.assert_called_with(
         "realname_verify_verified", auth.audit_auth_request_event.call_args.args[1], user_id="u1", outcome="verified")
+
+
+async def test_record_of_masks_name_and_id(monkeypatch):
+    """隐私中心: 只给打码后的姓名和证件号; 解不开密文时不展示证件号, 不报错。"""
+    from datetime import datetime
+
+    monkeypatch.setattr(realname.settings, "realname_hash_key", "k" * 40)
+    token = realname.encrypt(ADULT_ID)
+    rows: list[dict] = []
+    monkeypatch.setattr(realname, "db", SimpleNamespace(query_raw=AsyncMock(side_effect=lambda *a: rows)))
+    assert await realname.record_of("u1") is None
+    rows.append({"status": "verified", "masked_name": "张*", "id_number_encrypted": token,
+                 "verified_at": datetime(2026, 11, 13, 12, 0)})
+    assert await realname.record_of("u1") == {
+        "status": "verified", "masked_name": "张*", "masked_id_number": "1****************X",
+        "verified_at": "2026-11-13T12:00:00"}
+    rows[0] = {**rows[0], "id_number_encrypted": "garbage", "verified_at": None}
+    out = await realname.record_of("u1")
+    assert out["masked_id_number"] is None and out["verified_at"] is None
+
+
+async def test_summary_counts_admins(monkeypatch):
+    """内部管理员账号加进名单完成认证后, 统计里要能看到。"""
+    seen: list[str] = []
+
+    async def query_raw(sql, *args):
+        seen.append(sql)
+        return [{"active_users": 1, "phone_bound": 1}] if "phone_bound" in sql else []
+
+    monkeypatch.setattr(realname, "db", SimpleNamespace(query_raw=query_raw))
+    await realname.summary()
+    assert seen and not any("role<>'admin'" in q for q in seen)
