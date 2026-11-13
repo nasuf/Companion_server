@@ -233,14 +233,18 @@ def _today() -> date:
 
 
 async def load_state(user_id: str, *, role: str | None = None) -> RealnameState:
-    """role=None (后台任务, 如主动消息) 时自己查角色, 管理员照样豁免。
+    """role=None (后台任务, 如主动消息) 时自己查角色。
 
-    开关只对指定用户生效时, 名单外的用户按 off 处理 —— 旧版 App 用户不受影响。"""
+    开关只对指定用户生效时, 名单外的用户按 off 处理 —— 旧版 App 用户不受影响。
+    管理员在「全部用户」下豁免; 被明确加进名单的管理员照样要实名 (用于内部真机走查)。"""
     current_policy = policy()
     current = current_policy.mode
-    if not current_policy.applies_to(user_id) or role == "admin":
+    if not current_policy.applies_to(user_id):
         return RealnameState("off", True, None)
-    if role is None:
+    listed = current_policy.scope == "users"
+    if role == "admin" and not listed:
+        return RealnameState("off", True, None)
+    if role is None and not listed:
         user = await db.user.find_unique(where={"id": user_id})
         if user is not None and user.role == "admin":
             return RealnameState("off", True, None)

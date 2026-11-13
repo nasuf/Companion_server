@@ -124,6 +124,13 @@ async def test_admin_and_off_mode_never_blocked(store, settings, monkeypatch):
     # 后台任务不带角色时自己查: 管理员照样豁免
     assert await realname.chat_block_reason("admin") is None
     assert await realname.chat_block_reason("nobody") == "phone"
+    # 被明确加进名单的管理员照样要实名; 名单外的管理员不受影响
+    listed = realname.Policy("id_card", "users", frozenset({"admin"}), "admin")
+    monkeypatch.setattr(realname, "policy", lambda: listed)
+    assert await realname.chat_block_reason("admin", role="admin") == "phone"
+    assert await realname.chat_block_reason("admin") == "phone"
+    assert await realname.chat_block_reason("other-admin", role="admin") is None
+    monkeypatch.undo()
     monkeypatch.setattr(settings, "realname_mode", "off")
     assert await realname.chat_block_reason("nobody") is None
     monkeypatch.setattr(settings, "realname_mode", "bogus")
@@ -265,7 +272,9 @@ def test_production_config_validation(monkeypatch):
     with pytest.raises(RuntimeError, match="requires SMS_ENABLED"):
         Settings(**{**base, "sms_enabled": False}, realname_mode="phone").validate_security_config()
     with pytest.raises(RuntimeError, match="TENCENT_REALNAME_SECRET_ID"):
-        Settings(**base, realname_mode="id_card", realname_hash_key="k" * 40).validate_security_config()
+        # 显式置空: 本地 .env 里有真实密钥时也要验证缺密钥的报错
+        Settings(**base, realname_mode="id_card", realname_hash_key="k" * 40,
+                 tencent_realname_secret_id="", tencent_realname_secret_key="").validate_security_config()
     with pytest.raises(RuntimeError, match="at least 32"):
         Settings(**base, realname_mode="id_card", realname_hash_key="short",
                  tencent_realname_secret_id="a", tencent_realname_secret_key="b").validate_security_config()
