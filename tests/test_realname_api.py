@@ -240,7 +240,7 @@ async def test_user_status_and_verify_endpoints(monkeypatch):
     monkeypatch.setattr(realname, "verify", AsyncMock(side_effect=realname.RealnameError("mismatch")))
     with pytest.raises(HTTPException) as e:
         await auth.realname_verify(body, request=MagicMock(), payload=user)
-    assert (e.value.status_code, e.value.detail) == (400, "姓名与身份证号不一致")
+    assert (e.value.status_code, e.value.detail) == (400, "认证失败：姓名与身份证号不一致，请核对后重试")
     monkeypatch.setattr(realname, "verify", AsyncMock(side_effect=realname.RealnameError("brand_new")))
     with pytest.raises(HTTPException) as e:
         await auth.realname_verify(body, request=MagicMock(), payload=user)
@@ -283,3 +283,23 @@ async def test_summary_counts_admins(monkeypatch):
     monkeypatch.setattr(realname, "db", SimpleNamespace(query_raw=query_raw))
     await realname.summary()
     assert seen and not any("role<>'admin'" in q for q in seen)
+
+
+def test_id_number_problem_kinds(monkeypatch):
+    """证件号格式问题分三类, 各自给出能照着改的提示。"""
+    from app.api.public import auth
+
+    monkeypatch.setattr(realname, "_today", lambda: date(2026, 11, 13))
+    assert realname.id_number_problem(ADULT_ID) is None
+    assert realname.id_number_problem(ADULT_ID.lower()) is None
+    assert realname.id_number_problem("") == "length"
+    assert realname.id_number_problem(ADULT_ID[:-1]) == "length"
+    assert realname.id_number_problem("1101051949123100AB") == "length"
+    assert realname.id_number_problem("110105194913310021") == "birth"  # 13 月
+    future = "11010520270101001"
+    total = sum(int(d) * w for d, w in zip(future, realname._WEIGHTS))
+    assert realname.id_number_problem(future + realname._CHECK[total % 11]) == "birth"
+    assert realname.id_number_problem(ADULT_ID[:-1] + "1") == "checksum"
+    for reason in ("invalid_id_length", "invalid_id_birth", "invalid_id_checksum", "no_record"):
+        assert auth._REALNAME_ERRORS[reason][0] == 400
+    assert auth._REALNAME_ERRORS["mismatch"][1].startswith("认证失败")

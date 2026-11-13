@@ -147,19 +147,24 @@ def _mock_enabled() -> bool:
     return settings.realname_mock_enabled and not settings.is_production()
 
 
-def normalize_id_number(raw: str) -> str | None:
-    """18 位居民身份证号: 格式、出生日期与校验位都对才返回 (大写 X)。"""
+def id_number_problem(raw: str) -> str | None:
+    """证件号哪里不对: length (不是 18 位) / birth (出生日期无效) / checksum (校验位不对, 多半输错一位)。"""
     value = (raw or "").strip().upper()
     if not _ID_PATTERN.match(value):
-        return None
+        return "length"
     try:
         birth = date(int(value[6:10]), int(value[10:12]), int(value[12:14]))
     except ValueError:
-        return None
-    if birth.year < 1900:
-        return None
+        return "birth"
+    if birth.year < 1900 or birth > _today():
+        return "birth"
     total = sum(int(d) * w for d, w in zip(value[:17], _WEIGHTS))
-    return value if _CHECK[total % 11] == value[17] else None
+    return None if _CHECK[total % 11] == value[17] else "checksum"
+
+
+def normalize_id_number(raw: str) -> str | None:
+    """18 位居民身份证号: 格式、出生日期与校验位都对才返回 (大写 X)。"""
+    return None if id_number_problem(raw) else (raw or "").strip().upper()
 
 
 def normalize_name(raw: str) -> str | None:
@@ -269,8 +274,15 @@ async def chat_block_reason(user_id: str, *, role: str | None = None) -> str | N
     return required[0] if required else None
 
 
-async def _tencent_check(name: str, id_number: str) -> bool:
-    """True = 姓名与证件号一致。传输或接口错误抛 RealnameError("provider_unavailable")。"""
+# 腾讯云 IdCardVerification 的 Result: 0 一致; -1 不一致; -2 证件号非法; -3 姓名非法;
+# -4 证件库服务异常; -5 证件库中无此记录; -6 权威比对系统升级中; -7 当日次数超限
+_PROVIDER_RESULTS = {"0": None, "-1": "mismatch", "-2": "invalid_id_checksum",
+                     "-3": "invalid_name", "-5": "no_record"}
+_PROVIDER_DOWN = {"-4", "-6", "-7"}
+
+
+async def _tencent_check(name: str, id_number: str) -> str | None:
+    """None = 姓名与证件号一致; 否则返回不通过的原因。传输或接口错误抛 RealnameError("provider_unavailable")。"""
     from app.services.sms.tencent import tc3_authorization
 
     payload = json.dumps({"IdCard": id_number, "Name": name}, ensure_ascii=False,
@@ -302,8 +314,13 @@ async def _tencent_check(name: str, id_number: str) -> bool:
                        extra={"event": "realname_provider_error",
                               "code": (body["Error"] or {}).get("Code")})
         raise RealnameError("provider_unavailable")
-    # Result "0" = 一致; "-1" = 不一致; 其余 (查无此人、证件号无效等) 都按不通过处理
-    return str(body.get("Result")) == "0"
+    result = str(body.get("Result"))
+    if result in _PROVIDER_DOWN:
+        logger.warning("Realname provider unavailable",
+                       extra={"event": "realname_provider_error", "code": result})
+        raise RealnameError("provider_unavailable")
+    # 未知结果码按不一致处理, 不放行
+    return _PROVIDER_RESULTS.get(result, "mismatch")
 
 
 async def _take_attempt(user_id: str) -> None:
@@ -373,11 +390,14 @@ async def verify(user_id: str, *, name: str, id_number: str) -> str:
         return state.status
     if not state.phone_bound:
         raise RealnameError("phone_required")
-    clean_name, clean_id = normalize_name(name), normalize_id_number(id_number)
+    clean_name = normalize_name(name)
     if clean_name is None:
         raise RealnameError("invalid_name")
-    if clean_id is None:
-        raise RealnameError("invalid_id_number")
+    problem = id_number_problem(id_number)
+    if problem:
+        # 格式问题本地就能判断: 不消耗当日次数, 不调核验接口
+        raise RealnameError("invalid_id_" + problem)
+    clean_id = (id_number or "").strip().upper()
     await _take_attempt(user_id)
     digest = id_digest(clean_id)
     taken = await db.query_raw(
@@ -395,12 +415,12 @@ async def verify(user_id: str, *, name: str, id_number: str) -> str:
                             id_number=None)
         logger.info("Realname minor blocked", extra={"event": "realname_verified", "outcome": "minor"})
         return MINOR
-    matched = True if _mock_enabled() else await _tencent_check(clean_name, clean_id)
-    if not matched:
+    failure = None if _mock_enabled() else await _tencent_check(clean_name, clean_id)
+    if failure:
         await _record(user_id, status=REJECTED, name=None, digest=None, adult=None,
-                      reason="mismatch")
-        logger.info("Realname mismatch", extra={"event": "realname_verified", "outcome": "mismatch"})
-        raise RealnameError("mismatch")
+                      reason=failure)
+        logger.info("Realname rejected", extra={"event": "realname_verified", "outcome": failure})
+        raise RealnameError(failure)
     await _record_claim(user_id, status=VERIFIED, name=clean_name, digest=digest, adult=True,
                         id_number=clean_id)
     logger.info("Realname verified", extra={"event": "realname_verified", "outcome": "verified"})

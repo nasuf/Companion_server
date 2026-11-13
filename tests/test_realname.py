@@ -155,7 +155,7 @@ async def test_minor_is_locked_and_never_sent_to_provider(store, monkeypatch, se
     monkeypatch.setattr(settings, "realname_mock_enabled", False)
     monkeypatch.setattr(settings, "tencent_realname_secret_id", "id")
     monkeypatch.setattr(settings, "tencent_realname_secret_key", "key")
-    provider = AsyncMock(return_value=True)
+    provider = AsyncMock(return_value=None)
     monkeypatch.setattr(realname, "_tencent_check", provider)
     minor = _born(date(2010, 5, 1))
     assert await realname.verify("u1", name="张三", id_number=minor) == "minor"
@@ -189,13 +189,19 @@ async def test_mismatch_and_input_errors(store, monkeypatch, settings):
     monkeypatch.setattr(settings, "realname_mock_enabled", False)
     monkeypatch.setattr(settings, "tencent_realname_secret_id", "id")
     monkeypatch.setattr(settings, "tencent_realname_secret_key", "key")
-    monkeypatch.setattr(realname, "_tencent_check", AsyncMock(return_value=False))
+    monkeypatch.setattr(realname, "_tencent_check", AsyncMock(return_value="mismatch"))
     with pytest.raises(realname.RealnameError, match="mismatch"):
         await realname.verify("u1", name="张三", id_number=ADULT_ID)
     assert store.rows["u1"] == dict(store.rows["u1"], status="rejected", id_digest=None,
                                     failure_reason="mismatch")
-    with pytest.raises(realname.RealnameError, match="invalid_id_number"):
+    with pytest.raises(realname.RealnameError, match="invalid_id_checksum"):
         await realname.verify("u1", name="张三", id_number=ADULT_ID[:-1] + "1")
+    with pytest.raises(realname.RealnameError, match="invalid_id_length"):
+        await realname.verify("u1", name="张三", id_number=ADULT_ID[:-1])
+    with pytest.raises(realname.RealnameError, match="invalid_id_birth"):
+        await realname.verify("u1", name="张三", id_number=_with_check("11010520250230123"))
+    # 格式错误本地就拦下: 不调核验接口
+    assert realname._tencent_check.await_count == 1
     with pytest.raises(realname.RealnameError, match="invalid_name"):
         await realname.verify("u1", name="Zhang", id_number=ADULT_ID)
 
@@ -210,7 +216,7 @@ async def test_phone_required_first_and_daily_limit(store, settings, monkeypatch
     monkeypatch.setattr(realname, "_mock_enabled", lambda: False)
     monkeypatch.setattr(settings, "tencent_realname_secret_id", "id")
     monkeypatch.setattr(settings, "tencent_realname_secret_key", "key")
-    monkeypatch.setattr(realname, "_tencent_check", AsyncMock(return_value=False))
+    monkeypatch.setattr(realname, "_tencent_check", AsyncMock(return_value="mismatch"))
     for _ in range(2):
         with pytest.raises(realname.RealnameError, match="mismatch"):
             await realname.verify("u1", name="张三", id_number=ADULT_ID)
@@ -245,8 +251,8 @@ async def test_tencent_result_mapping(monkeypatch, settings):
                         lambda **kw: real_client(transport=httpx.MockTransport(handler)))
     monkeypatch.setattr(settings, "tencent_realname_secret_id", "AKID")
     monkeypatch.setattr(settings, "tencent_realname_secret_key", "secret")
-    assert await realname._tencent_check("张三", ADULT_ID) is True
-    assert await realname._tencent_check("张三", _born(date(1990, 1, 1))) is False
+    assert await realname._tencent_check("张三", ADULT_ID) is None
+    assert await realname._tencent_check("张三", _born(date(1990, 1, 1))) == "mismatch"
     req = calls[0]
     assert req.headers["X-TC-Action"] == "IdCardVerification"
     assert req.headers["Host"] == "faceid.tencentcloudapi.com"
@@ -259,6 +265,18 @@ async def test_tencent_result_mapping(monkeypatch, settings):
                         lambda **kw: real_client(transport=httpx.MockTransport(failing)))
     with pytest.raises(realname.RealnameError, match="provider_unavailable"):
         await realname._tencent_check("张三", ADULT_ID)
+
+    # 其余结果码: 能告诉用户哪里不对的分开; 服务方故障按暂不可用, 不记为用户核验失败
+    for code, expected in {"-2": "invalid_id_checksum", "-3": "invalid_name",
+                           "-5": "no_record", "-99": "mismatch"}.items():
+        monkeypatch.setattr(realname.httpx, "AsyncClient", lambda code=code, **kw: real_client(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"Response": {"Result": code}}))))
+        assert await realname._tencent_check("张三", ADULT_ID) == expected
+    for code in ("-4", "-6", "-7"):
+        monkeypatch.setattr(realname.httpx, "AsyncClient", lambda code=code, **kw: real_client(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"Response": {"Result": code}}))))
+        with pytest.raises(realname.RealnameError, match="provider_unavailable"):
+            await realname._tencent_check("张三", ADULT_ID)
 
 
 def test_production_config_validation(monkeypatch):
@@ -345,7 +363,7 @@ async def test_rejected_attempt_stores_no_identity(store, monkeypatch, settings)
     monkeypatch.setattr(realname, "_mock_enabled", lambda: False)
     monkeypatch.setattr(settings, "tencent_realname_secret_id", "id")
     monkeypatch.setattr(settings, "tencent_realname_secret_key", "key")
-    monkeypatch.setattr(realname, "_tencent_check", AsyncMock(return_value=False))
+    monkeypatch.setattr(realname, "_tencent_check", AsyncMock(return_value="mismatch"))
     with pytest.raises(realname.RealnameError, match="mismatch"):
         await realname.verify("u1", name="张三", id_number=ADULT_ID)
     row = store.rows["u1"]
