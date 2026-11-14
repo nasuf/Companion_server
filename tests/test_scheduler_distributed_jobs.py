@@ -48,3 +48,18 @@ def test_weekly_reflection_is_registered_through_distributed_wrapper():
 def test_runtime_job_queue_is_registered():
     jobs = {job.id: job for job in scheduler_mod.scheduler_job_definitions()}
     assert jobs["runtime_job_queue"].func is scheduler_mod._run_runtime_job_queue
+
+
+async def _passthrough_job(name, ttl, fn, **kwargs):
+    assert name == 'iap_notification_retry'
+    await fn()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('result,reported', [((3, 0), False), ((1, 2), True)])
+async def test_iap_notification_retry_reports_only_when_still_failing(result, reported):
+    with patch.object(scheduler_mod, '_run_distributed_job', new=_passthrough_job), \
+         patch('app.services.payments.notifications.retry_failed_notifications', new=AsyncMock(return_value=result)), \
+         patch.object(scheduler_mod, '_job_failed') as failed:
+        await scheduler_mod._run_iap_notification_retry()
+    assert failed.called is reported

@@ -351,3 +351,13 @@ async def test_retry_decode_failure_is_recorded_not_raised(monkeypatch):
     assert (ok, failed) == (0, 1)
     assert marked.await_args.args[0] == "uuid-9"
     assert marked.await_args.args[1].startswith("retry_decode_failed:")
+
+
+@pytest.mark.asyncio
+async def test_admin_unprocessed_filter_includes_failed_rows(monkeypatch):
+    from app.services.payments import admin
+
+    q = AsyncMock(return_value=[])
+    monkeypatch.setattr(admin, 'db', SimpleNamespace(query_raw=q))
+    await admin.list_notifications(unprocessed_only=True)
+    assert 'process_error IS NOT NULL' in q.call_args.args[0]

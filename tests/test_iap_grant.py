@@ -558,3 +558,14 @@ async def test_verify_accepts_matching_app_account_token(monkeypatch):
     result = await grant.verify_and_grant("22222222-2222-2222-2222-222222222222", "txn-mine")
 
     assert result["status"] == "granted"
+
+
+def test_require_owner_rejects_malformed_uuid():
+    with pytest.raises(grant.TransactionOwnerMismatchError):
+        grant._require_owner('not-a-uuid', '11111111-1111-1111-1111-111111111111')
+    with pytest.raises(grant.TransactionOwnerMismatchError):
+        grant._require_owner('11111111-1111-1111-1111-111111111111', 'garbage')
+
+
+def test_require_owner_allows_missing_token():
+    grant._require_owner('u1', None)
