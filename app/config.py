@@ -667,6 +667,9 @@ class Settings(BaseSettings):
                         self.apple_iap_private_key.strip()
                         or self.apple_iap_private_key_path.strip(),
                     ),
+                    # Production SignedDataVerifier raises ValueError without it,
+                    # which would surface as a 500 on every verify/notification.
+                    ("APPLE_IAP_APP_APPLE_ID", self.apple_iap_app_apple_id > 0),
                 )
                 if not value
             ]

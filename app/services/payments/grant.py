@@ -20,7 +20,11 @@ from app.services import wallet
 from app.services.payments import catalog
 from app.services.payments.apple import environment as apple_env
 from app.services.payments.catalog import IapProduct
-from app.services.payments.errors import AppleVerificationError, UnknownProductError
+from app.services.payments.errors import (
+    AppleVerificationError,
+    TransactionOwnerMismatchError,
+    UnknownProductError,
+)
 from app.services.runtime.tasks import fire_background
 from app.services.vip import grants as vip_grants
 from app.services.vip.entitlements import (
@@ -153,11 +157,29 @@ async def verify_and_grant(
     payload, env = await resolve_verified_payload(
         transaction_id, signed_transaction=signed_transaction
     )
+    _require_owner(user_id, _field(payload, "appAccountToken"))
     product = catalog.product_for(_field(payload, "productId") or "")
     if product is None:
         raise UnknownProductError(_field(payload, "productId") or "")
 
     return await record_and_grant(user_id, payload, env, product)
+
+
+def _require_owner(user_id: str, app_account_token: str | None) -> None:
+    """客户端购买时把 appAccountToken 设为用户 UUID；有值且不是当前用户就拒绝。
+
+    不 complete 的交易会留在设备队列里，原账号重新登录后照常到账。无 token 的
+    交易（旧版本客户端）放行，保持兼容。
+    """
+    if not app_account_token:
+        return
+    try:
+        token = uuid.UUID(str(app_account_token).strip())
+        current = uuid.UUID(str(user_id).strip())
+    except ValueError:
+        raise TransactionOwnerMismatchError() from None
+    if token != current:
+        raise TransactionOwnerMismatchError()
 
 
 async def record_and_grant(

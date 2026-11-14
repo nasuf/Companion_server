@@ -19,5 +19,9 @@ class AppleVerificationError(PaymentError):
     """Apple 侧校验失败：JWS 验签不通过、或 App Store Server API 拒绝。"""
 
 
+class TransactionOwnerMismatchError(PaymentError):
+    """交易的 appAccountToken 属于另一个账号（同设备切号重放 / 盗用他人 JWS）。"""
+
+
 class TransactionNotFoundError(AppleVerificationError):
     """transactionId 在 production 与 sandbox 都查不到（伪造 / 尚未同步）。"""

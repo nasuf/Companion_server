@@ -31,9 +31,24 @@ def test_apple_iap_enabled_with_keys_ok():
         apple_iap_issuer_id="issuer-uuid",
         apple_iap_key_id="KEY123",
         apple_iap_private_key="-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----",
+        apple_iap_app_apple_id=6779167374,
     )
     # 不应抛错
     settings.validate_security_config()
+
+
+def test_apple_iap_enabled_missing_app_apple_id_raises():
+    settings = Settings(
+        **_base_prod_kwargs(),
+        apple_iap_enabled=True,
+        apple_iap_bundle_id="com.bansheng.prod",
+        apple_iap_issuer_id="issuer-uuid",
+        apple_iap_key_id="KEY123",
+        apple_iap_private_key="-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----",
+    )
+    with pytest.raises(RuntimeError) as exc:
+        settings.validate_security_config()
+    assert "APPLE_IAP_APP_APPLE_ID" in str(exc.value)
 
 
 def test_apple_iap_disabled_skips_check():

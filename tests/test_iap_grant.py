@@ -529,3 +529,32 @@ async def test_vip_grant_calls_recompute_once(monkeypatch):
     assert recompute.await_count == 1
     _, kwargs = recompute.call_args
     assert kwargs.get("clear_lapse") is False
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_transaction_owned_by_another_user(monkeypatch):
+    fake = _FakeDb(existing=None)
+    payload = _payload("com.bansheng.ticket.80", txn="txn-other")
+    payload.appAccountToken = "11111111-1111-1111-1111-111111111111"
+    _wire(monkeypatch, fake, fetch_payload=payload)
+    credit = AsyncMock()
+    monkeypatch.setattr(grant.wallet, "credit_tickets", credit)
+
+    with pytest.raises(grant.TransactionOwnerMismatchError):
+        await grant.verify_and_grant("22222222-2222-2222-2222-222222222222", "txn-other")
+
+    credit.assert_not_awaited()
+    assert fake.iap_insert_args is None
+
+
+@pytest.mark.asyncio
+async def test_verify_accepts_matching_app_account_token(monkeypatch):
+    fake = _FakeDb(existing=None)
+    payload = _payload("com.bansheng.ticket.80", txn="txn-mine")
+    payload.appAccountToken = "22222222-2222-2222-2222-222222222222"
+    _wire(monkeypatch, fake, fetch_payload=payload)
+    monkeypatch.setattr(grant.wallet, "credit_tickets", AsyncMock())
+
+    result = await grant.verify_and_grant("22222222-2222-2222-2222-222222222222", "txn-mine")
+
+    assert result["status"] == "granted"

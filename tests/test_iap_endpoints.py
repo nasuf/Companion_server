@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.api.deps import require_redis
-from app.services.payments.errors import AppleVerificationError, UnknownProductError
+from app.services.payments.errors import (
+    AppleVerificationError,
+    TransactionOwnerMismatchError,
+    UnknownProductError,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +95,20 @@ def test_verify_apple_rejected_402(api_client, auth_header):
             headers=auth_header("u1"),
         )
     assert resp.status_code == 402
+
+
+def test_verify_owner_mismatch_403(api_client, auth_header):
+    with patch(
+        "app.api.public.iap.grant.verify_and_grant",
+        new=AsyncMock(side_effect=TransactionOwnerMismatchError()),
+    ):
+        resp = api_client.post(
+            "/iap/apple/verify",
+            json={"transaction_id": "t1"},
+            headers=auth_header("u1"),
+        )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "transaction_owner_mismatch"
 
 
 def test_verify_rejects_unknown_fields(api_client, auth_header):

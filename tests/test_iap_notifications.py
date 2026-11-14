@@ -244,3 +244,110 @@ async def test_refund_subscription_renewal_refreshes_state(monkeypatch):
     refresh.assert_awaited_once()
     assert refresh.call_args.args[:2] == ("otxn-sub", "u1")
     recompute.assert_awaited_once_with("u1")
+
+
+@pytest.mark.asyncio
+async def test_subscribed_before_verify_resolves_user_by_app_account_token(monkeypatch):
+    fake = _FakeDb(insert_new=True, user_row=None)
+    decoded = _decoded(NotificationTypeV2.SUBSCRIBED)
+    txn = _txn("com.bansheng.vip.monthly.auto")
+    txn.appAccountToken = "22222222-2222-2222-2222-222222222222"
+    _wire(monkeypatch, fake, decoded, txn)
+    monkeypatch.setattr(
+        notifications.grant,
+        "user_id_for_app_account_token",
+        AsyncMock(return_value="22222222-2222-2222-2222-222222222222"),
+    )
+    rg = AsyncMock()
+    monkeypatch.setattr(notifications.grant, "record_and_grant", rg)
+
+    await notifications.apply_notification("signed")
+
+    rg.assert_awaited_once()
+    assert rg.call_args.args[0] == "22222222-2222-2222-2222-222222222222"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_failure_leaves_notification_unprocessed(monkeypatch):
+    fake = _FakeDb(insert_new=True, user_row={"user_id": "u1"})
+    decoded = _decoded(NotificationTypeV2.DID_RENEW)
+    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.vip.monthly.auto"))
+    monkeypatch.setattr(
+        notifications.grant, "record_and_grant", AsyncMock(side_effect=RuntimeError("db down"))
+    )
+    marked = AsyncMock()
+    monkeypatch.setattr(notifications, "_mark_processed", marked)
+
+    await notifications.apply_notification("signed")
+
+    marked.assert_awaited_once_with("uuid-1", "db down")
+
+
+@pytest.mark.asyncio
+async def test_mark_processed_only_stamps_on_success(monkeypatch):
+    fake = _FakeDb()
+    calls: list[tuple] = []
+
+    async def _exec(q, *a):
+        calls.append((q, a))
+        return 1
+
+    fake.execute_raw = _exec
+    monkeypatch.setattr(notifications, "db", fake)
+
+    await notifications._mark_processed("uuid-1", "boom")
+
+    q, args = calls[0]
+    assert "CASE WHEN $2::text IS NULL THEN CURRENT_TIMESTAMP END" in q
+    assert args == ("apple", "boom", "uuid-1")
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_notifications_replays_and_counts(monkeypatch):
+    class _RetryDb(_FakeDb):
+        def _query(self, q, a):
+            if "FROM iap_notifications" in q and "signed_payload" in q:
+                return [
+                    {"notification_uuid": "uuid-1", "signed_payload": "jws-1"},
+                    {"notification_uuid": "uuid-2", "signed_payload": "jws-2"},
+                ]
+            return super()._query(q, a)
+
+    fake = _RetryDb(user_row={"user_id": "u1"})
+    decoded = _decoded(NotificationTypeV2.DID_RENEW)
+    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.vip.monthly.auto"))
+    rg = AsyncMock(side_effect=[None, RuntimeError("still broken")])
+    monkeypatch.setattr(notifications.grant, "record_and_grant", rg)
+    marked = AsyncMock()
+    monkeypatch.setattr(notifications, "_mark_processed", marked)
+
+    ok, failed = await notifications.retry_failed_notifications(limit=10)
+
+    assert (ok, failed) == (1, 1)
+    assert rg.await_count == 2
+    assert marked.await_args_list[0].args == ("uuid-1", None)
+    assert marked.await_args_list[1].args == ("uuid-1", "still broken")
+
+
+@pytest.mark.asyncio
+async def test_retry_decode_failure_is_recorded_not_raised(monkeypatch):
+    class _RetryDb(_FakeDb):
+        def _query(self, q, a):
+            if "FROM iap_notifications" in q and "signed_payload" in q:
+                return [{"notification_uuid": "uuid-9", "signed_payload": "jws"}]
+            return super()._query(q, a)
+
+    monkeypatch.setattr(notifications, "db", _RetryDb())
+    monkeypatch.setattr(
+        notifications.apple_env,
+        "verify_notification",
+        AsyncMock(side_effect=RuntimeError("ocsp timeout")),
+    )
+    marked = AsyncMock()
+    monkeypatch.setattr(notifications, "_mark_processed", marked)
+
+    ok, failed = await notifications.retry_failed_notifications()
+
+    assert (ok, failed) == (0, 1)
+    assert marked.await_args.args[0] == "uuid-9"
+    assert marked.await_args.args[1].startswith("retry_decode_failed:")

@@ -170,7 +170,8 @@ async def list_notifications(
         params.append(notification_type)
         clauses.append(f"notification_type = ${len(params)}")
     if unprocessed_only:
-        clauses.append("processed_at IS NULL")
+        # 旧版本失败行也写了 processed_at，靠 process_error 一并筛出。
+        clauses.append("(processed_at IS NULL OR process_error IS NOT NULL)")
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = await db.query_raw(
         f"""

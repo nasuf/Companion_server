@@ -15,6 +15,7 @@ from app.services.payments import grant, notifications
 from app.services.payments.errors import (
     AppleVerificationError,
     PaymentError,
+    TransactionOwnerMismatchError,
     UnknownProductError,
 )
 
@@ -69,6 +70,15 @@ async def verify_purchase(
                 },
             )
             raise HTTPException(status_code=402, detail="verification_failed") from exc
+        except TransactionOwnerMismatchError as exc:
+            logger.warning(
+                "iap verify owner mismatch",
+                extra={
+                    "event": EVT_PAYMENT_VERIFY_FAIL,
+                    "transaction_id": data.transaction_id,
+                },
+            )
+            raise HTTPException(status_code=403, detail="transaction_owner_mismatch") from exc
         except PaymentError as exc:
             raise HTTPException(status_code=422, detail="payment_error") from exc
         logger.info(

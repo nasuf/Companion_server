@@ -458,6 +458,15 @@ def register_scheduler_jobs(scheduler):
         replace_existing=True,
         max_instances=1,
     )
+    # Apple 通知处理失败只记 process_error 并回 200，Apple 不会重推；这里补处理。
+    scheduler.add_job(
+        _run_iap_notification_retry,
+        "interval",
+        minutes=10,
+        id="iap_notification_retry",
+        replace_existing=True,
+        max_instances=1,
+    )
     scheduler.add_job(
         _run_expire_consumable_batches,
         "cron",
@@ -1310,6 +1319,26 @@ async def _run_vip_expire_clear():
         )
 
     await _run_distributed_job("vip_expire_clear", 3600, _body)
+
+
+async def _run_iap_notification_retry():
+    """重放处理失败的 App Store Server Notifications（续费/退款到账补偿）."""
+    from app.services.payments.notifications import retry_failed_notifications
+
+    async def _body():
+        ok, failed = await retry_failed_notifications(limit=50)
+        if failed:
+            _job_failed(
+                "IAP notification retry",
+                RuntimeError(f"{failed} notification(s) still failing"),
+            )
+        logger.info(
+            f"[CRON] iap_notification_retry ok: ok={ok} failed={failed}",
+            extra={"event": EVT_SCHEDULER_JOB, "task_name": "iap_notification_retry",
+                   "phase": "ok", "retried_ok": ok, "failed": failed},
+        )
+
+    await _run_distributed_job("iap_notification_retry", 600, _body)
 
 
 async def _run_expire_consumable_batches():

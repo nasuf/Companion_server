@@ -2,7 +2,8 @@
 
 webhook 唯一鉴权 = JWS 验签（apple_env.verify_notification）。收到即落 iap_notifications
 （notification_uuid 唯一），已收过直接短路。处理失败只记 process_error 不抛，让端点回
-200 防 Apple 无限重推——靠 unprocessed 行 + 幂等重放补处理。
+200 防 Apple 无限重推——失败行 processed_at 保持 NULL，由 scheduler 的
+iap_notification_retry 调 [retry_failed_notifications] 幂等重放。
 """
 
 from __future__ import annotations
@@ -46,11 +47,14 @@ def _enum_val(value: Any) -> str | None:
     return getattr(value, "value", str(value))
 
 
-async def apply_notification(signed_payload: str) -> None:
+# 重放窗口：太新的行可能还在首次处理中；太旧的反复失败说明需要人工介入
+# （后台「未处理」筛选可见），不再无限重试。
+RETRY_MIN_AGE_S = 300
+RETRY_MAX_AGE_S = 72 * 3600
+
+
+async def _decode(signed_payload: str) -> dict[str, Any]:
     decoded, env = await apple_env.verify_notification(signed_payload)  # 验签失败→抛，端点回 401
-    uuid = _field(decoded, "notificationUUID") or ""
-    ntype = _enum_val(_field(decoded, "notificationType"))
-    subtype = _enum_val(_field(decoded, "subtype"))
     data = _field(decoded, "data")
 
     txn = None
@@ -64,13 +68,26 @@ async def apply_notification(signed_payload: str) -> None:
             apple_env.verify_renewal_info, _field(data, "signedRenewalInfo"), env
         )
 
-    original_txn_id = _field(txn, "originalTransactionId") or _field(
-        renewal, "originalTransactionId"
-    )
-    transaction_id = _field(txn, "transactionId")
+    return {
+        "uuid": _field(decoded, "notificationUUID") or "",
+        "ntype": _enum_val(_field(decoded, "notificationType")),
+        "subtype": _enum_val(_field(decoded, "subtype")),
+        "env": env,
+        "txn": txn,
+        "renewal": renewal,
+        "original_txn_id": _field(txn, "originalTransactionId")
+        or _field(renewal, "originalTransactionId"),
+        "transaction_id": _field(txn, "transactionId"),
+    }
+
+
+async def apply_notification(signed_payload: str) -> None:
+    n = await _decode(signed_payload)
+    uuid, ntype, subtype, env = n["uuid"], n["ntype"], n["subtype"], n["env"]
+    transaction_id = n["transaction_id"]
 
     is_new = await _insert_notification(
-        uuid, ntype, subtype, env, original_txn_id, transaction_id, signed_payload
+        uuid, ntype, subtype, env, n["original_txn_id"], transaction_id, signed_payload
     )
     logger.info(
         "iap notification %s/%s",
@@ -87,9 +104,18 @@ async def apply_notification(signed_payload: str) -> None:
     if not is_new:
         return  # 幂等：已收到过这条通知
 
+    await _process(n)
+
+
+async def _process(n: dict[str, Any]) -> bool:
+    """分派一条已验签通知；成功返回 True。失败只记 process_error，不抛。"""
+    uuid, ntype = n["uuid"], n["ntype"]
     try:
-        await _dispatch(ntype, subtype, txn, renewal, env, uuid, original_txn_id)
+        await _dispatch(
+            ntype, n["subtype"], n["txn"], n["renewal"], n["env"], uuid, n["original_txn_id"]
+        )
         await _mark_processed(uuid, None)
+        return True
     except Exception as exc:
         logger.exception(
             "iap notification dispatch failed uuid=%s type=%s",
@@ -98,10 +124,51 @@ async def apply_notification(signed_payload: str) -> None:
             extra={
                 "event": EVT_PAYMENT_NOTIFICATION_FAIL,
                 "notification_type": ntype,
-                "environment": env,
+                "environment": n["env"],
             },
         )
         await _mark_processed(uuid, str(exc))
+        return False
+
+
+async def retry_failed_notifications(*, limit: int = 50) -> tuple[int, int]:
+    """重放处理失败的通知（按接收顺序，保证 SUBSCRIBED 先于 REFUND）。
+
+    所有分派分支都按 transactionId / notification_uuid 幂等，重放不会重复发放。
+    返回 (成功数, 失败数)。
+    """
+    rows = await db.query_raw(
+        """
+        SELECT notification_uuid, signed_payload
+        FROM iap_notifications
+        WHERE provider = $1
+          AND (processed_at IS NULL OR process_error IS NOT NULL)
+          AND received_at < CURRENT_TIMESTAMP - make_interval(secs => $2)
+          AND received_at > CURRENT_TIMESTAMP - make_interval(secs => $3)
+        ORDER BY received_at ASC
+        LIMIT $4
+        """,
+        PROVIDER_APPLE,
+        float(RETRY_MIN_AGE_S),
+        float(RETRY_MAX_AGE_S),
+        limit,
+    )
+    ok = failed = 0
+    for row in rows:
+        uuid = str(_field(row, "notification_uuid", "") or "")
+        try:
+            n = await _decode(str(_field(row, "signed_payload", "") or ""))
+        except Exception as exc:
+            # 首次已验签通过才落库；这里失败多为 OCSP/网络抖动，留给下一轮。
+            logger.warning("iap notification retry decode failed uuid=%s: %s", uuid[:12], exc)
+            await _mark_processed(uuid, f"retry_decode_failed:{exc}")
+            failed += 1
+            continue
+        if await _process(n):
+            ok += 1
+        else:
+            failed += 1
+    return ok, failed
 
 
 async def _dispatch(
@@ -155,9 +222,12 @@ async def _grant_from_notification(txn: Any, env: str, uuid: str) -> None:
     if txn is None:
         return
     original_txn_id = _field(txn, "originalTransactionId") or _field(txn, "transactionId")
-    user_id = await _user_for_original_txn(original_txn_id)
+    # 首购通知可能早于客户端 verify 落库：库里查不到就按 appAccountToken（=用户 UUID）认人。
+    user_id = await _user_for_original_txn(
+        original_txn_id
+    ) or await grant.user_id_for_app_account_token(_field(txn, "appAccountToken"))
     if not user_id:
-        # 通知早于客户端 verify 落库（少见）：跳过，客户端下次 verify 会补到账。
+        # 无 token 的旧客户端交易：跳过，客户端下次 verify 会补到账。
         logger.warning("iap renew notification with no known user otxn=%s", (original_txn_id or "")[:12])
         return
     product = catalog.product_for(_field(txn, "productId") or "")
@@ -465,10 +535,12 @@ async def _insert_notification(
 
 
 async def _mark_processed(uuid: str, error: str | None) -> None:
+    """成功 → processed_at=now 并清 error；失败 → processed_at 保持 NULL 等重放。"""
     await db.execute_raw(
         """
         UPDATE iap_notifications
-        SET processed_at = CURRENT_TIMESTAMP, process_error = $2
+        SET processed_at = CASE WHEN $2::text IS NULL THEN CURRENT_TIMESTAMP END,
+            process_error = $2
         WHERE provider = $1 AND notification_uuid = $3
         """,
         PROVIDER_APPLE,
