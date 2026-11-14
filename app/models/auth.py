@@ -119,6 +119,20 @@ class PhoneBindRequest(BaseModel):
     code: str = Field(min_length=4, max_length=8)
 
 
+class WeChatMobileBindRequest(BaseModel):
+    """App 内已登录用户 (如手机号账号) 绑定微信: 携带 App 微信授权回来的 code."""
+
+    code: str = Field(min_length=1, max_length=512)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        code = value.strip()
+        if not code:
+            raise ValueError("code is required")
+        return code
+
+
 class WeChatH5BindRequest(BaseModel):
     """已登录用户 (如手机号账号) 绑定微信: 携带 OAuth 回调 code."""
 
@@ -166,6 +180,8 @@ class AuthResponse(BaseModel):
     # Binding state for the account-settings UI (phone masked at the API layer).
     phone: str | None = None
     wechat_bound: bool = False
+    # 已绑微信时的微信昵称 (隐私中心「账号信息」展示); 没有昵称或未绑为 None
+    wechat_nickname: str | None = None
     # 实名门槛还差的步骤, 按顺序: phone / id_card / minor_blocked。空 = 可以聊天。
     realname_required: list[str] = []
     realname_mode: str = "off"

@@ -186,7 +186,7 @@ async def test_auth_response_carries_agent_nickname(monkeypatch):
         conversation=SimpleNamespace(find_first=AsyncMock(return_value=None)),
     ))
     monkeypatch.setattr(auth_api, "resolve_display_identity", AsyncMock(return_value=(None, None)))
-    monkeypatch.setattr(phone_auth_mod, "get_identity_summary", AsyncMock(return_value=(None, False)))
+    monkeypatch.setattr(phone_auth_mod, "get_identity_summary", AsyncMock(return_value=(None, False, None)))
 
     response = await auth_api._build_auth_response(user, "jwt")
     assert (response.agent_name, response.agent_nickname) == ("陈砚", "阿砚")

@@ -343,7 +343,7 @@ async def test_build_auth_response_never_falls_back_to_the_login_hash(monkeypatc
     monkeypatch.setattr(
         phone_auth_mod,
         "get_identity_summary",
-        AsyncMock(return_value=("13812345678", False)),
+        AsyncMock(return_value=("13812345678", False, None)),
     )
 
     response = await auth_api._build_auth_response(user, "jwt")
@@ -588,3 +588,66 @@ async def test_bind_phone_creates_row_when_none(monkeypatch):
     data = db.authidentity.create.await_args.kwargs["data"]
     assert data["provider"] == "phone"
     assert data["providerAccountId"] == "13900001111"
+
+
+# ── App 内绑定微信 (/auth/wechat/mobile/bind) ─────────────────────
+@pytest.mark.asyncio
+async def test_wechat_mobile_bind_endpoint(monkeypatch):
+    """成功返回刷新后的会话; 微信已属另一账号 409; 授权失败 401 并记一次失败。"""
+    from fastapi import HTTPException
+
+    from app.api.public import auth as auth_api
+    from app.models.auth import WeChatMobileBindRequest
+    from app.services import wechat_auth
+    from app.services.phone_auth import IdentityConflict
+
+    user = SimpleNamespace(id="user-1", username="phone_x", role="user")
+    monkeypatch.setattr(auth_api, "db", SimpleNamespace(
+        user=SimpleNamespace(find_unique=AsyncMock(return_value=user))))
+    monkeypatch.setattr(auth_api, "enforce_login_rate_limit", AsyncMock())
+    monkeypatch.setattr(auth_api, "record_login_failure", AsyncMock())
+    monkeypatch.setattr(auth_api, "clear_login_failures", AsyncMock())
+    monkeypatch.setattr(auth_api, "audit_auth_request_event", lambda *a, **k: None)
+    monkeypatch.setattr(auth_api, "exchange_wechat_code", AsyncMock(return_value="token"))
+    built = SimpleNamespace(wechat_bound=True)
+    monkeypatch.setattr(auth_api, "_build_auth_response", AsyncMock(return_value=built))
+    bind = AsyncMock()
+    monkeypatch.setattr(wechat_auth, "bind_wechat_to_user", bind)
+    body = WeChatMobileBindRequest(code=" abc ")
+    assert body.code == "abc"
+
+    assert await auth_api.wechat_mobile_bind(body, FakeRequest(), payload={"sub": "user-1"}) is built
+    bind.assert_awaited_once_with("user-1", "token")
+    auth_api.exchange_wechat_code.assert_awaited_once_with("abc")
+
+    bind.side_effect = IdentityConflict("wechat_taken")
+    with pytest.raises(HTTPException) as exc:
+        await auth_api.wechat_mobile_bind(body, FakeRequest(), payload={"sub": "user-1"})
+    assert exc.value.status_code == 409 and "已绑定其他账号" in exc.value.detail
+
+    auth_api.exchange_wechat_code.side_effect = wechat_auth.WeChatLoginError("bad code")
+    with pytest.raises(HTTPException) as exc:
+        await auth_api.wechat_mobile_bind(body, FakeRequest(), payload={"sub": "user-1"})
+    assert exc.value.status_code == 401
+    auth_api.record_login_failure.assert_awaited_once()
+
+    auth_api.db.user.find_unique.return_value = None
+    with pytest.raises(HTTPException) as exc:
+        await auth_api.wechat_mobile_bind(body, FakeRequest(), payload={"sub": "gone"})
+    assert exc.value.status_code == 401
+
+    with pytest.raises(ValueError):
+        WeChatMobileBindRequest(code="   ")
+
+
+@pytest.mark.asyncio
+async def test_identity_summary_includes_wechat_nickname(monkeypatch):
+    import app.services.phone_auth as phone_auth_mod
+
+    rows = [SimpleNamespace(provider="phone", providerAccountId="13812345678", rawProfile=None, updatedAt="1"),
+            SimpleNamespace(provider="wechat", providerAccountId="u", rawProfile={"nickname": "阿涛"}, updatedAt="2")]
+    monkeypatch.setattr(phone_auth_mod, "db", SimpleNamespace(
+        authidentity=SimpleNamespace(find_many=AsyncMock(return_value=rows))))
+    assert await phone_auth_mod.get_identity_summary("u1") == ("13812345678", True, "阿涛")
+    phone_auth_mod.db.authidentity.find_many.return_value = rows[:1]
+    assert await phone_auth_mod.get_identity_summary("u1") == ("13812345678", False, None)

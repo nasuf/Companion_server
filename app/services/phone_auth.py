@@ -144,8 +144,10 @@ async def bind_phone_to_user(user_id: str, phone: str) -> None:
     )
 
 
-async def get_identity_summary(user_id: str) -> tuple[str | None, bool]:
-    """Return (phone, wechat_bound) for surfacing binding state to clients."""
+async def get_identity_summary(user_id: str) -> tuple[str | None, bool, str | None]:
+    """Return (phone, wechat_bound, wechat_nickname) for the account-info UI."""
+    from app.services.user_profile import _wechat_identity_profile
+
     identities = await db.authidentity.find_many(where={"userId": user_id})
     phone: str | None = None
     wechat_bound = False
@@ -154,4 +156,5 @@ async def get_identity_summary(user_id: str) -> tuple[str | None, bool]:
             phone = identity.providerAccountId
         elif identity.provider == "wechat":
             wechat_bound = True
-    return phone, wechat_bound
+    nickname, _ = _wechat_identity_profile(identities)
+    return phone, wechat_bound, nickname

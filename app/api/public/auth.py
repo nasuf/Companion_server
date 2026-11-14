@@ -18,6 +18,7 @@ from app.models.auth import (
     WeChatH5BindRequest,
     WeChatH5LoginRequest,
     WeChatMiniLoginRequest,
+    WeChatMobileBindRequest,
     WeChatMobileLoginRequest,
     WeChatProfileUpdate,
 )
@@ -90,7 +91,7 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
 
     # 冷静期内任何一次登录 (含恢复会话) 都撤销注销申请
     deletion_cancelled = await account_deletion.cancel_on_login(user)
-    phone, wechat_bound = await get_identity_summary(user.id)
+    phone, wechat_bound, wechat_nickname = await get_identity_summary(user.id)
     realname_state = await realname.load_state(user.id, role=user.role)
     workspace = await get_active_workspace(user_id=user.id)
     agent = None
@@ -132,6 +133,7 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
         conversation_id=conversation.id if conversation else None,
         phone=_mask_phone(phone),
         wechat_bound=wechat_bound,
+        wechat_nickname=wechat_nickname,
         realname_required=realname_state.required,
         realname_mode=realname_state.mode,
         deletion_cancelled=deletion_cancelled,
@@ -451,6 +453,48 @@ async def phone_bind(data: PhoneBindRequest, request: Request, payload: dict = D
         )
     audit_auth_request_event(
         "phone_bind_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    token = create_jwt(user.id, user.role)
+    return await _build_auth_response(user, token)
+
+
+@router.post("/wechat/mobile/bind", response_model=AuthResponse)
+async def wechat_mobile_bind(data: WeChatMobileBindRequest, request: Request,
+                             payload: dict = Depends(require_user)):
+    """App 内已登录用户 (如手机号账号) 绑定微信: 授权流程与 App 微信登录相同。
+
+    绑定后两种方式登录同一个账号: 微信登录按 unionid 找到这条身份, 手机号登录按号码找到同一用户。
+    该微信已是另一个账号时返回 409, 不合并账号。"""
+    from app.services.phone_auth import IdentityConflict
+    from app.services.wechat_auth import bind_wechat_to_user
+
+    user = await db.user.find_unique(where={"id": payload["sub"]})
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
+
+    rate_limit_key = "wechat:mobilebind"
+    await enforce_login_rate_limit(request, rate_limit_key)
+    try:
+        token_payload = await exchange_wechat_code(data.code)
+        await bind_wechat_to_user(user.id, token_payload)
+    except WeChatLoginError:
+        await record_login_failure(request, rate_limit_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信授权失败，请稍后重试",
+        )
+    except IdentityConflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该微信已绑定其他账号，请先用微信登录那个账号处理",
+        )
+    await clear_login_failures(request, rate_limit_key)
+    audit_auth_request_event(
+        "wechat_bind_success",
         request,
         username=user.username,
         user_id=user.id,
