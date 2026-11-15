@@ -95,3 +95,57 @@ async def test_hard_error_in_all_envs_raises_verification_error(monkeypatch):
 
     with pytest.raises(AppleVerificationError):
         await env.fetch_and_verify_transaction("txn")
+
+
+class _FakeNotifVerifier:
+    def __init__(self, *, exc=None, result=None):
+        self.exc = exc
+        self.result = result
+        self.calls = 0
+
+    def verify_and_decode_notification(self, signed):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+
+def _verifiers(monkeypatch, prod, sandbox):
+    monkeypatch.setattr(env.settings, 'apple_iap_environment', 'auto')
+    table = {Environment.PRODUCTION: prod, Environment.SANDBOX: sandbox}
+    monkeypatch.setattr(env, 'build_verifier', lambda e: table[e])
+
+
+@pytest.mark.asyncio
+async def test_sandbox_notification_retries_after_app_identifier_mismatch(monkeypatch):
+    # 沙盒通知不带 appAppleId，production 验签器先报 INVALID_APP_IDENTIFIER。
+    prod = _FakeNotifVerifier(exc=env.VerificationException(env.VerificationStatus.INVALID_APP_IDENTIFIER))
+    sandbox = _FakeNotifVerifier(result=SimpleNamespace(ok=True))
+    _verifiers(monkeypatch, prod, sandbox)
+
+    decoded, environment = await env.verify_notification('jws')
+
+    assert environment == 'Sandbox'
+    assert decoded.ok is True
+    assert prod.calls == 1 and sandbox.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_notification_rejected_when_last_env_also_mismatches(monkeypatch):
+    err = env.VerificationException(env.VerificationStatus.INVALID_APP_IDENTIFIER)
+    _verifiers(monkeypatch, _FakeNotifVerifier(exc=err), _FakeNotifVerifier(exc=err))
+
+    with pytest.raises(AppleVerificationError):
+        await env.verify_notification('jws')
+
+
+@pytest.mark.asyncio
+async def test_tampered_notification_does_not_try_next_env(monkeypatch):
+    prod = _FakeNotifVerifier(exc=env.VerificationException(env.VerificationStatus.VERIFICATION_FAILURE))
+    sandbox = _FakeNotifVerifier(result=SimpleNamespace(ok=True))
+    _verifiers(monkeypatch, prod, sandbox)
+
+    with pytest.raises(AppleVerificationError):
+        await env.verify_notification('jws')
+
+    assert sandbox.calls == 0

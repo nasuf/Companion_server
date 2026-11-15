@@ -193,8 +193,13 @@ async def verify_notification(
             )
             return decoded, env.value
         except VerificationException as exc:
-            # 环境不符就换下一个；其它验签失败（篡改/证书链/bundle）直接拒绝。
-            if exc.status == VerificationStatus.INVALID_ENVIRONMENT and len(envs) > 1:
+            # 环境不符就换下一个。沙盒通知不带 appAppleId，production 验签器会先报
+            # INVALID_APP_IDENTIFIER（库内先查应用标识再查环境），同样要换环境重试；
+            # 最后一个环境仍校验 bundleId，伪造通知依然被拒。其它失败（篡改/证书链）直接拒绝。
+            if exc.status in (
+                VerificationStatus.INVALID_ENVIRONMENT,
+                VerificationStatus.INVALID_APP_IDENTIFIER,
+            ) and len(envs) > 1 and env is not envs[-1]:
                 last_exc = AppleVerificationError(f"notif_verify_failed:{exc.status}")
                 continue
             raise AppleVerificationError(f"notif_verify_failed:{exc.status}") from exc
