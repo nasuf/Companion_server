@@ -2,7 +2,7 @@
 
 2026-11-15 生产：`WHERE id = $1::uuid` 触发 `operator does not exist: text = uuid`，
 ONE_TIME_CHARGE 通知的兜底路径恒失败。mock 数据库的测试抓不到这类错误，所以分两层：
-静态断言（CI 必跑）+ 真实 PostgreSQL（设 IAP_TEST_DATABASE_URL 指向本地一次性库才运行，只用临时表）。
+静态断言（CI 必跑）+ 真实 PostgreSQL（设 BILLING_TEST_DATABASE_URL 指向本地一次性库才运行，只用临时表）。
 """
 import os
 from datetime import timedelta
@@ -46,9 +46,9 @@ async def test_invalid_token_skips_query(monkeypatch, token):
 
 @pytest.fixture
 async def postgres_users(monkeypatch):
-    url = os.getenv("IAP_TEST_DATABASE_URL")
+    url = os.getenv("BILLING_TEST_DATABASE_URL")
     if not url:
-        pytest.skip("IAP_TEST_DATABASE_URL must point to a disposable local PostgreSQL")
+        pytest.skip("BILLING_TEST_DATABASE_URL must point to a disposable local PostgreSQL")
     assert urlsplit(url).hostname in {"127.0.0.1", "localhost", "::1"}
     database = Prisma(datasource={"url": url}, http={"trust_env": False})
     await database.connect()
