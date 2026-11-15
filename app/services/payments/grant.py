@@ -127,7 +127,7 @@ async def user_id_for_app_account_token(token: str | None) -> str | None:
     rows = await db.query_raw(
         """
         SELECT id FROM users
-        WHERE id = $1::uuid AND status = 'active'
+        WHERE id = $1 AND status = 'active'
         LIMIT 1
         """,
         user_id,
