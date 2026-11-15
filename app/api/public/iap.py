@@ -109,6 +109,11 @@ async def app_store_notifications(request: Request):
     try:
         await notifications.apply_notification(signed)
     except AppleVerificationError as exc:
+        logger.warning(
+            "iap notification signature rejected: %s",
+            exc,
+            extra={"event": EVT_PAYMENT_VERIFY_FAIL, "reason": str(exc)[:120]},
+        )
         raise HTTPException(status_code=401, detail="invalid_signature") from exc
     except Exception:
         # 已在 apply_notification 内落库；此处兜底不让非验签异常打成非 2xx。
