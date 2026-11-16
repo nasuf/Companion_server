@@ -22,6 +22,9 @@ class PromptTemplateResponse(BaseModel):
     web_version: int | None = None
     content_version_id: str | None = None
     propagation: "PromptPropagationStatus" = Field(default_factory=lambda: PromptPropagationStatus())
+    # Q01.01: 变量契约 — registry 中声明的必需/可选占位符列表，空列表表示无大括号模板
+    required_vars: list[str] = Field(default_factory=list)
+    optional_vars: list[str] = Field(default_factory=list)
 
 
 

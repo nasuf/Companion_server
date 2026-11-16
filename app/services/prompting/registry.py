@@ -229,6 +229,11 @@ class PromptDefinition:
     description: str
     default_text: str
     default_enabled: bool = True
+    # Q01.01: 变量契约。required_vars 是调用方保证会填的占位符；optional_vars
+    # 是按条件注入的占位符（empty 时 compact_optional_reference_rows 会删行）。
+    # 两者均为空时前端不展示变量面板（无大括号的原样拼接模板）。
+    required_vars: tuple[str, ...] = ()
+    optional_vars: tuple[str, ...] = ()
 
 
 # spec 文档来源标记约定 (description 内统一格式):

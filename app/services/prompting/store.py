@@ -72,8 +72,34 @@ async def _sync_cache(row) -> bool:
         return False
 
 
+_PLACEHOLDER_PAT = re.compile(
+    r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)(?:![^}:]+)?(?::[^}]+)?\}(?!\})"
+)
+
+
+def _extract_vars(text: str) -> list[str]:
+    """从模板文本提取占位符名称，去重、保序。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _PLACEHOLDER_PAT.finditer(text):
+        name = m.group(1)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
 def _response(definition, row, *, cache_synced=True, version_id=None, publication=None) -> dict:
-    return {**asdict(definition), "content": row.content if row else definition.default_text,
+    base = asdict(definition)
+    # Q01.01: required_vars/optional_vars 若 registry 未声明，从 default_text 自动推导。
+    # asdict 把 dataclass tuple 字段保留为 tuple；统一转 list 对齐 PromptTemplateResponse。
+    req = list(base.get("required_vars") or ())
+    opt = list(base.get("optional_vars") or ())
+    if not req and not opt:
+        req = _extract_vars(definition.default_text)
+    base["required_vars"] = req
+    base["optional_vars"] = opt
+    return {**base, "content": row.content if row else definition.default_text,
             "is_enabled": row.isEnabled if row else definition.default_enabled, "source": "db" if row else "default",
             "updated_at": row.updatedAt.isoformat() if row else None,
             "revision": row.revision if row else 0, "web_managed": row.webManaged if row else False,

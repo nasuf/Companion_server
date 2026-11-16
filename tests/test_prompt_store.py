@@ -68,3 +68,55 @@ def test_raw_text_prompts_may_keep_literal_braces():
     store.check_template_syntax('示例 {"a": 1} 和 {1,2}', 'chat.system_base')
     with pytest.raises(ValueError):
         store.check_template_syntax('示例 {1,2}', 'memory.relevance')
+
+
+# Q01.01: 变量提取与 PromptDefinition 新字段
+def test_extract_vars_from_template():
+    from app.services.prompting.store import _extract_vars
+    # 基本提取
+    assert _extract_vars("你好 {name}，你的年龄是 {age}") == ["name", "age"]
+    # 去重、保序
+    assert _extract_vars("{x} {y} {x}") == ["x", "y"]
+    # 转义 {{ }} 不提取
+    assert _extract_vars("示例 {{json}} 和 {real}") == ["real"]
+    # 无占位符
+    assert _extract_vars("纯文本") == []
+
+
+def test_response_includes_vars_from_default_text():
+    from app.services.prompting.store import _extract_vars, _response
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    # chat.temporal_check 有 {date}/{evidence}/{question}/{reply}
+    defn = PROMPT_DEFINITION_MAP["chat.temporal_check"]
+    response = _response(defn, None)
+    assert isinstance(response["required_vars"], list)
+    assert "date" in response["required_vars"]
+    assert "question" in response["required_vars"]
+    assert response["optional_vars"] == []
+
+
+def test_response_uses_registry_vars_when_declared():
+    from app.services.prompting.store import _response
+    from app.services.prompting.registry import PromptDefinition
+    defn = PromptDefinition(
+        key="test.fake", title="T", stage="S", category="C",
+        description="D", default_text="hello {name} {extra}",
+        required_vars=("name",), optional_vars=("extra",),
+    )
+    response = _response(defn, None)
+    assert response["required_vars"] == ["name"]
+    assert response["optional_vars"] == ["extra"]
+
+
+def test_every_definition_has_valid_var_contract():
+    """registry 里所有 prompt 的 required_vars + optional_vars 子集等于 default_text 占位符集合（允许 registry 比实际少，不允许多声明不存在的变量）."""
+    from app.services.prompting.registry import PROMPT_DEFINITIONS
+    from app.services.prompting.store import _extract_vars
+    for defn in PROMPT_DEFINITIONS:
+        actual = set(_extract_vars(defn.default_text))
+        declared = set(defn.required_vars) | set(defn.optional_vars)
+        extra = declared - actual
+        assert not extra, (
+            f"{defn.key}: registry 声明了不存在于 default_text 的变量 {extra}"
+        )
