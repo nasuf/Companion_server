@@ -21,7 +21,7 @@
 它不该以逐次评论的形式出现, 而该沉淀成 AI 对这个人的印象。两条通路已经在跑:
 
 - `memory.behaviour_signals._game_fact` → 用户画像里的「多数局没下完就走了」
-- `games.daily_digest` → 当天对局摘要进每日自我总结
+- `schedule_domain.review_inputs.render_games` → 当天对局记录 (含未结算局) 进每日自我总结
 
 这两处都是"AI 的整体感觉", 而不是"AI 盯着你每一次操作"。
 

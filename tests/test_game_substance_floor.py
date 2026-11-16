@@ -260,11 +260,15 @@ class TestQuickExitStaysSilent:
         """沉默不等于丢信息: "老是点开又关"该沉淀成印象, 不是逐次评论."""
         import inspect
 
-        from app.services.games.daily_digest import render_digest
         from app.services.memory.behaviour_signals import _game_fact
+        from app.services.schedule_domain.review_inputs import render_games
 
         assert "没下完就走了" in inspect.getsource(_game_fact)
-        assert inspect.getsource(render_digest)
+        summary = render_games([
+            {"title": "五子棋", "status": "settled", "outcome": "win", "dur": 120},
+            {"title": "五子棋", "status": "started", "outcome": None, "dur": 30},
+        ])
+        assert "未结算1局" in summary
 
     def test_both_sync_paths_use_the_same_exit(self):
         """五子棋和其他游戏各有一条同步文案路径 —— 漏一条就又开始编造."""
