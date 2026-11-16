@@ -7,7 +7,7 @@ Regression: LLM 偶尔用 \\n\\n 分段而不是约定的 ||, 老逻辑只 split
 
 from __future__ import annotations
 
-from app.services.chat.orchestrator import (
+from app.services.chat.reply_formatting import (
     _clean_reply_part,
     split_and_validate_replies,
     truncate_at_sentence,

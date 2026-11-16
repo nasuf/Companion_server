@@ -132,9 +132,9 @@ from app.services.relationship.relation_meta import (
     get_relation_meta,
 )
 from app.services.chat.filler_reply import build_filler_emoji_reply
-# R1 拆分: 消息上下文工具函数移至 message_utils; 此处 re-export 保持
-# 既有导入路径兼容 (tests / multi_intent 等 from orchestrator import).
-# R3 拆分: 意图路由修正移至 intent_routes; re-export 兼容既有导入.
+# 以下名字由 graph 经 ctx.services (即本模块) 访问 (_parse_message_created_at 为本模块
+# 自用), 不是单纯的兼容 re-export; 规范定义在 intent_routes / reply_formatting /
+# relation_context / message_utils, 测试应从规范模块导入.
 from app.services.chat.intent_routes import (
     _downgrade_non_explicit_current_schedule_query,
     _downgrade_non_explicit_current_state,
@@ -142,14 +142,11 @@ from app.services.chat.intent_routes import (
     _filter_non_explicit_sub_fragments,
     _route_current_schedule_query_to_current_state,
 )
-# R2 拆分: 回复切分纯函数移至 reply_formatting; re-export 兼容既有导入.
 from app.services.chat.reply_formatting import (
     _clean_reply_part,
     split_and_validate_replies,
-    split_short_circuit_reply,
     truncate_at_sentence,
 )
-# R4 拆分: 关系情绪线索检测移至 relationship/relation_context; re-export 兼容.
 from app.services.relationship.relation_context import detect_relational_context
 from app.services.chat.message_utils import (
     _achievement_turn_id,

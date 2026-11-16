@@ -56,7 +56,7 @@ def test_generate_reply_signature_no_split_llm_fn():
 
 def test_main_llm_output_with_double_pipe_splits_into_two():
     """主 LLM 给"句1||句2" → split_and_validate_replies 切成 2 条 (不调任何额外 LLM)."""
-    from app.services.chat.orchestrator import split_and_validate_replies
+    from app.services.chat.reply_formatting import split_and_validate_replies
 
     raw = "今天天气真好||我想去散步"
     result = split_and_validate_replies(raw, max_count=3, max_per_reply=60, max_total=150)
@@ -71,7 +71,7 @@ def test_main_llm_single_sentence_stays_single():
     旧路径会调 split_2 LLM 强拆, LLM 编"祝你生日快乐" (5 月语境错).
     新路径直接单条返回, 内容 100% 来自主 LLM.
     """
-    from app.services.chat.orchestrator import split_and_validate_replies
+    from app.services.chat.reply_formatting import split_and_validate_replies
 
     raw = "12月8号，射手座，没错吧？😌🎂"
     result = split_and_validate_replies(raw, max_count=3, max_per_reply=60, max_total=150)
@@ -83,7 +83,7 @@ def test_main_llm_single_sentence_stays_single():
 
 def test_main_llm_double_newline_splits_too():
     """主 LLM 用 \\n\\n 分段 → 也按多条切 (split_and_validate_replies 兼容)."""
-    from app.services.chat.orchestrator import split_and_validate_replies
+    from app.services.chat.reply_formatting import split_and_validate_replies
 
     raw = "你好啊\n\n最近怎么样"
     result = split_and_validate_replies(raw, max_count=3, max_per_reply=60, max_total=150)
@@ -95,9 +95,7 @@ def test_split_replies_bounds_overlong_single_reply_without_split_llm():
     """主 LLM 给 1 条但很长 → 本地按标点切短, 不再调用 split LLM 扩写。"""
     import asyncio
     from app.services.chat.reply_generate import _split_replies
-    from app.services.chat.orchestrator import (
-        split_and_validate_replies, truncate_at_sentence,
-    )
+    from app.services.chat.reply_formatting import split_and_validate_replies, truncate_at_sentence
 
     long_reply = "这是一段很长的回复。" * 20  # ~200 chars
     result, source = asyncio.run(_split_replies(

@@ -584,7 +584,7 @@ async def test_handle_current_state_rejects_previous_reply_followup():
 def test_orchestrator_downgrades_memory_recall_misrouted_as_current_state():
     """身份/记忆追问被 LLM 误归 CURRENT_STATE 时, 应回到普通聊天记忆路径。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_current_state
+    from app.services.chat.intent_routes import _downgrade_non_explicit_current_state
 
     diagnostics = {}
     result = _downgrade_non_explicit_current_state(
@@ -601,7 +601,7 @@ def test_orchestrator_downgrades_memory_recall_misrouted_as_current_state():
 def test_orchestrator_downgrades_past_experience_question_as_current_state():
     """追问 AI 去过哪些城市是经历/聊天，不是当前状态。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_current_state
+    from app.services.chat.intent_routes import _downgrade_non_explicit_current_state
 
     diagnostics = {}
     result = _downgrade_non_explicit_current_state(
@@ -618,7 +618,7 @@ def test_orchestrator_downgrades_past_experience_question_as_current_state():
 def test_orchestrator_keeps_explicit_current_state_intent():
     """真正询问 AI 当前状态的消息仍保留 CURRENT_STATE 短路。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_current_state
+    from app.services.chat.intent_routes import _downgrade_non_explicit_current_state
 
     diagnostics = {}
     original = IntentResult(intent=IntentType.CURRENT_STATE, confidence=0.9)
@@ -635,7 +635,7 @@ def test_orchestrator_keeps_explicit_current_state_intent():
 def test_orchestrator_reroutes_current_schedule_query_to_current_state():
     """现在忙吗这类当前可用性问题不应走日程表播报路径。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _route_current_schedule_query_to_current_state
+    from app.services.chat.intent_routes import _route_current_schedule_query_to_current_state
 
     diagnostics = {}
     result = _route_current_schedule_query_to_current_state(
@@ -656,7 +656,7 @@ def test_orchestrator_reroutes_current_schedule_query_to_current_state():
 def test_orchestrator_keeps_future_schedule_query_as_schedule():
     """未来忙闲问题仍保留计划查询，不被当前状态路径吞掉。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _route_current_schedule_query_to_current_state
+    from app.services.chat.intent_routes import _route_current_schedule_query_to_current_state
 
     diagnostics = {}
     original = IntentResult(
@@ -677,7 +677,7 @@ def test_orchestrator_keeps_future_schedule_query_as_schedule():
 def test_orchestrator_downgrades_social_opener_misrouted_as_current_schedule():
     """寒暄被 LLM 误归 current schedule 时，应回到普通聊天路径。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_current_schedule_query
+    from app.services.chat.intent_routes import _downgrade_non_explicit_current_schedule_query
 
     diagnostics = {}
     result = _downgrade_non_explicit_current_schedule_query(
@@ -705,7 +705,7 @@ def test_orchestrator_downgrades_social_opener_misrouted_as_current_schedule():
 def test_orchestrator_keeps_explicit_current_schedule_query():
     """真正问日程/忙闲时仍保留 schedule query。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_current_schedule_query
+    from app.services.chat.intent_routes import _downgrade_non_explicit_current_schedule_query
 
     diagnostics = {}
     original = IntentResult(
@@ -725,7 +725,7 @@ def test_orchestrator_keeps_explicit_current_schedule_query():
 
 def test_orchestrator_reroutes_sleep_state_query_mislabeled_as_schedule_adjust():
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
+    from app.services.chat.intent_routes import _downgrade_non_explicit_schedule_adjust
 
     diagnostics = {}
     result = _downgrade_non_explicit_schedule_adjust(
@@ -745,7 +745,7 @@ def test_orchestrator_reroutes_sleep_state_query_mislabeled_as_schedule_adjust()
 
 def test_orchestrator_keeps_explicit_schedule_adjust_request():
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
+    from app.services.chat.intent_routes import _downgrade_non_explicit_schedule_adjust
 
     diagnostics = {}
     original = IntentResult(
@@ -765,7 +765,7 @@ def test_orchestrator_keeps_explicit_schedule_adjust_request():
 def test_orchestrator_downgrades_bare_affirmative_without_schedule_offer():
     """裸附和词 + AI 上一句非作息邀约 → 降级为日常交流 (2026-09-21 会话 6d5a34db bug)。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
+    from app.services.chat.intent_routes import _downgrade_non_explicit_schedule_adjust
 
     diagnostics = {}
     result = _downgrade_non_explicit_schedule_adjust(
@@ -783,7 +783,7 @@ def test_orchestrator_downgrades_bare_affirmative_without_schedule_offer():
 def test_orchestrator_keeps_bare_affirmative_after_schedule_offer():
     """裸附和词 + AI 上一句主动提出调整自己作息 → 保留作息调整 (grounding 命中)。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
-    from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
+    from app.services.chat.intent_routes import _downgrade_non_explicit_schedule_adjust
 
     diagnostics = {}
     original = IntentResult(intent=IntentType.SCHEDULE_ADJUST, confidence=0.88)
@@ -944,7 +944,7 @@ def test_no_hardcoded_schedule_adjust_templates_in_source():
 
 
 def test_orchestrator_filters_non_explicit_schedule_adjust_sub_fragments():
-    from app.services.chat.orchestrator import _filter_non_explicit_sub_fragments
+    from app.services.chat.intent_routes import _filter_non_explicit_sub_fragments
 
     diagnostics = {}
     result = _filter_non_explicit_sub_fragments(
@@ -961,7 +961,7 @@ def test_orchestrator_filters_non_explicit_schedule_adjust_sub_fragments():
 
 
 def test_orchestrator_filters_non_explicit_current_sub_fragments():
-    from app.services.chat.orchestrator import _filter_non_explicit_sub_fragments
+    from app.services.chat.intent_routes import _filter_non_explicit_sub_fragments
 
     diagnostics = {}
     result = _filter_non_explicit_sub_fragments(

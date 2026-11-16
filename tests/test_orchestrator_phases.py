@@ -28,10 +28,7 @@ async def _drain(agen):
 
 def test_ensure_current_user_message_appends_missing_current_turn():
     """Queued/delayed paths must not let the main prompt end at the previous user turn."""
-    from app.services.chat.orchestrator import (
-        _ensure_current_user_message,
-        _max_user_created_at,
-    )
+    from app.services.chat.message_utils import _ensure_current_user_message, _max_user_created_at
 
     received_at = "2026-04-28T07:24:35.953289+00:00"
     messages = [
@@ -69,7 +66,7 @@ def test_ensure_current_user_message_appends_missing_current_turn():
 
 
 def test_ensure_current_user_message_does_not_duplicate_present_turn():
-    from app.services.chat.orchestrator import _ensure_current_user_message
+    from app.services.chat.message_utils import _ensure_current_user_message
 
     messages = [
         {
@@ -96,7 +93,7 @@ def test_ensure_current_user_message_overlays_empty_card_content():
     rewritten prompt as user_message. The main LLM must see that rewrite,
     not `[MM-DD HH:MM] ` on an empty HumanMessage.
     """
-    from app.services.chat.orchestrator import _ensure_current_user_message
+    from app.services.chat.message_utils import _ensure_current_user_message
 
     rewrite = (
         "用户刚刚给你发了一个红包，金额 100 钞票"
@@ -127,10 +124,7 @@ def test_ensure_current_user_message_overlays_empty_card_content():
 
 def test_synthetic_current_without_message_id_does_not_expand_coverage():
     """Sub-intent synthetic turns can guide the prompt but must not widen scheduler dedup."""
-    from app.services.chat.orchestrator import (
-        _ensure_current_user_message,
-        _max_user_created_at,
-    )
+    from app.services.chat.message_utils import _ensure_current_user_message, _max_user_created_at
 
     ensured = _ensure_current_user_message(
         [],

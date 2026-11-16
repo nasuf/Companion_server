@@ -1,6 +1,6 @@
 """Tests for chat naturalness helpers."""
 
-from app.services.chat.orchestrator import detect_relational_context
+from app.services.relationship.relation_context import detect_relational_context
 from app.services.relationship.emotion import quick_emotion_estimate
 
 
