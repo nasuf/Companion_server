@@ -206,7 +206,6 @@ class Settings(BaseSettings):
     # Advanced / legacy overrides
     chat_model: str = ""
     utility_model: str = ""
-    prefilter_model: str = ""  # Override for pre-filter model (default: utility_model)
     enable_memory_prefilter: bool = True  # Spec §2.1.2: small model "记/不记" before big model extraction
     # When a message hits a high-precision emotion keyword, skip the utility LLM
     # emotion call (~300-400 tok + 200-600ms saved). Ambiguous messages (no
@@ -292,8 +291,6 @@ class Settings(BaseSettings):
     # LangSmith tracing (legacy backend, kept for old traces / opt-in)
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""
-    langsmith_org_id: str = ""
-    langsmith_project_id: str = ""
 
     # Axiom 结构化日志 (https://app.axiom.co). 字段在此声明仅为通过 Settings 校验
     # (避免 extra_forbidden); 实际运行 app/observability/axiom_setup.py 走 os.getenv.
@@ -397,7 +394,6 @@ class Settings(BaseSettings):
     # Apple Root CA-G3（链校验根，公开证书，随仓库分发）。
     apple_iap_root_ca_path: str = "app/services/payments/certs/AppleRootCA-G3.cer"
     apple_iap_environment: str = "auto"        # auto | production | sandbox
-    apple_iap_http_timeout_s: float = 10.0
 
     # Jamendo music integration. The client id is configured on the server;
     # Flutter receives normalized metadata plus Jamendo file endpoint URLs.
@@ -468,13 +464,7 @@ class Settings(BaseSettings):
     offline_arrival_require_geocode: bool = False
     # Friend-like companionship during an active offline activity.
     # Send timing is the probability table in activity_companion.py.
-    # The interval, active-chat, and pause fields stay so existing env
-    # files keep loading; they no longer drive this path.
     offline_activity_companion_enabled: bool = True
-    offline_activity_companion_min_interval_minutes: int = 10
-    offline_activity_companion_max_interval_minutes: int = 20
-    offline_activity_companion_active_chat_minutes: int = 5
-    offline_activity_companion_pause_after_ignored: int = 2
     offline_activity_photo_exact_threshold: float = 0.78
     offline_activity_photo_near_threshold: float = 0.55
 
@@ -545,13 +535,6 @@ class Settings(BaseSettings):
     llm_chat_stream_timeout_s: float = 90.0
     # 流式首 chunk 超时 (连不上 / 模型未加载时触发 fallback, 防用户长时间无响应)
     llm_chat_stream_first_chunk_timeout_s: float = 30.0
-
-    # admin 批量生成 character profile 单请求最大数量 + 内部并发上限.
-    # 单请求 N 个 profile 时, 后端用 Semaphore 控制实际并发 LLM 数, 防止 100
-    # 个同时打 DashScope 触发 429. 总耗时 ≈ ceil(N / concurrency) × 单次 LLM 时间.
-    # 默认 10 是 DashScope 默认 tier 安全值; 升级 tier 后可调高 env 覆盖。
-    character_profile_batch_max: int = 100
-    character_profile_batch_concurrency: int = 10
 
     # Redis client resilience (app/redis_client.py)
     # socket_timeout 防止 Redis 卡顿永久阻塞 asyncio event loop; 超时触发后抛
