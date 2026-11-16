@@ -110,7 +110,12 @@ def test_response_uses_registry_vars_when_declared():
 
 
 def test_every_definition_has_valid_var_contract():
-    """registry 里所有 prompt 的 required_vars + optional_vars 子集等于 default_text 占位符集合（允许 registry 比实际少，不允许多声明不存在的变量）."""
+    """防护网：registry 里所有 prompt 的 required_vars + optional_vars 子集等于 default_text 占位符集合。
+
+    允许 registry 比实际少（显式声明是可选的），不允许多声明不存在的变量。
+    当有人开始在 registry 里显式声明 required_vars / optional_vars 时，此测试才有实际拦截效果，
+    避免拼写错误或过期声明。当前所有 definition 均使用默认空元组。
+    """
     from app.services.prompting.registry import PROMPT_DEFINITIONS
     from app.services.prompting.store import _extract_vars
     for defn in PROMPT_DEFINITIONS:

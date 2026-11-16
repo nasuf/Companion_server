@@ -78,7 +78,13 @@ _PLACEHOLDER_PAT = re.compile(
 
 
 def _extract_vars(text: str) -> list[str]:
-    """从模板文本提取占位符名称，去重、保序。"""
+    """从模板文本中提取占位符名称列表（去重，保留顺序）。
+
+    只匹配裸 {name} 形式（Python 标识符，不含 format spec / conversion），
+    与前端 utils.ts 的 PLACEHOLDER_RE 语义一致。
+    注意：不处理 {{{name}}} 形式（Python str.format 中等价于 '{' + name值 + '}'），
+    因为当前模板规范只使用 {name} 形式，刻意不支持 triple-brace 写法。
+    """
     seen: set[str] = set()
     out: list[str] = []
     for m in _PLACEHOLDER_PAT.finditer(text):
@@ -99,6 +105,8 @@ def _response(definition, row, *, cache_synced=True, version_id=None, publicatio
         req = _extract_vars(definition.default_text)
     base["required_vars"] = req
     base["optional_vars"] = opt
+    # 推导基于 definition.default_text（registry 意图），不追踪 row.content 中实际使用的变量。
+    # 这样前端展示的是"开发者设计这个模板支持哪些变量"，即使运营在 Web 编辑了内容也保持稳定。
     return {**base, "content": row.content if row else definition.default_text,
             "is_enabled": row.isEnabled if row else definition.default_enabled, "source": "db" if row else "default",
             "updated_at": row.updatedAt.isoformat() if row else None,
