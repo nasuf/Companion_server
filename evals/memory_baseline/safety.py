@@ -87,7 +87,6 @@ def configure_isolation(database_url: str, redis_url: str) -> None:
         ONLINE_MODEL="false",
         JWT_SECRET="synthetic-memory-evaluation-only",
         APNS_ENABLED="false",
-        CHAT_EXECUTOR="legacy",
         TTS_OUTPUT_PROBABILITY="0",
     )
     # PYTHON_DOTENV_DISABLED does not disable pydantic-settings' own reader.
