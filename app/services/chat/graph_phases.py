@@ -894,6 +894,45 @@ async def _load_activity_history(ctx) -> list[str] | None:
     return lines or ["（还没有给对方推荐过任何线下活动）"]
 
 
+async def _detect_contradiction(ctx, steps: dict[str, float]) -> str | None:
+    """L1 矛盾检测; 命中时存待确认并返回追问句, 失败当未命中。"""
+    services = ctx.services
+    started = services.perf_counter()
+    try:
+        conflict = await services.detect_l1_contradiction(
+            ctx.user_message, ctx.user_id, workspace_id=ctx.workspace_id,
+            recent_context=ctx.recent_context_text,
+        )
+        if not conflict:
+            return None
+        inquiry = await services.generate_contradiction_inquiry(
+            conflict, agent_name=ctx.agent.name if ctx.agent else "AI",
+            recent_context=ctx.recent_context_text,
+            personality_brief=(
+                services.build_personality_brief(ctx.agent) if ctx.agent else ""
+            ),
+            user_portrait=str(ctx.portrait) if ctx.portrait else "",
+        )
+        await services.save_pending_contradiction(ctx.conversation_id, conflict,
+            user_id=ctx.user_id, workspace_id=ctx.workspace_id, agent_id=ctx.agent_id,
+            message_ids=sorted(ctx.current_turn_ids), user_message=ctx.aggregated_turn_text)
+        services.logger.info(
+            f"L1 contradiction detected: {conflict.get('conflict_description', '')}",
+            extra={
+                "event": services.EVT_MEMORY_CONTRADICTION,
+                "conflict_summary": (
+                    conflict.get("conflict_description") or ""
+                )[:80],
+            },
+        )
+        return inquiry
+    except Exception as e:
+        services.logger.warning(f"Contradiction detection failed: {e}")
+        return None
+    finally:
+        steps["contradiction"] = round((services.perf_counter() - started) * 1000, 1)
+
+
 async def prepare_reply(ctx):
     services = ctx.services
     # LAT01.02: 这一步各段耗时 (毫秒), 进诊断 prepare_reply_ms; 刻意停顿单列, 不算处理
@@ -912,37 +951,13 @@ async def prepare_reply(ctx):
     )
     lap("patience")
     ctx.contradiction_inquiry: str | None = None
-    if ctx.memory_relevance in ("strong", "medium"):
-        try:
-            conflict = await services.detect_l1_contradiction(
-                ctx.user_message, ctx.user_id, workspace_id=ctx.workspace_id,
-                recent_context=ctx.recent_context_text,
-            )
-            if conflict:
-                inquiry = await services.generate_contradiction_inquiry(
-                    conflict, agent_name=ctx.agent.name if ctx.agent else "AI",
-                    recent_context=ctx.recent_context_text,
-                    personality_brief=(
-                        services.build_personality_brief(ctx.agent) if ctx.agent else ""
-                    ),
-                    user_portrait=str(ctx.portrait) if ctx.portrait else "",
-                )
-                await services.save_pending_contradiction(ctx.conversation_id, conflict,
-                    user_id=ctx.user_id, workspace_id=ctx.workspace_id, agent_id=ctx.agent_id,
-                    message_ids=sorted(ctx.current_turn_ids), user_message=ctx.aggregated_turn_text)
-                ctx.contradiction_inquiry = inquiry
-                services.logger.info(
-                    f"L1 contradiction detected: {conflict.get('conflict_description', '')}",
-                    extra={
-                        "event": services.EVT_MEMORY_CONTRADICTION,
-                        "conflict_summary": (
-                            conflict.get("conflict_description") or ""
-                        )[:80],
-                    },
-                )
-        except Exception as e:
-            services.logger.warning(f"Contradiction detection failed: {e}")
-        lap("contradiction")
+    # LAT01.03: 矛盾检测 (生产 p50 1.1s) 与下面的回复前停顿并行, 用到结果前才等;
+    # 检测自身耗时记 contradiction, 停顿之后还要等的部分记 contradiction_await
+    contradiction_task = (
+        ctx.spawn(_detect_contradiction(ctx, steps))
+        if ctx.memory_relevance in ("strong", "medium")
+        else None
+    )
     # 双方所在地: 主 prompt、联网检索、地点校验共用这一份 (读失败退回"不知道")
     ctx.location_context = await services.load_location_context(
         ctx.agent, ctx.user_id, ctx.workspace_id
@@ -957,19 +972,6 @@ async def prepare_reply(ctx):
         else None
     )
     lap("last_reply_count")
-    if ctx.relational_context:
-        ctx.reply_count = 1
-        ctx.allow_count_variation = False
-    elif ctx.contradiction_inquiry:
-        ctx.reply_count = 1
-        ctx.allow_count_variation = False
-    else:
-        ctx.reply_count = services.pick_reply_count_target(
-            ctx.last_reply_count, services.MAX_REPLY_COUNT
-        )
-        ctx.allow_count_variation = True
-    ctx.max_reply_count = services.MAX_REPLY_COUNT
-    ctx.max_total = services.MAX_TOTAL_CHARS
     if ctx.l3_task is not None:
         try:
             ctx.l3_memories, l3_trigger_label = await ctx.l3_task
@@ -1109,19 +1111,6 @@ async def prepare_reply(ctx):
         return _finish_main_messages(ctx, services, system_prompt, reply_messages)
 
     ctx._build_main_chat_messages = _build_main_chat_messages
-    selected_ids = [getattr(m, "id", "") for m in ctx.classified_memories or []]
-    candidate_ids = list(getattr(ctx.fetched, "candidate_ids", None) or [])
-    if ctx.contradiction_inquiry:
-        # 矛盾追问直接作为本轮回复, 主 prompt 不构建: 选中的记忆没有被用上, 只记候选。
-        selected_ids, candidate_ids = [], selected_ids + candidate_ids
-    ctx.response_diagnostics["memory_usage_submission"] = submit_memory_usage(
-        event_id=ctx.memory_usage_event_id, user_id=ctx.user_id,
-        workspace_id=ctx.workspace_id,
-        selected_ids=selected_ids,
-        candidate_ids=candidate_ids,
-        fire_background=services._fire_background,
-    )
-    lap("memory_usage")
     from app.services.interaction.chat_management import (
         clamp_reply_delay_seconds,
     )
@@ -1151,6 +1140,35 @@ async def prepare_reply(ctx):
             with ctx.owner.timing.deliberate_wait():
                 await services.asyncio.sleep(actual_sleep)
     lap("deliberate_pause")
+    if contradiction_task is not None:
+        ctx.contradiction_inquiry = await contradiction_task
+        lap("contradiction_await")
+    if ctx.relational_context:
+        ctx.reply_count = 1
+        ctx.allow_count_variation = False
+    elif ctx.contradiction_inquiry:
+        ctx.reply_count = 1
+        ctx.allow_count_variation = False
+    else:
+        ctx.reply_count = services.pick_reply_count_target(
+            ctx.last_reply_count, services.MAX_REPLY_COUNT
+        )
+        ctx.allow_count_variation = True
+    ctx.max_reply_count = services.MAX_REPLY_COUNT
+    ctx.max_total = services.MAX_TOTAL_CHARS
+    selected_ids = [getattr(m, "id", "") for m in ctx.classified_memories or []]
+    candidate_ids = list(getattr(ctx.fetched, "candidate_ids", None) or [])
+    if ctx.contradiction_inquiry:
+        # 矛盾追问直接作为本轮回复, 主 prompt 不构建: 选中的记忆没有被用上, 只记候选。
+        selected_ids, candidate_ids = [], selected_ids + candidate_ids
+    ctx.response_diagnostics["memory_usage_submission"] = submit_memory_usage(
+        event_id=ctx.memory_usage_event_id, user_id=ctx.user_id,
+        workspace_id=ctx.workspace_id,
+        selected_ids=selected_ids,
+        candidate_ids=candidate_ids,
+        fire_background=services._fire_background,
+    )
+    lap("memory_usage")
     if ctx.relational_context:
         # 用户正低落/抱怨: 先接情绪, 不提旧话题
         topic_continuation = None

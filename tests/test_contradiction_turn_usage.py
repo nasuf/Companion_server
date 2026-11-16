@@ -63,3 +63,43 @@ async def test_contradiction_turn_uses_context_and_credits_candidates_only(monke
     usage = submitted[-1]
     assert usage["selected_ids"] == []
     assert set(usage["candidate_ids"]) == {"sel-1", "cand-1"}
+
+
+@pytest.mark.asyncio
+async def test_contradiction_check_runs_during_the_reply_pause(monkeypatch):
+    """LAT01.03: 检测与回复前停顿并行, 一轮只多等两者中较长的那个, 追问照常替换主回复。"""
+    import asyncio
+    import time
+
+    from app.services.chat import orchestrator as chat
+    from app.services.chat.data_fetch_phase import FetchedContext
+    from app.services.chat.intent_dispatcher import IntentType
+    from app.services.interaction import chat_management
+    from tests.g02_harness_support import configure_pair
+
+    io = configure_pair(monkeypatch)
+    io.db.message.find_many.side_effect = lambda **_: []
+    chat.fetch_parallel_context.return_value = FetchedContext(memory_relevance="strong")
+    monkeypatch.setattr(chat_management, "reply_delay_enabled", lambda: True)
+    monkeypatch.setattr(chat_management, "reply_delay_max_seconds", lambda: 10)
+    monkeypatch.setattr(chat, "calculate_reply_delay", lambda *_, **__: 0.4)
+
+    async def slow_detect(*_, **__):
+        await asyncio.sleep(0.4)
+        return {"new_info": "我搬到上海了", "old_content": "用户住在北京", "conflict_description": "现居地变化"}
+
+    monkeypatch.setattr(chat, "detect_l1_contradiction", slow_detect)
+    monkeypatch.setattr(chat, "generate_contradiction_inquiry", AsyncMock(return_value="搬去上海啦？"))
+    generate = AsyncMock(return_value=(["搬去上海啦？"], "", False, None))
+    monkeypatch.setattr(chat, "_generate_reply", generate)
+
+    started = time.perf_counter()
+    events = [event async for event in chat.stream_chat_response(
+        "c-1", "我搬到上海了", io.agent, "u-1", forced_intent=IntentType.NONE,
+        reply_context={"received_at": NOW.isoformat()},
+    )]
+    elapsed = time.perf_counter() - started
+
+    assert sum(e["event"] == "done" for e in events) == 1
+    assert generate.await_args.kwargs["contradiction_inquiry"] == "搬去上海啦？"
+    assert elapsed < 0.7, elapsed  # 串行是 0.8s 以上
