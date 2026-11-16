@@ -16,7 +16,6 @@ import pytest
 from app.services.memory.storage.repo import MemoryRecord
 from app.services.memory.retrieval.legacy import (
     _memory_to_dict,
-    format_memories_for_prompt,
     retrieve_memories,
 )
 from app.services.memory.storage.persistence import DEDUP_THRESHOLD, is_duplicate, store_memory
@@ -77,38 +76,6 @@ class TestMemoryToDict:
 
         result = _memory_to_dict(m)
         assert result["similarity"] == 0.0
-
-
-# --- format_memories_for_prompt ---
-
-class TestFormatMemories:
-    def test_ignores_legacy_summary_key(self):
-        """`content` is the single source of truth; a stray legacy `summary`
-        key must never win over it."""
-        memories = [
-            {"summary": "summary text", "content": "full content"},
-        ]
-        result = format_memories_for_prompt(memories)
-        assert result == ["full content"]
-
-    def test_uses_content(self):
-        memories = [
-            {"content": "full content"},
-        ]
-        result = format_memories_for_prompt(memories)
-        assert result == ["full content"]
-
-    def test_skips_empty(self):
-        memories = [
-            {"content": None},
-            {"content": ""},
-            {"content": "valid"},
-        ]
-        result = format_memories_for_prompt(memories)
-        assert result == ["valid"]
-
-    def test_empty_list(self):
-        assert format_memories_for_prompt([]) == []
 
 
 # --- retrieve_memories dedup ---

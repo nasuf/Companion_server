@@ -182,10 +182,3 @@ async def _find_awakening_candidates(
     return awakened[:2]  # Max 2 awakened memories
 
 
-def format_memories_for_prompt(memories: list[dict]) -> list[str]:
-    """Format memory dicts into strings suitable for prompt injection."""
-    return [
-        m.get("content", "")
-        for m in memories
-        if m.get("content")
-    ]
