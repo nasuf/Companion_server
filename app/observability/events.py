@@ -157,7 +157,6 @@ EVT_PREFLIGHT_RESOLVED = "preflight.resolved"  # contradiction / deletion / set_
 EVT_PREFLIGHT_FAILED = "preflight.failed"
 
 # Multi-intent
-EVT_INTENT_SUB_RECURSED = "intent.sub_recursed"  # sub fragment 递归入口
 
 # Reply post-process
 EVT_REPLY_DECORATION = "reply.decoration"  # emoji / sticker / none

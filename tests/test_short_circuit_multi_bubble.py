@@ -307,18 +307,16 @@ async def test_voice_reply_stays_one_bubble_with_full_text(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sub_intents_start_after_all_primary_bubbles():
-    from app.services.chat import multi_intent
+async def test_pending_sub_fragments_do_not_recurse_into_a_child_turn():
+    """子意图由图内切换 ChatFrame 处理; 短路收尾不得再递归 stream_chat_response."""
+    from app.services.chat import multi_intent, orchestrator
 
-    captured: dict = {}
-
-    async def fake_sub_intents(*args, start_index, **kwargs):
-        captured["start_index"] = start_index
-        return
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("finalize_short_circuit must not start a child turn")
         yield  # pragma: no cover - async generator marker
 
     with (
-        patch.object(multi_intent, "process_sub_intents", fake_sub_intents),
+        patch.object(orchestrator, "stream_chat_response", forbidden),
         patch.object(multi_intent, "_fire_background", side_effect=lambda c: c.close()),
         patch.object(multi_intent, "finish_assistant_turn", new=AsyncMock()),
     ):
@@ -335,7 +333,7 @@ async def test_sub_intents_start_after_all_primary_bubbles():
         ))
 
     assert [p["index"] for p in _reply_payloads(events)] == [1, 2, 3]
-    assert captured["start_index"] == 4
+    assert events[-1]["event"] == "done"
 
 
 @pytest.mark.asyncio

@@ -170,8 +170,8 @@ class ShortCircuitCtx:
                 "sub_intent_mode": self.sub_intent_mode,
             },
         )
-        # consumed_full_message=True 时清空 sub fragments, 让 finalize_short_circuit
-        # 跳过 process_sub_intents 递归. 比加新参数到 finalize 签名干净.
+        # consumed_full_message=True 时清空 sub fragments: handler 已消化整句,
+        # 本条回复即本回合成就的最终回复.
         sub_fragments = (
             {} if self.consumed_full_message else self.pending_sub_fragments
         )

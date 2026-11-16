@@ -92,7 +92,6 @@ from app.services.chat.intent_dispatcher import (
     LABEL_TO_INTENT,
 )
 from app.services.chat.multi_intent import (
-    process_sub_intents as _process_sub_intents,
     short_circuit_reply as _short_circuit_reply_impl,
 )
 from app.services.chat.intent_handlers import (

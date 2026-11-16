@@ -3,11 +3,10 @@
 `stream_chat_response` 的多处短路分支共用的三个工具：
 
 - `short_circuit_reply`: 落库 + 构造 reply/done SSE 事件列表
-- `finalize_short_circuit`: 短路分支尾部：主回复 → 子意图循环 → done/trace
-- `process_sub_intents`: 按 priority 依次递归处理拆分后的子意图
+- `finalize_short_circuit`: 短路分支尾部：主回复 → done/trace
 
-为避免与 `orchestrator.stream_chat_response` 的循环引用，
-`process_sub_intents` 在函数内部延迟导入。
+子意图不再递归调用 stream_chat_response，由图内切换 ChatFrame 处理
+（graph_runtime）。
 """
 
 from __future__ import annotations
@@ -19,22 +18,12 @@ from typing import Any
 
 from app.db import db
 from app.services.chat.message_utils import _achievement_turn_id
-from app.observability.events import EVT_INTENT_SUB_RECURSED
-from app.services.chat.intent_dispatcher import (
-    INTENT_PRIORITY,
-    IntentType,
-    LABEL_TO_INTENT,
-)
 from app.services.chat.turn_lifecycle import finish_assistant_turn
 from app.services.runtime.tasks import fire_background as _fire_background
 
 logger = logging.getLogger(__name__)
 
 _DONE_EVENT = {"event": "done", "data": json.dumps({"message_id": "complete"})}
-
-
-def _count_reply_events(events: list[dict]) -> int:
-    return sum(1 for evt in events if evt.get("event") == "reply")
 
 
 def delivered_reply_text(events: list[dict]) -> str:
@@ -275,74 +264,6 @@ async def short_circuit_reply(
     return events
 
 
-async def process_sub_intents(
-    pending_sub_fragments: dict[str, str],
-    conversation_id: str,
-    agent,
-    user_id: str,
-    reply_context: dict | None,
-    start_index: int,
-    parent_patience: int,
-    parent_trace_id: str | None = None,
-    memory_usage_event_id: str | None = None,
-) -> AsyncGenerator[dict, None]:
-    """spec §3.3 step 3：按 priority 顺序处理拆分后的子意图片段。
-
-    每个片段作为独立子调用进入 stream_chat_response(sub_intent_mode=True)，
-    共享 reply_context 沿用首条消息的 due_at（spec §6）。
-
-    parent_trace_id 透传给 sub: sub 的 tracer 用 attach_to_parent 复用
-    parent run_id, 让 sub 产生的消息 metadata.trace_id 跟 parent 一致 — 用户点
-    任意 reply 的 trace 按钮跳到 parent 视图, 看到完整 root + nested 树.
-    """
-    if not pending_sub_fragments:
-        return
-
-    # 延迟导入避免循环依赖
-    from app.services.chat.orchestrator import stream_chat_response
-
-    ordered = sorted(
-        pending_sub_fragments.items(),
-        key=lambda kv: INTENT_PRIORITY.index(kv[0]) if kv[0] in INTENT_PRIORITY else float("inf"),
-    )
-    cur_index = start_index
-    for index, (label, text) in enumerate(ordered):
-        intent_type = LABEL_TO_INTENT.get(label, IntentType.NONE)
-        is_last_sub_intent = index == len(ordered) - 1
-        logger.info(
-            f"[INTENT-SUB] label={label} intent={intent_type.value} "
-            f"index={cur_index} text={text[:40]!r}",
-            extra={
-                "event": EVT_INTENT_SUB_RECURSED,
-                "intent_label": label,
-                "intent": intent_type.value,
-                "fragment_index": cur_index,
-                "fragment_len": len(text),
-            },
-        )
-        async for evt in stream_chat_response(
-            conversation_id=conversation_id,
-            user_message=text,
-            agent=agent,
-            user_id=user_id,
-            reply_context=reply_context,
-            save_user_message=False,
-            delivered_from_queue=True,
-            sub_intent_mode=True,
-            forced_intent=intent_type,
-            reply_index_offset=cur_index,
-            parent_patience=parent_patience,
-            parent_trace_id=parent_trace_id,
-            achievement_turn_final=is_last_sub_intent,
-            memory_usage_event_id=memory_usage_event_id,
-        ):
-            if evt.get("event") == "done":
-                continue
-            yield evt
-            if evt.get("event") == "reply":
-                cur_index += 1
-
-
 async def finalize_short_circuit(
     reply: str,
     *,
@@ -367,7 +288,7 @@ async def finalize_short_circuit(
     memory_usage_event_id: str | None = None,
     on_delivered: Callable[[str], None] | None = None,
 ) -> AsyncGenerator[dict, None]:
-    """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
+    """短路分支尾部：primary reply → done → trace 关闭。
 
     sub_intent_mode=True 时跳过 done/trace（由父调用完成）。
     tracer 是 `ChatTracer` 实例（LocalTracer / LangSmithTracer）；本函数仅调 `tracer.close()`。
@@ -400,16 +321,6 @@ async def finalize_short_circuit(
         on_delivered(delivered)
     for evt in events:
         yield evt
-
-    if not sub_intent_mode and not defer_turn_finalization and pending_sub_fragments:
-        async for evt in process_sub_intents(
-            pending_sub_fragments, conversation_id, agent, user_id,
-            reply_context,
-            start_index=reply_index_offset + _count_reply_events(events),
-            parent_patience=cached_patience,
-            memory_usage_event_id=memory_usage_event_id,
-        ):
-            yield evt
 
     if not sub_intent_mode and not defer_turn_finalization:
         yield _DONE_EVENT
