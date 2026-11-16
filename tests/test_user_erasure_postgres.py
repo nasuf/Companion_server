@@ -785,28 +785,23 @@ async def test_unavailable_private_media_mount_preserves_sql_retry_source(
 async def test_healthy_private_writes_are_erased_without_changing_peer(
     erased_pair, monkeypatch
 ):
-    from fastapi import HTTPException
     from app.services.runtime import cache
-    from app.services.relationship import consistency
     from app.services.notifications import presence
 
     database, redis, _, records = erased_pair
-    for module in (cache, consistency, presence):
+    for module in (cache, presence):
         monkeypatch.setattr(module, "get_redis", AsyncMock(return_value=redis))
     for user, _, workspace, conversation, _, memory, _ in records:
+        # Legacy keys with no live producer left; erasure must still clear them.
         await redis.delete("context_window:" + conversation.id)
-        await consistency.push_to_context_window(
-            conversation.id, "user", "synthetic context"
-        )
+        await redis.lpush("context_window:" + conversation.id, "synthetic context")
+        await redis.set("cache:graph:" + user.id + ":synthetic", "synthetic graph")
         await cache.bump_cache_version(user.id, workspace.id)
         await cache.cache_set_retrieval(
             "synthetic query",
             user.id,
             {"memories": [{"id": memory.id, "text": "private"}]},
             workspace.id,
-        )
-        await cache.cache_set_graph_context(
-            user.id, {"context": "synthetic graph"}, workspace.id
         )
         await presence.update_presence(
             user_id=user.id,
@@ -826,15 +821,12 @@ async def test_healthy_private_writes_are_erased_without_changing_peer(
         assert (await cache.cache_retrieval("synthetic query", user.id, workspace.id))[
             "memories"
         ][0]["id"] == memory.id
-        assert await cache.cache_graph_context(user.id, workspace.id) == {
-            "context": "synthetic graph"
-        }
     target, peer = records
     uid, wid, cid = target[0].id, target[2].id, target[3].id
     peer_before = await cache.cache_retrieval("synthetic query", peer[0].id, peer[2].id)
     await data_reset.hard_delete_user_data(uid)
     assert await cache.cache_retrieval("synthetic query", uid, wid) is None
-    assert await cache.cache_graph_context(uid, wid) is None
+    assert not await redis.exists("cache:graph:" + uid + ":synthetic")
     assert await cache.get_cache_version("ret", uid, wid) == 0
     assert not await redis.exists(
         "context_window:" + cid, presence._key(uid, "synthetic-device")
@@ -849,18 +841,13 @@ async def test_healthy_private_writes_are_erased_without_changing_peer(
         await cache.cache_retrieval("synthetic query", peer[0].id, peer[2].id)
         == peer_before
     )
-    assert await cache.cache_graph_context(peer[0].id, peer[2].id) == {
-        "context": "synthetic graph"
-    }
-    assert await consistency.get_context_window(peer[3].id) == [
-        {"role": "user", "content": "synthetic context"}
+    assert await redis.get("cache:graph:" + peer[0].id + ":synthetic") == "synthetic graph"
+    assert await redis.lrange("context_window:" + peer[3].id, 0, -1) == [
+        "synthetic context"
     ]
     assert await redis.exists(presence._key(peer[0].id, "synthetic-device"))
     assert await redis.hget("memory:processing:observations:data", peer[0].id)
     await cache.cache_set_retrieval("late", uid, {"private": "must not return"}, wid)
-    await cache.cache_set_graph_context(uid, {"private": "must not return"}, wid)
-    with pytest.raises(HTTPException):
-        await consistency.push_to_context_window(cid, "user", "must not return")
     assert not [key async for key in redis.scan_iter(match="*" + uid + "*")]
     await data_reset.hard_delete_user_data(peer[0].id)
 

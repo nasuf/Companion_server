@@ -136,29 +136,3 @@ async def cache_set_retrieval(
             )
     except Exception:
         logger.debug("Retrieval cache write skipped: account unavailable")
-
-
-async def cache_graph_context(user_id: str, workspace_id: str | None = None) -> dict | None:
-    """Get cached graph context (scoped to current cache version)."""
-    ver = await get_cache_version("graph", user_id, workspace_id)
-    result = await cache_get("graph", f"owner:{user_id}:v{ver}:{workspace_id or 'none'}")
-    if isinstance(result, dict):
-        return result
-    return None
-
-
-async def cache_set_graph_context(user_id: str, context: dict, workspace_id: str | None = None) -> None:
-    """Cache graph context (TTL 5 min, keyed by current cache version)."""
-    ver = await get_cache_version("graph", user_id, workspace_id)
-    from app.services.runtime import user_erasure
-    try:
-        async with user_erasure.owner_write_scope(user_id):
-            await cache_set(
-                "graph",
-                f"owner:{user_id}:v{ver}:{workspace_id or 'none'}",
-                context,
-                ttl=DEFAULT_TTL,
-            )
-
-    except Exception:
-        logger.debug("Graph cache write skipped: account unavailable")
