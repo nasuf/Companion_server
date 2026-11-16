@@ -13,7 +13,6 @@ years the DB has loaded (e.g. a year beyond the latest data).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections import defaultdict
 from datetime import date
@@ -143,18 +142,3 @@ def reset_for_testing() -> None:
     _loaded = False
 
 
-def invalidate_background() -> None:
-    """Schedule a reload without blocking the caller.
-
-    Use this from synchronous paths (e.g. admin API response handlers
-    that don't want to hold up the 200 response while the cache warms up).
-    The reload runs as a background task on the running event loop; if
-    no loop is running, we fall back to scheduling via asyncio.run.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # Not in an async context — run synchronously (tests / CLI).
-        asyncio.run(reload())
-        return
-    loop.create_task(reload())

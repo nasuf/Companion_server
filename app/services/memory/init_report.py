@@ -99,13 +99,3 @@ def phase_timer(report: InitReport, name: str):
         report.phase_ms[name] = int(time.time() * 1000) - start
 
 
-async def get_init_report(agent_id: str) -> dict | None:
-    """Read-back helper for debugging / admin UI."""
-    try:
-        redis = await get_redis()
-        raw = await redis.get(report_key(agent_id))
-    except Exception:
-        return None
-    if not raw:
-        return None
-    return json.loads(raw)

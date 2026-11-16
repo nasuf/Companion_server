@@ -1,6 +1,6 @@
 """话题管理服务。
 
-6类话题分类 + Redis话题栈 + 疲劳检测 + 话题推荐。
+6类话题分类 + Redis话题栈 + 疲劳检测。
 纯计算与 Redis 状态；写入用短数据库锁校验会话生命周期，无 LLM 调用。
 """
 
@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 
 from app.redis_client import get_redis
 from app.services.runtime import user_erasure
-from app.services.mbti import signal as mbti_signal
 
 logger = logging.getLogger(__name__)
 
@@ -40,20 +38,6 @@ def classify_topic(message: str) -> str:
 
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "生活"  # 默认生活
-
-
-async def get_topic_stack(conversation_id: str) -> list[dict]:
-    """获取当前话题栈（从Redis）。"""
-    redis = await get_redis()
-    key = f"topics:{conversation_id}"
-    data = await redis.lrange(key, 0, 9)  # 最近10个话题
-    result = []
-    for item in data:
-        try:
-            result.append(json.loads(item))
-        except (json.JSONDecodeError, TypeError):
-            continue
-    return result
 
 
 # 与重逢感知「大间隔」档 (prompt_builder._REENGAGE_LONG_S) 对齐: 隔 ≥3h 回来,
@@ -128,110 +112,3 @@ def detect_topic_fatigue(topic_info: dict, recent_messages: list[str] | None = N
 
 # format_topic_context 已删除: orchestrator 直传 push_topic 的 dict 给
 # prompt_builder, 由 chat.topic_context_section 模板渲染 (registry 管理).
-
-# --- 2I.6 话题推荐 ---
-
-# 话题库：按亲密度等级和人格倾向分类
-TOPIC_POOL: dict[str, list[str]] = {
-    "生活_casual": [
-        "最近有看什么好看的剧吗", "今天天气真不错", "你中午吃了什么",
-        "周末有什么安排", "最近有没有发现什么好吃的店",
-    ],
-    "兴趣_casual": [
-        "你最近在听什么歌", "有没有推荐的电影", "你玩游戏吗",
-        "最近有什么好书推荐", "你喜欢什么运动",
-    ],
-    "生活_deep": [
-        "你觉得理想的生活是什么样的", "如果可以去任何地方旅行你想去哪",
-        "你有什么一直想做但还没做的事", "你觉得什么时候最放松",
-    ],
-    "情感_deep": [
-        "你觉得什么是好的友谊", "你最近有什么烦恼吗",
-        "有没有什么事让你特别感动", "你觉得孤独是什么感觉",
-    ],
-    "思想_deep": [
-        "你觉得人生中最重要的是什么", "你对未来有什么期待",
-        "你觉得成功的定义是什么", "你相信命运吗",
-    ],
-    "幽默": [
-        "你知道什么冷笑话吗", "如果你是一种动物你觉得自己是什么",
-        "你觉得世界上最无用的发明是什么", "你有什么奇怪的小习惯",
-    ],
-    "脑洞": [
-        "如果你能拥有一种超能力你想要什么", "你觉得外星人存在吗",
-        "如果可以穿越到任何时代你想去哪里", "你觉得AI会有感情吗",
-    ],
-}
-
-# MBTI 字母 → 话题偏好权重 (spec §1.2: 直接 MBTI, 不经派生信号)
-# 注: "humor" 作为 (E + N)/2 的复合在循环里另算。
-_MBTI_TOPIC_WEIGHTS: dict[str, dict[str, float]] = {
-    "E": {"生活_casual": 0.3, "兴趣_casual": 0.3, "幽默": 0.4},
-    "T": {"思想_deep": 0.5, "生活_deep": 0.3, "兴趣_casual": 0.2},
-    "F": {"情感_deep": 0.5, "生活_deep": 0.3, "生活_casual": 0.2},
-    "N": {"脑洞": 0.5, "思想_deep": 0.3, "幽默": 0.2},
-}
-_HUMOR_TOPIC_WEIGHTS: dict[str, float] = {
-    "幽默": 0.5, "生活_casual": 0.3, "兴趣_casual": 0.2,
-}
-
-# 亲密度等级 → 可用话题深度
-_INTIMACY_ALLOWED: dict[str, list[str]] = {
-    "L1": ["生活_casual", "兴趣_casual"],
-    "L2": ["生活_casual", "兴趣_casual", "幽默", "脑洞"],
-    "L3": ["生活_casual", "兴趣_casual", "幽默", "脑洞", "生活_deep"],
-    "L4": ["生活_casual", "兴趣_casual", "幽默", "脑洞", "生活_deep", "情感_deep"],
-    "L5": ["生活_casual", "兴趣_casual", "幽默", "脑洞", "生活_deep", "情感_deep", "思想_deep"],
-}
-
-
-def select_new_topic(
-    mbti: dict | None = None,
-    intimacy_level: str = "L1",
-    recent_topics: list[str] | None = None,
-) -> str:
-    """2I.6 基于人格偏好+亲密度等级推荐新话题。spec §1.2 使用 MBTI。
-
-    Args:
-        mbti: 当前 effective MBTI dict（None 时所有类别等权）
-        intimacy_level: 亲密度等级 L1-L5
-        recent_topics: 最近使用过的话题（用于去重）
-
-    Returns:
-        推荐话题文本
-    """
-    recent_topics = recent_topics or []
-
-    # 1. 确定可用话题池
-    allowed_categories = _INTIMACY_ALLOWED.get(intimacy_level, _INTIMACY_ALLOWED["L1"])
-
-    # 2. 计算各话题类别权重
-    category_weights: dict[str, float] = {cat: 1.0 for cat in allowed_categories}
-
-    if mbti:
-        for letter, topic_prefs in _MBTI_TOPIC_WEIGHTS.items():
-            sig_val = mbti_signal(mbti, letter)
-            for cat, weight in topic_prefs.items():
-                if cat in category_weights:
-                    category_weights[cat] += sig_val * weight
-        # humor 是 (E + N)/2 的复合, 单独算
-        humor = (mbti_signal(mbti, "E") + mbti_signal(mbti, "N")) / 2
-        for cat, weight in _HUMOR_TOPIC_WEIGHTS.items():
-            if cat in category_weights:
-                category_weights[cat] += humor * weight
-
-    # 3. 按权重选择类别
-    categories = list(category_weights.keys())
-    weights = [category_weights[c] for c in categories]
-    total = sum(weights)
-    weights = [w / total for w in weights]
-
-    chosen_category = random.choices(categories, weights=weights, k=1)[0]
-
-    # 4. 从类别中选话题，避免最近用过的
-    pool = TOPIC_POOL.get(chosen_category, TOPIC_POOL["生活_casual"])
-    available = [t for t in pool if t not in recent_topics]
-    if not available:
-        available = pool
-
-    return random.choice(available)
