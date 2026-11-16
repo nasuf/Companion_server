@@ -82,10 +82,10 @@ async def test_contradiction_check_runs_during_the_reply_pause(monkeypatch):
     chat.fetch_parallel_context.return_value = FetchedContext(memory_relevance="strong")
     monkeypatch.setattr(chat_management, "reply_delay_enabled", lambda: True)
     monkeypatch.setattr(chat_management, "reply_delay_max_seconds", lambda: 10)
-    monkeypatch.setattr(chat, "calculate_reply_delay", lambda *_, **__: 0.4)
+    monkeypatch.setattr(chat, "calculate_reply_delay", lambda *_, **__: 1.0)
 
     async def slow_detect(*_, **__):
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(1.0)
         return {"new_info": "我搬到上海了", "old_content": "用户住在北京", "conflict_description": "现居地变化"}
 
     monkeypatch.setattr(chat, "detect_l1_contradiction", slow_detect)
@@ -102,4 +102,4 @@ async def test_contradiction_check_runs_during_the_reply_pause(monkeypatch):
 
     assert sum(e["event"] == "done" for e in events) == 1
     assert generate.await_args.kwargs["contradiction_inquiry"] == "搬去上海啦？"
-    assert elapsed < 0.7, elapsed  # 串行是 0.8s 以上
+    assert elapsed < 1.7, elapsed  # 串行是 2.0s 以上

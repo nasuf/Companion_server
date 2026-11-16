@@ -62,3 +62,9 @@ def test_every_code_default_passes_syntax_check():
     from app.services.prompting.registry import PROMPT_DEFINITIONS
     for definition in PROMPT_DEFINITIONS:
         store.check_template_syntax(definition.default_text)
+
+def test_raw_text_prompts_may_keep_literal_braces():
+    # chat.system_base 原样拼进 prompt, 不走 format; 字面大括号是合法内容
+    store.check_template_syntax('示例 {"a": 1} 和 {1,2}', 'chat.system_base')
+    with pytest.raises(ValueError):
+        store.check_template_syntax('示例 {1,2}', 'memory.relevance')

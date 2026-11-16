@@ -172,11 +172,15 @@ async def is_prompt_enabled(key: str) -> bool:
 _FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def check_template_syntax(content: str) -> None:
+def check_template_syntax(content: str, key: str | None = None) -> None:
     """Q01.01: 存入前校验占位符语法; 渲染失败时 safe_format 会把未渲染原文发给模型。
 
     只认 {name} / {name:spec} / {name!r}; 字面大括号要写成 {{ }}。
+    默认文本没有大括号的模板 (原样拼进 prompt, 或没有可填的占位符) 不校验。
     """
+    definition = PROMPT_DEFINITION_MAP.get(key) if key else None
+    if definition and "{" not in definition.default_text and "}" not in definition.default_text:
+        return
     try:
         fields = [f for _, f, _, _ in string.Formatter().parse(content) if f is not None]
     except ValueError as exc:
@@ -201,7 +205,7 @@ async def _mutate(key, change_type, *, content=None, enabled=None, version_id=No
             if not previous or previous.promptKey != key:
                 raise KeyError(f"Unknown prompt version for key: {key}")
             content = previous.content
-            check_template_syntax(content)
+            check_template_syntax(content, key)
         # A same-content publication must preserve legacy surrounding whitespace;
         # edited drafts retain the normal Web trimming policy.
         if publish_version and change_type == "manual_save" and row and content == row.content.strip():
@@ -233,7 +237,7 @@ async def update_prompt_text(key: str, content: str, *, expected_updated_at=None
     normalized = content.strip()
     if not normalized:
         raise ValueError("Prompt content cannot be empty")
-    check_template_syntax(normalized)
+    check_template_syntax(normalized, key)
     return await _mutate(key, "manual_save", content=normalized,
                          expected_updated_at=expected_updated_at, expected_revision=expected_revision,
                          publish_version=publish_version)
