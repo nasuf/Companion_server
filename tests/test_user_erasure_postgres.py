@@ -795,7 +795,10 @@ async def test_healthy_private_writes_are_erased_without_changing_peer(
         # Legacy keys with no live producer left; erasure must still clear them.
         await redis.delete("context_window:" + conversation.id)
         await redis.lpush("context_window:" + conversation.id, "synthetic context")
-        await redis.set("cache:graph:" + user.id + ":synthetic", "synthetic graph")
+        await redis.set(
+            "cache:graph:" + user.id + ":synthetic",
+            json.dumps({"userId": user.id, "context": "synthetic graph"}),
+        )
         await cache.bump_cache_version(user.id, workspace.id)
         await cache.cache_set_retrieval(
             "synthetic query",
@@ -841,7 +844,10 @@ async def test_healthy_private_writes_are_erased_without_changing_peer(
         await cache.cache_retrieval("synthetic query", peer[0].id, peer[2].id)
         == peer_before
     )
-    assert await redis.get("cache:graph:" + peer[0].id + ":synthetic") == "synthetic graph"
+    assert json.loads(await redis.get("cache:graph:" + peer[0].id + ":synthetic")) == {
+        "userId": peer[0].id,
+        "context": "synthetic graph",
+    }
     assert await redis.lrange("context_window:" + peer[3].id, 0, -1) == [
         "synthetic context"
     ]
