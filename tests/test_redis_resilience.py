@@ -166,17 +166,27 @@ async def test_delayed_queue_append_redis_down_raises(unit_media_scope):
 
 
 @pytest.mark.asyncio
-async def test_delayed_queue_scan_redis_down_returns_empty(caplog):
-    """scan_due_delayed_messages Redis zrangebyscore 失败返回 []."""
-    from app.services.interaction.delayed_queue import scan_due_delayed_messages
+async def test_delayed_queue_flush_redis_down_returns_empty(caplog):
+    """scheduler 用的 flush: Redis eval 失败返回 [], 不抛, 留 warning."""
+    from app.services.interaction.delayed_queue import flush_due_delayed_messages
 
     broken = _BrokenRedis()
     with patch("app.services.interaction.delayed_queue.get_redis", AsyncMock(return_value=broken)):
         with caplog.at_level("WARNING"):
-            result = await scan_due_delayed_messages()
+            result = await flush_due_delayed_messages("conv-1")
 
     assert result == []
-    assert any("[DELAY-SCAN] Redis zrangebyscore failed" in rec.message for rec in caplog.records)
+    assert any("[DELAY-FLUSH] Redis eval failed" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_delayed_queue_due_ids_redis_down_raises():
+    """due_delayed_conversation_ids 不吞错: 由 scheduler 的 _job_failed 统一上报."""
+    from app.services.interaction.delayed_queue import due_delayed_conversation_ids
+
+    with patch("app.services.interaction.delayed_queue.get_redis", AsyncMock(return_value=_BrokenRedis())):
+        with pytest.raises(Exception):
+            await due_delayed_conversation_ids()
 
 
 # ═══════════════════════════════════════════════════════════════════

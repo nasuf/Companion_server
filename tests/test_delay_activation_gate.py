@@ -83,10 +83,13 @@ async def test_enqueue_error_must_reply_without_queued(monkeypatch, unit_media_s
 async def test_rapid_messages_keep_arrival_order_and_merge_once(isolated):
     await q.enqueue_or_append_delayed("conv", payload("甲", "a"), 0)
     await q.enqueue_or_append_delayed("conv", payload("乙", "b"), 0)
-    first, second = await asyncio.gather(q.scan_due_delayed_messages(), q.scan_due_delayed_messages())
-    all_batches = first + second
-    assert len(all_batches) == 1
-    merged = q.merge_delayed_payloads(all_batches[0][1])
+    assert await q.due_delayed_conversation_ids() == ["conv"]
+    first, second = await asyncio.gather(
+        q.flush_due_delayed_messages("conv"), q.flush_due_delayed_messages("conv")
+    )
+    batches = [b for b in (first, second) if b]
+    assert len(batches) == 1
+    merged = q.merge_delayed_payloads(batches[0])
     assert merged["queued_messages"] == ["甲", "乙"]
     assert merged["reply_context"]["turn_message_ids"] == ["a", "b"]
 

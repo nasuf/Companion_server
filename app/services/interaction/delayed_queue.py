@@ -117,21 +117,6 @@ async def due_delayed_conversation_ids() -> list[str]:
     return [item if isinstance(item, str) else item.decode() for item in ids]
 
 
-async def scan_due_delayed_messages() -> list[tuple[str, list[dict[str, Any]]]]:
-    """Legacy scan API. Scheduler uses IDs then locks before flushing."""
-    try:
-        conv_ids = await due_delayed_conversation_ids()
-    except Exception as e:
-        logger.warning(f"[DELAY-SCAN] Redis zrangebyscore failed: {e}")
-        return []
-    results = []
-    for cid in conv_ids:
-        payloads = await flush_due_delayed_messages(cid)
-        if payloads:
-            results.append((cid, payloads))
-    return results
-
-
 def merge_delayed_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Merge queued payloads into a single processing task."""
     if not payloads:
