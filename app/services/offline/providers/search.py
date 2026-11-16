@@ -152,55 +152,6 @@ def _image_url_from_item(item: Any) -> str | None:
     return text if text.startswith(("http://", "https://")) else None
 
 
-async def tavily_image_search(
-    query: str,
-    *,
-    max_results: int = 8,
-    timeout_s: float = 10.0,
-) -> list[str]:
-    api_key = settings.tavily_api_key.strip()
-    endpoint = settings.tavily_search_endpoint.strip()
-    if not api_key or not endpoint:
-        return []
-    payload = {
-        "query": " ".join(query.split())[:380],
-        "max_results": max(1, min(max_results, 10)),
-        "search_depth": "basic",
-        "include_answer": False,
-        "include_raw_content": False,
-        "include_images": True,
-    }
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "authorization": f"Bearer {api_key}",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=timeout_s, headers=headers, trust_env=False) as client:
-            response = await client.post(endpoint, json=payload)
-            response.raise_for_status()
-            data = response.json()
-    except Exception as exc:
-        logger.warning("[offline] tavily image search failed: %s", exc)
-        return []
-
-    candidates: list[str] = []
-    if isinstance(data, dict):
-        for item in data.get("images") or []:
-            image_url = _image_url_from_item(item)
-            if image_url:
-                candidates.append(image_url)
-        for item in data.get("results") or []:
-            result = _result_from_item(item)
-            if result and result.image_url:
-                candidates.append(result.image_url)
-    deduped: list[str] = []
-    for image_url in candidates:
-        if image_url not in deduped:
-            deduped.append(image_url)
-    return deduped[:max_results]
-
-
 async def tavily_place_images(query: str) -> list[SearchResult]:
     """Return page photos and separate image-search documents with their evidence."""
     return await tavily_search(query, max_results=8, image_evidence=True, timeout_s=15)

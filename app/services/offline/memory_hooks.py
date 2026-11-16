@@ -33,27 +33,6 @@ def remember_user_event(
     )
 
 
-def remember_ai_event(
-    *,
-    user_id: str,
-    workspace_id: str | None,
-    text: str,
-    evidence_message_ids: list[str] | None = None,
-) -> None:
-    if not text.strip():
-        return
-    fire_background(
-        process_memory_pipeline(
-            user_id,
-            text.strip(),
-            side="ai",
-            workspace_id=workspace_id,
-            statement_time=datetime.now(UTC),
-            evidence_message_ids=evidence_message_ids,
-        )
-    )
-
-
 def remember_offline_fragment(
     *,
     user_id: str,
