@@ -32,8 +32,6 @@ Use both repository `Secrets` and repository `Variables`.
 - `DASHSCOPE_TTS_API_KEY`
 - `DEEPSEEK_API_KEY`
 - `LANGSMITH_API_KEY`
-- `LANGSMITH_ORG_ID`
-- `LANGSMITH_PROJECT_ID`
 
 Optional:
 

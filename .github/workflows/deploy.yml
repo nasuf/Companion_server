@@ -242,8 +242,6 @@ jobs:
             LANGSMITH_TRACING=${{ vars.LANGSMITH_TRACING }}
             REPLY_DELAY_ENABLED=${{ vars.REPLY_DELAY_ENABLED }}
             LANGSMITH_API_KEY=${{ secrets.LANGSMITH_API_KEY }}
-            LANGSMITH_ORG_ID=${{ vars.LANGSMITH_ORG_ID }}
-            LANGSMITH_PROJECT_ID=${{ vars.LANGSMITH_PROJECT_ID }}
             AXIOM_TOKEN=${{ secrets.AXIOM_TOKEN }}
             AXIOM_DATASET=${{ vars.AXIOM_DATASET }}
             AXIOM_ORG_ID=${{ vars.AXIOM_ORG_ID }}
