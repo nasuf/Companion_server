@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import string
 from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -167,6 +169,23 @@ async def is_prompt_enabled(key: str) -> bool:
     return (bool(row.isEnabled) if row else default_enabled) and (not snapshot or snapshot.get(key, (None, default_enabled))[1])
 
 
+_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def check_template_syntax(content: str) -> None:
+    """Q01.01: 存入前校验占位符语法; 渲染失败时 safe_format 会把未渲染原文发给模型。
+
+    只认 {name} / {name:spec} / {name!r}; 字面大括号要写成 {{ }}。
+    """
+    try:
+        fields = [f for _, f, _, _ in string.Formatter().parse(content) if f is not None]
+    except ValueError as exc:
+        raise ValueError(f"模板大括号不成对 ({exc})；字面大括号请写成 {{{{ }}}}") from exc
+    bad = [f for f in fields if not _FIELD_NAME.fullmatch(f)]
+    if bad:
+        raise ValueError(f"模板含无效占位符 {{{bad[0]}}}；字面大括号请写成 {{{{ }}}}")
+
+
 async def _mutate(key, change_type, *, content=None, enabled=None, version_id=None,
                   expected_updated_at=None, expected_revision=None, publish_version=False):
     definition = PROMPT_DEFINITION_MAP.get(key)
@@ -182,6 +201,7 @@ async def _mutate(key, change_type, *, content=None, enabled=None, version_id=No
             if not previous or previous.promptKey != key:
                 raise KeyError(f"Unknown prompt version for key: {key}")
             content = previous.content
+            check_template_syntax(content)
         # A same-content publication must preserve legacy surrounding whitespace;
         # edited drafts retain the normal Web trimming policy.
         if publish_version and change_type == "manual_save" and row and content == row.content.strip():
@@ -213,6 +233,7 @@ async def update_prompt_text(key: str, content: str, *, expected_updated_at=None
     normalized = content.strip()
     if not normalized:
         raise ValueError("Prompt content cannot be empty")
+    check_template_syntax(normalized)
     return await _mutate(key, "manual_save", content=normalized,
                          expected_updated_at=expected_updated_at, expected_revision=expected_revision,
                          publish_version=publish_version)

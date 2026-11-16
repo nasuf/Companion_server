@@ -48,3 +48,17 @@ async def test_snapshot_keeps_source_provenance_and_content(monkeypatch):
         assert text=='captured'
         assert str(text)=='captured'
     finally: store._prompt_snapshot.reset(token)
+
+@pytest.mark.parametrize('content',['回复 {1,2,4} 条','输出 {title, body}','少了一半 {name','多了 }'])
+async def test_save_rejects_templates_that_cannot_render(content):
+    with pytest.raises(ValueError):
+        await store.update_prompt_text('memory.relevance',content)
+
+@pytest.mark.parametrize('content',['你好 {name}','JSON 示例 {{"a": 1}}','{n:.2f} {x!r}','没有占位符'])
+def test_valid_templates_pass_syntax_check(content):
+    store.check_template_syntax(content)
+
+def test_every_code_default_passes_syntax_check():
+    from app.services.prompting.registry import PROMPT_DEFINITIONS
+    for definition in PROMPT_DEFINITIONS:
+        store.check_template_syntax(definition.default_text)
