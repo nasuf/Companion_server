@@ -4,7 +4,7 @@ from itertools import permutations
 
 import pytest
 
-from app.services.chat.followup_policy import derive_followup_policy
+from app.services.time_domain.followup import derive_followup_policy
 
 NOW = datetime(2026, 10, 31, 0, 5, tzinfo=timezone.utc)
 

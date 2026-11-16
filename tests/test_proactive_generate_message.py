@@ -174,7 +174,7 @@ class TestAntiRepetitionShipsRetry:
     (True, "刚看到一朵好看的云", "刚看到一朵好看的云", None),
 ])
 async def test_optional_questions_honor_conversation_policy(allowed, text, expected, reason):
-    from app.services.chat.followup_policy import FollowupPolicy
+    from app.services.time_domain.followup import FollowupPolicy
     ctx = _build_ctx(_admin_test=True, temporal_context={},
         _followup_policy=FollowupPolicy(allowed, recent_questions=("你今天工作忙完了吗？",)))
     with (

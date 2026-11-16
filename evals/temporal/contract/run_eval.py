@@ -73,7 +73,6 @@ def main():
     source_paths = sorted((root / "app/services/time_domain").glob("*.py"))
     if not source_paths:
         source_paths = [root / "app/services/temporal_query.py",
-                        root / "app/services/temporal_operation.py",
                         root / "app/services/schedule_domain/time_parser.py"]
     source_hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
                      for p in source_paths if p.exists()}

@@ -5,13 +5,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.chat.temporal_context import build_turn_clock, dated_dialogue, prepare_reply_time
-from app.services.chat.followup_policy import derive_followup_policy, guard_optional_questions
+from app.services.time_domain.followup import derive_followup_policy, guard_optional_questions
 from app.services.chat.prompt_builder import build_chat_messages, compute_reengagement_gap_seconds
 from app.services.memory.retrieval.context_selector import (
     ClassifiedMemory, format_memory_time, select_context, split_by_source,
 )
 from app.services.memory.retrieval.hybrid import _memory_to_cache_dict, _memory_from_cache_dict
-from app.services.temporal import parse_time
+from app.services.time_domain.timestamps import parse_time
 
 NOW = datetime(2026, 10, 19, 11, 54, tzinfo=timezone.utc)
 
@@ -327,7 +327,7 @@ def test_current_state_context_drops_old_transient_state():
 
 
 def test_repeated_question_guard_keeps_unrelated_questions():
-    from app.services.chat.followup_policy import FollowupPolicy, repeats_recent_question
+    from app.services.time_domain.followup import FollowupPolicy, repeats_recent_question
     policy=FollowupPolicy(recent_questions=("你今天工作忙完了吗？",))
     assert repeats_recent_question("你今天工作忙完了吗", policy)
     assert not repeats_recent_question("要听听我刚听的歌吗？", policy)

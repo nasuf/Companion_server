@@ -246,7 +246,7 @@ def digest(root):
             "app/services/memory",
             "app/services/runtime",
             "app/services/graph",
-            "app/services/temporal",
+            "app/services/time_domain",
             "app/services/persona_grounding.py",
             "app/services/runtime_config.py",
             "app/api/realtime",

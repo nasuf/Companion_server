@@ -12,17 +12,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ALIASES = {
-    "app.services.temporal": "timestamps",
     "app.services.temporal_query": "query",
-    "app.services.temporal_binding": "binding",
-    "app.services.temporal_operation": "operations",
     "app.services.chat.temporal_context": "context",
     "app.services.chat.temporal_recall": "recall",
     "app.services.chat.temporal_guard": "guard",
-    "app.services.chat.followup_policy": "followup",
     "app.services.schedule_domain.time_service": "clock",
     "app.services.schedule_domain.time_parser": "parser",
-    "app.services.schedule_domain.time_expression": "expression",
     "app.services.memory.retrieval.timeline": "timeline",
 }
 
