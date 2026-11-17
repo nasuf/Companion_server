@@ -197,7 +197,10 @@ class ChatFrame:
             if self.current_state_fast_path
             else "unified_classifier",
             "confidence": self.detected_intent.confidence,
-            "pending_labels": list(self.pending_sub_fragments),
+            # 整句已被 handler 消化时子片段会被丢弃不执行, 证据里也不该再报出来
+            "pending_labels": []
+            if self.sc_ctx and self.sc_ctx.consumed_full_message
+            else list(self.pending_sub_fragments),
         }
 
     async def save_replies(self, conversation_id, replies, **kwargs):

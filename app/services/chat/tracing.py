@@ -39,7 +39,7 @@ from app.services.memory.lifecycle.quality import (
     serialize_quality,
 )
 from app.services.runtime.ws_manager import manager
-from app.services.chat.trace_enrich import apply_prompt_render_traces
+from app.services.chat.trace_enrich import apply_prompt_render_traces, build_execution_path
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +281,16 @@ def _attach_message_trace_metadata(detail: dict[str, Any], metadata: dict) -> di
         steps = detail.get("steps")
         if isinstance(steps, list):
             apply_prompt_render_traces(steps, prompt_render_traces)
+    steps = detail.get("steps")
+    if isinstance(steps, list):
+        # 只是展示用的摘要: 汇总出错不能连累整个 Trace 打不开
+        try:
+            detail["execution_path"] = build_execution_path(
+                steps, response_diagnostics if isinstance(response_diagnostics, dict) else None,
+            )
+        except Exception:
+            logger.warning("[TRACE] execution path summary failed", exc_info=True)
+            detail["execution_path"] = {"version": 1, "status": "error"}
     return detail
 
 

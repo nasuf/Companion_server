@@ -636,3 +636,154 @@ def test_unreadable_feedback_never_mislabels_a_step():
     trace_enrich._mark_revision(step, "需要修正的上一稿问题：[不是 JSON")
     trace_enrich._mark_revision(step, "需要修正的上一稿问题：[不是, JSON]")
     assert step["display_name"] == "活动推荐寄语"
+
+
+def _graph_step(name, *, node=None, fragment=0, intent=None, next_node=None, status="success", error=None):
+    node = name if node is None else node
+    return {
+        "id": f"{name}-{fragment}",
+        "name": name,
+        "status": status,
+        "duration_ms": 5,
+        "error": error,
+        "inputs": {"fragment_index": fragment},
+        "outputs": {"intent": intent or {}, "next_node": next_node},
+        "extra": {"metadata": {
+            "langgraph_node": node, "executor": "langgraph",
+            "graph_version": "chat-g01-v1", "checkpoint_enabled": False,
+        }},
+    }
+
+
+def test_execution_path_groups_nodes_and_intents_by_fragment():
+    primary = {"type": "record_request", "origin": "unified_classifier", "confidence": 0.75, "pending_labels": []}
+    with_sub = {**primary, "pending_labels": ["询问当前状态"]}
+    forced = {"type": "current_state", "origin": "forced", "confidence": 1.0, "pending_labels": []}
+    steps = [
+        {"id": "root", "name": "chat_request", "status": "success", "extra": {}},
+        _graph_step("identify", intent=primary, next_node="prepare_routes"),
+        _graph_step("route_next", node="identify", next_node=None),       # 路由不是节点
+        {"id": "llm", "name": "ChatOpenAI", "run_type": "llm", "status": "success",
+         "extra": {"metadata": {"langgraph_node": "identify"}}},          # LLM 子调用不是节点
+        _graph_step("prepare_routes", intent=with_sub, next_node="fragments"),
+        _graph_step("fragments", next_node="load_turn"),
+        _graph_step("identify", fragment=1, intent=forced, next_node="special_route"),
+        _graph_step("finish_turn", fragment=1, next_node="stop"),
+    ]
+    path = trace_enrich.build_execution_path(steps, {"reply_path": "short_circuit", "short_circuit_kind": "record_request"})
+
+    assert path["status"] == "available"
+    assert (path["executor"], path["graph_version"], path["checkpoint_enabled"]) == ("langgraph", "chat-g01-v1", False)
+    assert [n["node"] for n in path["nodes"]] == ["identify", "prepare_routes", "fragments", "identify", "finish_turn"]
+    assert path["nodes"][0]["next_node"] == "prepare_routes"
+    assert path["intents"] == [
+        {"fragment_index": 0, "type": "record_request", "origin": "unified_classifier",
+         "confidence": 0.75, "sub_labels": ["询问当前状态"], "sub_labels_executed": True},
+        {"fragment_index": 1, "type": "current_state", "origin": "forced", "confidence": 1.0,
+         "sub_labels": [], "sub_labels_executed": False},
+    ]
+    assert (path["reply_path"], path["short_circuit_kind"]) == ("short_circuit", "record_request")
+    assert path["failed_nodes"] == 0 and path["truncated"] is False
+    assert path["runtime_link"]["status"] == "not_linked"
+
+
+def test_execution_path_marks_failures_and_never_reports_missing_graph_as_success():
+    failed = trace_enrich.build_execution_path(
+        [_graph_step("special_route", status="error", error="x" * 500)], None,
+    )
+    assert failed["failed_nodes"] == 1
+    assert len(failed["nodes"][0]["error"]) == 200
+
+    legacy = trace_enrich.build_execution_path(
+        [{"id": "r", "name": "chat_request", "status": "success", "extra": None}], {},
+    )
+    assert legacy["status"] == "unavailable"
+    assert legacy["nodes"] == [] and legacy["intents"] == []
+    assert legacy["executor"] is None and legacy["checkpoint_enabled"] is None
+
+
+def test_execution_path_is_bounded_and_prefers_message_diagnostics(monkeypatch):
+    monkeypatch.setattr(trace_enrich, "_EXECUTION_PATH_MAX_NODES", 3)
+    steps = [_graph_step("guard", fragment=i) for i in range(4)] + [_graph_step("finish_turn", status="error")]
+    path = trace_enrich.build_execution_path(steps, {"executor": "langgraph", "graph_version": "chat-g02"})
+    assert len(path["nodes"]) == 3 and path["node_count"] == 5 and path["truncated"] is True
+    assert path["failed_nodes"] == 1                       # 被截掉的失败节点也要计入
+    assert path["graph_version"] == "chat-g02"
+
+
+def test_running_or_cancelled_nodes_are_not_counted_as_failures():
+    steps = [
+        _graph_step("load_turn"),
+        _graph_step("guard", status="pending"),
+        _graph_step("pending", status="cancelled"),
+        _graph_step("identify", status=None),
+        "not-a-step",                                      # 坏数据跳过, 不抛
+    ]
+    path = trace_enrich.build_execution_path(steps, None)
+    assert path["failed_nodes"] == 0
+    assert path["status_counts"] == {"success": 1, "error": 0, "pending": 1, "cancelled": 1, "unknown": 1}
+
+
+def test_sub_intents_that_never_ran_are_flagged():
+    consumed = {"type": "record_request", "origin": "unified_classifier", "confidence": 0.8,
+                "pending_labels": ["计划查询"]}
+    path = trace_enrich.build_execution_path(
+        [_graph_step("identify", intent=consumed), _graph_step("finish_turn")], None,
+    )
+    assert path["intents"][0]["sub_labels"] == ["计划查询"]
+    assert path["intents"][0]["sub_labels_executed"] is False
+
+
+def test_summary_failure_does_not_break_the_trace_detail(monkeypatch):
+    from app.services.chat import tracing
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("bad step")
+
+    monkeypatch.setattr(tracing, "build_execution_path", boom)
+    detail = {"steps": [{"id": "x"}]}
+    tracing._attach_message_trace_metadata(detail, {})
+    assert detail["execution_path"] == {"version": 1, "status": "error"}
+    assert detail["steps"] == [{"id": "x"}]
+
+
+def test_trace_detail_carries_execution_path_from_message_diagnostics():
+    from app.services.chat.tracing import _attach_message_trace_metadata
+
+    detail = {"steps": [_graph_step("finish_turn", next_node="stop")]}
+    _attach_message_trace_metadata(detail, {"response_diagnostics": {"reply_path": "main_llm"}})
+    assert detail["execution_path"]["reply_path"] == "main_llm"
+    assert [n["node"] for n in detail["execution_path"]["nodes"]] == ["finish_turn"]
+
+
+@pytest.mark.parametrize("consumed, expected", [(True, []), (False, ["计划查询"])])
+def test_intent_snapshot_drops_sub_intents_when_the_whole_message_was_consumed(consumed, expected):
+    from types import SimpleNamespace
+
+    from app.services.chat.graph_runtime import ChatFrame
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    frame = SimpleNamespace(
+        detected_intent=IntentResult(intent=IntentType.RECORD_REQUEST, confidence=0.8),
+        forced_intent=None, crisis_care_turn=False, current_state_fast_path=False,
+        pending_sub_fragments={"计划查询": "我吃过了"},
+        sc_ctx=SimpleNamespace(consumed_full_message=consumed),
+    )
+    assert ChatFrame.intent_snapshot(frame)["pending_labels"] == expected
+
+
+def test_sub_intent_execution_counts_truncated_fragments_and_waits_for_running_turns(monkeypatch):
+    split = {"type": "record_request", "origin": "unified_classifier", "confidence": 0.8,
+             "pending_labels": ["询问当前状态"]}
+    monkeypatch.setattr(trace_enrich, "_EXECUTION_PATH_MAX_NODES", 1)
+    truncated = trace_enrich.build_execution_path(
+        [_graph_step("identify", intent=split), _graph_step("finish_turn", fragment=1)], None,
+    )
+    assert truncated["truncated"] is True
+    assert truncated["intents"][0]["sub_labels_executed"] is True    # 后续片段被截掉也算跑过
+
+    monkeypatch.setattr(trace_enrich, "_EXECUTION_PATH_MAX_NODES", 120)
+    running = trace_enrich.build_execution_path(
+        [_graph_step("identify", intent=split), _graph_step("special_route", status="pending")], None,
+    )
+    assert running["intents"][0]["sub_labels_executed"] is None       # 回合没跑完, 不下结论

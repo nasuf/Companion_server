@@ -1030,3 +1030,113 @@ def _mark_critical_path(steps: list[dict[str, Any]]) -> None:
         if not children:
             break
         cur = max(children, key=_end_ms)
+
+
+# O01.01.V01: 执行链路摘要 —— 本回合走了哪些图节点、每段的意图判定, 全部取自已加载的 step,
+# 不另查库. 缺什么就标什么, 不把缺失画成成功.
+# 节点 = name 与 metadata.langgraph_node 相同的 step (主图只有一层; 若以后引入子图, 内部节点也会被收进来).
+_EXECUTION_PATH_MAX_NODES = 120
+_EXECUTION_PATH_ERROR_CHARS = 200
+_NODE_STATUS_BUCKETS = ("success", "error", "pending", "cancelled")
+
+
+def _step_metadata(step: dict[str, Any]) -> dict[str, Any]:
+    extra = step.get("extra")
+    meta = extra.get("metadata") if isinstance(extra, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def _intent_summary(intent: Any) -> dict[str, Any] | None:
+    if not isinstance(intent, dict) or not intent.get("type"):
+        return None
+    labels = intent.get("pending_labels")
+    return {
+        "type": intent.get("type"),
+        "origin": intent.get("origin"),
+        "confidence": intent.get("confidence"),
+        "sub_labels": [str(x) for x in labels] if isinstance(labels, list) else [],
+    }
+
+
+def _sub_labels_executed(labels: list[str], fragment: int, max_fragment: int, pending: int) -> bool | None:
+    if not labels:
+        return False
+    if max_fragment > fragment:
+        return True
+    return None if pending else False
+
+
+def build_execution_path(
+    steps: list[Any],
+    diagnostics: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """汇总图节点序列、各片段意图与执行器信息, 供 Trace 弹窗「执行链路」使用."""
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    nodes: list[dict[str, Any]] = []
+    intents: dict[int, dict[str, Any]] = {}
+    status_counts = {key: 0 for key in (*_NODE_STATUS_BUCKETS, "unknown")}
+    executor = diagnostics.get("executor")
+    graph_version = diagnostics.get("graph_version")
+    checkpoint = diagnostics.get("checkpoint_enabled")
+    node_total = 0
+    max_fragment = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        meta = _step_metadata(step)
+        executor = executor or meta.get("executor")
+        graph_version = graph_version or meta.get("graph_version")
+        if not isinstance(checkpoint, bool) and isinstance(meta.get("checkpoint_enabled"), bool):
+            checkpoint = meta["checkpoint_enabled"]
+        node = meta.get("langgraph_node")
+        if not node or step.get("name") != node:
+            continue  # route_next / LLM 子调用不是节点本身
+        node_total += 1
+        status = step.get("status")
+        status_counts[status if status in _NODE_STATUS_BUCKETS else "unknown"] += 1
+        inputs = step.get("inputs") if isinstance(step.get("inputs"), dict) else {}
+        outputs = step.get("outputs") if isinstance(step.get("outputs"), dict) else {}
+        fragment = inputs.get("fragment_index")
+        if not isinstance(fragment, int) or isinstance(fragment, bool):
+            fragment = 0
+        max_fragment = max(max_fragment, fragment)
+        intent = _intent_summary(outputs.get("intent"))
+        if intent:
+            intents[fragment] = intent  # 同一片段以最后一次为准 = 最终生效的意图
+        if len(nodes) >= _EXECUTION_PATH_MAX_NODES:
+            continue
+        entry: dict[str, Any] = {
+            "step_id": step.get("id"),
+            "node": node,
+            "fragment_index": fragment,
+            "status": status,
+            "duration_ms": step.get("duration_ms"),
+            "next_node": outputs.get("next_node"),
+        }
+        if step.get("error"):
+            entry["error"] = str(step["error"])[:_EXECUTION_PATH_ERROR_CHARS]
+        nodes.append(entry)
+    return {
+        "version": 1,
+        "status": "available" if node_total else "unavailable",
+        "executor": executor,
+        "graph_version": graph_version,
+        "checkpoint_enabled": checkpoint if isinstance(checkpoint, bool) else None,
+        # 本条消息的回复路径; 多意图回合每条消息各有一份
+        "reply_path": diagnostics.get("reply_path"),
+        "short_circuit_kind": diagnostics.get("short_circuit_kind"),
+        "intents": [
+            # 拆出的子意图要有后续片段真的跑过才算执行 (老 Trace 在整句被消化时仍会报出子意图);
+            # 回合还没跑完时说不准, 给 None
+            {"fragment_index": k, **v, "sub_labels_executed": _sub_labels_executed(
+                v["sub_labels"], k, max_fragment, status_counts["pending"])}
+            for k, v in sorted(intents.items())
+        ],
+        "nodes": nodes,
+        "node_count": node_total,
+        "truncated": node_total > len(nodes),
+        "status_counts": status_counts,
+        "failed_nodes": status_counts["error"],
+        # SQL 运行时入口 (agent_runs / runtime_jobs) 生产未启用, 聊天回合没有可关联的 ID
+        "runtime_link": {"status": "not_linked", "reason": "sql_runtime_not_enabled"},
+    }
