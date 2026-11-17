@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.llm.resilience import LLMDeadlineExceeded, llm_deadline
 from app.services.memory.storage import repo as memory_repo
 from app.services.proactive import tuning
 from app.services.prompting.utils import render_prompt
@@ -109,11 +110,12 @@ async def _load_user_hobbies(user_id: str, workspace_id: str) -> list[str]:
 
 async def _run_pick(key: str, params: dict[str, Any]) -> Any:
     try:
-        return await asyncio.wait_for(
-            render_prompt(key, params, lambda p: invoke_json(get_utility_model(), p)),
-            timeout=_PICK_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
+        with llm_deadline(_PICK_TIMEOUT_S - 0.5):
+            return await asyncio.wait_for(
+                render_prompt(key, params, lambda p: invoke_json(get_utility_model(), p)),
+                timeout=_PICK_TIMEOUT_S,
+            )
+    except (asyncio.TimeoutError, LLMDeadlineExceeded):
         logger.info(f"[TRENDING] {key} timed out")
         return None
 

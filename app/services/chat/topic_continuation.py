@@ -33,6 +33,7 @@ from app.services.interaction.topic_continuity import (
     note_transition,
 )
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_text
+from app.services.llm.resilience import LLMDeadlineExceeded, llm_deadline
 from app.services.prompting.utils import render_prompt
 from app.services.time_domain.expression import format_clock
 
@@ -129,11 +130,13 @@ def _clean_line(raw: str | None) -> str | None:
 async def _generate(key: str, params: dict[str, Any], *, utility: bool = False) -> str | None:
     model = get_utility_model if utility else get_chat_model
     try:
-        return await asyncio.wait_for(
-            render_prompt(key, params, lambda p: invoke_text(model(), p), strip_split=False),
-            timeout=_LLM_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
+        # The deadline stops retries/fallback before wait_for cancels them midway.
+        with llm_deadline(_LLM_TIMEOUT_S - 0.5):
+            return await asyncio.wait_for(
+                render_prompt(key, params, lambda p: invoke_text(model(), p), strip_split=False),
+                timeout=_LLM_TIMEOUT_S,
+            )
+    except (asyncio.TimeoutError, LLMDeadlineExceeded):
         logger.info(f"[CONTINUITY] {key} timed out")
         return None
 

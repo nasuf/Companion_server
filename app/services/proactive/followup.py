@@ -42,6 +42,7 @@ from app.services.interaction.topic_continuity import (
     render_dialogue,
 )
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_text
+from app.services.llm.resilience import LLMDeadlineExceeded, llm_deadline
 from app.services.proactive import tuning
 from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.gates import check_followup_gates, check_workspace
@@ -187,19 +188,20 @@ async def judge_topic_completion(
     if arm_reason in NO_FOLLOWUP_REASONS:
         return None
     try:
-        raw = await asyncio.wait_for(
-            render_prompt(
-                "proactive.topic_completion_judge",
-                {
-                    "conversation": format_turns(turns),
-                    "user_last_time": _last_time(turns, "user"),
-                    "current_time": format_clock(now),
-                },
-                lambda p: invoke_text(get_utility_model(), p),
-            ),
-            timeout=_JUDGE_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
+        with llm_deadline(_JUDGE_TIMEOUT_S - 0.5):
+            raw = await asyncio.wait_for(
+                render_prompt(
+                    "proactive.topic_completion_judge",
+                    {
+                        "conversation": format_turns(turns),
+                        "user_last_time": _last_time(turns, "user"),
+                        "current_time": format_clock(now),
+                    },
+                    lambda p: invoke_text(get_utility_model(), p),
+                ),
+                timeout=_JUDGE_TIMEOUT_S,
+            )
+    except (asyncio.TimeoutError, LLMDeadlineExceeded):
         logger.info("[FOLLOWUP] topic judge timed out")
         return None
     return _parse_verdict(raw)
@@ -243,22 +245,23 @@ async def generate_followup_message(
     if not agent:
         return None
     try:
-        raw = await asyncio.wait_for(
-            render_prompt(
-                "proactive.followup_unfinished",
-                {
-                    "conversation": temporal + "\n" + dated_dialogue(messages, max_chars=5000),
-                    "ai_last_time": _last_time(turns, "assistant"),
-                    "current_time": format_clock(now),
-                    "time_scene": describe_time_scene(now),
-                    "personality_brief": build_personality_brief(agent),
-                },
-                lambda p: invoke_text(get_chat_model(), p),
-                strip_split=False,
-            ),
-            timeout=_GENERATE_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
+        with llm_deadline(_GENERATE_TIMEOUT_S - 0.5):
+            raw = await asyncio.wait_for(
+                render_prompt(
+                    "proactive.followup_unfinished",
+                    {
+                        "conversation": temporal + "\n" + dated_dialogue(messages, max_chars=5000),
+                        "ai_last_time": _last_time(turns, "assistant"),
+                        "current_time": format_clock(now),
+                        "time_scene": describe_time_scene(now),
+                        "personality_brief": build_personality_brief(agent),
+                    },
+                    lambda p: invoke_text(get_chat_model(), p),
+                    strip_split=False,
+                ),
+                timeout=_GENERATE_TIMEOUT_S,
+            )
+    except (asyncio.TimeoutError, LLMDeadlineExceeded):
         logger.info("[FOLLOWUP] generation timed out")
         return None
     message = _clean_followup(raw)
