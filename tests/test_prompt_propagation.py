@@ -409,3 +409,29 @@ def test_notes_without_an_active_render_trace_are_ignored():
 
     tc.note_served_prompt("a.key", 1)                      # 没开记录时不抛
     tc.note_prompt_fallback("a.key")
+
+
+@pytest.mark.parametrize("call", ["patience", "delay"])
+async def test_read_failures_that_fall_back_to_code_defaults_invalidate_the_revision(monkeypatch, call):
+    from app.services.interaction import boundary
+    from app.services.prompting import store
+    from app.services.prompting import trace_components as tc
+    from app.services.schedule_domain import timing
+
+    async def broken(key):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(store, "get_prompt_text", broken)
+    key = boundary._ZONE_TO_PATIENCE_INSTRUCTION_KEY["medium"] if call == "patience" else "reply.delay_reason_sleep"
+    trace = tc.start_prompt_render_trace()
+    try:
+        tc.note_served_prompt(key, 7)                      # 同请求早些时候取到过 r7
+        if call == "patience":
+            text = await boundary.get_patience_prompt_instruction(50)
+        else:
+            text = await timing.explain_delay_reason("schedule_sleep", "午睡")
+        served = dict(tc._prompt_render_traces.get().served)
+    finally:
+        tc.reset_prompt_render_trace(trace)
+    assert text
+    assert served[key] is None
