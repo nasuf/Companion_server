@@ -229,3 +229,93 @@ async def test_stream_probe_released_on_cancel_and_abandon():
     assert await gen.__anext__() == "a"
     await gen.aclose()  # consumer stopped reading
     assert long.closed and breaker.try_acquire() and not breaker._failures
+
+
+def _capture_trace(monkeypatch):
+    from app.services.chat import local_tracer
+
+    steps = []
+    monkeypatch.setattr(local_tracer, "record_manual_step", lambda **kw: steps.append(kw))
+    return steps
+
+
+async def test_unary_deadline_is_recorded_in_trace_with_budget(monkeypatch):
+    steps = _capture_trace(monkeypatch)
+
+    async def slow():
+        await asyncio.sleep(5)
+
+    with llm_deadline(0.7), pytest.raises(LLMDeadlineExceeded):
+        await resilience.call_with_resilience(
+            slow, primary_provider="ark", profile=_profile(), op="t",
+            fallback_factory=slow, fallback_provider="dashscope",
+        )
+    (step,) = steps
+    assert step["name"] == "llm_deadline"
+    assert step["inputs"] == {"op": "t", "provider": "ark", "budget_seconds": 0.7}
+    assert "0.7 秒" in step["decision_label"]
+
+
+async def test_stream_fallback_deadline_keeps_its_type_and_traces(monkeypatch):
+    steps = _capture_trace(monkeypatch)
+    with llm_deadline(1.2), pytest.raises(LLMDeadlineExceeded):
+        await _drain(resilience.astream_with_resilience(
+            _BrokenStream,
+            primary_provider="ark", profile=_profile(), op="t",
+            fallback_factory=lambda: _Stream([0, 5]), fallback_provider="dashscope",
+        ))
+    assert [s["inputs"]["op"] for s in steps] == ["t:fallback"]
+
+
+class _BrokenStream(_Stream):
+    def __init__(self):
+        super().__init__([])
+
+    async def __anext__(self):
+        raise RuntimeError("provider down")
+
+
+async def test_nested_budget_reports_the_tighter_one(monkeypatch):
+    steps = _capture_trace(monkeypatch)
+
+    async def slow():
+        await asyncio.sleep(5)
+
+    with llm_deadline(0.8):
+        with llm_deadline(30), pytest.raises(LLMDeadlineExceeded):
+            await resilience.call_with_resilience(
+                slow, primary_provider="ark", profile=_profile(), op="t")
+    assert steps[0]["inputs"]["budget_seconds"] == 0.8
+    assert resilience._deadline_budget.get() is None
+
+
+async def test_trace_failure_never_breaks_the_call(monkeypatch):
+    from app.services.chat import local_tracer
+
+    def boom(**_kw):
+        raise RuntimeError("trace down")
+
+    monkeypatch.setattr(local_tracer, "record_manual_step", boom)
+
+    async def slow():
+        await asyncio.sleep(5)
+
+    with llm_deadline(0.6), pytest.raises(LLMDeadlineExceeded):
+        await resilience.call_with_resilience(slow, primary_provider="ark", profile=_profile(), op="t")
+
+
+async def test_unary_fallback_deadline_traces_the_fallback(monkeypatch):
+    steps = _capture_trace(monkeypatch)
+
+    async def down():
+        raise RuntimeError("provider down")
+
+    async def slow():
+        await asyncio.sleep(5)
+
+    with llm_deadline(1.2), pytest.raises(LLMDeadlineExceeded):
+        await resilience.call_with_resilience(
+            down, primary_provider="ark", profile=_profile(max_retries=0), op="t",
+            fallback_factory=slow, fallback_provider="dashscope",
+        )
+    assert [s["inputs"]["op"] for s in steps] == ["t:fallback"]

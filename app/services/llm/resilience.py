@@ -52,6 +52,8 @@ class LLMDeadlineExceeded(LLMFailedError):
 # Monotonic instant by which the caller needs an answer. Retries, backoff,
 # the fallback provider and nested calls all share it (ContextVar follows tasks).
 _deadline: ContextVar[float | None] = ContextVar("llm_deadline", default=None)
+# The innermost budget in seconds, only for the Trace step explaining a cut-short call.
+_deadline_budget: ContextVar[float | None] = ContextVar("llm_deadline_budget", default=None)
 # Below this, another attempt cannot plausibly return; fail instead of trying.
 _MIN_ATTEMPT_S = 0.5
 
@@ -61,11 +63,33 @@ def llm_deadline(seconds: float):
     """Bound every LLM call inside to `seconds` overall; nested budgets only tighten."""
     end = time.monotonic() + seconds
     current = _deadline.get()
-    token = _deadline.set(end if current is None else min(current, end))
+    tighter = current is None or end < current
+    token = _deadline.set(end if tighter else current)
+    budget_token = _deadline_budget.set(seconds) if tighter else None
     try:
         yield
     finally:
         _deadline.reset(token)
+        if budget_token is not None:
+            _deadline_budget.reset(budget_token)
+
+
+def _trace_deadline(op: str, provider: str, exc: Exception) -> None:
+    """Show in the Trace that the caller's budget, not the provider, ended this call."""
+    try:
+        from app.services.chat.local_tracer import record_manual_step
+
+        budget = _deadline_budget.get()
+        record_manual_step(
+            name="llm_deadline",
+            display_name=f"模型调用超出截止时间 · {op}",
+            decision_label=(f"预算 {budget:g} 秒用完" if budget is not None else "预算用完")
+            + "，后续不再重试，不计入供应商故障",
+            inputs={"op": op, "provider": provider, "budget_seconds": budget},
+            outputs={"error": str(exc)[:200]},
+        )
+    except Exception:
+        pass
 
 
 def _within_deadline(timeout: float, op: str) -> tuple[float, bool]:
@@ -600,6 +624,8 @@ async def call_with_resilience(
             primary_observed, provider=primary_provider, profile=profile, op=op, observation=primary_observation,
         )
     except LLMFailedError as primary_exc:
+        if isinstance(primary_exc, LLMDeadlineExceeded):
+            _trace_deadline(op, primary_provider, primary_exc)
         if (fallback_factory is None or not profile.allow_ollama_fallback
                 or isinstance(primary_exc, LLMDeadlineExceeded)):
             primary_observation.fallback("not_attempted")
@@ -623,6 +649,8 @@ async def call_with_resilience(
         primary_observation.fallback("failed")
         fallback_observation.fallback("not_attempted")
         failure = LLMDeadlineExceeded if isinstance(fallback_exc, LLMDeadlineExceeded) else LLMFailedError
+        if failure is LLMDeadlineExceeded:
+            _trace_deadline(f"{op}:fallback", fallback_provider, fallback_exc)
         raise failure(
             f"{op}: both primary={primary_provider} and {fallback_provider} fallback failed; "
             f"last error: {fallback_exc}"
@@ -673,6 +701,8 @@ async def astream_with_resilience(
             yield token
         return
     except LLMFailedError as primary_exc:
+        if isinstance(primary_exc, LLMDeadlineExceeded):
+            _trace_deadline(op, primary_provider, primary_exc)
         # 已经推过 token 或无 fallback → 直接让异常穿出, 调用方自己兜底
         if (got_first_chunk or fallback_factory is None or not profile.allow_ollama_fallback
                 or isinstance(primary_exc, LLMDeadlineExceeded)):
@@ -698,7 +728,10 @@ async def astream_with_resilience(
     except LLMFailedError as fallback_exc:
         primary_observation.fallback("failed")
         fallback_observation.fallback("not_attempted")
-        raise LLMFailedError(
+        failure = LLMDeadlineExceeded if isinstance(fallback_exc, LLMDeadlineExceeded) else LLMFailedError
+        if failure is LLMDeadlineExceeded:
+            _trace_deadline(f"{op}:fallback", fallback_provider, fallback_exc)
+        raise failure(
             f"{op}: primary={primary_provider} and {fallback_provider} fallback both failed: "
             f"{fallback_exc}"
         ) from fallback_exc
