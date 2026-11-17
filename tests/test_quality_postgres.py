@@ -359,3 +359,55 @@ def test_wilson_interval_bounds():
     assert high == 1.0 and 0.6 < low < 0.75
     low, high = wilson(0, 10)
     assert low == 0.0 and 0.25 < high < 0.35
+
+
+def test_report_state_separates_running_stale_not_run_and_failures():
+    from app.api.admin.quality import report_state
+
+    assert report_state(dict(status="running", lease_expired=False)) == "running"
+    assert report_state(dict(status="running", lease_expired=True)) == "stale"
+    assert report_state(dict(status="pending")) == "not_run"
+    assert report_state(dict(status="completed")) == "completed"
+    assert report_state(dict(status="skipped")) == "skipped"
+    assert report_state(dict(status="budget_exhausted")) == "failed"
+
+
+async def test_regression_report_tolerates_legacy_and_malformed_reports(quality, monkeypatch):
+    """Old reports lack per-group plans; malformed fields must not become numbers."""
+    from app.api.admin import quality as api
+
+    database = quality[0]
+    monkeypatch.setattr(api, "db", database)
+    ident = await jobs.enqueue("nightly", "test-" + uuid4().hex, uuid4().hex, {"prompts": "bad"})
+    other = await jobs.enqueue("nightly", "test-" + uuid4().hex, uuid4().hex, {})
+    await database.execute_raw(
+        "UPDATE quality_jobs SET status='completed',report=$2::jsonb WHERE id=$1",
+        other, json.dumps({"corpus_hash": "other-corpus"}))
+    await database.execute_raw(
+        "UPDATE quality_jobs SET status='running',lease_until=NOW()-interval '1 minute',report=$2::jsonb WHERE id=$1",
+        ident, json.dumps({
+            "corpus_hash": "corpus-b", "baseline_job_id": other, "errored_scenarios": "bad",
+            "gate": {"status": "incomplete", "noise_rate": "bad"}, "error_type": "LostLease",
+            "expected_by_group": {"no-separator": 3, "x|other": "bad"},
+        }))
+    await database.execute_raw(
+        "INSERT INTO quality_results(job_id,case_id,repetition,result) VALUES($1,'x:a',0,$2::jsonb)",
+        ident, json.dumps(dict(case_id="x:a", repetition=0, suite="x", critical=False, turns=1, **{"pass": True})))
+    body = await api.regression_report(ident)
+    assert body["state"] == "stale"
+    assert body["versions"]["prompt_count"] is None and body["versions"]["route"] is None
+    assert body["totals"]["expected"] is None and body["totals"]["not_run"] is None
+    assert body["totals"]["evaluated"] == 1 and body["totals"]["errored"] == 0
+    assert body["thresholds"]["noise_rate"] == api.settings.quality_noise_rate
+    assert body["error"] == {"type": "LostLease", "case_id": None}
+    assert [g["key"] for g in body["groups"]] == ["x|other"] and body["groups"][0]["not_run"] is None
+    assert body["baseline"]["corpus_matches"] is False and body["baseline"]["groups"] == {}
+
+    # Baseline job since deleted: no comparison rather than an empty one.
+    await database.execute_raw(
+        "UPDATE quality_jobs SET report='{\"baseline_job_id\":\"deleted-job\"}'::jsonb WHERE id=$1", ident)
+    legacy = await api.regression_report(ident)
+    assert legacy["totals"]["expected_by_group"] == "not_collected"
+    assert legacy["baseline"] is None and legacy["gate"] is None and legacy["error"] is None
+    await database.execute_raw("UPDATE quality_jobs SET report='{}'::jsonb WHERE id=$1", ident)
+    assert (await api.regression_report(ident))["baseline"] is None
