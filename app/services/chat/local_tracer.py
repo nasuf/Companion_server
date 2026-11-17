@@ -47,10 +47,12 @@ logger = logging.getLogger(__name__)
 # 根节点没写进去时, 后续每个子步骤都会撞外键 / 找不到根行: 单独计 orphaned, 不和真实写入失败混在一起.
 TRACE_WRITE_FAILURE_KEY = "trace:write_failures:{day}"
 TRACE_WRITE_ORPHANED_KIND = "orphaned"
+# Writes shed because too many were already in flight (DB slow or down).
+TRACE_WRITE_DROPPED_KIND = "dropped"
 _TRACE_WRITE_FAILURE_TTL = 35 * 86400
 
 
-async def _note_write_failure(kind: str, error: BaseException) -> None:
+async def _note_write_failure(kind: str, error: BaseException | None, count: int = 1) -> None:
     from prisma.errors import ForeignKeyViolationError, RecordNotFoundError, UniqueViolationError
 
     if kind == "run_start" and isinstance(error, UniqueViolationError):
@@ -64,7 +66,7 @@ async def _note_write_failure(kind: str, error: BaseException) -> None:
         key = TRACE_WRITE_FAILURE_KEY.format(day=day)
         redis = await get_redis()
         pipe = redis.pipeline()
-        pipe.hincrby(key, kind, 1)
+        pipe.hincrby(key, kind, count)
         pipe.expire(key, _TRACE_WRITE_FAILURE_TTL)
         await asyncio.wait_for(pipe.execute(), timeout=0.5)
     except Exception:
@@ -157,18 +159,61 @@ def _json_safe(value: Any) -> Any:
         return None
 
 
+# In-flight trace writes per process. A slow or unreachable DB would otherwise
+# pile up one task per step without limit; past the cap, writes are shed and
+# counted rather than queued.
+MAX_PENDING_WRITES = 500
+_pending_writes: set[asyncio.Task] = set()
+_dropped_unreported = 0
+_drop_report: asyncio.Task | None = None
+
+
+async def _report_drops() -> None:
+    global _dropped_unreported
+    while _dropped_unreported:
+        count, _dropped_unreported = _dropped_unreported, 0
+        await _note_write_failure(TRACE_WRITE_DROPPED_KIND, None, count)
+
+
 def _fire(coro) -> asyncio.Task | None:
-    """Schedule a fire-and-forget DB write; drop silently without a loop.
+    """Schedule a fire-and-forget DB write; drop it without a loop or past the cap.
 
     Trace persistence must never break or slow the chat hot path. The wrapped
     coroutines swallow their own exceptions, so no done-callback is needed.
+    Returns None when the write was dropped.
     """
+    global _dropped_unreported, _drop_report
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         coro.close()
+        return None
+    if len(_pending_writes) >= MAX_PENDING_WRITES:
+        coro.close()
+        _dropped_unreported += 1
+        # One reporter at a time folds a burst of drops into a single increment.
+        if _drop_report is None or _drop_report.done():
+            _drop_report = loop.create_task(_report_drops())
+        return None
+    task = loop.create_task(coro)
+    _pending_writes.add(task)
+    task.add_done_callback(_pending_writes.discard)
+    return task
+
+
+async def drain_trace_writes(timeout: float = 3.0) -> None:
+    """Let in-flight trace writes finish before the DB pool closes."""
+    pending = set(_pending_writes)
+    if _drop_report is not None and not _drop_report.done():
+        pending.add(_drop_report)
+    if not pending:
         return
-    return loop.create_task(coro)
+    _, remaining = await asyncio.wait(pending, timeout=timeout)
+    for task in remaining:
+        task.cancel()
+    if remaining:
+        await asyncio.gather(*remaining, return_exceptions=True)
+        logger.warning("[local-trace] shutdown writes timed out count=%d", len(remaining))
 
 
 # ─────────────────────────────────────────────────────────────────

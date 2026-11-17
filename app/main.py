@@ -203,6 +203,8 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"WS subscriber shutdown failed: {e!r}")
         from app.services.llm.usage_repo import drain_usage_writes
         await drain_usage_writes()
+        from app.services.chat.local_tracer import drain_trace_writes
+        await drain_trace_writes()
         try:
             from app.services.ops.provider_failing import retire
 
