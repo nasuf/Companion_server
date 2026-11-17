@@ -84,6 +84,8 @@ _BOUNDARY_BODY_PROMPT_KEYS = {
 
 # Registry 中不作为独立 LangSmith LLM step 出现、但会作为组合 prompt 的可编辑片段出现.
 _COMPONENT_ONLY_PROMPT_KEYS = {
+    # Appended inside invoke_structured's retry, never a step of its own.
+    "llm.format_repair",
     "chat.dialogue_history_header",
     "chat.dialogue_current_message_header",
     "chat.dialogue_continuation_hint",

@@ -42,7 +42,8 @@ async def test_only_successful_route_is_recorded(monkeypatch,stream,fail_primary
             assert route=={}
         else:
             assert await models.invoke_json(primary,'test',invocation_metadata=route)=={'memories':[]}
-            assert route=={'actual_model':'test/'+('fallback' if fail_primary else 'primary')}
+            assert route['actual_model']=='test/'+('fallback' if fail_primary else 'primary')
+            assert route['truncated'] is False
         assert all('invocation_metadata' not in kwargs for kwargs in seen)
     finally:
         resilience.reset_breakers_for_testing()
