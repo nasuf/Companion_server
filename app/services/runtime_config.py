@@ -180,7 +180,13 @@ async def _load_caches_unlocked() -> None:
         if revision_rows[0].get("realtime_model"):
             new_global["realtimeModel"] = revision_rows[0]["realtime_model"]
         new_agent = {row.agentId: _row_to_dict(row) for row in overrides}
-        new_prompts = {row.key: (row.content, row.isEnabled) for row in prompts}
+        from app.services.prompting.store import PromptSnapshot
+        new_prompts = PromptSnapshot(
+            {row.key: (row.content, row.isEnabled) for row in prompts},
+            # 只收真实修订号: 缺字段时不编 0, Trace 显示"版本未记录"
+            {row.key: row.revision for row in prompts
+             if isinstance(getattr(row, "revision", None), int)},
+        )
         identifier_counts: dict[str, int] = {}
         for r in registry:
             identifier_counts[r.identifier] = identifier_counts.get(r.identifier, 0) + 1

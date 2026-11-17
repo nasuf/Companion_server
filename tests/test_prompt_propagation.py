@@ -242,6 +242,9 @@ async def test_a_successful_config_load_reports_the_new_snapshot(monkeypatch):
     await rc._load_caches_unlocked()
     assert noted == [{"chat.main": 6, "memory.relevance": 2}]
     assert rc._PROMPT_REVISIONS == {"chat.main": 6, "memory.relevance": 2}
+    # 快照仍按二元组读, 修订号挂在旁边 (O01.01)
+    assert rc._PROMPTS_CACHE["chat.main"] == ("c", True)
+    assert rc._PROMPTS_CACHE.revisions == {"chat.main": 6, "memory.relevance": 2}
 
 
 @pytest.mark.asyncio
@@ -304,3 +307,105 @@ async def test_rows_without_a_revision_still_serve(monkeypatch):
     monkeypatch.setattr(store, "_sync_cache", AsyncMock(return_value=True))
     assert "hi" in await store.get_prompt_text("memory.relevance")
     assert noted == [{"memory.relevance": 0}]
+
+
+# ── O01.01: 渲染记录带上实际服务的修订号 ───────────────────────────────
+@pytest.fixture
+def _snapshot_reads(monkeypatch):
+    """走快照取文案: 数据库只用于 is_prompt_enabled 的实时开关 (这里一律启用)。"""
+    from types import SimpleNamespace as Row
+
+    from app.services.prompting import store
+
+    monkeypatch.setattr(store, "db", Row(prompttemplate=Row(find_unique=AsyncMock(
+        return_value=Row(isEnabled=True)))))
+    return store
+
+
+async def _render(store, snapshot, action):
+    from app.services.prompting import trace_components as tc
+
+    bind = store.bind_prompt_snapshot(snapshot)
+    trace = tc.start_prompt_render_trace()
+    try:
+        await action(store)
+        return tc.snapshot_prompt_render_traces()
+    finally:
+        tc.reset_prompt_render_trace(trace)
+        store.reset_prompt_snapshot(bind)
+
+
+@pytest.mark.asyncio
+async def test_revision_is_recorded_only_for_content_served_from_the_snapshot(_snapshot_reads):
+    store = _snapshot_reads
+    snap = store.PromptSnapshot({"memory.relevance": ("相关度 {x}", True),
+                                 "memory.judgement_user": ("停用的定制文案", False)},
+                                {"memory.relevance": 7, "memory.judgement_user": 9})
+
+    async def action(st):
+        (await st.get_prompt_text("memory.relevance")).format(x=1)
+        # 停用后回落代码默认文案: 快照里的 r9 不是实际服务的内容, 不能写
+        (await st.get_prompt_text_or_default("memory.judgement_user")).format_map({})
+
+    served, fallback = await _render(store, snap, action)
+    assert served["prompt_revision"] == 7
+    assert served["components"][0]["prompt_revision"] == 7
+    assert "prompt_revision" not in fallback
+    assert "prompt_revision" not in fallback["components"][0]
+
+
+@pytest.mark.asyncio
+async def test_keys_missing_from_the_snapshot_record_no_revision(_snapshot_reads):
+    store = _snapshot_reads
+    snap = store.PromptSnapshot({}, {})                    # 没进库: 用的是代码默认文案
+
+    async def action(st):
+        (await st.get_prompt_text("memory.relevance")).format_map({})
+
+    (record,) = await _render(store, snap, action)
+    assert "prompt_revision" not in record
+
+
+def test_fallback_or_conflicting_revisions_invalidate_the_key():
+    from app.services.prompting import trace_components as tc
+
+    trace = tc.start_prompt_render_trace()
+    try:
+        tc.note_served_prompt("a.key", 3)
+        tc.note_prompt_fallback("a.key")                   # 同一请求后来回落默认文案
+        tc.note_served_prompt("a.key", 3)                  # 作废后不再恢复
+        tc.note_served_prompt("b.key", 3)
+        tc.note_served_prompt("b.key", 4)                  # 同一请求取到两个版本
+        tc.note_served_prompt("c.key", 5)
+        tc.ManagedPromptText("A", "a.key").format()
+        tc.ManagedPromptText("B", "b.key").format()
+        tc.ManagedPromptText("C", "c.key").format()
+        a, b, c = tc.snapshot_prompt_render_traces()
+    finally:
+        tc.reset_prompt_render_trace(trace)
+    assert "prompt_revision" not in a and "prompt_revision" not in b
+    assert c["prompt_revision"] == 5
+
+
+def test_components_copied_from_an_earlier_render_drop_stale_revisions():
+    from app.services.prompting import trace_components as tc
+
+    trace = tc.start_prompt_render_trace()
+    try:
+        tc.note_served_prompt("a.key", 3)
+        tc.record_prompt_render("A", prompt_key="a.key", source="first")
+        first = tc.snapshot_prompt_render_traces()[0]
+        tc.note_prompt_fallback("a.key")                   # 复制之前同请求里这个 key 作废了
+        tc.record_prompt_render("A+", prompt_key="a.key", components=first["components"], source="copy")
+        copied = tc.snapshot_prompt_render_traces()[1]
+    finally:
+        tc.reset_prompt_render_trace(trace)
+    assert first["components"][0]["prompt_revision"] == 3
+    assert "prompt_revision" not in copied and "prompt_revision" not in copied["components"][0]
+
+
+def test_notes_without_an_active_render_trace_are_ignored():
+    from app.services.prompting import trace_components as tc
+
+    tc.note_served_prompt("a.key", 1)                      # 没开记录时不抛
+    tc.note_prompt_fallback("a.key")

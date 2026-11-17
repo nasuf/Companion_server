@@ -25,8 +25,37 @@ def prompt_hash(prompt: str) -> str:
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
+class _RenderTraceLog(list):
+    """本请求的渲染记录; served 登记本请求里各 key 实际取到的修订号 (O01.01)。
+
+    None = 本请求里这个 key 回落过默认文案或取到过两个不同修订号, 不再写修订号。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.served: dict[str, int | None] = {}
+
+
 def start_prompt_render_trace() -> Token[list[dict[str, Any]] | None]:
-    return _prompt_render_traces.set([])
+    return _prompt_render_traces.set(_RenderTraceLog())
+
+
+def note_served_prompt(key: str, revision: int | None) -> None:
+    """get_prompt_text 成功返回快照/数据库里的内容时登记修订号; 拿不准传 None。"""
+    served = getattr(_prompt_render_traces.get(), "served", None)
+    if served is None or not key:
+        return
+    if not isinstance(revision, int) or (key in served and served[key] != revision):
+        served[key] = None
+    else:
+        served.setdefault(key, revision)
+
+
+def note_prompt_fallback(key: str) -> None:
+    """回落到代码默认文案: 本请求里这个 key 的修订号都不可信。"""
+    served = getattr(_prompt_render_traces.get(), "served", None)
+    if served is not None and key:
+        served[key] = None
 
 
 def reset_prompt_render_trace(token: Token[list[dict[str, Any]] | None]) -> None:
@@ -68,7 +97,20 @@ def record_prompt_render(
             "end": len(rendered_prompt),
             "editable": True,
         }]
+    # O01.01: 每段用的是哪个修订号, 让回复能对到提示词版本历史; 查不到就不写 (= 未记录).
+    # 组件可能复制自更早的记录, 查不到时要删掉带过来的旧值
+    for item in (payload, *payload.get("components", ())):
+        revision = _served_revision(item.get("prompt_key"))
+        if revision is None:
+            item.pop("prompt_revision", None)
+        else:
+            item["prompt_revision"] = revision
     traces.append(payload)
+
+
+def _served_revision(key: str | None) -> int | None:
+    served = getattr(_prompt_render_traces.get(), "served", None)
+    return served.get(key) if served and key else None
 
 
 class _SafeRenderDict(dict):

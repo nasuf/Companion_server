@@ -211,8 +211,10 @@ def test_structured_prompt_render_trace_overrides_legacy_section_guessing():
         "prompt_hash": trace_enrich.prompt_hash(prompt),
         "prompt_key": "chat.system_base",
         "source": "chat.system_prompt",
+        "prompt_revision": 12,
         "components": [
-            {"prompt_key": "chat.relationship_stage_section", "start": start, "end": end},
+            {"prompt_key": "chat.relationship_stage_section", "start": start, "end": end,
+             "prompt_revision": 4},
         ],
     }])
 
@@ -220,6 +222,8 @@ def test_structured_prompt_render_trace_overrides_legacy_section_guessing():
     assert [item["prompt_key"] for item in components] == ["chat.relationship_stage_section"]
     assert components[0]["start"] == start
     assert components[0]["end"] == end
+    # O01.01: 实际服务的修订号透传到 Trace
+    assert step["prompt_revision"] == 12 and components[0]["prompt_revision"] == 4
 
 
 def test_main_reply_exposes_ai_state_component_only_when_rendered():

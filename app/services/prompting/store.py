@@ -16,7 +16,11 @@ from prisma import Json
 from app.db import db
 from app.redis_client import get_redis
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP, PROMPT_DEFINITIONS
-from app.services.prompting.trace_components import ManagedPromptText
+from app.services.prompting.trace_components import (
+    ManagedPromptText,
+    note_prompt_fallback,
+    note_served_prompt,
+)
 
 logger = logging.getLogger(__name__)
 PROMPT_KEY_PREFIX = "prompt_template:"
@@ -179,6 +183,18 @@ async def _version(tx, row, change_type, source):
 def _schedule_eval(version):
     from app.services.runtime.tasks import fire_background
     fire_background(_attach_eval_to_version(version.id, version.promptKey, version.changeType))
+
+
+class PromptSnapshot(dict):
+    """{key: (content, enabled)}; revisions 是同一次可重复读事务里读出的修订号。
+
+    修订号挂在属性上而不是塞进元组: 现有读法都按二元组解包, 测试也直接传普通 dict。
+    只作证据 (O01.01: 回复用的是哪个提示词版本), 不参与取文案。
+    """
+
+    def __init__(self, items=(), revisions: dict[str, int] | None = None):
+        super().__init__(items)
+        self.revisions = dict(revisions or {})
 
 
 def get_prompt_snapshot() -> dict | None:
@@ -412,12 +428,15 @@ async def get_prompt_text(key: str) -> str:
     snapshot = _prompt_snapshot.get()
     if snapshot is not None:
         content = snapshot.get(key, (definition.default_text, True))[0]
+        # 只有内容确实出自快照才有修订号; 没进库的 key 用的是代码默认文案
+        served_revision = getattr(snapshot, "revisions", {}).get(key) if key in snapshot else None
     else:
         row = await db.prompttemplate.find_unique(where={"key": key})
         # Re-check the row used for content (a disable may race the first read).
         if row and not row.isEnabled:
             raise PromptDisabledError(key)
         content = row.content if row else definition.default_text
+        served_revision = getattr(row, "revision", None) if row else None
         if row:
             await _sync_cache(row)
         # 证据: 本 worker 这次实际按哪个 revision 服务了该 key (O01.03.V01)。
@@ -453,7 +472,10 @@ async def get_prompt_text(key: str) -> str:
                 template = ManagedPromptText(f"{prefix}\n\n{content}", key)
 
     from app.services.prompting.dialogue_layout import attach_layout
-    return await attach_layout(template, get_prompt_text)
+    result = await attach_layout(template, get_prompt_text)
+    # 成功返回才登记: 后面任何回落默认文案都不会被这次登记冒充 (O01.01)
+    note_served_prompt(key, served_revision)
+    return result
 
 
 async def get_prompt_text_or_default(key: str) -> str:
@@ -468,6 +490,7 @@ async def get_prompt_text_or_default(key: str) -> str:
     except PromptDisabledError:
         definition = PROMPT_DEFINITION_MAP[key]
         logger.info("[PROMPT-DISABLED] structural key=%s falls back to code default", key)
+        note_prompt_fallback(key)
         return ManagedPromptText(definition.default_text, key, prompt_variant="default")
 
 

@@ -90,6 +90,8 @@ async def explain_delay_reason(reason: str, activity: str | None = None, status:
     except PromptDisabledError:
         return ""
     except Exception:
+        from app.services.prompting.trace_components import note_prompt_fallback
+        note_prompt_fallback(prompt_key)
         tpl = PROMPT_DEFINITION_MAP[prompt_key].default_text
     try:
         return tpl.format(**params)

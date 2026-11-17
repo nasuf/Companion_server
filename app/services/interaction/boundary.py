@@ -643,7 +643,9 @@ async def get_patience_prompt_instruction(patience: int) -> str | None:
         return None
     except Exception as e:
         logger.warning(f"patience instruction fetch failed ({key}): {e}")
-        return ManagedPromptText(PROMPT_DEFINITION_MAP[key].default_text, key)
+        from app.services.prompting.trace_components import note_prompt_fallback
+        note_prompt_fallback(key)
+        return ManagedPromptText(PROMPT_DEFINITION_MAP[key].default_text, key, prompt_variant="default")
 
 
 # --- 热路径入口：边界检查 ---

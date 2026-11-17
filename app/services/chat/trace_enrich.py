@@ -193,7 +193,7 @@ def _component_admin_meta(component: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(prompt_key, str) or not prompt_key:
         return None
     payload = _prompt_admin_meta(prompt_key)
-    for key in ("start", "end", "editable"):
+    for key in ("start", "end", "editable", "prompt_revision"):
         if key in component:
             payload[key] = component[key]
     return payload
@@ -971,6 +971,9 @@ def apply_prompt_render_traces(
             if enriched_components:
                 step["prompt_components"] = enriched_components
         step["prompt_render_source"] = matched.get("source")
+        # O01.01: 生成这一步时实际服务的修订号; 老消息没有就不写, 前端显示"未记录"
+        if isinstance(matched.get("prompt_revision"), int):
+            step["prompt_revision"] = matched["prompt_revision"]
     return steps
 
 
