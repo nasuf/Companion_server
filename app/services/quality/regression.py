@@ -12,6 +12,16 @@ from app.services.quality import jobs, budget, transport, gates, replay
 from evals.quality.corpus import load, normalise, VERSION
 
 
+def _expected_by_group(cases):
+    counts = {}
+    for case in cases:
+        key = f"{case['suite']}|{'critical' if case['critical'] else 'other'}"
+        counts[key] = counts.get(key, 0) + (
+            settings.quality_critical_repeats if case["critical"] else 1
+        )
+    return counts
+
+
 async def corpus(job):
     cases = load(quick=job["kind"] == "prompt")
     rows = await db.query_raw("""SELECT c.id,c.case_data FROM quality_cases c JOIN quality_samples s ON s.id=c.sample_id
@@ -201,6 +211,9 @@ async def run(job, *, cases=None, key_overrides=None, sink=None, concurrency=1):
         corpus_hash=fingerprint,
         scenarios=len(cases),
         repeats=settings.quality_critical_repeats,
+        # Planned samples per suite/criticality, so the report can say which
+        # groups never ran instead of inferring it from what did.
+        expected_by_group=_expected_by_group(cases),
         warning_only=True,
         forced_routing=True,
         quick_selection="提示词快速集共30个场景，最多10个最新人工确认问题（关键问题优先）；完整回放保留全部已启用问题。"

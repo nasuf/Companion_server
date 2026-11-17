@@ -639,6 +639,7 @@ async def test_regression_runs_scenarios_in_parallel_and_records_all(quality, mo
     assert peak == 4
     report = result["report"]
     assert report["evaluated"] == report["expected"] == 8
+    assert report["expected_by_group"] == {"test|other": 8}
     assert report["gate_status"] == "baseline_recorded" and result["status"] == "completed"
 
 

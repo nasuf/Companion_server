@@ -255,6 +255,7 @@ async def test_quality_admin_api_denies_nonadmin_and_invalid_dates(monkeypatch):
             "/samples/x",
             "/routing-history",
             "/jobs/x/results",
+            "/jobs/x/report",
         ):
             assert (await client.get("/admin-api/quality" + path)).status_code == 403
 
@@ -268,3 +269,93 @@ async def test_quality_admin_api_denies_nonadmin_and_invalid_dates(monkeypatch):
         assert (
             await client.get("/admin-api/quality/jobs/x/samples?limit=500")
         ).status_code == 422
+
+
+async def test_regression_report_groups_baseline_not_run_and_filters(quality, monkeypatch):
+    """O01.08.V01: summary -> failing group detail, versions as digests only."""
+    from app.api.admin import quality as api
+    from app.api.jwt_auth import require_user
+    from fastapi import FastAPI
+    import httpx
+
+    database = quality[0]
+    monkeypatch.setattr(api, "db", database)
+    snapshot = {"hash": "snap-digest", "prompts": [{"key": "chat.system_base", "content": "PROMPT-BODY-SECRET"}],
+                "route": ["ark", "model-x"], "prices": {"secret": 1}}
+
+    async def regression_job(results, report):
+        ident = await jobs.enqueue("nightly", "test-" + uuid4().hex, uuid4().hex, snapshot)
+        await database.execute_raw(
+            "UPDATE quality_jobs SET status='completed',report=$2::jsonb WHERE id=$1", ident, json.dumps(report))
+        for case_id, repetition, suite, critical, passed in results:
+            row = dict(case_id=case_id, repetition=repetition, suite=suite, critical=critical, turns=1)
+            row["pass"] = passed
+            await database.execute_raw(
+                "INSERT INTO quality_results(job_id,case_id,repetition,result) VALUES($1,$2,$3,$4::jsonb)",
+                ident, case_id, repetition, json.dumps(row))
+        return ident
+
+    common = dict(corpus_version="v9", corpus_hash="corpus-a", repeats=3)
+    base = await regression_job(
+        [("persona:a", r, "persona", True, True) for r in range(3)] + [("reply:b", 0, "reply", False, True)],
+        dict(common, gate_status="baseline_recorded"))
+    candidate = await regression_job(
+        [("persona:a", 0, "persona", True, True), ("persona:a", 1, "persona", True, False),
+         ("persona:a", 2, "persona", True, None), ("reply:b", 0, "reply", False, True),
+         ("human_confirmed:c", 0, "human_confirmed", False, False)],
+        dict(common, baseline_job_id=base, expected=7, evaluated=5,
+             gate={"status": "incomplete", "reason": "missing_scenarios"},
+             expected_by_group={"persona|critical": 3, "reply|other": 1, "human_confirmed|other": 1,
+                                "never|other": 2},
+             errored_scenarios=[{"case_id": "persona:a", "repetition": 2}]))
+    daily_job = await jobs.enqueue("daily", "test-" + uuid4().hex, uuid4().hex, {})
+
+    app = FastAPI()
+    app.include_router(api.router)
+
+    async def admin():
+        return {"sub": "synthetic", "role": "admin"}
+
+    app.dependency_overrides[require_user] = admin
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/admin-api/quality/jobs/{candidate}/report")
+        assert response.status_code == 200, response.text[:300]
+        assert "PROMPT-BODY-SECRET" not in response.text and "secret" not in response.text
+        body = response.json()
+        assert (await client.get(f"/admin-api/quality/jobs/{daily_job}/report")).status_code == 404
+        assert (await client.get("/admin-api/quality/jobs/missing/report")).status_code == 404
+        failing = (await client.get(f"/admin-api/quality/jobs/{candidate}/results",
+                                    params={"suite": "persona", "critical": "true", "failed_only": "true"})).json()
+        other = (await client.get(f"/admin-api/quality/jobs/{candidate}/results",
+                                  params={"suite": "reply", "failed_only": "true"})).json()
+
+    assert body["state"] == "completed"
+    assert body["versions"]["code"] and body["versions"]["prompt_version"] is None
+    assert body["versions"] == dict(body["versions"], prompt_snapshot="snap-digest", prompt_count=1,
+                                    route=["ark", "model-x"], corpus_version="v9", corpus_hash="corpus-a", repeats=3)
+    assert body["totals"] == dict(expected=7, evaluated=5, not_run=2, unjudged=1, errored=1,
+                                  expected_by_group="recorded")
+    groups = {g["key"]: g for g in body["groups"]}
+    persona = groups["persona|critical"]
+    assert (persona["passed"], persona["failed"], persona["unjudged"], persona["judged"]) == (1, 1, 1, 2)
+    assert persona["pass_rate"] == 0.5 and persona["small_sample"] is True
+    assert 0 < persona["ci95"][0] < 0.5 < persona["ci95"][1] < 1
+    assert persona["origin"] == "synthetic" and persona["not_run"] == 0
+    assert groups["human_confirmed|other"]["origin"] == "production_confirmed"
+    never = groups["never|other"]
+    assert (never["samples"], never["not_run"], never["ci95"], never["pass_rate"]) == (0, 2, None, None)
+    assert body["baseline"]["id"] == base and body["baseline"]["corpus_matches"] is True
+    assert body["baseline"]["groups"]["persona|critical"]["pass_rate"] == 1.0
+    assert body["gate"]["reason"] == "missing_scenarios"
+    assert [(r["case_id"], r["repetition"]) for r in failing["items"]] == [("persona:a", 1), ("persona:a", 2)]
+    assert other["items"] == []
+
+
+def test_wilson_interval_bounds():
+    from app.api.admin.quality import wilson
+
+    assert wilson(0, 0) is None
+    low, high = wilson(10, 10)
+    assert high == 1.0 and 0.6 < low < 0.75
+    low, high = wilson(0, 10)
+    assert low == 0.0 and 0.25 < high < 0.35
