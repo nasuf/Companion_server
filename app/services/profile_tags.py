@@ -75,6 +75,16 @@ async def list_profile_tags(
           AND (($2::text IS NULL AND workspace_id IS NULL) OR workspace_id = $2)
           AND ($3::text IS NULL OR agent_id = $3)
           AND is_active = TRUE
+          -- M02.04.03: a tag stops applying as soon as any source memory is
+          -- deleted or archived; the next portrait refresh rebuilds the set.
+          AND NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(source_memory_ids) = 'array'
+                   THEN source_memory_ids ELSE '[]'::jsonb END) AS s(id)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM memories_user m
+              WHERE m.id = s.id AND m.user_id = user_profile_tags.user_id
+                AND NOT m.is_archived))
         ORDER BY confidence DESC, evidence_count DESC, updated_at DESC
         LIMIT $4
         """,
