@@ -67,26 +67,27 @@ AI 自述和日常总结不得据此创建新的永久人设。原来的 Web 提
 
 ## 遗忘范围与历史重抽取语义
 
-本节冻结当前语义（M02.04.01）。软归档和用户遗忘是两种不同的操作，只有后者会触发遗忘屏障。
+本节冻结当前语义（M02.04.01，M02.04.02 补齐 App 删除）。软归档和用户遗忘是两种不同的操作，只有后者会触发遗忘屏障。
+用户遗忘可以是硬删除，也可以是保留文本的归档。
 
 | 操作 | 入口 | 记忆行 | 向量 | 遗忘屏障 | 可撤销 |
 | --- | --- | --- | --- | --- | --- |
 | 用户遗忘（硬删除） | 聊天中“忘掉…”，`delete_memories_by_description` | 删除 | 删除 | 触发 | 聊天内撤销按快照重建为新 ID |
-| App 批量删除 | `POST /memories/bulk-delete`，审计 `user_bulk_delete` | `is_archived=true` | 保留 | 不触发 | 无用户入口 |
-| 工作区清空 | `wipe_workspace_memories`，审计 `workspace_wipe` | `is_archived=true` | 保留 | 不触发 | 无用户入口 |
+| App 批量删除 | `POST /memories/bulk-delete`，审计 `user_bulk_delete` | `is_archived=true` | 保留 | 触发 | 无用户入口，文本可人工恢复 |
+| 工作区清空 | `wipe_workspace_memories`，审计 `workspace_wipe` | `is_archived=true` | 保留 | 触发 | 无用户入口，文本可人工恢复 |
 | 压缩归档 | 夜间压缩，审计 `consolidated_into` | `is_archived=true` | 夜间可回收 | 不触发 | 运维脚本 `undo_consolidation.py` |
 | 取消提醒 | 聊天取消提醒 | `is_archived=true` | 保留 | 不触发 | 撤回取消时恢复 |
 
-遗忘屏障指 `memories_user`/`memories_ai` 上的 `BEFORE DELETE` 触发器：递增工作区
+遗忘屏障由数据库函数 `fence_forgotten_memories(side, workspace_id, ids)` 实现：递增工作区
 `memory_erasure_epochs`，把证据来源消息写入 `memory_erased_sources`，将写入回执标为
 `erased`，并把冻结抽取结果中相关事实替换为 `{"_erased": true}`。之后提交的抽取会按
-这些记录拒绝被删除来源的内容。软归档只让检索和上下文看不到该行，不登记来源，因此
-同一源消息上的迟到或重放抽取在语义上仍可能写入相同事实。将 App 删除改为走遗忘屏障
-属于 M02.04.02。
+这些记录拒绝被删除来源的内容。硬删除由 `BEFORE DELETE` 触发器调用它；App 批量删除和
+工作区清空由 `archive_forgotten` 在归档、审计的同一事务中调用。压缩归档和取消提醒属于
+内部归档，只让检索和上下文看不到该行，不登记来源。
 
 ### 源消息仍显示、但不得再次用于模型记忆的情形
 
-- 用户遗忘某条记忆后，源消息仍留在聊天记录里。其来源已登记在 `memory_erased_sources`，
+- 用户遗忘某条记忆后（聊天删除、App 批量删除或工作区清空），源消息仍留在聊天记录里。其来源已登记在 `memory_erased_sources`，
   回执和冻结结果已脱敏。消息审计游标靠 `memory_extraction_sources` 反连接判定是否
   已处理，回执在删除后保留，所以这条消息不会被重新抽取。
 - 抽取回执保留期间，任何已有回执的消息都不会被消息审计再次抽取；游标不早于该会话首个

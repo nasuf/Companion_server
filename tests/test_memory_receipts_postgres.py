@@ -794,3 +794,87 @@ def test_failure_origin_follows_the_cause_chain():
     first, second = ValueError("a"), KeyError("b")
     first.__cause__, second.__cause__ = second, first
     assert receipts.failure_origin(first)[0] in {"ValueError", "KeyError"}  # terminates
+
+
+async def _forget(db, monkeypatch, uid, ids, side="user"):
+    from app.services.memory.interaction import forget
+    from app.services.memory.storage import repo
+
+    monkeypatch.setattr(forget, "db", db)
+    monkeypatch.setattr(forget, "invalidate_scope", AsyncMock())
+    monkeypatch.setattr(forget, "after_memory_changelog", AsyncMock())
+    table = db.aimemory if side == "ai" else db.usermemory
+    rows = [await table.find_unique(where={"id": i}) for i in ids]
+    records = [repo._to_record(r, side) for r in rows]
+    return await forget.archive_forgotten(uid, records, operation="user_bulk_delete")
+
+
+async def test_archive_forgetting_fences_sources_like_physical_erasure(ledger, monkeypatch):
+    db, uid, wid, msg, args, extract = ledger
+    ids = await pipeline.process_memory_pipeline(**args)
+    epoch = await db.query_raw(
+        "SELECT generation FROM memory_erasure_epochs WHERE workspace_id=$1", wid
+    )
+    assert await _forget(db, monkeypatch, uid, [ids[0]]) == 1
+    row = await db.usermemory.find_unique(where={"id": ids[0]})
+    assert row.isArchived and row.content == "用户今天参观了合成展览"
+    after = await db.query_raw(
+        "SELECT generation FROM memory_erasure_epochs WHERE workspace_id=$1", wid
+    )
+    assert after[0]["generation"] == (epoch[0]["generation"] if epoch else 0) + 1
+    assert (
+        await db.query_raw(
+            "SELECT count(*)::int n FROM memory_erased_sources WHERE workspace_id=$1 AND message_id=$2",
+            wid, msg.id,
+        )
+    )[0]["n"] == 1
+    receipts_ = await db.query_raw(
+        "SELECT status,memory_id FROM memory_write_receipts ORDER BY fact_index"
+    )
+    assert [r["status"] for r in receipts_] == ["erased", "written"]
+    assert receipts_[0]["memory_id"] is None
+    audit = await db.memorychangelog.find_many(
+        where={"memoryId": ids[0], "operation": "user_bulk_delete"}
+    )
+    assert len(audit) == 1 and audit[0].oldValue == "用户今天参观了合成展览"
+    # Replay must not bring the forgotten fact back as a new live row.
+    assert await pipeline.process_memory_pipeline(**args) == [ids[1]]
+    live = await db.usermemory.find_many(
+        where={"userId": uid, "isArchived": False, "content": {"startswith": "用户"}}
+    )
+    assert [m.id for m in live] == [ids[1]]
+    assert extract.await_count == 1
+
+
+async def test_archive_forgetting_redacts_an_unfinished_batch(ledger, monkeypatch):
+    db, uid, wid, msg, args, extract = ledger
+    finish = receipt_followups.finish_followups
+    monkeypatch.setattr(
+        receipt_followups, "finish_followups", AsyncMock(side_effect=RuntimeError("after commit"))
+    )
+    with pytest.raises(pipeline.MemoryExtractionError):
+        await pipeline.process_memory_pipeline(**args)
+    mid = (await db.query_raw("SELECT memory_id FROM memory_write_receipts"))[0]["memory_id"]
+    assert await _forget(db, monkeypatch, uid, [mid]) == 1
+    payload = (await db.query_raw("SELECT extraction FROM memory_extraction_batches"))[0]["extraction"]
+    assert payload["memories"][0] == {"_erased": True}
+    monkeypatch.setattr(receipt_followups, "finish_followups", finish)
+    assert len(await pipeline.process_memory_pipeline(**args)) == 1
+    live = await db.usermemory.find_many(
+        where={"userId": uid, "isArchived": False, "content": {"startswith": "用户"}}
+    )
+    assert [m.content for m in live] == ["用户参加了合成读书活动"]
+
+
+async def test_archive_forgetting_skips_foreign_and_archived_rows(ledger, monkeypatch):
+    db, uid, wid, msg, args, extract = ledger
+    ids = await pipeline.process_memory_pipeline(**args)
+    assert await _forget(db, monkeypatch, "someone-else", ids) == 0
+    assert await _forget(db, monkeypatch, uid, [ids[0]]) == 1
+    assert await _forget(db, monkeypatch, uid, [ids[0]]) == 0
+    assert (
+        await db.query_raw(
+            "SELECT count(*)::int n FROM memory_changelogs WHERE memory_id=$1 AND operation='user_bulk_delete'",
+            ids[0],
+        )
+    )[0]["n"] == 1

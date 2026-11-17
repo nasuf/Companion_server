@@ -20,8 +20,8 @@ from app.models.memory import (
     WorkspaceMemoryWipeResponse,
 )
 from app.services.memory.lifecycle.quality import derive_memory_quality, serialize_quality
+from app.services.memory.interaction.forget import archive_forgotten
 from app.services.memory.manual_edit import MemoryEditError, edit_memory_with_evidence
-from app.services.memory.storage.persistence import log_memory_changelog
 from app.services.memory.lifecycle.hygiene import run_memory_hygiene
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.retrieval.context_selector import exceeds_injection_limit
@@ -250,28 +250,15 @@ async def bulk_delete_memories(
     _user=Depends(require_user_self),
 ):
     requested = list(dict.fromkeys(data.memory_ids))
-    archived = 0
     missing_or_forbidden: list[str] = []
+    records = []
     for memory_id in requested:
         rec = await memory_repo.find_unique(memory_id)
         if not rec or rec.userId != user_id or rec.isArchived:
             missing_or_forbidden.append(memory_id)
             continue
-        await memory_repo.update(
-            rec.id,
-            source=rec.source,
-            record=rec,
-            isArchived=True,
-        )
-        await log_memory_changelog(
-            rec.userId,
-            rec.id,
-            "user_bulk_delete",
-            old_value=rec.content,
-            new_value=None,
-            workspace_id=rec.workspaceId,
-        )
-        archived += 1
+        records.append(rec)
+    archived = await archive_forgotten(user_id, records, operation="user_bulk_delete")
     return MemoryBulkDeleteResponse(
         requested=len(requested),
         archived=archived,
@@ -303,36 +290,10 @@ async def wipe_workspace_memories(
     }
     if data.include_user:
         records = await memory_repo.find_many(source="user", where=where)
-        archived_user = await memory_repo.update_many(
-            source="user",
-            where=where,
-            data={"isArchived": True},
-        )
-        for rec in records:
-            await log_memory_changelog(
-                rec.userId,
-                rec.id,
-                "workspace_wipe",
-                old_value=rec.content,
-                new_value=None,
-                workspace_id=rec.workspaceId,
-            )
+        archived_user = await archive_forgotten(user_id, records, operation="workspace_wipe")
     if data.include_ai:
         records = await memory_repo.find_many(source="ai", where=where)
-        archived_ai = await memory_repo.update_many(
-            source="ai",
-            where=where,
-            data={"isArchived": True},
-        )
-        for rec in records:
-            await log_memory_changelog(
-                rec.userId,
-                rec.id,
-                "workspace_wipe",
-                old_value=rec.content,
-                new_value=None,
-                workspace_id=rec.workspaceId,
-            )
+        archived_ai = await archive_forgotten(user_id, records, operation="workspace_wipe")
     return WorkspaceMemoryWipeResponse(
         workspace_id=data.workspace_id,
         archived_user=archived_user,

@@ -158,3 +158,21 @@ async def test_abandoned_output_cleanup_preserves_original_text_and_recent_stage
     assert await f.db.aimemory.find_unique(where={"id":abandoned.id}) is None
     assert await f.db.aimemory.find_unique(where={"id":recent.id}) is not None
     assert (await row(f,original.id,"ai"))["content"]==original.content
+
+
+@pytest.mark.parametrize("side",["user","ai"])
+async def test_late_consolidation_cannot_commit_a_forgotten_original(memory_flow,monkeypatch,side):
+    from app.services.memory.interaction import forget
+    f=memory_flow;originals,digest=await cluster(f,monkeypatch,side)
+    monkeypatch.setattr(forget,"db",f.db)
+    monkeypatch.setattr(forget,"invalidate_scope",AsyncMock())
+    monkeypatch.setattr(forget,"after_memory_changelog",AsyncMock())
+    table=f.db.aimemory if side=="ai" else f.db.usermemory
+    record=repo._to_record(await table.find_unique(where={"id":originals[0].id}),side)
+    assert await forget.archive_forgotten(f.ids["owner"],[record],operation="user_bulk_delete")==1
+    with pytest.raises(consolidation_write.MemoryWriteError,match="parent"):
+        await archive(f,originals,digest,side)
+    rows=await f.db.query_raw(f"SELECT count(*)::int n FROM {'memories_ai' if side=='ai' else 'memories_user'} WHERE provenance='consolidated' AND user_id=$1",f.ids["owner"])
+    assert rows[0]["n"]==0
+    rest=[await row(f,m.id,side) for m in originals[1:]]
+    assert not any(r["is_archived"] for r in rest)

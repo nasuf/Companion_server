@@ -127,8 +127,7 @@ def test_bulk_delete_archives_only_owned_memories(client):
 
     with (
         patch("app.api.public.memories.memory_repo.find_unique", AsyncMock(side_effect=_find)),
-        patch("app.api.public.memories.memory_repo.update", AsyncMock()) as update,
-        patch("app.api.public.memories.log_memory_changelog", AsyncMock()) as changelog,
+        patch("app.api.public.memories.archive_forgotten", AsyncMock(return_value=1)) as forget,
     ):
         response = client.post(
             "/memories/bulk-delete?user_id=u1",
@@ -140,9 +139,9 @@ def test_bulk_delete_archives_only_owned_memories(client):
     body = response.json()
     assert body["archived"] == 1
     assert body["missing_or_forbidden"] == ["m2", "ghost"]
-    update.assert_awaited_once()
-    assert update.await_args.kwargs["isArchived"] is True
-    changelog.assert_awaited_once()
+    forget.assert_awaited_once()
+    assert forget.await_args.args == ("u1", [owned])
+    assert forget.await_args.kwargs == {"operation": "user_bulk_delete"}
 
 
 def test_workspace_wipe_archives_user_and_ai_memories(client):
@@ -159,10 +158,9 @@ def test_workspace_wipe_archives_user_and_ai_memories(client):
             AsyncMock(side_effect=[user_records, ai_records]),
         ),
         patch(
-            "app.api.public.memories.memory_repo.update_many",
+            "app.api.public.memories.archive_forgotten",
             AsyncMock(side_effect=[1, 1]),
-        ) as update_many,
-        patch("app.api.public.memories.log_memory_changelog", AsyncMock()) as changelog,
+        ) as forget,
     ):
         response = client.post(
             "/memories/workspace-wipe?user_id=u1",
@@ -176,5 +174,5 @@ def test_workspace_wipe_archives_user_and_ai_memories(client):
         "archived_user": 1,
         "archived_ai": 1,
     }
-    assert update_many.await_count == 2
-    assert changelog.await_count == 2
+    assert [c.args for c in forget.await_args_list] == [("u1", user_records), ("u1", ai_records)]
+    assert all(c.kwargs == {"operation": "workspace_wipe"} for c in forget.await_args_list)
