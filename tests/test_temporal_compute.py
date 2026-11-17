@@ -150,7 +150,10 @@ async def test_plan_for_question_routes_and_degrades(monkeypatch):
     done = await plan("这个月我去了几次健身房")
     assert done.status == "computed" and load.await_args.kwargs["term"][:3] == ("健身", "撸铁", "举铁")
     assert await plan("今天好累") is None
-    assert await plan("我减肥多久了") is None            # 持续时长, 不是距上次多久
+    since_first = await plan("我减肥多久了")            # 持续时长: 从第一次提起算起的下限
+    assert since_first is not None and since_first.operation == "duration"
+    assert load.await_args.kwargs["term"][0] == "减肥"
+    assert await plan("我今天上班多久了") is None        # 这一次持续多久, 提及日子算不出来
     recent = await plan("我最近一次去健身房是哪天")      # "最近一次" 不是时间范围
     assert recent.status == "computed"
     await plan("我多久没吃火锅了")
@@ -267,3 +270,89 @@ def test_vague_topics_are_not_guessed():
     assert compute.topic_term("我上次那个是什么时候来着") == ""
     assert compute.topic_term("这个月我做了几次") == ""
     assert compute.topic_term("我上个月看了几场电影") == "电影"
+
+
+def test_ongoing_duration_is_a_lower_bound_from_first_mention():
+    rows = [_row(1, "用户在减肥", "2026-09-10"), _row(2, "用户减肥瘦了两斤", "2026-10-20"),
+            _row(3, "用户打算明年减肥", "2026-12-01")]
+    plan = compute_plan("duration", "我减肥多久了", rows, now=NOW, zone=_TZ)
+    assert plan.status == "computed"
+    assert plan.value == {"since_first_days": 53, "first_date": "2026-09-10"}
+    text = render_plan(plan)
+    assert "第一次跟你提到：2026-09-10" in text and "至少" in text and "不适用" in text
+    # 最早的记录可能超出扫描上限: 不拿扫到的最早一条冒充开始时间
+    cut = compute_plan("duration", "我减肥多久了", rows, now=NOW, zone=_TZ, truncated=True)
+    assert cut.status == "topic_unclear" and "first_beyond_scan" in cut.reasons
+    # "多久没" 仍是距上次多久
+    since_last = compute_plan("duration", "我多久没减肥了", rows, now=NOW, zone=_TZ)
+    assert since_last.value["last_date"] == "2026-10-20"
+
+
+@pytest.mark.parametrize("question, term", [
+    ("我坚持健身多长时间了", "健身"),
+    ("我练瑜伽有多少天了", "练瑜伽"),
+    ("我一直在减肥多久了", "减肥"),
+    ("我有氧练了几次", "有氧练"),  # "有" 只在 多久/多少 前剥掉
+])
+def test_topic_term_strips_duration_modifiers(question, term):
+    assert topic_term(question) == term
+
+
+@pytest.mark.parametrize("reply, verdict", [
+    ("从你九月十号跟我说起，到现在五十三天了", "consistent"),
+    ("9月10号你就说在减了", "consistent"),
+    ("你9月12号开始的", "mismatch"),
+    ("都60天了", "mismatch"),
+])
+def test_reply_check_for_ongoing_duration(reply, verdict):
+    diag = {"status": "computed", "operation": "duration",
+            "value": {"since_first_days": 53, "first_date": "2026-09-10"}}
+    assert compute.check_reply(diag, reply) == verdict
+
+
+@pytest.mark.parametrize("question, kind", [
+    ("我减肥多久了", "since_first"),
+    ("我坚持健身多长时间了", "since_first"),
+    ("我练瑜伽有多少天了", "since_first"),
+    ("我多久没去健身了", "since_last"),
+    ("上次去健身房到现在多久了", "since_last"),
+    ("我最近一次吃火锅是多久前", "since_last"),
+    ("我多久前去的医院", "since_last"),
+    ("我一直没去医院有多久了", "since_last"),
+    ("我每次跑步多久", None),
+    ("我一般健身多长时间", None),
+    ("我早上跑步多长时间", None),
+    ("我坚持不了健身多久了", None),
+])
+def test_duration_kind_routes_since_last_before_since_first(question, kind):
+    assert compute._duration_kind(question) == kind
+
+
+@pytest.mark.asyncio
+async def test_plan_for_question_duration_routing(monkeypatch):
+    rows = [_row(1, "用户在健身", "2026-09-10"), _row(2, "用户去健身了", "2026-10-29")]
+    monkeypatch.setattr(compute, "load_event_rows", AsyncMock(return_value=(rows, False)))
+
+    async def plan(text):
+        return await compute.plan_for_question(text, _q(text), user_id="u", workspace_id="w", now=NOW)
+
+    first = await plan("我坚持健身多长时间了")
+    assert first.status == "computed"
+    assert first.value == {"since_first_days": 53, "first_date": "2026-09-10"}
+    last = await plan("上次去健身房到现在多久了")
+    assert last.value["last_date"] == "2026-10-29" and "since_first_days" not in last.value
+    assert await plan("我每次健身多久") is None
+    assert await plan("我今天健身多久了") is None   # 这一次的时长, 不当成持续多久
+
+
+def test_first_side_hint_only_for_undated_mentions():
+    merged = compute_plan("duration", "我减肥多久了",
+                          [_row(1, "用户在减肥", "2026-09-10", mentions=2, sources=("2026-09-10",))],
+                          now=NOW, zone=_TZ)
+    assert "merged_mentions" in merged.reasons
+    assert "可能更" not in render_plan(merged)    # 缺的是后来几次的日子, 不影响最早那次
+    undated = compute_plan("duration", "我减肥多久了",
+                           [_row(1, "用户在减肥", "2026-09-10"), _row(2, "用户减肥中", None)],
+                           now=NOW, zone=_TZ)
+    assert "实际可能更早" in render_plan(undated)
+    assert "不要说成对方是那天开始的" in render_plan(undated)

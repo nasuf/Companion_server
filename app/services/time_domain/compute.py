@@ -34,6 +34,7 @@ _OPERATIONS = {"count", "order", "duration"}
 _STRIP = re.compile(
     r"几次|多少次|多少回|几回|几场|多少场|几趟|次数|一共|总共|加起来|"
     r"最近一次|上一次|上上次|上次|最后一次|倒数第[一二三四五六七八九十\d]+次|第[一二三四五六七八九十\d]+次|"
+    r"有(?=多久|多长|多少)|坚持|一直|持续|"
     r"多久|多长时间|多少天|几天|几个月|隔了|间隔|距离|离现在|到现在|以来|"
     r"什么时候|啥时候|哪天|几号|是不是|有没有|"
     r"这个月|上个月|下个月|今年|去年|前年|本周|这周|上周|这礼拜|上礼拜|最近|今天|昨天|前天|"
@@ -70,6 +71,26 @@ _OTHER_ACTOR = re.compile(_ACTORS)
 _WITH_ACTOR = re.compile(r"(?:和|跟|陪|与|同|带)着?" + _ACTORS)
 _FINALLY_DONE = re.compile(r"终于|总算|又去了|还是去了")
 _DURATION_SINCE = re.compile(r"多久没|多长时间没|多少天没|几天没|隔了多久|间隔多久|距离(?:我)?上次|距(?:我)?上次|离(?:我)?上次|过去几天")
+# 距上次多久: "上次去健身房到现在多久了""多久前去的医院""一直没去医院有多久了"
+_SINCE_LAST = re.compile(r"上次|上一次|最近一次|最后一次|多久前|多久以前|多长时间前|几天前|"
+                         r"没[^，。！？,]{0,6}(?:多久|多长时间|多少天|几天)")
+# 持续多久: 只认句尾 "多久了/多少天了" ("我减肥多久了""坚持健身多长时间了")
+_SINCE_FIRST = re.compile(r"(?:多久|多长时间|多少天|几天|几个月|几年)了[吗呢啊呀？?！!。\s]*$")
+# 问单次时长 ("每次跑步多久""早上跑步多长时间") 或抱怨 ("坚持不了多久了"), 提及日子算不出来
+_NOT_ONGOING = re.compile(r"每次|每回|一次|一般|平时|通常|平常|每天|早上|上午|中午|下午|晚上|"
+                          r"不了|不下去|放弃|不想")
+
+
+def _duration_kind(question: str) -> str | None:
+    """duration 问句是 "距上次多久" (since_last) 还是 "持续多久" (since_first); 拿不准返回 None。"""
+    question = question or ""
+    if _DURATION_SINCE.search(question) or _SINCE_LAST.search(question):
+        return "since_last"
+    if _SINCE_FIRST.search(question) and not _NOT_ONGOING.search(question):
+        return "since_first"
+    return None
+
+
 # 问了时间范围 ("这个月" "上周" "九月份")。"最近" 不算范围 (模糊词, 解析不出区间), 按不限范围算。
 _TIME_HINT = re.compile(r"这个月|上个月|今年|去年|前年|这周|本周|上周|这礼拜|上礼拜|月份?|号|今天|昨天|前天")
 _ORDINAL = re.compile(r"(倒数)?第([一二三四五六七八九十\d]{1,3})次")
@@ -271,11 +292,19 @@ def compute_plan(operation: str, question: str, rows: list[EventRow], *, now: da
             return plan
         pick = dates[n - 1] if side == "first" else dates[-n]
         plan.value = {"which": side, "n": n, "date": pick.isoformat(), "days_ago": (today - pick).days}
-    elif operation == "duration":
+    elif operation == "duration" and _duration_kind(question) != "since_first":
         last = dates[-1]
         plan.value = {"since_last_days": (today - last).days, "last_date": last.isoformat()}
         if len(dates) >= 2:
             plan.value["gap_between_last_two_days"] = (dates[-1] - dates[-2]).days
+    elif operation == "duration":
+        # "我减肥多久了": 真正开始的那天不知道, 只能从第一次跟你提起算起, 是下限
+        if truncated:
+            plan.status = "topic_unclear"  # 最早的那些可能没扫到
+            plan.reasons.append("first_beyond_scan")
+            return plan
+        first = dates[0]
+        plan.value = {"since_first_days": (today - first).days, "first_date": first.isoformat()}
     return plan
 
 
@@ -304,14 +333,23 @@ def render_plan(plan: TemporalAnswerPlan) -> str:
         else:
             name = "第一次" if v["n"] == 1 else f"第{v['n']}次"
         lines.append(f"对方{name}跟你提到：{v['date']}，距今 {v['days_ago']} 天")
+    elif plan.operation == "duration" and "since_first_days" in v:
+        lines.append(f"对方第一次跟你提到：{v['first_date']}，到今天 {v['since_first_days']} 天")
+        lines.append("真正开始的时间你不知道：只能说至少从对方第一次跟你提起算起有这么久，"
+                     "不能说成正好这么久，也不要说成对方是那天开始的；对方如果说过已经停了、不做了，"
+                     "以对方说的为准；如果对方问的是今天或这一次持续了多久，这条不适用")
     elif plan.operation == "duration":
         lines.append(f"对方最近一次跟你提到：{v['last_date']}，到今天 {v['since_last_days']} 天")
         if "gap_between_last_two_days" in v:
             lines.append(f"最近两次提到相隔 {v['gap_between_last_two_days']} 天")
         lines.append("用你自己的话说成是对方上次跟你提起的时间，不要断定对方这段时间一次都没去")
-    if "merged_mentions" in plan.reasons or "undated_mentions" in plan.reasons:
-        earlier = plan.operation == "order" and v.get("which") == "first"
-        lines.append(f"还有说法没记清日子，实际可能更多、{'更早' if earlier else '更近'}")
+    first_side = (plan.operation == "order" and v.get("which") == "first") or "since_first_days" in v
+    if first_side:
+        # 合并过的说法缺的是后来几次的日子, 不影响最早那次; 只有没日子的说法可能更早
+        if "undated_mentions" in plan.reasons:
+            lines.append("还有说法没记清日子，实际可能更早")
+    elif "merged_mentions" in plan.reasons or "undated_mentions" in plan.reasons:
+        lines.append("还有说法没记清日子，实际可能更多、更近")
     lines.append("这些数字和日期由程序算好，照着说，不要自己重新数或算日期差。")
     return "\n".join(lines)
 
@@ -359,14 +397,17 @@ async def plan_for_question(question: str, temporal_query, *, user_id: str | Non
     operation = getattr(getattr(temporal_query, "operation", None), "type", None)
     if operation not in _OPERATIONS:
         return None
-    if operation == "duration" and not _DURATION_SINCE.search(question or ""):
-        return None  # "我减肥多久了" 问的是持续时长, 不是距上次多久
+    kind = _duration_kind(question) if operation == "duration" else None
+    if operation == "duration" and kind is None:
+        return None  # 问单次时长 / 说法拿不准: 不给事实段
     if operation == "order" and _ordinal(question or "") is None:
         return None
     term = topic_term(question)
     if not term or not user_id or not workspace_id:
         return TemporalAnswerPlan(operation=operation, status="topic_unclear", topic=term)
     expressions = getattr(temporal_query, "expressions", ()) or ()
+    if kind == "since_first" and (expressions or _TIME_HINT.search(question)):
+        return None  # "今天上班多久了": 问的是这一次持续多久, 提及日子算不出来
     if _TIME_HINT.search(_ORDINAL_WORDS.sub("", question)) and len(expressions) != 1:
         plan = TemporalAnswerPlan(operation=operation, status="topic_unclear", topic=term)
         plan.reasons.append("range_unclear")  # 问了范围却没解析出唯一范围, 不拿全部历史顶替
@@ -433,8 +474,8 @@ def _check_dates(value: dict, reply: str) -> str:
     from datetime import date as date_cls
     from app.services.time_domain.parser import _parse_cn_number
 
-    target = value.get("date") or value.get("last_date")
-    days = value.get("days_ago") if "days_ago" in value else value.get("since_last_days")
+    target = value.get("date") or value.get("last_date") or value.get("first_date")
+    days = next((value[k] for k in ("days_ago", "since_last_days", "since_first_days") if k in value), None)
     try:
         expected_date = date_cls.fromisoformat(target) if target else None
     except ValueError:
