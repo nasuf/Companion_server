@@ -88,7 +88,7 @@ async def test_hybrid_cache_key_uses_enhanced_query():
     from app.services.memory.retrieval import hybrid
 
     captured_keys = []
-    async def _capture_cache_get(key, user_id, workspace_id=None):
+    async def _capture_cache_get(key, user_id, workspace_id=None, **_):
         captured_keys.append(key)
         return None
 

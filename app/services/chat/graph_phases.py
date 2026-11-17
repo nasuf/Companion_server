@@ -8,6 +8,7 @@ It deliberately has no checkpoint or replay implementation.
 from __future__ import annotations
 
 from app.services.chat.memory_usage import submit_memory_usage
+from app.services.memory.retrieval.live_check import keep_live_memories
 from app.services.chat import reply_repetition
 from app.services.chat.reply_repetition import review as repetition_review
 from app.services.chat.reply_repetition import semantic as semantic_repetition
@@ -1156,6 +1157,13 @@ async def prepare_reply(ctx):
         ctx.allow_count_variation = True
     ctx.max_reply_count = services.MAX_REPLY_COUNT
     ctx.max_total = services.MAX_TOTAL_CHARS
+    # M02.04.04: 召回可能来自缓存, 或早于停顿期间的遗忘。分级 prompt、主 prompt
+    # 和使用登记都读这份列表, 在它们之前按库再核一遍。
+    ctx.classified_memories = await keep_live_memories(
+        ctx.classified_memories, user_id=ctx.user_id, workspace_id=ctx.workspace_id,
+        diagnostics=ctx.response_diagnostics,
+    )
+    lap("memory_live_check")
     selected_ids = [getattr(m, "id", "") for m in ctx.classified_memories or []]
     candidate_ids = list(getattr(ctx.fetched, "candidate_ids", None) or [])
     if ctx.contradiction_inquiry:

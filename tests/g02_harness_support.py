@@ -113,6 +113,13 @@ def configure_pair(patches):
 
     io.location_queries = AsyncMock(side_effect=location_rows)
     patches.setattr(location_context, "db", SimpleNamespace(query_raw=io.location_queries))
+    from app.services.memory.retrieval import live_check
+
+    async def _all_live(_sql, ids, *_args):
+        return [{"id": i} for i in ids]
+
+    # Synthetic recalls are never forgotten mid-turn; keep them all live.
+    patches.setattr(live_check, "db", SimpleNamespace(query_raw=_all_live))
     async def load_fixture_location(agent, user_id, workspace_id):
         return await location_context.load_location_context(agent, user_id, workspace_id, now=io.now)
 

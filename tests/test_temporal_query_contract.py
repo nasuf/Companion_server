@@ -162,9 +162,9 @@ async def test_real_executor_passes_original_anchor_to_retrieval(monkeypatch, ex
 async def test_same_text_on_different_dates_never_reuses_retrieval_cache(monkeypatch):
     from app.services.memory.retrieval import hybrid as h
     cache = {}
-    async def get(key, user_id, workspace_id=None):
+    async def get(key, user_id, workspace_id=None, **_):
         return cache.get((key, user_id, workspace_id))
-    async def put(key, user_id, value, workspace_id=None):
+    async def put(key, user_id, value, workspace_id=None, **_):
         cache[(key, user_id, workspace_id)] = value
     monkeypatch.setattr(h, "cache_retrieval", get)
     monkeypatch.setattr(h, "cache_set_retrieval", put)

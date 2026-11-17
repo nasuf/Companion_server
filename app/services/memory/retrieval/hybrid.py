@@ -30,6 +30,7 @@ from app.services.memory.storage.entity_repo import search_related_memories_for_
 from app.services.runtime.cache import (
     cache_retrieval,
     cache_set_retrieval,
+    get_cache_version,
 )
 from app.services.time_domain.parser import has_explicit_time, parse_time_expressions
 
@@ -238,7 +239,9 @@ async def hybrid_retrieve(
     cache_key = effective_query + "\n" + query.cache_token()
     # "我们之间"类提问用原话判定 (共同经历线索通常在原话, 不在指代改写里).
     wants_shared_history = asks_shared_history(message)
-    cached = await cache_retrieval(cache_key, user_id, workspace_id=workspace_id)
+    cache_version = await get_cache_version("ret", user_id, workspace_id)
+    cached = await cache_retrieval(cache_key, user_id, workspace_id=workspace_id,
+                                   version=cache_version)
     if cached:
         logger.debug("Hybrid retrieval cache hit (key=%s)", cache_key[:30])
         cached = _rehydrate_cached_memories(cached)
@@ -480,6 +483,7 @@ async def hybrid_retrieve(
             user_id,
             _cacheable_retrieval_result(result),
             workspace_id=workspace_id,
+            version=cache_version,
         )
     except Exception:
         pass

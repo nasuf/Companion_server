@@ -111,9 +111,11 @@ async def cache_set_embedding(text: str, embedding: list[float]) -> None:
     await cache_set("emb", text, embedding, ttl=1800)
 
 
-async def cache_retrieval(query: str, user_id: str, workspace_id: str | None = None) -> dict | None:
-    """Get cached retrieval results (scoped to current cache version)."""
-    ver = await get_cache_version("ret", user_id, workspace_id)
+async def cache_retrieval(
+    query: str, user_id: str, workspace_id: str | None = None, *, version: int | None = None,
+) -> dict | None:
+    """Get cached retrieval results (scoped to the given or current cache version)."""
+    ver = await get_cache_version("ret", user_id, workspace_id) if version is None else version
     result = await cache_get("ret", f"owner:{user_id}:v{ver}:{workspace_id or 'none'}:{query}")
     if isinstance(result, dict):
         return result
@@ -121,10 +123,16 @@ async def cache_retrieval(query: str, user_id: str, workspace_id: str | None = N
 
 
 async def cache_set_retrieval(
-    query: str, user_id: str, results: dict, workspace_id: str | None = None
+    query: str, user_id: str, results: dict, workspace_id: str | None = None,
+    *, version: int | None = None,
 ) -> None:
-    """Cache retrieval results (TTL 5 min, keyed by current cache version)."""
-    ver = await get_cache_version("ret", user_id, workspace_id)
+    """Cache retrieval results (TTL 5 min).
+
+    Pass the version read before retrieval started. A write or forget during
+    retrieval bumps the version, so the result lands under the old key and is
+    never served; reading the version here would file stale rows as current.
+    """
+    ver = await get_cache_version("ret", user_id, workspace_id) if version is None else version
     from app.services.runtime import user_erasure
     try:
         async with user_erasure.owner_write_scope(user_id):

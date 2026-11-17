@@ -86,7 +86,7 @@ async def test_hybrid_cache_write_serializes_classified_memories(monkeypatch):
 
     captured: dict = {}
 
-    async def _capture_cache_set(key, user_id, result, workspace_id=None):
+    async def _capture_cache_set(key, user_id, result, workspace_id=None, **_):
         captured["result"] = result
 
     monkeypatch.setattr(hybrid_mod, "cache_retrieval", AsyncMock(return_value=None))
