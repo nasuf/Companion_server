@@ -69,3 +69,71 @@ def test_missing_reads_rejected_but_current_state_short_circuit_is_explicit():
     validate_location_evidence('current_state', {}, 0, [])
     with pytest.raises(RuntimeError, match='not exercised'):
         validate_location_evidence('current_state', {'location_context': {'user_source': 'device'}}, 0, [])
+
+
+async def test_deterministic_historical_fallback_is_judged_not_incomplete(tmp_path, monkeypatch):
+    """Nightly regression: this case answered with the fixed historical-recall fallback (no model
+    call) and the harness raised "Incomplete actual reply flow" every night, so the whole run was
+    reported incomplete. Its validity reads also hit the unconnected database."""
+    import json
+    import logging
+    import os
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import openai
+
+    from evals.quality import corpus
+    from evals.temporal.awareness import run_incident_eval as harness
+    from app.services.prompting.registry import PROMPT_DEFINITIONS
+
+    for key in ("DATABASE_URL", "REDIS_URL", "TRACING_BACKEND"):  # run() overwrites these
+        monkeypatch.setenv(key, os.environ.get(key, ""))
+    for key in ("ARK_API_KEY", "DASHSCOPE_API_KEY"):
+        monkeypatch.setenv(key, "synthetic")
+    for key in ("ARK_BASE_URL", "DASHSCOPE_BASE_URL"):
+        monkeypatch.setenv(key, "http://127.0.0.1:1")
+    judged = []
+
+    class Completions:
+        async def create(self, **kwargs):
+            judged.append(kwargs["messages"][-1]["content"])
+            content = json.dumps({"pass": True, "reason": "synthetic"})
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))], usage=None)
+
+    class Client:
+        def __init__(self, *_a, **_k):
+            self.chat = SimpleNamespace(completions=Completions())
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", Client)
+    warnings = []
+    handler = logging.Handler()
+    handler.emit = lambda record: warnings.append(record.getMessage())
+    logging.getLogger("app.services.time_domain.validity_context").addHandler(handler)
+    raw = next(json.loads(line) for line in (Path(__file__).resolve().parents[1] / "evals/temporal/dialogue/cases.jsonl")
+               .read_text().splitlines() if '"development-identity-family_trip"' in line)
+    snapshot = tmp_path / "prompts.json"
+    snapshot.write_text(json.dumps([{"key": d.key, "content": d.default_text, "is_enabled": True}
+                                    for d in PROMPT_DEFINITIONS], ensure_ascii=False))
+    model_calls = []
+
+    async def provider_call(messages, **_options):
+        model_calls.append(messages)
+        return {"text": "去西藏的是你弟弟呀。", "usage": {}}
+
+    args = SimpleNamespace(source_root=tmp_path, prompt_snapshot=snapshot, output=tmp_path / "out.json",
+                           model="synthetic", judge_model="synthetic", samples=1, provider_call=provider_call)
+    try:
+        await harness.run(args, cases=[corpus.normalise("temporal_dialogue", raw)])
+    finally:
+        logging.getLogger("app.services.time_domain.validity_context").removeHandler(handler)
+    run = json.loads(args.output.read_text())["runs"][0]
+    assert run["response_diagnostics"]["reply_path"] == "temporal_recall"
+    assert run["calls"] == [] and model_calls == []      # 确定性回复, 没有模型调用
+    assert run["judge"]["pass"] is True and judged        # 照常交给评审
+    validity = run["response_diagnostics"]["temporal_context"]["validity"]
+    assert validity["status"] != "unavailable" and validity["recent_source_count"] == 1
+    assert not [w for w in warnings if "unavailable" in w]

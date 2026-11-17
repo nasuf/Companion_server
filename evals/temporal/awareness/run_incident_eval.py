@@ -68,6 +68,47 @@ def configure_time_context(patch, chat, io):
 REPLAY_PROTOCOL = 2
 
 
+def _stub_validity_reads(patch, history):
+    """Answer the temporal-validity revalidation reads the way production would for this case.
+
+    The case's synthetic memories and history rows exist in the case world, but no temporal
+    assertion was ever materialised for them. Without this the reads hit the unconnected
+    database, validity is marked unavailable and the reply is generated from silently
+    degraded evidence instead of the production path.
+    """
+    try:
+        from app.services.time_domain import validity_context
+    except ImportError:
+        return  # baseline predates the validity read path
+    from app.services.memory.evidence import content_version
+    from app.services.memory.interaction import change_history
+
+    by_id = {row.id: row for row in history}
+
+    async def query_raw(_sql, *params):
+        requested = json.loads(params[2])
+        if requested and "side" not in requested[0]:  # recent user statements: same id, version and time
+            rows = []
+            for item in requested:
+                row = by_id.get(item["id"])
+                if (row is None or row.role != "user" or content_version(row.content) != item["version"]
+                        or row.createdAt != datetime.fromisoformat(item["statement_at"])):
+                    continue
+                rows.append({"source_message_id": row.id, "content": row.content,
+                             "statement_time": row.createdAt, "source_version": item["version"]})
+            return rows
+        # memory revalidation: every requested memory is live, none has a materialised assertion
+        return [{"memory_id": item["id"], "side": item["side"], "historical_memory_id": item["id"],
+                 "chain_truncated": False, "any_chain_truncated": False, "candidate_total": 0,
+                 "source_rank": 1, "assertion_id": None} for item in requested]
+
+    async def no_changes(*_args, **_kwargs):
+        return []
+
+    patch.setattr(validity_context, "db", SimpleNamespace(query_raw=query_raw))
+    patch.setattr(change_history, "read_constraints", no_changes)
+
+
 async def run(args, cases=None):
     if (args.source_root / ".env").exists():
         raise ValueError("Use an isolated source checkout without .env")
@@ -203,6 +244,7 @@ async def run(args, cases=None):
                         history.append(SimpleNamespace(id="u-new", role="user", content=case["message"], metadata={},
                             createdAt=datetime.fromisoformat(case["received_at"].replace("Z", "+00:00"))))
                     io.db.message.find_many.side_effect = lambda **_: list(reversed(history))
+                    _stub_validity_reads(patch, history)
                     memories = select_context([dict(id="synthetic-meal", source="ai", content="9月8日午饭吃了三明治",
                         main_category="生活", sub_category="日常", importance=.7, similarity=.9, rank_score=.8,
                         occur_time="2026-09-08T04:00:00Z", statement_time="2026-09-08T04:05:00Z",
@@ -242,7 +284,10 @@ async def run(args, cases=None):
                     answer = " ".join(texts)
                     validate_location_evidence(case["route"], captured_diagnostics,
                                                io.location_queries.await_count, location_failures.failures)
-                    if not captured or not answer or not any(e["event"] == "done" for e in events):
+                    # The historical-recall path may answer with its fixed fallback without any
+                    # model call; that is a real reply to judge, not an incomplete flow.
+                    deterministic = captured_diagnostics.get("reply_path") == "temporal_recall"
+                    if (not captured and not deterministic) or not answer or not any(e["event"] == "done" for e in events):
                         raise RuntimeError(f"Incomplete actual reply flow for {case['id']}")
                     try:
                         verdict = await judge.chat.completions.create(model=args.judge_model, temperature=0,
