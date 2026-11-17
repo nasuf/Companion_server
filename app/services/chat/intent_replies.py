@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
+from app.services.llm.resilience import llm_deadline
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, render_prompt
 
 logger = logging.getLogger(__name__)
@@ -374,9 +375,12 @@ async def record_ask_time(
         )
 
     try:
-        result = await _asyncio.wait_for(
-            _do_ask(), timeout=_ASK_TIME_TIMEOUT_SEC,
-        )
+        # The LLM chain gets slightly less than the hard cap, so retries stop
+        # on their own instead of being cancelled mid-request.
+        with llm_deadline(max(_ASK_TIME_TIMEOUT_SEC - 0.5, 0.5)):
+            result = await _asyncio.wait_for(
+                _do_ask(), timeout=_ASK_TIME_TIMEOUT_SEC,
+            )
     except (_asyncio.TimeoutError, Exception) as e:
         logger.info(
             f"record_ask_time timeout/error after "
@@ -453,9 +457,12 @@ async def reminder_pre_check(
         )
 
     try:
-        result = await _asyncio.wait_for(
-            _do_check(), timeout=_REMINDER_PRECHECK_TIMEOUT_SEC,
-        )
+        # The LLM chain gets slightly less than the hard cap, so retries stop
+        # on their own instead of being cancelled mid-request.
+        with llm_deadline(max(_REMINDER_PRECHECK_TIMEOUT_SEC - 0.5, 0.5)):
+            result = await _asyncio.wait_for(
+                _do_check(), timeout=_REMINDER_PRECHECK_TIMEOUT_SEC,
+            )
     except (_asyncio.TimeoutError, Exception) as e:
         logger.info(
             f"reminder_pre_check timeout/error after "

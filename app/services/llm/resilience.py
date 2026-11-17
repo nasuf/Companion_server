@@ -27,7 +27,8 @@ import asyncio
 import logging
 import time
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -42,6 +43,40 @@ logger = logging.getLogger(__name__)
 
 class LLMFailedError(RuntimeError):
     """所有 retry + fallback 都失败后的终极异常, 调用方需要自己兜底 (静态文本等)."""
+
+
+class LLMDeadlineExceeded(LLMFailedError):
+    """The caller's overall budget ran out; not a provider failure."""
+
+
+# Monotonic instant by which the caller needs an answer. Retries, backoff,
+# the fallback provider and nested calls all share it (ContextVar follows tasks).
+_deadline: ContextVar[float | None] = ContextVar("llm_deadline", default=None)
+# Below this, another attempt cannot plausibly return; fail instead of trying.
+_MIN_ATTEMPT_S = 0.5
+
+
+@contextmanager
+def llm_deadline(seconds: float):
+    """Bound every LLM call inside to `seconds` overall; nested budgets only tighten."""
+    end = time.monotonic() + seconds
+    current = _deadline.get()
+    token = _deadline.set(end if current is None else min(current, end))
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
+def _within_deadline(timeout: float, op: str) -> tuple[float, bool]:
+    """Return (timeout capped by the caller's budget, whether the cap applied)."""
+    end = _deadline.get()
+    if end is None:
+        return timeout, False
+    remaining = end - time.monotonic()
+    if remaining < _MIN_ATTEMPT_S:
+        raise LLMDeadlineExceeded(f"{op}: caller deadline exhausted")
+    return (remaining, True) if remaining < timeout else (timeout, False)
 
 
 class LLMCircuitOpenError(LLMFailedError):
@@ -233,6 +268,12 @@ class CircuitBreaker:
             return False
         self._half_open_inflight = True
         return True
+
+    def release_probe(self) -> None:
+        """The half-open probe ended without a verdict (caller deadline or
+        cancellation): free the slot without counting success or failure,
+        otherwise the breaker stays half-open with no probe allowed, forever."""
+        self._half_open_inflight = False
 
     def record_success(self) -> None:
         self._failures.clear()
@@ -434,10 +475,17 @@ async def _run_with_retry(
         # Kill switch: 只保留 timeout, 跳过 CB + retry。并发上限仍然生效 ——
         # 这个开关是为了排查时少一层重试/熔断的干扰, 而故障期恰恰最需要防止请求
         # 洪峰, 把限流一起关掉会让情况更糟。
+        timeout, capped = _within_deadline(profile.timeout_s, op)
         async with _llm_slot(provider):
             began = time.time()
             try:
-                result = await asyncio.wait_for(factory(), timeout=profile.timeout_s)
+                result = await asyncio.wait_for(factory(), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                if observation:
+                    observation.record("failure", began, error=exc)
+                if capped:
+                    raise LLMDeadlineExceeded(f"{op} on {provider}: caller deadline reached") from exc
+                raise
             except Exception as exc:
                 if observation:
                     observation.record("failure", began, error=exc)
@@ -447,20 +495,32 @@ async def _run_with_retry(
             return result
 
     breaker = _get_breaker(provider)
+    probe = breaker.state() == "half_open"
     if not breaker.try_acquire():
         _record_runtime_event(result="circuit_open")
         if observation:
             observation.record("circuit", time.time(), circuit_open=True)
         raise LLMCircuitOpenError(f"circuit open for {provider} on {op}")
+    try:
+        return await _attempts(factory, breaker=breaker, provider=provider, profile=profile,
+                               op=op, observation=observation)
+    except (LLMDeadlineExceeded, asyncio.CancelledError):
+        if probe:
+            breaker.release_probe()
+        raise
 
+
+async def _attempts(factory, *, breaker, provider, profile, op, observation):
     last_exc: Exception | None = None
     for attempt in range(profile.max_retries + 1):
         started = time.monotonic()
         began = time.time()
+        # Retries only start when the backoff check below left a usable budget.
+        timeout, capped = _within_deadline(profile.timeout_s, op)
         try:
             # 槽位只包住这一次请求, 不包外层的 backoff sleep。
             async with _llm_slot(provider):
-                result = await asyncio.wait_for(factory(), timeout=profile.timeout_s)
+                result = await asyncio.wait_for(factory(), timeout=timeout)
             breaker.record_success()
             if observation:
                 observation.record("success", began)
@@ -468,9 +528,15 @@ async def _run_with_retry(
                          started=started, attempt=attempt)
             return result
         except asyncio.TimeoutError as e:
-            last_exc = e
-            _log_attempt(provider=provider, op=op, result="timeout",
+            _log_attempt(provider=provider, op=op, result="deadline" if capped else "timeout",
                          started=started, attempt=attempt)
+            if capped:
+                # The caller's budget cut this attempt short; the provider did
+                # not fail, so the breaker is untouched.
+                if observation:
+                    observation.record("failure", began, error=e)
+                raise LLMDeadlineExceeded(f"{op} on {provider}: caller deadline reached") from e
+            last_exc = e
         except Exception as e:
             last_exc = e
             _log_attempt(provider=provider, op=op, result="error",
@@ -481,7 +547,11 @@ async def _run_with_retry(
             observation.record("failure", began, error=last_exc, circuit_open=breaker.state() == "open")
         if attempt >= profile.max_retries:
             break
-        await asyncio.sleep(profile.retry_backoff_s[attempt])
+        backoff = profile.retry_backoff_s[attempt]
+        end = _deadline.get()
+        if end is not None and end - time.monotonic() < backoff + _MIN_ATTEMPT_S:
+            break  # no time left to wait and try again
+        await asyncio.sleep(backoff)
 
     raise LLMFailedError(
         f"{op} on {provider} failed after {profile.max_retries + 1} attempts: "
@@ -530,7 +600,8 @@ async def call_with_resilience(
             primary_observed, provider=primary_provider, profile=profile, op=op, observation=primary_observation,
         )
     except LLMFailedError as primary_exc:
-        if fallback_factory is None or not profile.allow_ollama_fallback:
+        if (fallback_factory is None or not profile.allow_ollama_fallback
+                or isinstance(primary_exc, LLMDeadlineExceeded)):
             primary_observation.fallback("not_attempted")
             raise
         _record_runtime_event(result="fallback")
@@ -551,7 +622,8 @@ async def call_with_resilience(
     except LLMFailedError as fallback_exc:
         primary_observation.fallback("failed")
         fallback_observation.fallback("not_attempted")
-        raise LLMFailedError(
+        failure = LLMDeadlineExceeded if isinstance(fallback_exc, LLMDeadlineExceeded) else LLMFailedError
+        raise failure(
             f"{op}: both primary={primary_provider} and {fallback_provider} fallback failed; "
             f"last error: {fallback_exc}"
         ) from fallback_exc
@@ -602,7 +674,8 @@ async def astream_with_resilience(
         return
     except LLMFailedError as primary_exc:
         # 已经推过 token 或无 fallback → 直接让异常穿出, 调用方自己兜底
-        if got_first_chunk or fallback_factory is None or not profile.allow_ollama_fallback:
+        if (got_first_chunk or fallback_factory is None or not profile.allow_ollama_fallback
+                or isinstance(primary_exc, LLMDeadlineExceeded)):
             primary_observation.fallback("not_attempted")
             raise
         _record_runtime_event(result="fallback")
@@ -713,25 +786,50 @@ async def _stream_provider(
     factory = lambda: observed_stream(source_factory, provider, model_name)
 
     if not settings.llm_resilience_enabled:
+        # Kill switch drops breaker/fallback only. A stalled stream must still
+        # time out, and the connection is closed here rather than left to GC.
+        stream = factory()
+        aiter = stream.__aiter__()
         started = time.monotonic()
         try:
-            async for chunk in factory():
-                # 仅尊重总 timeout (killswitch 场景保留基本防卡)
+            first_wait, _ = _within_deadline(profile.first_chunk_timeout_s, op)
+            async with _llm_slot(provider):
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=first_wait)
+            while True:
                 if time.monotonic() - started > profile.timeout_s:
                     raise LLMFailedError(f"{op} on {provider}: exceeded overall timeout (killswitch mode)")
                 _capture_chunk_usage(chunk, last_usage)
                 yield _chunk_text(chunk)
+                wait, _ = _within_deadline(profile.idle_timeout_s or profile.first_chunk_timeout_s, op)
+                try:
+                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=wait)
+                except StopAsyncIteration:
+                    break
             if observation:
                 observation.record("success", began)
+        except StopAsyncIteration:
+            if observation:
+                observation.record("success", began)
+        except asyncio.TimeoutError as exc:
+            if observation:
+                observation.record("failure", began, error=exc)
+            raise LLMFailedError(f"{op} on {provider}: stream stalled (killswitch mode)") from exc
         except Exception as exc:
             if observation:
                 observation.record("failure", began, error=exc)
             raise
         finally:
             _flush_stream_usage(last_usage, model_name)
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    pass
         return
 
     breaker = _get_breaker(provider)
+    probe = breaker.state() == "half_open"
     if not breaker.try_acquire():
         _record_runtime_event(result="circuit_open")
         if observation:
@@ -765,29 +863,43 @@ async def _stream_provider(
         # 秒两条流的吞吐。而且异步生成器被消费方中途丢弃时, finally 要等 GC 才跑,
         # 槽位泄漏是永久的容量损失 —— 比没有限流更糟。这一段的持有时长有
         # first_chunk_timeout_s 兜底, 泄漏窗口是有界的。
+        first_wait, first_capped = _within_deadline(profile.first_chunk_timeout_s, op)
         async with _llm_slot(provider):
-            first = await asyncio.wait_for(
-                aiter.__anext__(), timeout=profile.first_chunk_timeout_s,
-            )
+            first = await asyncio.wait_for(aiter.__anext__(), timeout=first_wait)
     except asyncio.CancelledError:
+        if probe:
+            breaker.release_probe()
         try:
             await _safe_close()
         finally:
             _flush_stream_usage(last_usage, model_name)
         raise
     except Exception as e:
-        breaker.record_failure()
+        # Out of caller budget (before or during the wait) is not a provider failure.
+        cut_short = isinstance(e, LLMDeadlineExceeded) or (
+            isinstance(e, asyncio.TimeoutError) and first_capped
+        )
+        if not cut_short:
+            breaker.record_failure()
+        elif probe:
+            breaker.release_probe()
         if observation:
             observation.record("failure", began, error=e, circuit_open=breaker.state() == "open")
-        _log_attempt(provider=provider, op=op, result="first_chunk_fail",
+        _log_attempt(provider=provider, op=op, result="deadline" if cut_short else "first_chunk_fail",
                      started=started, exc=e)
         try:
             await _safe_close()
         finally:
             _flush_stream_usage(last_usage, model_name)
+        if cut_short:
+            raise LLMDeadlineExceeded(f"{op} on {provider}: caller deadline reached before first chunk") from e
         raise LLMFailedError(f"stream no first chunk on {provider}: {e}") from e
 
     deadline = started + profile.timeout_s
+    caller_end = _deadline.get()
+    caller_bound = caller_end is not None and caller_end < deadline
+    if caller_bound:
+        deadline = caller_end
     # idle 超时: chunk 间最大允许停顿. None → 沿用 first_chunk_timeout_s
     # (与改动前等价 — 老 chat_stream profile 行为不变).
     idle = profile.idle_timeout_s or profile.first_chunk_timeout_s
@@ -798,11 +910,16 @@ async def _stream_provider(
         _capture_chunk_usage(first, last_usage)
         yield _chunk_text(first)
         while True:
+            wait = min(idle, max(deadline - time.monotonic(), 0.0)) if caller_bound else idle
             try:
-                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=idle)
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=wait)
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
+                if caller_bound and time.monotonic() >= deadline:
+                    _log_attempt(provider=provider, op=op, result="deadline", started=started)
+                    await _safe_close()
+                    raise LLMDeadlineExceeded(f"{op} on {provider}: caller deadline reached mid-stream")
                 breaker.record_failure()
                 if observation:
                     observation.record("failure", began, circuit_open=breaker.state() == "open")
@@ -813,6 +930,9 @@ async def _stream_provider(
                     f"stream idle > {idle}s on {provider} (no chunk between yields)"
                 )
             if time.monotonic() > deadline:
+                if caller_bound:
+                    await _safe_close()
+                    raise LLMDeadlineExceeded(f"{op} on {provider}: caller deadline reached mid-stream")
                 breaker.record_failure()
                 if observation:
                     observation.record("failure", began, circuit_open=breaker.state() == "open")
@@ -837,6 +957,8 @@ async def _stream_provider(
         await _safe_close()
         raise LLMFailedError(f"stream mid error on {provider}: {e}") from e
     finally:
+        if probe and breaker._half_open_inflight:
+            breaker.release_probe()  # deadline or consumer stopped before a verdict
         _flush_stream_usage(last_usage, model_name)
         await _safe_close()
 
