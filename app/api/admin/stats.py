@@ -2268,3 +2268,172 @@ async def _time_awareness(since: datetime, days: int) -> dict:
         "schedule_routine": routine_used,
         "reminders": {"missed_in_window": reminders["missed"], "paused_now": reminders["paused"]},
     }
+
+
+# ── Trace 采集覆盖 (O01.02.V01) ─────────────────────────────────────────────
+
+_TC_TURN_CAP = 5000
+_TC_GAP_LIMIT = 50
+_TC_STALE_RUNNING = timedelta(minutes=10)
+_TC_IN_FLIGHT = timedelta(minutes=1)
+
+
+@router.get("/trace-coverage")
+async def trace_coverage_summary(
+    days: int = Query(1, ge=1, le=30),
+    _admin: dict = Depends(require_admin_jwt),
+):
+    """最近 N 天聊天回合的 Trace 采集覆盖、根 run 状态、写入失败与保留状态。
+
+    分母 = 已产生助手回复、且带用户回合 ID (achievement_turn_id 以 user-turn: 开头) 的回合,
+    按回合去重, 来自消息表而不是 Trace 本身; 主动消息/提醒、没有回合 ID 的回复、在任何回复
+    落库之前就失败的回合不在分母内。最多读最新 5000 个回合 (超过即 truncated=true, 并给出
+    实际覆盖的起点)。不读消息正文。本地采集未启用时不出覆盖数字。
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return await _trace_coverage(since, days)
+
+
+def _trace_collection_status() -> str:
+    backend = str(settings.trace_backend or "")
+    if backend == "local":
+        return "enabled"
+    return "external_langsmith" if backend == "langsmith" else "disabled"
+
+
+async def _trace_coverage(since: datetime, days: int) -> dict:
+    now = datetime.now(timezone.utc)
+    retention_days = int(settings.trace_retention_days)
+    retention_cutoff = now - timedelta(days=retention_days) if retention_days > 0 else None
+    collection = {
+        "status": _trace_collection_status(),
+        "backend": settings.trace_backend,
+        "retention_days": retention_days,
+        "langsmith_auto_upload": bool(settings.langsmith_tracing),
+    }
+    base = {
+        "version": 1,
+        "window_days": days,
+        "since": since.isoformat(),
+        "sampled_at": now.isoformat(),
+        "scope": "user_chat_turns",
+        "collection": collection,
+        "write_failures": await _trace_write_failures(now, days),
+        # 字段截断目前没有记录, 如实标未采集
+        "truncation": {"status": "not_collected"},
+        # 回合重放依赖 checkpoint (R02 暂缓), 后台不提供恢复按钮
+        "replay": {"status": "not_enabled", "reason": "checkpoint_disabled"},
+    }
+    if collection["status"] != "enabled":
+        # 外部后端或关闭时 trace_runs 本来就没有行, 出数字只会被读成"写入失败"
+        return {**base, "coverage": None, "turns": None, "root_status": {}, "missing_hours": None}
+    try:
+        rows = await db.query_raw(
+            f"""WITH turns AS MATERIALIZED (
+                  SELECT metadata->>'achievement_turn_id' AS turn, min(created_at) AS at,
+                         array_remove(array_agg(DISTINCT metadata->>'trace_id'), NULL) AS ids
+                  FROM messages
+                  WHERE role = 'assistant' AND created_at >= $1::timestamptz AT TIME ZONE 'UTC'
+                    AND metadata->>'achievement_turn_id' LIKE 'user-turn:%'
+                  GROUP BY 1 ORDER BY min(created_at) DESC LIMIT {_TC_TURN_CAP + 1})
+                SELECT t.at, cardinality(t.ids) AS id_count, r.status AS root_status,
+                       r.started_at AS root_started_at
+                FROM turns t LEFT JOIN LATERAL (
+                  SELECT status, started_at FROM trace_runs
+                  WHERE run_id = ANY(t.ids) ORDER BY started_at LIMIT 1) r ON true""",
+            since.isoformat(),
+        )
+    except Exception:
+        raise HTTPException(status_code=503, detail="Trace 采集指标暂不可用") from None
+    rows = sorted(rows, key=lambda r: _as_utc(r["at"]) or now, reverse=True)
+    truncated = len(rows) > _TC_TURN_CAP
+    rows = rows[:_TC_TURN_CAP]
+
+    tz = ZoneInfo(settings.schedule_timezone)
+    counts = {"turns": 0, "collected": 0, "no_trace_id": 0, "rows_missing": 0,
+              "in_flight": 0, "expired": 0, "multiple_trace_ids": 0}
+    root_status: dict[str, int] = {}
+    hours: dict[str, list[int]] = {}  # 本地小时 → [缺失回合数, 已采集回合数]
+    oldest: datetime | None = None
+    for r in rows:
+        at = _as_utc(r["at"])
+        oldest = at if at and (oldest is None or at < oldest) else oldest
+        counts["turns"] += 1
+        hour = at.astimezone(tz).strftime("%Y-%m-%d %H:00") if at else None
+        bucket = hours.setdefault(hour, [0, 0]) if hour else [0, 0]
+        id_count = int(r["id_count"] or 0)
+        if id_count > 1:
+            counts["multiple_trace_ids"] += 1
+        if not id_count:
+            counts["no_trace_id"] += 1
+            bucket[0] += 1
+            continue
+        status = r["root_status"]
+        if status is None:
+            # 清理按 trace_runs.created_at, 根节点比消息早写; 边界留余量免得把刚清掉的算成缺失
+            if retention_cutoff and at and at < retention_cutoff + _TC_STALE_RUNNING:
+                counts["expired"] += 1          # 过了保留期被清理 ≠ 采集失败
+            elif at and now - at < _TC_IN_FLIGHT:
+                counts["in_flight"] += 1        # 根节点可能还在写
+            else:
+                counts["rows_missing"] += 1
+                bucket[0] += 1
+            continue
+        counts["collected"] += 1
+        bucket[1] += 1
+        started = _as_utc(r["root_started_at"])
+        if status == "running" and started and now - started > _TC_STALE_RUNNING:
+            status = "running_stale"
+        root_status[str(status)] = root_status.get(str(status), 0) + 1
+
+    # 截断时最早那个小时只统计了一部分, 不据此判缺失
+    partial_hour = oldest.astimezone(tz).strftime("%Y-%m-%d %H:00") if truncated and oldest else None
+    gaps = sorted((h for h, (missing, collected) in hours.items()
+                   if missing and not collected and h != partial_hour), reverse=True)
+    return {
+        **base,
+        "turns": {"count": counts["turns"], "cap": _TC_TURN_CAP, "truncated": truncated,
+                  # 截断时实际只统计到这里; 更早的时段未统计
+                  "effective_since": oldest.isoformat() if truncated and oldest else since.isoformat()},
+        "coverage": counts,
+        "root_status": root_status,
+        "missing_hours": {"timezone": settings.schedule_timezone, "items": gaps[:_TC_GAP_LIMIT],
+                          "total": len(gaps), "truncated": len(gaps) > _TC_GAP_LIMIT},
+    }
+
+
+def _as_utc(value: Any) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+async def _trace_write_failures(now: datetime, days: int) -> dict:
+    """按 UTC 自然日读写入失败计数 (含窗口起始当天); Redis 不可用时如实返回 unavailable, 不当成 0.
+
+    orphaned = 根节点没写进去导致的子步骤连带失败, 不计入 total。
+    """
+    from app.services.chat.local_tracer import TRACE_WRITE_FAILURE_KEY, TRACE_WRITE_ORPHANED_KIND
+
+    day_keys = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days + 1)]
+    try:
+        redis = await get_redis()
+        pipe = redis.pipeline()
+        for day in day_keys:
+            pipe.hgetall(TRACE_WRITE_FAILURE_KEY.format(day=day))
+        results = await asyncio.wait_for(pipe.execute(), timeout=2)
+        by_kind: dict[str, int] = {}
+        for raw in results:
+            for kind, n in (raw or {}).items():
+                kind = kind.decode() if isinstance(kind, bytes) else str(kind)
+                by_kind[kind] = by_kind.get(kind, 0) + int(n)
+    except Exception:
+        return {"status": "unavailable", "by_kind": {}, "total": None, "orphaned": None}
+    orphaned = by_kind.pop(TRACE_WRITE_ORPHANED_KIND, 0)
+    return {"status": "ok", "by_kind": by_kind, "total": sum(by_kind.values()), "orphaned": orphaned,
+            "utc_days": [day_keys[-1], day_keys[0]]}

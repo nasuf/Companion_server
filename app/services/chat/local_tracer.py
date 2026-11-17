@@ -42,6 +42,34 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# O01.02.V01: trace_runs 写入失败按 UTC 自然日、按类型计数 (原来只有 debug 日志, 生产 INFO 级别下看不到).
+# 计数本身失败不影响聊天; 撞重复主键 (start/end 竞态) 是预期行为, 不计.
+# 根节点没写进去时, 后续每个子步骤都会撞外键 / 找不到根行: 单独计 orphaned, 不和真实写入失败混在一起.
+TRACE_WRITE_FAILURE_KEY = "trace:write_failures:{day}"
+TRACE_WRITE_ORPHANED_KIND = "orphaned"
+_TRACE_WRITE_FAILURE_TTL = 35 * 86400
+
+
+async def _note_write_failure(kind: str, error: BaseException) -> None:
+    from prisma.errors import ForeignKeyViolationError, RecordNotFoundError, UniqueViolationError
+
+    if kind == "run_start" and isinstance(error, UniqueViolationError):
+        return  # 结束 upsert 先到, 行已存在; 其他路径撞主键都意味着数据没写进去
+    if isinstance(error, ForeignKeyViolationError | RecordNotFoundError):
+        kind = TRACE_WRITE_ORPHANED_KIND
+    try:
+        from app.redis_client import get_redis
+
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        key = TRACE_WRITE_FAILURE_KEY.format(day=day)
+        redis = await get_redis()
+        pipe = redis.pipeline()
+        pipe.hincrby(key, kind, 1)
+        pipe.expire(key, _TRACE_WRITE_FAILURE_TTL)
+        await asyncio.wait_for(pipe.execute(), timeout=0.5)
+    except Exception:
+        logger.debug("[local-trace] write failure counter unavailable", exc_info=True)
+
 # Runs still marked running after this window are shown as "cancelled": the
 # LLM call was likely killed by asyncio.wait_for, which skips langchain's
 # end/error callbacks (the same root cause that left LangSmith traces
@@ -352,6 +380,7 @@ async def _write_run_start(handler: LocalTraceHandler, run: Any) -> None:
     except Exception as e:
         # Duplicate key is expected when the end upsert won the race.
         logger.debug(f"[local-trace] run start write skipped {run.id}: {type(e).__name__}: {e}")
+        await _note_write_failure("run_start", e)
 
 
 def _terminal_status(error: str | None) -> str:
@@ -408,6 +437,7 @@ async def _write_run_end(handler: LocalTraceHandler, run: Any) -> None:
         )
     except Exception as e:
         logger.debug(f"[local-trace] run end write failed {run.id}: {type(e).__name__}: {e}")
+        await _note_write_failure("run_end", e)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -550,6 +580,7 @@ async def _write_manual_step(
         })
     except Exception as e:
         logger.debug(f"[local-trace] manual step write failed: {type(e).__name__}: {e}")
+        await _note_write_failure("manual_step", e)
 
 
 async def _write_manual_run(
@@ -612,6 +643,7 @@ async def _write_manual_run(
         await db.tracerun.create(data=data)
     except Exception as e:
         logger.debug(f"[local-trace] manual run write failed: {type(e).__name__}: {e}")
+        await _note_write_failure("manual_run", e)
 
 
 async def _write_root_start(
@@ -638,6 +670,7 @@ async def _write_root_start(
         await db.tracerun.create(data=data)
     except Exception as e:
         logger.debug(f"[local-trace] root start write failed {trace_id}: {type(e).__name__}: {e}")
+        await _note_write_failure("root_start", e)
 
 
 async def _write_root_end(
@@ -661,6 +694,7 @@ async def _write_root_end(
         )
     except Exception as e:
         logger.debug(f"[local-trace] root end write failed {trace_id}: {type(e).__name__}: {e}")
+        await _note_write_failure("root_end", e)
 
 
 class LocalTracer:

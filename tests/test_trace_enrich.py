@@ -787,3 +787,54 @@ def test_sub_intent_execution_counts_truncated_fragments_and_waits_for_running_t
         [_graph_step("identify", intent=split), _graph_step("special_route", status="pending")], None,
     )
     assert running["intents"][0]["sub_labels_executed"] is None       # 回合没跑完, 不下结论
+
+
+async def test_trace_write_failures_are_counted_except_expected_duplicates(monkeypatch):
+    from app.services.chat import local_tracer
+
+    calls = []
+
+    class Pipe:
+        def hincrby(self, key, field, n):
+            calls.append((key, field, n))
+
+        def expire(self, key, ttl):
+            calls.append((key, "ttl", ttl))
+
+        async def execute(self):
+            return []
+
+    class Redis:
+        def pipeline(self):
+            return Pipe()
+
+    async def get_redis():
+        return Redis()
+
+    monkeypatch.setattr("app.redis_client.get_redis", get_redis)
+
+    from prisma.errors import ForeignKeyViolationError, RecordNotFoundError, UniqueViolationError
+
+    def prisma_error(cls):
+        error = cls.__new__(cls)
+        Exception.__init__(error, "x")
+        return error
+
+    await local_tracer._note_write_failure("run_start", prisma_error(UniqueViolationError))
+    assert calls == []                                     # start/end 竞态撞主键不算失败
+    await local_tracer._note_write_failure("run_end", prisma_error(UniqueViolationError))
+    assert [c[1] for c in calls] == ["run_end", "ttl"]    # 结束 upsert 撞主键 = 结束数据丢了, 要计
+    calls.clear()
+    await local_tracer._note_write_failure("root_end", RuntimeError("db down"))
+    assert [c[1] for c in calls] == ["root_end", "ttl"]
+    assert calls[0][0].startswith("trace:write_failures:")
+    calls.clear()
+    await local_tracer._note_write_failure("run_end", prisma_error(ForeignKeyViolationError))
+    await local_tracer._note_write_failure("root_end", prisma_error(RecordNotFoundError))
+    assert [c[1] for c in calls if c[1] != "ttl"] == ["orphaned", "orphaned"]   # 根节点没了的连带失败单独计
+
+    async def broken():
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr("app.redis_client.get_redis", broken)
+    await local_tracer._note_write_failure("root_end", RuntimeError("db down"))  # 计数失败也不抛
