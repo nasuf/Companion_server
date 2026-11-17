@@ -144,7 +144,8 @@ async def _repair_missing_fields(
         missing_fields=_build_repair_missing_fields_text(schema, missing),
     )
     try:
-        result = await invoke_json(model, prompt, profile="background")
+        # Only requested fields are kept below; whole categories survive a cut-off.
+        result = await invoke_json(model, prompt, profile="background", allow_truncated=True)
     except Exception as e:
         logger.warning(f"character repair LLM call failed: {e}")
         return {}

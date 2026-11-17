@@ -335,7 +335,8 @@ async def generate_full_profile(
     prompt = template.format(**args)
 
     model = get_chat_model()
-    profile = await invoke_json(model, prompt, profile="background")
+    # Missing fields are detected and repaired below, so a cut-off object is usable.
+    profile = await invoke_json(model, prompt, profile="background", allow_truncated=True)
     if not isinstance(profile, dict):
         raise ValueError(f"character.generation LLM returned non-dict: {type(profile).__name__}")
 

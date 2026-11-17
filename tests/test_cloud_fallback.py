@@ -96,7 +96,7 @@ async def test_actual_route_usage_and_metadata_in_four_combinations(monkeypatch,
             summary=usage_tracker.flush_session(token)
         actual='ark/primary' if behavior=='ok' else 'dashscope/backup'
         assert result=={'reply':'合成回复'}
-        assert metadata=={'actual_model':actual}
+        assert metadata['actual_model']==actual and metadata['truncated'] is False
         expected = {actual: {'input': 12, 'output': 5, 'cached_input': 4}}
         if stream and behavior == 'fail':
             expected['ark/primary'] = {'input': 0, 'output': 0, 'cached_input': 0, 'unmetered_calls': 1}
@@ -280,7 +280,7 @@ async def test_utility_cloud_backup_is_independent_and_records_actual_route(monk
             summary = usage_tracker.flush_session(token)
         actual = 'dashscope/primary' if behavior == 'ok' else 'deepseek/backup'
         assert result == {'reply': '合成回复'}
-        assert metadata == {'actual_model': actual}
+        assert metadata['actual_model'] == actual
         expected = {actual: {'input': 12, 'output': 5, 'cached_input': 4}}
         if stream and behavior == 'fail':
             expected['dashscope/primary'] = {'input': 0, 'output': 0, 'cached_input': 0, 'unmetered_calls': 1}

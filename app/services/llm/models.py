@@ -14,8 +14,10 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import OpenAIEmbeddings
+from pydantic import BaseModel
 
 from app.config import settings
+from app.observability.events import EVT_LLM_JSON_TRUNCATED
 from app.services.llm.providers import build_chat_model, get_provider
 
 logger = logging.getLogger(__name__)
@@ -299,18 +301,37 @@ def _salvage_truncated_json_object(text: str) -> dict | None:
         return None
 
 
-def _extract_json(text: str) -> Any:
-    """Extract and parse JSON from model output text."""
+class TruncatedJSONError(ValueError):
+    """Model output was cut off; only a prefix of top-level fields survived."""
+
+
+class StructuredOutputError(ValueError):
+    """Output still failed its schema after the single allowed format repair."""
+
+
+def _extract_json(text: str, *, allow_truncated: bool = False) -> Any:
+    """Extract and parse JSON from model output text.
+
+    A cut-off object is only salvaged for callers that can tell missing fields
+    from defaults (allow_truncated=True); everyone else gets TruncatedJSONError
+    instead of a partial dict that looks like success.
+    """
+    value, _ = _parse_json(text, allow_truncated=allow_truncated)
+    return value
+
+
+def _parse_json(text: str, *, allow_truncated: bool = False) -> tuple[Any, bool]:
+    """Return (value, truncated)."""
     text = text.strip()
     try:
-        return json.loads(text)
+        return json.loads(text), False
     except json.JSONDecodeError:
         pass
 
     match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if match:
         try:
-            return json.loads(match.group(1).strip())
+            return json.loads(match.group(1).strip()), False
         except json.JSONDecodeError:
             pass
 
@@ -319,7 +340,7 @@ def _extract_json(text: str) -> Any:
         end = text.rfind(end_char)
         if start != -1 and end != -1 and end > start:
             try:
-                return json.loads(text[start : end + 1])
+                return json.loads(text[start : end + 1]), False
             except json.JSONDecodeError:
                 continue
 
@@ -327,7 +348,13 @@ def _extract_json(text: str) -> Any:
     # 走状态机救出已完整的顶层字段, 残缺字段交给上层 repair pass.
     salvaged = _salvage_truncated_json_object(text)
     if salvaged is not None:
-        return salvaged
+        logger.warning(
+            "[LLM-JSON] truncated output salvaged=%s fields=%d", allow_truncated, len(salvaged),
+            extra={"event": EVT_LLM_JSON_TRUNCATED, "outcome": "salvaged" if allow_truncated else "rejected"},
+        )
+        if not allow_truncated:
+            raise TruncatedJSONError("model_output_truncated")
+        return salvaged, True
 
     raise ValueError(f"Could not extract JSON from model output: {text[:200]}")
 
@@ -407,7 +434,7 @@ async def _invoke_with_resilience(
         return await _invoke_via_stream(
             model, messages, provider=provider, profile=profile,
             op=op, force_json=force_json, **kwargs,
-            invocation_metadata=invocation_metadata,
+            invocation_metadata=invocation_metadata if invocation_metadata is not None else {},
         )
 
     primary_model, primary_kwargs = _for_ollama(model, kwargs)
@@ -453,7 +480,7 @@ async def _invoke_via_stream(
     profile: "CallProfile",
     op: str,
     force_json: bool,
-    invocation_metadata: dict | None = None,
+    invocation_metadata: dict,
     **kwargs: Any,
 ) -> Any:
     """Streaming 适配器: 与 ainvoke 等价的接口, 内部走 astream + 累积 chunks.
@@ -501,8 +528,8 @@ async def _invoke_via_stream(
         fallback_model_name=fb_model_name,
         fallback_provider=provider_name(fallback) if fallback is not None else "",
     )
-    if invocation_metadata is not None and selected_model is not None:
-        invocation_metadata["actual_model"] = _resolve_usage_model_key(selected_model)
+    invocation_metadata["usage_recorded"] = True
+    invocation_metadata["actual_model"] = _resolve_usage_model_key(selected_model or model)
     return AIMessage(content=text)
 
 
@@ -554,12 +581,18 @@ def _extract_cached_input_tokens(meta: dict) -> int:
     return 0
 
 
-def _record_usage_from_response(model: BaseChatModel, response: Any, *, actual_model: str | None = None) -> dict:
+def _record_usage_from_response(
+    model: BaseChatModel, response: Any, *, actual_model: str | None = None, already_recorded: bool = False,
+) -> dict:
     """提取 response.usage_metadata 并 record 到当前 chat session, 返回 usage dict."""
     from app.services.llm import usage_tracker
 
+    if already_recorded:  # streamed: collect_stream metered the real chunks
+        return {}
     meta = getattr(response, "usage_metadata", None)
     if not isinstance(meta, dict):
+        # No provider usage is unknown cost, not a free call.
+        usage_tracker.record_unmetered(actual_model or _resolve_usage_model_key(model))
         return {}
     input_tok = int(meta.get("input_tokens", 0) or 0)
     output_tok = int(meta.get("output_tokens", 0) or 0)
@@ -582,14 +615,70 @@ async def invoke_json_with_usage(
     Resilience: primary 经 timeout+retry+CB, 失败后切配置的备选模型. 两级都挂抛
     LLMFailedError (调用方自己兜底, 多数已有 try/except 返 None/空 dict).
     """
+    allow_truncated = kwargs.pop("allow_truncated", False)
     metadata = kwargs.get("invocation_metadata")
     if metadata is None:
         metadata = kwargs["invocation_metadata"] = {}
     response = await _invoke_with_resilience(
         model, prompt, op="invoke_json", force_json=True, **kwargs,
     )
-    usage = _record_usage_from_response(model, response, actual_model=metadata.get("actual_model"))
-    return _extract_json(response.content), usage
+    usage = _record_usage_from_response(
+        model, response, actual_model=metadata.get("actual_model"),
+        already_recorded=bool(metadata.get("usage_recorded")),
+    )
+    value, truncated = _parse_json(response.content, allow_truncated=allow_truncated)
+    metadata["truncated"] = truncated
+    return value, usage
+
+
+async def invoke_structured(
+    model: BaseChatModel,
+    prompt: str | list[BaseMessage],
+    schema: type[BaseModel],
+    **kwargs: Any,
+) -> BaseModel:
+    """JSON call validated against a Pydantic schema, with at most one repair.
+
+    A truncated object, unparsable text or a schema mismatch gets exactly one
+    follow-up asking the same model to restate its answer in the schema. If
+    that still fails, StructuredOutputError is raised: write paths must never
+    see defaults filled in where the model gave nothing.
+    """
+    metadata = kwargs.get("invocation_metadata")
+    if metadata is None:
+        metadata = kwargs["invocation_metadata"] = {}
+    messages = [HumanMessage(content=prompt)] if isinstance(prompt, str) else list(prompt)
+    first_error: Exception | None = None
+    while True:
+        response = await _invoke_with_resilience(
+            model, messages, op="invoke_structured", force_json=True, **kwargs,
+        )
+        if first_error is not None:  # each call resets the caller's metadata
+            metadata["format_repair"] = "attempted"
+        _record_usage_from_response(
+            model, response, actual_model=metadata.get("actual_model"),
+            already_recorded=bool(metadata.get("usage_recorded")),
+        )
+        try:
+            return schema.model_validate(_extract_json(response.content))
+        except ValueError as exc:  # pydantic ValidationError is a ValueError
+            if first_error is not None:
+                metadata["format_repair"] = "failed"
+                raise StructuredOutputError(
+                    f"{schema.__name__}: {type(first_error).__name__} then {type(exc).__name__}"
+                ) from exc
+            first_error = exc
+        from app.services.prompting.store import get_prompt_text_or_default
+
+        template = await get_prompt_text_or_default("llm.format_repair")
+        messages = [
+            *messages,
+            AIMessage(content=str(response.content)[:4000]),
+            HumanMessage(content=template.format(
+                error=str(first_error)[:600],
+                schema=json.dumps(schema.model_json_schema(), ensure_ascii=False)[:3000],
+            )),
+        ]
 
 
 async def invoke_text(
@@ -608,5 +697,8 @@ async def invoke_text(
     response = await _invoke_with_resilience(
         model, prompt, op="invoke_text", force_json=False, **kwargs,
     )
-    _record_usage_from_response(model, response, actual_model=metadata.get("actual_model"))
+    _record_usage_from_response(
+        model, response, actual_model=metadata.get("actual_model"),
+        already_recorded=bool(metadata.get("usage_recorded")),
+    )
     return response.content

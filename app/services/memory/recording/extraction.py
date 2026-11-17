@@ -130,8 +130,14 @@ async def extract_memories(
         # 误传对象会变成 get_profile(get_profile("...")) → KeyError(CallProfile(...))
         # → except 吃掉返空 dict → DB 0 条. 生产 trace 019e0004 (2026-05-07).
         route: dict = {}
-        result = await invoke_json(model, prompt, profile="memory_extract", invocation_metadata=route)
+        # Salvage only keeps whole top-level fields: `memories` is either complete
+        # or absent (then rejected below); a cut-off tail drops entities/topics.
+        result = await invoke_json(
+            model, prompt, profile="memory_extract", invocation_metadata=route, allow_truncated=True,
+        )
         provenance["actual_model"] = route.get("actual_model")
+        if route.get("truncated"):
+            provenance["truncated"] = True
         # Validate structure
         if not isinstance(result, dict) or not isinstance(result.get("memories"), list) or any(
             not isinstance(item, dict) for item in result["memories"]

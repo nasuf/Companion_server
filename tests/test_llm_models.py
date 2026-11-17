@@ -171,7 +171,7 @@ class TestExtractJson:
             '```json\n{"identity": {"name": "x", "age": 24}, '
             '"appearance": {"height": "170cm"}, '
             '"career": {"title": "占卜师", "duties": "在专属塔罗占卜室接待咨询者，')
-        result = models._extract_json(truncated)
+        result = models._extract_json(truncated, allow_truncated=True)
         assert "identity" in result
         assert result["identity"]["name"] == "x"
         assert "appearance" in result
@@ -183,7 +183,7 @@ class TestExtractJson:
         """嵌套对象内部截断: 整个顶层 key 丢, 之前的保住."""
         truncated = (
             '{"a": 1, "b": {"x": "ok"}, "c": {"d": "incomplete')
-        result = models._extract_json(truncated)
+        result = models._extract_json(truncated, allow_truncated=True)
         assert result == {"a": 1, "b": {"x": "ok"}}
 
     def test_completely_garbled_raises(self):
@@ -191,6 +191,14 @@ class TestExtractJson:
         import pytest
         with pytest.raises(ValueError):
             models._extract_json("just plain text no json here")
+
+    def test_truncated_output_is_rejected_unless_caller_opts_in(self):
+        """A partial object must not look like success to write paths."""
+        import pytest
+        with pytest.raises(models.TruncatedJSONError):
+            models._extract_json('{"a": 1, "b": "cut')
+        assert models._parse_json('{"a": 1, "b": "cut', allow_truncated=True) == ({"a": 1}, True)
+        assert models._parse_json('{"a": 1}') == ({"a": 1}, False)
 
     def test_truncated_only_first_field_no_comma_yet(self):
         """第一个字段都没写完且没出现顶层逗号 — 没东西可救, 抛 ValueError."""
@@ -267,7 +275,13 @@ class TestInvokeJsonStreaming:
         ])
         model = self._fake_model_with_astream(astream_factory)
 
-        result = await models.invoke_json(model, "fake-prompt", profile="test_stream_trunc")
+        meta: dict = {}
+        result = await models.invoke_json(
+            model, "fake-prompt", profile="test_stream_trunc", allow_truncated=True, invocation_metadata=meta,
+        )
+        assert meta["truncated"] is True
+        with pytest.raises(models.TruncatedJSONError):
+            await models.invoke_json(model, "fake-prompt", profile="test_stream_trunc")
         # 截断救援保住 identity, life_events 整个 key 丢失
         assert result["identity"]["name"] == "x"
         assert "life_events" not in result
@@ -431,3 +445,159 @@ class TestOllamaSamplingKwargs:
         assert result == {"ok": 1}
         assert seen["temperature"] == 0
         assert "temperature" not in seen["kwargs"] and seen["kwargs"]["format"] == "json"
+
+
+
+# ── Q01.06: unknown usage, structured output with one repair ──
+
+class _Unary:
+    """Model stub returning queued contents via ainvoke, optionally with usage."""
+
+    @staticmethod
+    def build(contents, usage=None):
+        from langchain_core.messages import AIMessage
+        from langchain_ollama import ChatOllama
+
+        calls = []
+
+        class _M(ChatOllama):
+            async def ainvoke(self, messages, **_kwargs):
+                calls.append(messages)
+                return AIMessage(content=contents[len(calls) - 1], usage_metadata=usage)
+
+        return _M.model_construct(model="stub", base_url="http://fake"), calls
+
+
+@pytest.fixture
+def unary_profile():
+    resilience.set_profiles_for_testing({
+        "test_q0106": resilience.CallProfile(
+            timeout_s=2.0, max_retries=0, retry_backoff_s=(), allow_ollama_fallback=False,
+        ),
+    })
+    yield "test_q0106"
+    resilience.reset_profiles_cache_for_testing()
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _usage():
+    from app.services.llm import usage_tracker
+
+    token = usage_tracker.start_session()
+    try:
+        yield usage_tracker._current.get()
+    finally:
+        usage_tracker._current.reset(token)
+
+
+class _Answer(__import__("pydantic").BaseModel):
+    kind: str
+    count: int
+
+
+@pytest.mark.asyncio
+async def test_missing_usage_is_unmetered_not_zero(unary_profile):
+    model, _ = _Unary.build(['{"a": 1}'])
+    with _usage() as summary:
+        await models.invoke_json(model, "p", profile=unary_profile)
+    bucket = summary["tokens_by_model"]["ollama/stub"]
+    assert bucket["unmetered_calls"] == 1 and bucket["input"] == 0
+    assert summary["call_count"] == 1 and summary["input_tokens"] == 0
+
+    metered, _ = _Unary.build(['{"a": 1}'], usage={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+    with _usage() as summary:
+        await models.invoke_json(metered, "p", profile=unary_profile)
+    assert summary["input_tokens"] == 7 and "unmetered_calls" not in summary["tokens_by_model"]["ollama/stub"]
+
+
+def test_streamed_usage_is_not_counted_twice():
+    from langchain_core.messages import AIMessage
+
+    with _usage() as summary:
+        assert models._record_usage_from_response(None, AIMessage(content="x"), already_recorded=True) == {}
+    assert summary["call_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_structured_output_validates_and_repairs_at_most_once(unary_profile, monkeypatch):
+    from app.services.prompting import store
+    from app.services.prompting.defaults import LLM_FORMAT_REPAIR_PROMPT
+
+    async def repair_template(key):
+        assert key == "llm.format_repair"
+        return LLM_FORMAT_REPAIR_PROMPT
+
+    monkeypatch.setattr(store, "get_prompt_text_or_default", repair_template)
+    model, calls = _Unary.build(['{"kind": "a", "count": 2}'])
+    assert (await models.invoke_structured(model, "p", _Answer, profile=unary_profile)).count == 2
+    assert len(calls) == 1
+
+    meta: dict = {}
+    model, calls = _Unary.build(['{"kind": "a"', '{"kind": "a", "count": 3}'])
+    result = await models.invoke_structured(model, "p", _Answer, profile=unary_profile, invocation_metadata=meta)
+    assert result.count == 3 and meta["format_repair"] == "attempted" and len(calls) == 2
+    repair = calls[1]
+    assert [type(m).__name__ for m in repair] == ["HumanMessage", "AIMessage", "HumanMessage"]
+    assert '"count"' in repair[2].content  # schema shown to the model
+
+    model, calls = _Unary.build(['{"kind": "a"}', '{"kind": "a", "count": "many"}'])
+    with pytest.raises(models.StructuredOutputError):
+        await models.invoke_structured(model, "p", _Answer, profile=unary_profile, invocation_metadata=meta)
+    assert len(calls) == 2 and meta["format_repair"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_contradiction_analysis_failure_is_not_a_new_fact(monkeypatch):
+    from app.services.memory.interaction import contradiction
+
+    async def broken(*_a, **_k):
+        raise models.StructuredOutputError("ContradictionAnalysis")
+
+    async def template(_key):
+        return "{user_reply}"
+
+    monkeypatch.setattr(contradiction, "invoke_structured", broken)
+    monkeypatch.setattr(contradiction, "get_prompt_text", template)
+    result = await contradiction.analyze_contradiction_response("嗯", {"old_content": "x"})
+    assert result == {"change_type": None, "reason": "analysis_failed"}
+    from app.services.memory.interaction.contradiction_write import replacement_text
+    from app.services.memory.manual_write import MemoryWriteError
+    with pytest.raises(MemoryWriteError):
+        replacement_text(result)
+
+
+@pytest.mark.asyncio
+async def test_contradiction_analysis_returns_validated_verdict(monkeypatch):
+    from app.services.memory.interaction import contradiction
+
+    async def structured(_model, _prompt, schema, **_k):
+        return schema.model_validate({"change_type": "变化", "new_memory": "住杭州", "extra": "x"})
+
+    async def template(_key):
+        return "{user_reply}"
+
+    monkeypatch.setattr(contradiction, "invoke_structured", structured)
+    monkeypatch.setattr(contradiction, "get_prompt_text", template)
+    result = await contradiction.analyze_contradiction_response("搬家了", {"old_content": "住苏州"})
+    assert result["change_type"] == "变化" and result["new_memory"] == "住杭州" and "extra" not in result
+
+
+@pytest.mark.asyncio
+async def test_memory_extraction_marks_salvaged_output(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from app.services.memory.recording import extraction
+
+    async def salvaged(_model, _prompt, **kwargs):
+        assert kwargs["allow_truncated"] is True
+        kwargs["invocation_metadata"].update(actual_model="ark/m", truncated=True)
+        return {"memories": []}
+
+    monkeypatch.setattr(extraction, "invoke_json", salvaged)
+    monkeypatch.setattr(extraction, "get_chat_model", MagicMock())
+    monkeypatch.setattr(extraction, "get_prompt_text", AsyncMock(
+        return_value="{new_conversation} {context_conversation} {current_time} {taxonomy_list}"))
+    result = await extraction.extract_memories("用户：你好")
+    assert result["_provenance"]["truncated"] is True and "_extraction_error" not in result

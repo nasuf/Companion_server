@@ -133,6 +133,7 @@ EVT_ADMIN_CHAT_QUOTA_RESET = "admin.chat_quota_reset"
 EVT_LLM_CALL = "llm.call"
 EVT_LLM_FAIL = "llm.fail"
 EVT_LLM_FALLBACK = "llm.fallback_to_ollama"
+EVT_LLM_JSON_TRUNCATED = "llm.json_truncated"
 EVT_DB_LOOKUP_FAIL = "db.lookup_failed"  # 通用 infra: 用于 enrichment 路径 DB lookup 失败
 EVT_WS_CONNECT = "ws.connect"
 EVT_WS_DISCONNECT = "ws.disconnect"

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.prompting.defaults import (
+    LLM_FORMAT_REPAIR_PROMPT,
     DIALOGUE_HISTORY_HEADER, DIALOGUE_CURRENT_MESSAGE_HEADER, DIALOGUE_CONTINUATION_HINT,
     MEMORY_EXTRACTION_SOURCE_CONTRACT_PROMPT,
     CHAT_TEMPORAL_RECALL_PROMPT, CHAT_TEMPORAL_RECALL_CHECK_PROMPT,
@@ -246,6 +247,12 @@ class PromptDefinition:
 # 工程项以 【工程补丁】/【工程附加】/【工程扩展】/【工程主导】 前缀标识, 不带 spec 引用.
 
 PROMPT_DEFINITIONS = [
+    PromptDefinition(
+        "llm.format_repair", "结构化输出格式修复", "模型调用", "系统",
+        "【工程】结构化调用（invoke_structured）首次输出解析或校验失败时，追加给同一模型的唯一一次格式修复；"
+        "再失败即报错，不把缺失字段补成成功。停用时回落代码默认文案。占位符: {error} {schema}。",
+        LLM_FORMAT_REPAIR_PROMPT, required_vars=("error", "schema"),
+    ),
     PromptDefinition("chat.dialogue_history_header", "最近对话标题", "聊天热路径", "聊天",
                      "【工程】8 个登记回复模板的历史标题；停用任一结构标题恢复原布局。", DIALOGUE_HISTORY_HEADER),
     PromptDefinition("chat.dialogue_current_message_header", "本轮用户消息标题", "聊天热路径", "聊天",

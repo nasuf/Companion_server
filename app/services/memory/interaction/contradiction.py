@@ -16,6 +16,9 @@ import json
 import logging
 import re
 from datetime import UTC, datetime, timedelta
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
 
 from app.observability.events import (
     EVT_LLM_FAIL,
@@ -24,6 +27,7 @@ from app.observability.events import (
 from app.redis_client import get_redis
 from app.services.runtime import user_erasure
 from app.services.llm.models import (
+    invoke_structured,
     get_chat_model,
     get_utility_model,
     invoke_json,
@@ -223,6 +227,18 @@ async def generate_contradiction_inquiry(
         return "诶,我记得你之前说的不太一样,是情况有变化吗?"
 
 
+class ContradictionAnalysis(BaseModel):
+    """memory.contradiction_analysis output; only the verdict is mandatory."""
+
+    model_config = ConfigDict(extra="ignore")
+    change_type: Literal["变化", "新增", "错误"]
+    reason: str | None = ""
+    updated_memory: str | None = ""
+    new_memory: str | None = ""
+    new_memory_main_category: str | None = ""
+    new_memory_sub_category: str | None = ""
+
+
 async def analyze_contradiction_response(
     user_reply: str,
     conflict: dict,
@@ -237,23 +253,23 @@ async def analyze_contradiction_response(
             "original_memory": conflict.get("old_content", ""),
             "conflict_memory": conflict.get("conflict_description", ""),
         }))
-        result = await invoke_json(get_utility_model(), prompt)
-        if isinstance(result, dict):
-            logger.info(
-                f"contradiction.analyze: change_type={result.get('change_type')}",
-                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "analyze",
-                       "change_type": result.get("change_type"),
-                       "reason": (result.get("reason") or "")[:60]},
-            )
-            return result
-        return {"change_type": "新增", "reason": "解析失败"}
+        result = (await invoke_structured(get_utility_model(), prompt, ContradictionAnalysis)).model_dump()
+        logger.info(
+            f"contradiction.analyze: change_type={result.get('change_type')}",
+            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "analyze",
+                   "change_type": result.get("change_type"),
+                   "reason": (result.get("reason") or "")[:60]},
+        )
+        return result
     except Exception as e:
         logger.warning(
             f"Contradiction response analysis failed: {e}",
             extra={"event": EVT_LLM_FAIL, "stage": "contradiction_analyze",
                    "error_type": type(e).__name__},
         )
-        return {"change_type": "新增", "reason": str(e)[:20]}
+        # No verdict is not a "新增": the write layer rejects a missing type, so
+        # the user hears the correction was not saved and a repair item is filed.
+        return {"change_type": None, "reason": "analysis_failed"}
 
 
 async def generate_contradiction_reply(
