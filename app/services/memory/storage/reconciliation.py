@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, model_validator
+
 from app.services.memory.config import DEDUP_THRESHOLD
 from app.services.memory.polarity import semantic_conflict_reasons
 from app.services.memory.retrieval.vector_search import search_by_embedding
@@ -231,6 +233,25 @@ def _safe_action(value: str | None) -> ReconciliationAction:
     return "keep_separate"
 
 
+class ReconciliationVerdict(BaseModel):
+    """memory.reconciliation output. A merge must carry its merged text: without
+    it the write would silently overwrite the old memory with the new one."""
+
+    model_config = ConfigDict(extra="ignore")
+    action: Literal[
+        "insert_new", "drop_duplicate", "update_existing",
+        "merge_existing", "keep_separate", "needs_confirmation",
+    ]
+    reason: str | None = ""
+    merged_summary: str | None = None
+
+    @model_validator(mode="after")
+    def _merge_has_text(self):
+        if self.action == "merge_existing" and not (self.merged_summary or "").strip():
+            raise ValueError("merge_existing requires a non-empty merged_summary")
+        return self
+
+
 async def _llm_adjudicate(
     *,
     source: Source,
@@ -248,7 +269,7 @@ async def _llm_adjudicate(
     keep the invocation narrow.
     """
     try:
-        from app.services.llm.models import get_chat_model, invoke_json
+        from app.services.llm.models import get_chat_model, invoke_structured
         from app.services.prompting.store import get_prompt_text
 
         prompt = (await get_prompt_text("memory.reconciliation")).format(
@@ -260,14 +281,16 @@ async def _llm_adjudicate(
             new_sub=new_sub or "",
             new_text=new_text,
         )
-        result = await invoke_json(get_chat_model(), prompt, profile="chat_extract")
+        result = (await invoke_structured(
+            get_chat_model(), prompt, ReconciliationVerdict, profile="chat_extract",
+        )).model_dump()
     except Exception as e:
+        # No verdict means no mutation: the caller falls through to inserting
+        # the new memory separately.
         logger.warning(f"Memory reconciliation LLM adjudication failed: {e}")
         return None
 
-    if not isinstance(result, dict):
-        return None
-    action = _safe_action(str(result.get("action") or ""))
+    action = _safe_action(result["action"])
     if action in {"insert_new", "keep_separate", "needs_confirmation"}:
         return ReconciliationDecision(action=action, reason=str(result.get("reason") or "llm"))
     # The `memory.reconciliation` prompt names its merged-text field
@@ -469,6 +492,9 @@ async def resolve_memory_write(
             if decision.action == "drop_duplicate":
                 return decision
             if not decision.merged_content:
+                if decision.action != "update_existing":
+                    # A merge with no merged text would overwrite the old memory.
+                    continue
                 decision.merged_content = content
             return decision
         if decision.action == "needs_confirmation":

@@ -583,21 +583,21 @@ async def test_detect_deletion_intent_injects_context_for_legacy_prompt():
 
     seen: dict = {}
 
-    async def _invoke(_model, prompt):
+    async def _invoke(_model, prompt, schema, **_kwargs):
         seen["prompt"] = prompt
-        return {
+        return schema.model_validate({
             "is_deletion_request": True,
             "target_description": "用户叫花卷",
             "intent": "delete",
             "new_time": None,
             "confidence": 0.9,
-        }
+        })
 
     with (
         patch.object(del_mod, "get_prompt_text",
                      new_callable=AsyncMock,
                      return_value="用户消息：{message}"),
-        patch.object(del_mod, "invoke_json", side_effect=_invoke),
+        patch.object(del_mod, "invoke_structured", side_effect=_invoke),
     ):
         result = await del_mod.detect_deletion_intent(
             "这个别记了",
@@ -959,3 +959,48 @@ async def test_find_matching_memories_default_threshold_tightened():
     assert threshold_default >= 0.78, (
         f"删除候选阈值必须 ≥ 0.78 (历史 0.7 太松导致一刀切误删); got {threshold_default}"
     )
+
+
+@pytest.mark.asyncio
+async def test_detect_deletion_intent_returns_none_when_output_is_unusable():
+    """模型输出不是对象 / 修复后仍不合格时不能抛到聊天热路径。"""
+    from app.services.llm.models import StructuredOutputError
+    from app.services.memory.interaction import deletion as del_mod
+
+    with (
+        patch.object(del_mod, "get_prompt_text", new_callable=AsyncMock,
+                     return_value="{context}{message}"),
+        patch.object(del_mod, "invoke_structured", new_callable=AsyncMock,
+                     side_effect=StructuredOutputError("not an object")),
+    ):
+        assert await del_mod.detect_deletion_intent("这个别记了") is None
+
+
+def test_deletion_intent_schema_defaults_and_bounds():
+    from pydantic import ValidationError
+
+    from app.services.memory.interaction.deletion import DeletionIntent
+
+    parsed = DeletionIntent.model_validate({"is_deletion_request": True, "confidence": 0.8})
+    assert parsed.intent == "delete" and parsed.target_description is None
+    with pytest.raises(ValidationError):
+        DeletionIntent.model_validate({"is_deletion_request": True, "intent": "erase"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {"is_deletion_request": False, "confidence": 0.95},
+    {"is_deletion_request": True, "confidence": 0.1},
+])
+async def test_detect_deletion_intent_rejects_negative_or_unsure(payload):
+    from app.services.memory.interaction import deletion as del_mod
+
+    async def _invoke(_model, _prompt, schema, **_kwargs):
+        return schema.model_validate(payload)
+
+    with (
+        patch.object(del_mod, "get_prompt_text", new_callable=AsyncMock,
+                     return_value="{context}{message}"),
+        patch.object(del_mod, "invoke_structured", side_effect=_invoke),
+    ):
+        assert await del_mod.detect_deletion_intent("这个别记了") is None

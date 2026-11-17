@@ -459,6 +459,116 @@ class TestMemoryReconciliation:
         assert decision.merged_content == "用户周末会去花鸟市场逛干花摊，也买过多肉植物"
         mock_llm.assert_awaited_once()
 
+    async def test_llm_merge_without_merged_text_never_overwrites(self):
+        existing = _record(
+            id="old-life",
+            content="用户周末经常去花鸟市场逛干花摊",
+            source="user",
+            main="生活",
+            sub="生活",
+            level=2,
+            importance=0.7,
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+            patch("app.services.memory.storage.reconciliation._relation", return_value="keep_separate"),
+            patch("app.services.memory.storage.reconciliation._related_enough_for_llm", return_value=True),
+            patch(
+                "app.services.memory.storage.reconciliation._llm_adjudicate",
+                new_callable=AsyncMock,
+                return_value=ReconciliationDecision(action="merge_existing"),
+            ),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="user",
+                workspace_id="ws1",
+                content="用户在花鸟市场买过多肉植物",
+                embedding=[0.1],
+                main_category="生活",
+                sub_category="生活",
+                entities=["花鸟市场", "多肉植物"],
+                topics=["花鸟市场", "植物"],
+            )
+
+        assert decision.action != "merge_existing"
+        assert decision.existing_id is None
+
+    async def test_llm_update_without_merged_text_uses_new_content(self):
+        existing = _record(
+            id="old-life",
+            content="用户周末经常去花鸟市场逛干花摊",
+            source="user",
+            main="生活",
+            sub="生活",
+            level=2,
+            importance=0.7,
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+            patch("app.services.memory.storage.reconciliation._relation", return_value="keep_separate"),
+            patch("app.services.memory.storage.reconciliation._related_enough_for_llm", return_value=True),
+            patch(
+                "app.services.memory.storage.reconciliation._llm_adjudicate",
+                new_callable=AsyncMock,
+                return_value=ReconciliationDecision(action="update_existing"),
+            ),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="user",
+                workspace_id="ws1",
+                content="用户在花鸟市场买过多肉植物",
+                embedding=[0.1],
+                main_category="生活",
+                sub_category="生活",
+                entities=["花鸟市场", "多肉植物"],
+                topics=["花鸟市场", "植物"],
+            )
+
+        assert decision.action == "update_existing"
+        assert decision.existing_id == "old-life"
+        assert decision.merged_content == "用户在花鸟市场买过多肉植物"
+
+    async def test_store_memory_ignores_merge_without_merged_text(self):
+        existing = _record(
+            id="old-life",
+            content="用户周末经常去花鸟市场逛干花摊",
+            source="user",
+            main="生活",
+            sub="生活",
+            level=2,
+            importance=0.7,
+        )
+        decision = ReconciliationDecision(
+            action="merge_existing",
+            existing_id="old-life",
+            existing_record=existing,
+        )
+        P = "app.services.memory.storage.persistence"
+        with (
+            patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
+            patch(f"{P}.generate_embedding", new_callable=AsyncMock, return_value=[0.1]),
+            patch(f"{P}.resolve_memory_write", new_callable=AsyncMock, return_value=decision),
+            patch(f"{P}.store_embedding", new_callable=AsyncMock),
+            patch(f"{P}.memory_repo.update", new_callable=AsyncMock) as mock_update,
+            patch(f"{P}.memory_repo.create", new_callable=AsyncMock, return_value=MagicMock(id="new-life")),
+            patch(f"{P}.log_memory_changelog", new_callable=AsyncMock),
+        ):
+            await store_memory(
+                user_id="u1",
+                content="用户在花鸟市场买过多肉植物",
+                level=2,
+                importance=0.8,
+                main_category="生活",
+                sub_category="生活",
+                source="user",
+            )
+
+        mock_update.assert_not_called()
+
     async def test_store_memory_updates_existing_when_reconciliation_says_update(self):
         existing = _record(
             id="old-pref",

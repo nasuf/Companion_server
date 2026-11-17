@@ -18,13 +18,16 @@ import json
 import logging
 import re
 from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
 
 from app.db import db
 from app.observability.events import EVT_MEMORY_DELETED, EVT_MEMORY_DELETION_PENDING
 from app.redis_client import get_redis
 from app.services.runtime import user_erasure
 from app.services.memory.storage import repo as memory_repo
-from app.services.llm.models import get_utility_model, invoke_json
+from app.services.llm.models import get_utility_model, invoke_structured
 from app.services.memory.config import DELETION_SIMILARITY_THRESHOLD, LLM_INTENT_MIN_CONFIDENCE
 from app.services.memory.storage.embedding import generate_embedding
 from app.services.memory.retrieval.vector_search import search_by_embedding
@@ -169,6 +172,17 @@ def resolve_contextual_deletion_target(
     return None
 
 
+class DeletionIntent(BaseModel):
+    """memory.deletion_intent output."""
+
+    model_config = ConfigDict(extra="ignore")
+    is_deletion_request: bool = False
+    target_description: str | None = None
+    intent: Literal["delete", "reschedule"] = "delete"
+    new_time: str | None = None
+    confidence: float = 0.0
+
+
 async def detect_deletion_intent(
     message: str,
     recent_context: str | None = None,
@@ -192,14 +206,16 @@ async def detect_deletion_intent(
         "context": recent_context or "（无）",
     })
     try:
-        result = await invoke_json(get_utility_model(), prompt)
+        result = (await invoke_structured(
+            get_utility_model(), prompt, DeletionIntent,
+        )).model_dump()
     except Exception as e:
         logger.warning(f"Deletion intent detection failed: {e}")
         return None
 
-    if not result.get("is_deletion_request", False):
+    if not result["is_deletion_request"]:
         return None
-    if result.get("confidence", 0) < LLM_INTENT_MIN_CONFIDENCE:
+    if result["confidence"] < LLM_INTENT_MIN_CONFIDENCE:
         return None
 
     if not result.get("target_description"):

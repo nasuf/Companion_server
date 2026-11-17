@@ -39,7 +39,8 @@ async def _adjudicate(llm_result: dict):
         "app.services.prompting.store.get_prompt_text",
         AsyncMock(return_value="{old_text}{new_text}"),
     ), patch(
-        "app.services.llm.models.invoke_json", AsyncMock(return_value=llm_result)
+        "app.services.llm.models.invoke_structured",
+        AsyncMock(side_effect=lambda _m, _p, schema, **_k: schema.model_validate(llm_result)),
     ), patch("app.services.llm.models.get_chat_model", lambda *a, **k: object()):
         return await rc._llm_adjudicate(**_fixture_args())
 
@@ -85,3 +86,17 @@ class TestAdjudication:
         assert d is not None
         assert d.action == "keep_separate"
         assert d.reason == "不同的事"
+
+    async def test_merge_without_merged_text_yields_no_verdict(self):
+        """merge 缺合并文本会把旧记忆整条覆盖成新文本 —— 修复一次仍缺就不裁决."""
+        d = await _adjudicate({"action": "merge_existing", "merged_summary": "  "})
+        assert d is None
+
+    async def test_unknown_action_yields_no_verdict(self):
+        assert await _adjudicate({"action": "overwrite_everything"}) is None
+
+    async def test_update_without_merged_text_falls_back_to_new_text(self):
+        d = await _adjudicate({"action": "update_existing"})
+        assert d is not None
+        assert d.action == "update_existing"
+        assert d.merged_content == _SHORT

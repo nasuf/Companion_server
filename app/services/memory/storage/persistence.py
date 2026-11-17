@@ -550,7 +550,12 @@ async def store_memory(
         )
         return await skipped()
 
-    if decision.action in {"update_existing", "merge_existing"} and decision.existing_id and decision.existing_record:
+    if (
+        decision.action in {"update_existing", "merge_existing"}
+        and decision.existing_id
+        and decision.existing_record
+        and (decision.merged_content or decision.action == "update_existing")
+    ):
         updated_content = decision.merged_content or content
         if (repo_source == "ai" and updated_content != content
                 and not await _generated_self_memory_allowed(user_id, workspace_id, updated_content, provenance)):
