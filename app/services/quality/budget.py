@@ -21,20 +21,35 @@ class BudgetExhausted(RuntimeError):
 
 
 async def reserve(
-    job_id: str, model: str, ceiling, *, lease_token: str, now=None, request=None
+    job_id: str, model: str, ceiling, *, lease_token: str, now=None, request=None,
+    charge_id: str | None = None,
 ) -> str:
+    """`charge_id` lets a remote caller retry an ambiguous reserve: the same ID is
+    only ever committed once, so a replay cannot double-count the budget."""
     now = now or datetime.now(UTC)
     day = local_day(now)
     month = day.replace(day=1)
     ceiling = money(ceiling)
     if ceiling <= 0:
         raise ValueError("positive_priced_reservation_required")
-    charge_id = uuid4().hex
+    charge_id = charge_id or uuid4().hex
     async with db.tx(timeout=timedelta(seconds=8)) as tx:
         await tx.execute_raw("SET LOCAL lock_timeout='3s'")
         from app.services.quality.jobs import require_lease
 
         await require_lease(tx, job_id, lease_token)
+        existing = await tx.query_raw(
+            "SELECT job_id,model,reserved_cny FROM quality_charges WHERE id=$1", charge_id
+        )
+        if existing:
+            prior = existing[0]
+            if (
+                prior["job_id"] != job_id
+                or prior["model"] != model
+                or money(prior["reserved_cny"]) != ceiling
+            ):
+                raise ValueError("charge_id_conflict")
+            return charge_id  # the earlier attempt committed; do not reserve again
         await tx.execute_raw(
             "INSERT INTO quality_budget_months(month) VALUES($1::date) ON CONFLICT DO NOTHING",
             str(month),

@@ -166,7 +166,28 @@ async def _with_retries(sink, case, repetition, attempt, errored, report):
                         suite=case["suite"], **{"pass": None}, turns=0)
 
 
-async def run(job, *, cases=None, key_overrides=None, sink=None):
+def _primary_failure(group: BaseExceptionGroup) -> BaseException:
+    """The exception that decides the run's outcome when parallel scenarios fail."""
+    leaves = []
+
+    def walk(exc):
+        if isinstance(exc, BaseExceptionGroup):
+            for inner in exc.exceptions:
+                walk(inner)
+        else:
+            leaves.append(exc)
+
+    walk(group)
+    for kind in (jobs.LostLease, budget.BudgetExhausted, transport.NotConfigured):
+        for exc in leaves:
+            if isinstance(exc, kind):
+                return exc
+    return leaves[0]
+
+
+async def run(job, *, cases=None, key_overrides=None, sink=None, concurrency=1):
+    """`concurrency` scenarios run at once (the Actions nightly uses 4; the API
+    worker keeps 1). A budget, configuration or lease failure stops all of them."""
     sink = sink or LocalSink(job)
     cases = cases if cases is not None else await corpus(job)
     fingerprint = hashlib.sha256(json.dumps(cases, sort_keys=True).encode()).hexdigest()
@@ -312,18 +333,34 @@ async def run(job, *, cases=None, key_overrides=None, sink=None):
         return row
 
     errored = []
-    try:
-        for case in cases:
-            for repetition in range(
-                settings.quality_critical_repeats if case["critical"] else 1
-            ):
+    units = iter([
+        (case, repetition)
+        for case in cases
+        for repetition in range(settings.quality_critical_repeats if case["critical"] else 1)
+    ])
+
+    async def worker():
+        # Workers share one iterator, so scenarios still start in corpus order.
+        for case, repetition in units:
+            try:
                 row = await _with_retries(
                     sink, case, repetition, lambda: scenario(case, repetition), errored, report
                 )
                 # No raw private conversation/reply/judge reason is retained in
                 # these generic rows. Owned originals stay in quality_samples.
                 await sink.result(row)
-                results.append(row)
+            except Exception as exc:
+                exc.quality_case_id = case["id"]
+                raise
+            results.append(row)
+
+    try:
+        try:
+            async with asyncio.TaskGroup() as group:
+                for _ in range(max(1, concurrency)):
+                    group.create_task(worker())
+        except BaseExceptionGroup as failures:
+            raise _primary_failure(failures) from None
     except budget.BudgetExhausted:
         terminal = "budget_exhausted"
     except transport.NotConfigured:
@@ -333,7 +370,7 @@ async def run(job, *, cases=None, key_overrides=None, sink=None):
     except Exception as exc:
         terminal = "failed"
         report["error_type"] = type(exc).__name__
-        report["error_case_id"] = case["id"]
+        report["error_case_id"] = getattr(exc, "quality_case_id", None)
         if isinstance(exc, replay.RendererError):
             report["renderer_diagnostic"] = exc.diagnostic
     baseline_id, previous = await sink.baseline(fingerprint)

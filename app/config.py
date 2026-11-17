@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     quality_daily_cny: float = Field(default=1, gt=0, le=100)
     quality_prompt_run_cny: float = Field(default=.5, gt=0, le=100)
     quality_prompt_daily_cny: float = Field(default=5, gt=0, le=100)
-    quality_full_run_cny: float = Field(default=3, gt=0, le=100)
-    quality_monthly_cny: float = Field(default=60, gt=0, le=1000)
+    quality_full_run_cny: float = Field(default=5, gt=0, le=100)  # full run settles ~2.92; 4 parallel ceilings add up to ~1.3
+    quality_monthly_cny: float = Field(default=120, gt=0, le=1000)  # ~31 full nightly runs (~93) + daily/prompt
     quality_prompt_debounce_seconds: int = Field(default=600, ge=60, le=3600)
     quality_noise_rate: float = Field(default=1/92, ge=0, le=1)
     quality_noise_min_cases: int = Field(default=2, ge=0, le=50)

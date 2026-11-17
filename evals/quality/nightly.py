@@ -13,11 +13,17 @@ import os
 from pathlib import Path
 import sys
 import httpx
+from uuid import uuid4
 
 BASE = "https://banshengcomp.com/api/admin-api/quality-ci"
-RETRY_WINDOW_SECONDS = 60
+# A deploy stops the control API for minutes (2026-11-15: a 502 during the
+# 01:23-01:31 UTC deploy ended the run). Transient errors are retried for up to
+# 15 minutes, inside the server's 30-minute remote lease (jobs.REMOTE_LEASE_SECONDS).
+RETRY_WINDOW_SECONDS = 900
+MAX_ATTEMPTS = 40
+# finish is idempotent server-side; reserve is retried only with a client charge ID.
 _RETRYABLE_ACTIONS = frozenset(
-    {"renew", "prepare", "result", "baseline", "settle", "uncertain"}
+    {"renew", "prepare", "result", "baseline", "settle", "uncertain", "finish"}
 )
 _OPERATIONS = _RETRYABLE_ACTIONS | {"begin", "reserve", "finish", "reserve_block", "settle_block"}
 _TRANSIENT_STATUS = frozenset({500, 502, 503, 504})
@@ -36,6 +42,7 @@ class ControlRequestError(RuntimeError):
                 "transport_error",
                 "invalid_response",
                 "deadline_exceeded",
+                "keys_unavailable",
             }
             else "invalid_response"
         )
@@ -52,6 +59,12 @@ class ControlRequestError(RuntimeError):
     def transient(self):
         return self.code == "transport_error" or self.http_status in _TRANSIENT_STATUS
 
+    @property
+    def never_handled(self):
+        """The server rejected the request before running it (its GitHub key set was
+        unreachable), so even a non-idempotent operation can be replayed."""
+        return self.code == "keys_unavailable"
+
 
 def public_failure(exc):
     result = {"status": "incomplete", "error_type": type(exc).__name__}
@@ -66,29 +79,37 @@ def public_failure(exc):
     return result
 
 
+def _detail(response):
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body.get("detail") if isinstance(body, dict) else None
+
+
 class Control:
     def __init__(self):
         self.job = None
 
     async def request(self, path, data):
         operation = "begin" if path.endswith("/begin") else data.get("operation", "unknown")
-        # begin claims a lease, reserve creates a new charge, and finish releases
-        # the lease. None may be blindly replayed after an ambiguous response.
-        retryable = self.retryable(path, operation)
-        # A deploy restart answers 502 for up to ~30s (14 deploys on 10-30/31:
-        # 9 under 10s, 4 at 13-19s, one 29s). Waits of 5+10+15+15s cover 45s.
-        attempts = 5 if retryable else 1
+        # begin claims a lease and is never replayed after an ambiguous response;
+        # reserve only with its own charge ID; finish is idempotent server-side.
+        retryable = self.retryable(path, operation, data)
+        # The window, not this cap, normally ends an outage: the first 39 waits
+        # already add up to more than RETRY_WINDOW_SECONDS.
         attempt = 0
         try:
-            # This window is shorter than the server's 180s lease. Confirmed
-            # lease loss/budget/auth errors still terminate immediately.
+            # Shorter than the server's remote lease. Confirmed lease loss,
+            # budget and auth errors still terminate immediately.
             async with asyncio.timeout(RETRY_WINDOW_SECONDS):
-                for attempt in range(1, attempts + 1):
+                for attempt in range(1, MAX_ATTEMPTS + 1):
                     try:
                         return await self._request_once(path, data, operation)
                     except ControlRequestError as exc:
                         exc.attempts = attempt
-                        if attempt == attempts or not exc.transient:
+                        replayable = retryable or exc.never_handled
+                        if attempt == MAX_ATTEMPTS or not exc.transient or not replayable:
                             # regression.run may convert this exception into a
                             # failed report. Preserve safe diagnostics here too.
                             print(
@@ -111,7 +132,7 @@ class Control:
                             ),
                             flush=True,
                         )
-                        await asyncio.sleep(min(5 * attempt, 15))
+                        await asyncio.sleep(min(5 * attempt, 30))
         except TimeoutError as exc:
             error = ControlRequestError("control", "deadline_exceeded", operation)
             error.attempts = attempt
@@ -123,12 +144,13 @@ class Control:
             )
             raise error from exc
 
-    def retryable(self, path, operation):
-        return (
-            path.startswith("/jobs/")
-            and path.count("/") == 2
-            and operation in _RETRYABLE_ACTIONS
-        )
+    def retryable(self, path, operation, data=None):
+        if not (path.startswith("/jobs/") and path.count("/") == 2):
+            return False
+        if operation == "reserve":
+            # Without its own ID an ambiguous reserve could be committed twice.
+            return bool(((data or {}).get("data") or {}).get("charge_id"))
+        return operation in _RETRYABLE_ACTIONS
 
     async def _request_once(self, path, data, operation):
         async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
@@ -174,6 +196,10 @@ class Control:
                 raise budget.BudgetExhausted("server_budget")
             if response.status_code == 409:
                 raise jobs.LostLease("server_lease_busy_or_lost")
+            if response.status_code == 503 and _detail(response) == "quality_workflow_keys_unavailable":
+                raise ControlRequestError(
+                    "control", "keys_unavailable", operation, http_status=503
+                )
             if response.status_code != 200:
                 raise ControlRequestError(
                     "control", "http_error", operation, http_status=response.status_code
@@ -211,6 +237,25 @@ class Control:
         value = await self.action("baseline", {"corpus_hash": fingerprint})
         return value["id"], value["results"]
 
+    async def abandon(self):
+        """Best effort, one attempt: release the shared executor so the server's
+        own daily/prompt jobs are not blocked until the 30-minute lease expires."""
+        try:
+            await asyncio.wait_for(
+                self._request_once(
+                    "/jobs/" + self.job["id"],
+                    dict(
+                        lease_token=self.job["lease_token"],
+                        operation="finish",
+                        data=dict(status="failed", report={"controller_aborted": True}),
+                    ),
+                    "finish",
+                ),
+                timeout=40,
+            )
+        except Exception:  # never mask the original failure; cancellation still propagates
+            pass
+
     async def finish(self, status, report):
         await self.action("finish", dict(status=status, report=report))
         self.status = status
@@ -221,7 +266,10 @@ class Control:
     ):
         if not request:
             raise ValueError("quality_request_required_for_reservation")
-        return (await self.action("reserve", dict(model=model, **request)))["id"]
+        charge_id = uuid4().hex
+        return (
+            await self.action("reserve", dict(model=model, charge_id=charge_id, **request))
+        )["id"]
 
     async def settle(self, charge_id, cost, usage):
         await self.action("settle", dict(charge_id=charge_id, usage=usage))
@@ -293,7 +341,7 @@ async def main():
         )
     from app.config import settings
     from app.services import runtime_config
-    from app.services.quality import transport, regression
+    from app.services.quality import jobs, transport, regression
 
     control.job = manifest["job"]
     runtime_config._PRICING_CACHE = manifest["prices"]
@@ -311,6 +359,8 @@ async def main():
             control.job,
             cases=manifest["cases"],
             sink=control,
+            # 781 scenario runs took 5-6h sequentially against a 6h job timeout.
+            concurrency=4,
             key_overrides={
                 "ark": os.environ["EVAL_ARK_API_KEY"],
                 "dashscope": os.environ["EVAL_DASHSCOPE_API_KEY"],
@@ -318,6 +368,7 @@ async def main():
         )
     )
     heart = asyncio.create_task(heartbeat())
+    released = False
     try:
         done, _ = await asyncio.wait([task, heart], return_when=asyncio.FIRST_COMPLETED)
         for ended in done:
@@ -332,11 +383,17 @@ async def main():
                 )
             )
         )
+        released = True
         return 0 if control.status == "completed" else 1
+    except jobs.LostLease:
+        released = True  # someone else owns the job now; never touch it
+        raise
     finally:
         for pending in (task, heart):
             pending.cancel()
         await asyncio.gather(task, heart, return_exceptions=True)
+        if not released and getattr(control, "status", None) is None:
+            await control.abandon()
 
 
 if __name__ == "__main__":

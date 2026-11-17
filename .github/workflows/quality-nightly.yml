@@ -1,7 +1,9 @@
 name: Nightly chat quality
 on:
   schedule:
-    - cron: '30 19 * * *' # Asia/Shanghai 03:30
+    # Asia/Shanghai 23:30. GitHub starts scheduled runs late: 2026-10-29..11-17
+    # the 03:30 schedule began 3h08m-7h01m afterwards, i.e. in the day.
+    - cron: '30 15 * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,8 +14,8 @@ jobs:
   replay:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    # Full sequential multi-turn replay can exceed 90 minutes. SQL per-call
-    # reservations still enforce the 3 CNY run and 60 CNY monthly hard limits.
+    # Four scenarios run in parallel (~1.5h); sequential replay took 5-6h. SQL
+    # per-call reservations still enforce the 5 CNY run and 120 CNY monthly limits.
     timeout-minutes: 360
     permissions:
       contents: read

@@ -71,6 +71,10 @@ async def identity(authorization: str = Header(default="")):
         raise HTTPException(401, "quality_workflow_identity_required")
     try:
         return await asyncio.to_thread(verify, authorization[7:])
+    except jwt.PyJWKClientConnectionError as exc:
+        # GitHub's key set could not be fetched (cold cache right after a deploy
+        # restart, network blip). The token was never judged: let the run retry.
+        raise HTTPException(503, "quality_workflow_keys_unavailable") from exc
     except Exception as exc:
         raise HTTPException(401, "quality_workflow_identity_invalid") from exc
 

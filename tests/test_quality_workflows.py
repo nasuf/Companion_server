@@ -249,7 +249,7 @@ async def test_api_lists_results_and_review_conflict_use_real_database(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as c:
         data = (await c.get("/admin-api/quality")).json()
-        assert data["sampled_at"] and data["policy"]["monthly_cny"] == 60
+        assert data["sampled_at"] and data["policy"]["monthly_cny"] == 120
         item = next(j for j in data["jobs"] if j["id"] == job["id"])
         assert (
             float(item["settled_cny"]) == 0.005
@@ -480,14 +480,14 @@ def _regression_case(case_id):
     )
 
 
-async def _run_regression(database, cases):
+async def _run_regression(database, cases, concurrency=1):
     snap = {
         "prompts": [{"key": "test", "content": "fixture", "is_enabled": True}],
         "route": ["ark", "model"],
     }
     ident = await jobs.enqueue("routing", uuid4().hex, "v1", snap)
     job = await jobs.claim(job_id=ident)
-    await regression.run(job, cases=cases)
+    await regression.run(job, cases=cases, concurrency=concurrency)
     return (
         await database.query_raw(
             "SELECT status,report FROM quality_jobs WHERE id=$1", ident
@@ -618,6 +618,61 @@ async def test_regression_infrastructure_error_outside_scenarios_fails_run(
     assert result["report"]["error_type"] == "RuntimeError"
     assert result["report"]["error_case_id"] == "a"
     assert result["report"]["gate_status"] == "incomplete"
+
+
+async def test_regression_runs_scenarios_in_parallel_and_records_all(quality, monkeypatch):
+    database, *_ = quality
+    monkeypatch.setattr(regression, "db", database)
+    running = peak = 0
+
+    async def slow(job, current, *args, **kwargs):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.2)  # long enough for every worker's lease renewal to land
+        running -= 1
+        return {"judge": {"pass": True}, "reply": "你好"}
+
+    monkeypatch.setattr(regression.replay, "replay_turn", slow)
+    cases = [_regression_case(c) for c in "abcdefgh"]
+    result = await _run_regression(database, cases, concurrency=4)
+    assert peak == 4
+    report = result["report"]
+    assert report["evaluated"] == report["expected"] == 8
+    assert report["gate_status"] == "baseline_recorded" and result["status"] == "completed"
+
+
+async def test_regression_parallel_budget_exhaustion_stops_every_scenario(quality, monkeypatch):
+    database, *_ = quality
+    monkeypatch.setattr(regression, "db", database)
+    started = []
+
+    async def spend(job, current, *args, **kwargs):
+        started.append(current["id"])
+        if current["id"] == "b":
+            raise budget.BudgetExhausted("run")
+        await asyncio.sleep(0.05)
+        return {"judge": {"pass": True}, "reply": "你好"}
+
+    monkeypatch.setattr(regression.replay, "replay_turn", spend)
+    cases = [_regression_case(c) for c in "abcdefgh"]
+    result = await _run_regression(database, cases, concurrency=2)
+    assert result["status"] == "budget_exhausted"
+    assert result["report"]["gate_status"] == "incomplete"
+    assert started == ["a", "b"]  # "a" was cancelled mid-run, nothing else started
+    assert result["report"]["evaluated"] == 0
+
+
+def test_parallel_failure_priority_lease_then_budget_then_config():
+    """When several scenarios fail together, the outcome follows the sequential rules:
+    a lost lease is never reported as a mere failure."""
+    other, lease = RuntimeError("sink"), jobs.LostLease("gone")
+    spent, missing = budget.BudgetExhausted("run"), regression.transport.NotConfigured()
+    group = BaseExceptionGroup("x", [other, ExceptionGroup("y", [missing, spent]), lease])
+    assert regression._primary_failure(group) is lease
+    assert regression._primary_failure(BaseExceptionGroup("x", [other, missing, spent])) is spent
+    assert regression._primary_failure(BaseExceptionGroup("x", [other, missing])) is missing
+    assert regression._primary_failure(BaseExceptionGroup("x", [other])) is other
 
 
 @pytest.mark.parametrize(

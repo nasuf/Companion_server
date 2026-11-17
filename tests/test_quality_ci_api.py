@@ -81,6 +81,16 @@ async def test_ci_complete_cycle_no_business_access_and_idempotent_begin(control
         },
     )
     charge = reserved.json()["id"]
+    # A retried reserve with its own ID is committed once, never double-counted.
+    keyed = {"model": "ark/model", "messages": [{"role": "user", "content": "合成"}],
+             "max_tokens": 10, "charge_id": "c" * 32}
+    first, again = await action("reserve", keyed), await action("reserve", keyed)
+    assert first.json()["id"] == again.json()["id"] == "c" * 32
+    assert (await db.query_raw(
+        "SELECT count(*)::int AS n FROM quality_charges WHERE id=$1", "c" * 32))[0]["n"] == 1
+    assert (await action("reserve", {**keyed, "charge_id": "../x"})).status_code == 400
+    # The same ID can never stand for a different reservation.
+    assert (await action("reserve", {**keyed, "max_tokens": 900})).status_code == 400
     assert (
         await action(
             "reserve", {"model": "unapproved/x", "messages": [], "max_tokens": 10}
@@ -121,6 +131,10 @@ async def test_ci_complete_cycle_no_business_access_and_idempotent_begin(control
             {"status": "completed", "report": {"gate_status": "baseline_recorded"}},
         )
     ).status_code == 200
+    # A finish retried after its first attempt committed is acknowledged; a
+    # different outcome on the released lease is still a lost lease.
+    assert (await action("finish", {"status": "completed", "report": {}})).status_code == 200
+    assert (await action("finish", {"status": "failed", "report": {}})).status_code == 409
     assert (await action("renew")).status_code == 409
     repeated = (await client.post("/admin-api/quality-ci/begin", json=body)).json()
     assert repeated["status"] == "completed"
@@ -267,3 +281,18 @@ async def test_oidc_header_failures_are_401(monkeypatch):
     with pytest.raises(HTTPException) as error:
         await oidc.identity("Bearer invalid")
     assert error.value.status_code == 401
+
+
+async def test_unreachable_github_keys_are_503_not_an_invalid_identity(monkeypatch):
+    """Right after a deploy the key cache is cold; failing to fetch it must not
+    look like a forged token (2026-11-15 run ended on that 401)."""
+    import jwt
+    from fastapi import HTTPException
+
+    def unreachable(_):
+        raise jwt.PyJWKClientConnectionError("fetch failed")
+
+    monkeypatch.setattr(oidc, "verify", unreachable)
+    with pytest.raises(HTTPException) as error:
+        await oidc.identity("Bearer token")
+    assert error.value.status_code == 503

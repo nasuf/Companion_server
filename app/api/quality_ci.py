@@ -1,6 +1,7 @@
 """Narrow OIDC-only evaluation control, with no business administration rights."""
 
 import json
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Literal
@@ -117,7 +118,23 @@ async def action(job_id: str, body: Action, identity=Depends(oidc.NIGHTLY)):
     data = body.data
     try:
         # Every mutation is bound to this exact repository/run/lease.
-        await jobs.renew(job_id, body.lease_token)
+        try:
+            await jobs.renew(job_id, body.lease_token, jobs.REMOTE_LEASE_SECONDS)
+        except jobs.LostLease:
+            # A retried finish whose first attempt committed: same run, same lease,
+            # same terminal status. Re-read: the first attempt may have committed
+            # while this one waited for the lease lock. Anything else is a real loss.
+            if body.operation == "finish":
+                now = await db.query_raw(
+                    "SELECT status,lease_token FROM quality_jobs WHERE id=$1", job_id
+                )
+                if (
+                    now
+                    and now[0]["lease_token"] == body.lease_token
+                    and now[0]["status"] == data.get("status")
+                ):
+                    return {"ok": True}
+            raise
         if body.operation == "renew":
             return {"ok": True}
         if body.operation == "prepare":
@@ -156,12 +173,18 @@ async def action(job_id: str, body: Action, identity=Depends(oidc.NIGHTLY)):
                 prices=job["snapshot"]["prices"],
                 operation=data.get("operation", "chat"),
             )
+            charge_id = data.get("charge_id")
+            if charge_id is not None and not (
+                isinstance(charge_id, str) and re.fullmatch("[a-f0-9]{32}", charge_id)
+            ):
+                raise ValueError("invalid_charge_id")
             charge = await budget.reserve(
                 job_id,
                 data["model"],
                 ceiling,
                 lease_token=body.lease_token,
                 request=data,
+                charge_id=charge_id,
             )
             return dict(id=charge)
         charge = await db.query_raw(

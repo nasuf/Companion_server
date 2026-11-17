@@ -14,6 +14,9 @@ from app.db import db
 from app.services.quality.policy import local_day
 
 LEASE_SECONDS = 180
+# The Actions controller retries transient control errors for up to 15 minutes
+# (a deploy restart); its lease must outlive that window or one deploy ends the run.
+REMOTE_LEASE_SECONDS = 1800
 
 
 class LostLease(RuntimeError):
@@ -114,18 +117,18 @@ async def require_lease(tx, job_id, token):
         raise LostLease("quality_executor_lease_lost")
 
 
-async def renew(job_id, token):
+async def renew(job_id, token, seconds=LEASE_SECONDS):
     async with db.tx(timeout=timedelta(seconds=8)) as tx:
         await require_lease(tx, job_id, token)
         await tx.execute_raw(
             "UPDATE quality_executor SET lease_until=NOW()+make_interval(secs=>$1) WHERE job_id=$2",
-            LEASE_SECONDS,
+            seconds,
             job_id,
         )
         await tx.execute_raw(
             "UPDATE quality_jobs SET lease_until=NOW()+make_interval(secs=>$2) WHERE id=$1 AND status='running'",
             job_id,
-            LEASE_SECONDS,
+            seconds,
         )
 
 
