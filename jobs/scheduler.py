@@ -531,6 +531,17 @@ def register_scheduler_jobs(scheduler):
         max_instances=1,
     )
 
+    # 遗忘后从 Trace / 镜像 / 消息元数据 / 待确认状态里清掉正文 (M02.04.05)。
+    # 队列行入队 10 分钟后才处理, 让遗忘时正在进行的回合先写完 Trace。
+    scheduler.add_job(
+        _run_forget_scrub,
+        "interval",
+        minutes=5,
+        id="memory_forget_scrub",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Weekly portrait update on Sunday at 3:45 AM (staggered from daily reflection)
     scheduler.add_job(
         _run_weekly_portraits,
@@ -884,6 +895,12 @@ async def _run_portrait_forget_rebuild():
     from app.services.portrait import rebuild_portraits_after_forget
 
     await _run_distributed_job("portrait_forget_rebuild", 3600, rebuild_portraits_after_forget)
+
+
+async def _run_forget_scrub():
+    from app.services.memory.interaction.forget_scrub import scrub_forgotten_text
+
+    await _run_distributed_job("memory_forget_scrub", 600, scrub_forgotten_text)
 
 
 async def _run_weekly_portraits():

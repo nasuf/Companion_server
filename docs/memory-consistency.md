@@ -130,4 +130,27 @@ AI 自述和日常总结不得据此创建新的永久人设。原来的 Web 提
 
 用户遗忘（`delete` / `user_bulk_delete` / `workspace_wipe`）写入的变更日志只记操作、记忆 ID 和时间，
 `old_value` 为空。聊天内撤销删除依赖 Redis 里 1 小时的快照，不读审计；App 删除的文本保留在归档行里。
-删除与撤销的普通日志只输出 ID 和正文长度。此前写入的遗忘审计仍带正文，按 M02.04.05 后续清理。
+删除与撤销的普通日志只输出 ID 和正文长度。此前写入的遗忘审计仍带正文（生产当前 0 行）。
+
+### 遗忘后清除 Trace、镜像与待确认中的正文（M02.04.05）
+
+遗忘屏障 `fence_forgotten_memories` 在删除或归档的同一事务里，把被遗忘记忆的正文复制进
+`memory_forget_scrubs` 队列（随工作区级联删除）。每 5 分钟的 `memory_forget_scrub` 任务处理
+入队满 10 分钟的行（让遗忘时正在进行的回合先写完 Trace），按工作区一次扫描：
+
+| 位置 | 处理 |
+|---|---|
+| `messages.metadata`（`memory_retrievals` / `memory_retrieval_analysis` 等） | 按记忆 ID 把 text/content/summary 换成 `[已遗忘]`；其他字符串里的正文同样替换；比较交换写回，并发改动时下轮重试 |
+| `trace_runs` inputs/outputs/extra/events | 正文替换为 `[已遗忘]` |
+| `message_traces` steps/summary/root_message | 同上 |
+| Redis `deletion:pending:*` / `contradiction:pending:*` | 提到该记忆 ID 或正文的待确认票据直接删除 |
+
+替换在解析后的 JSON 上做，不会截断转义序列。元数据里召回诊断带的正文（可能与当前正文不同的旧写法）
+也一并纳入替换。全部成功后才删除队列行；失败累加 `attempts` 并记录异常类型，下轮重试。
+
+边界：
+- 少于 4 个字的正文只按 ID 清除，不在 Trace 全文里替换，避免误伤普通词（如“跑步”）。
+- 正文在入队后最多保留约 15 分钟（延迟 10 分钟 + 5 分钟调度）；超过 1 小时未清理由数据不变量
+  `forget_scrub_drained`（「遗忘正文清理」）判为 violated，只报条数和重试次数，不含正文。
+- 聊天内撤销删除的 1 小时 Redis 快照是撤销功能本身，保留；源消息原文按 M02.04.01 语义仍显示。
+- 运行任务载荷只带消息 ID（位置记忆）或建号人设参数（agent 初始化），不携带记忆正文，不做处理。

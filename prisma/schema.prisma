@@ -2959,6 +2959,23 @@ model MemoryErasedSource {
  @@map("memory_erased_sources")
 }
 
+// SQL-managed queue of forgotten text pending trace/metadata scrub; rows are
+// deleted once scrubbed and cascade with the workspace.
+model MemoryForgetScrub {
+ id BigInt @id @default(autoincrement())
+ workspaceId String @map("workspace_id")
+ side String
+ memoryId String @map("memory_id")
+ content String
+ attempts Int @default(0)
+ lastError String? @map("last_error")
+ createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+ @@unique([workspaceId,side,memoryId])
+ @@index([createdAt],map:"memory_forget_scrubs_created_idx")
+ @@ignore
+ @@map("memory_forget_scrubs")
+}
+
 // SQL-managed append-only semantic history; physical erasure cascades.
 model MemoryTemporalVersion {
   id BigInt @id @default(autoincrement())

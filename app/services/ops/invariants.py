@@ -473,6 +473,18 @@ async def _check_token_usage_reconciled() -> InvariantResult:
     return InvariantResult("token_usage_reconciled", "用量与 Trace 对账", status, detail, observed)
 
 
+async def _check_forget_scrub_drained() -> InvariantResult:
+    """遗忘后的正文清理不能积压: 积压的每一行都是用户已遗忘、却仍留在 Trace 里的正文."""
+    from app.services.memory.interaction.forget_scrub import scrub_backlog
+    title = "遗忘正文清理"
+    observed = await scrub_backlog()
+    if observed["stuck"]:
+        return InvariantResult("forget_scrub_drained", title, "violated",
+                               f"{observed['stuck']} 条遗忘正文超过 1 小时未清理 (最多重试 {observed['max_attempts']} 次)",
+                               observed)
+    return InvariantResult("forget_scrub_drained", title, "ok", "没有超过 1 小时未清理的遗忘正文", observed)
+
+
 _CHECKS: tuple[tuple[str, str, Callable[[], Awaitable[InvariantResult]]], ...] = (
     ("schedule_today", "今日作息覆盖", _check_schedule_today),
     ("no_oversized_memories", "记忆长度上限", _check_no_oversized_memories),
@@ -483,6 +495,7 @@ _CHECKS: tuple[tuple[str, str, Callable[[], Awaitable[InvariantResult]]], ...] =
     ("capacity_headroom", "容量水位", _check_capacity_headroom),
     ("token_usage_reconciled", "用量与 Trace 对账", _check_token_usage_reconciled),
     ("daily_metrics_settled", "内测统计定型", _check_daily_metrics_settled),
+    ("forget_scrub_drained", "遗忘正文清理", _check_forget_scrub_drained),
 )
 
 
