@@ -519,6 +519,18 @@ def register_scheduler_jobs(scheduler):
         max_instances=1,
     )
 
+    # 用户遗忘后重建画像 (每天 04:40): 旧画像可能复述已遗忘的内容。每对
+    # (用户, agent) 一天最多重建一次, 一批有界, 积压由次日继续消化。
+    scheduler.add_job(
+        _run_portrait_forget_rebuild,
+        "cron",
+        hour=4,
+        minute=40,
+        id="portrait_forget_rebuild",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Weekly portrait update on Sunday at 3:45 AM (staggered from daily reflection)
     scheduler.add_job(
         _run_weekly_portraits,
@@ -866,6 +878,12 @@ def scheduler_job_definitions():
     definitions = AsyncIOScheduler(timezone=settings.schedule_timezone)
     register_scheduler_jobs(definitions)
     return [job for job in definitions.get_jobs() if not isinstance(job.trigger, DateTrigger)]
+
+
+async def _run_portrait_forget_rebuild():
+    from app.services.portrait import rebuild_portraits_after_forget
+
+    await _run_distributed_job("portrait_forget_rebuild", 3600, rebuild_portraits_after_forget)
 
 
 async def _run_weekly_portraits():

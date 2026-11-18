@@ -49,6 +49,12 @@ MIN_MEMORIES_FOR_PORTRAIT = 15   # L1 + L2 合计
 MIN_USER_MESSAGES_FOR_PORTRAIT = 30
 MIN_AGENT_AGE_HOURS = 24
 
+# User forgetting. Their changelog rows carry the forgotten text in old_value,
+# so they never enter a prompt; a portrait older than one of them is rebuilt
+# from live memories instead of patched.
+FORGET_OPERATIONS = ("delete", "user_bulk_delete", "workspace_wipe")
+FORGET_REBUILD_BATCH = 50
+
 
 async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
     """检查首次画像生成前置条件 (见上方常量的说明)。"""
@@ -244,7 +250,8 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
         order={"version": "desc"},
     )
 
-    if not previous:
+    if not previous or not previous.content:
+        # No portrait yet, or emptied after the user forgot everything.
         return await generate_portrait(user_id, agent_id)
 
     # Get this week's changelog
@@ -263,6 +270,11 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
     # 记忆没变不代表没有新信息: 互动方式 (什么时候来、情绪基调、消息长短) 会先于
     # 记忆变化。只看 changelog 的话, 一个天天来聊但没说出任何新事实的用户, 画像里
     # 的相处方式会一直停在几周前。
+    if any(cl.operation in FORGET_OPERATIONS and _after(cl.createdAt, previous.createdAt)
+           for cl in changelogs):
+        # The old portrait may repeat what the user asked to forget.
+        return await generate_portrait(user_id, agent_id)
+    changelogs = [cl for cl in changelogs if cl.operation not in FORGET_OPERATIONS]
     behaviour_facts = await _collect_behaviour_facts(user_id, agent_id, workspace_id)
     if not changelogs and not behaviour_facts:
         logger.info(f"No changes this week for user {user_id}, keeping portrait")
@@ -317,22 +329,73 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
         portrait=portrait,
     )
 
-    # 清理已消费的变更日志
-    try:
-        deleted = await db.memorychangelog.delete_many(
-            where={
-                "userId": user_id,
-                "workspaceId": workspace_id,
-                "createdAt": {"lte": one_week_ago},
-            },
-        )
-        if deleted:
-            logger.info(f"Cleaned up {deleted} changelog entries for user {user_id}")
-    except Exception as e:
-        logger.warning(f"Failed to clean changelog for user {user_id}: {e}")
-
+    # Changelog rows are audit history (consolidation undo, repair, quality
+    # all read them); the portrait only reads a 7-day window and never deletes.
     logger.info(f"Updated portrait v{previous.version + 1} for user {user_id}")
     return portrait
+
+
+def _after(a: datetime | None, b: datetime | None) -> bool:
+    if a is None or b is None:
+        return False
+    if a.tzinfo is None:
+        a = a.replace(tzinfo=UTC)
+    if b.tzinfo is None:
+        b = b.replace(tzinfo=UTC)
+    return a > b
+
+
+async def rebuild_portraits_after_forget(*, limit: int = FORGET_REBUILD_BATCH) -> dict:
+    """Rebuild portraits written before the user's latest forget, oldest first.
+
+    Runs daily, so a burst of deletions costs one rebuild per pair. A pair with
+    no live L1/L2 memory left gets an empty version so the old text stops
+    being served; a model failure leaves the pair for the next run.
+    """
+    from app.services.llm.usage_tracker import usage_session
+
+    rows = await db.query_raw(
+        """SELECT p.user_id, p.agent_id FROM (
+             SELECT DISTINCT ON (user_id, agent_id) user_id, agent_id, created_at
+             FROM user_portraits ORDER BY user_id, agent_id, version DESC) p
+           JOIN chat_workspaces w ON w.user_id = p.user_id AND w.agent_id = p.agent_id
+           WHERE EXISTS (SELECT 1 FROM memory_changelogs c
+             WHERE c.user_id = p.user_id AND c.workspace_id = w.id
+               AND c.operation = ANY($1::text[]) AND c.created_at > p.created_at)
+           GROUP BY p.user_id, p.agent_id, p.created_at
+           ORDER BY p.created_at LIMIT $2""",
+        list(FORGET_OPERATIONS), limit,
+    )
+    stats = {"due": len(rows), "rebuilt": 0, "emptied": 0, "failed": 0}
+    for row in rows:
+        user_id, agent_id = row["user_id"], row["agent_id"]
+        try:
+            async with usage_session(scope="schedule_cron", conversation_id=None,
+                                     agent_id=agent_id, user_id=user_id):
+                workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+                live = await memory_repo.count(source="user", where={
+                    "userId": user_id, "workspaceId": workspace_id,
+                    "level": {"in": [1, 2]}, "isArchived": False,
+                })
+                if not live:
+                    latest = await db.userportrait.find_first(
+                        where={"userId": user_id, "agentId": agent_id},
+                        order={"version": "desc"},
+                    )
+                    await db.userportrait.create(data={
+                        "user": {"connect": {"id": user_id}}, "agentId": agent_id,
+                        "version": latest.version + 1 if latest else 1, "content": "",
+                    })
+                    stats["emptied"] += 1
+                elif await generate_portrait(user_id, agent_id):
+                    stats["rebuilt"] += 1
+                else:
+                    stats["failed"] += 1
+        except Exception as exc:
+            stats["failed"] += 1
+            logger.warning("Portrait rebuild after forget failed: %s", type(exc).__name__)
+    logger.info("Portrait rebuild after forget: %s", stats)
+    return stats
 
 
 async def get_latest_portrait(user_id: str, agent_id: str) -> str | None:

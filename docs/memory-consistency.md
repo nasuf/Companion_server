@@ -119,5 +119,9 @@ AI 自述和日常总结不得据此创建新的永久人设。原来的 Web 提
 | --- | --- | --- |
 | 画像标签 `user_profile_tags` | `source_memory_ids` | 任一来源被删除或归档，读取时即不再返回该标签；下次画像刷新重建。无来源标签照旧返回 |
 | 实体关系召回 | `memory_mentions` 关联记忆行 | 查询本就过滤已归档记忆，被删记忆的关联随行删除 |
-| 用户画像文本 `user_portraits` | 无逐句来源 | 没有定时刷新：`update_portrait_weekly` 没有调用方，画像只由 `scripts/backfill_user_portraits.py` 手动生成。生成时只读未归档记忆，但生成后一直沿用并注入聊天 prompt，可能含已遗忘内容（已知缺口） |
+| 用户画像文本 `user_portraits` | 无逐句来源 | 每周日 03:45 周更（近 7 天活跃的 agent）。用户遗忘（`delete` / `user_bulk_delete` / `workspace_wipe`）晚于最新画像时，每天 04:40 的 `portrait_forget_rebuild` 只按未归档记忆整份重建；已无 L1/L2 记忆时写入空版本。周更遇到遗忘也整份重建，变化段不含遗忘记录的原文 |
 | 压缩摘要原文 | `consolidated_into` | 摘要被遗忘后原文仍以归档状态保留文本（已知缺口） |
+
+画像周更以前会删除该工作区 7 天前的全部变更日志，其中包括 `consolidated_into`
+等审计。生产上已有 8 条仍有效的压缩摘要因此失去撤销依据（只读核对，2026-11-18）。
+周更现已不再删除变更日志；变更日志只由 `changelog_retention` 按 13 个月清理 `access` 行。
