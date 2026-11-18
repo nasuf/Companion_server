@@ -117,7 +117,7 @@ async def test_every_persisted_step_rolls_back_and_retry_works(repairing,action,
     assert (await submit(item,action,content='修复后的合成事实',memory_ids=[parent.id])).status_code==200
 
 
-@pytest.mark.parametrize('change',['target','parent','generation','actor','item','delete'])
+@pytest.mark.parametrize('change',['target','parent','generation','actor','item','delete','forget_target','forget_parent'])
 async def test_rechecks_changes_during_embedding(repairing,change):
     o,target,queue,client,embedding,admin,submit=repairing
     db,uid,wid,_,_,_,_,users,agents,*_=o;row=await target();parent=await target();item=await queue(row)
@@ -130,6 +130,11 @@ async def test_rechecks_changes_during_embedding(repairing,change):
             await db.user.update(where={'id':admin},data={'role':'user'})
         elif change=='item':
             await repair_queue.update_memory_repair_item_status(item['id'],status='dismissed')
+        elif change.startswith('forget'):
+            # App 批量删除: 归档并登记遗忘屏障, 与 archive_forgotten 同一事务语义
+            mid=row.id if change=='forget_target' else parent.id
+            await db.execute_raw('UPDATE memories_user SET is_archived=true WHERE id=$1',mid)
+            await db.query_raw("SELECT 1 AS ok FROM (SELECT fence_forgotten_memories('user',$1,ARRAY[$2]::text[])) f",wid,mid)
         else:
             await db.usermemory.delete(where={'id':parent.id})
         return VECTOR
