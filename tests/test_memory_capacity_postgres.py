@@ -176,3 +176,52 @@ async def test_late_consolidation_cannot_commit_a_forgotten_original(memory_flow
     assert rows[0]["n"]==0
     rest=[await row(f,m.id,side) for m in originals[1:]]
     assert not any(r["is_archived"] for r in rest)
+
+
+@pytest.mark.parametrize("side",["user","ai"])
+async def test_deleting_an_undone_digest_leaves_restored_originals_alone(memory_flow,monkeypatch,side):
+    f=memory_flow;originals,digest=await cluster(f,monkeypatch,side)
+    await archive(f,originals,digest,side)
+    monkeypatch.setattr(embedding,"generate_embedding",AsyncMock(return_value=[0.01]*1024))
+    assert (await capacity.restore_consolidated_digest(digest.id))["restored"]==5
+    table='memories_ai' if side=='ai' else 'memories_user'
+    try:
+        await f.db.execute_raw(f"DELETE FROM {table} WHERE id=$1",digest.id)
+        queued=await f.db.query_raw("SELECT memory_id FROM memory_forget_scrubs WHERE workspace_id=$1",f.ids["workspace"])
+        assert [r["memory_id"] for r in queued]==[digest.id]
+        vectors=await f.db.query_raw("SELECT count(*)::int n FROM memory_embeddings WHERE memory_id=ANY($1::text[])",[m.id for m in originals])
+        assert vectors[0]["n"]==5
+    finally:
+        await f.db.execute_raw("DELETE FROM memory_forget_scrubs WHERE workspace_id=$1",f.ids["workspace"])
+
+
+@pytest.mark.parametrize("side",["user","ai"])
+async def test_forgetting_a_digest_while_it_is_being_undone_ends_consistent(memory_flow,monkeypatch,side):
+    """Undo builds vectors outside the transaction, then commits under row
+    locks; a concurrent digest delete either wins (originals forgotten, undo
+    finds nothing) or loses (originals restored, digest archived and deleted
+    alone). Never a live original without a vector or a half-fenced cluster."""
+    f=memory_flow;originals,digest=await cluster(f,monkeypatch,side)
+    await archive(f,originals,digest,side)
+    gate=asyncio.Event()
+    async def slow_embedding(_text):
+        await gate.wait();return [0.01]*1024
+    monkeypatch.setattr(embedding,"generate_embedding",slow_embedding)
+    table='memories_ai' if side=='ai' else 'memories_user'
+    try:
+        undo=asyncio.create_task(capacity.restore_consolidated_digest(digest.id))
+        await asyncio.sleep(0.2)
+        await f.db.execute_raw(f"DELETE FROM {table} WHERE id=$1",digest.id)
+        gate.set()
+        with pytest.raises(RuntimeError,match="Archive changed"):
+            await undo
+        rows=[await row(f,m.id,side) for m in originals]
+        assert all(r["is_archived"] for r in rows)
+        vectors=await f.db.query_raw("SELECT count(*)::int n FROM memory_embeddings WHERE memory_id=ANY($1::text[])",[m.id for m in originals])
+        assert vectors[0]["n"]==0
+        queued=await f.db.query_raw("SELECT memory_id FROM memory_forget_scrubs WHERE workspace_id=$1",f.ids["workspace"])
+        assert {r["memory_id"] for r in queued}=={digest.id,*(m.id for m in originals)}
+        assert (await capacity.restore_consolidated_digest(digest.id))=={"found":0,"restored":0}
+    finally:
+        gate.set()
+        await f.db.execute_raw("DELETE FROM memory_forget_scrubs WHERE workspace_id=$1",f.ids["workspace"])
