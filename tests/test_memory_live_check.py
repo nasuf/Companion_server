@@ -48,9 +48,14 @@ async def test_check_failure_drops_every_checkable_row():
 async def test_empty_or_unidentified_input_skips_the_query():
     with patch.object(live_check, "db") as db:
         db.query_raw = AsyncMock()
-        assert await live_check.keep_live_memories(None, user_id="u", workspace_id="w") is None
+        diag: dict = {}
+        assert await live_check.keep_live_memories(None, user_id="u", workspace_id="w",
+                                                   diagnostics=diag) is None
+        assert diag["memory_live_check"] == {"status": "no_candidates", "checked": 0, "dropped": 0}
         legacy = [ClassifiedMemory(text="x", relevance="medium", score=0.5)]
-        assert await live_check.keep_live_memories(legacy, user_id="u", workspace_id="w") == legacy
+        assert await live_check.keep_live_memories(legacy, user_id="u", workspace_id="w",
+                                                   diagnostics=diag) == legacy
+        assert diag["memory_live_check"]["status"] == "no_ids"
     db.query_raw.assert_not_awaited()
 
 

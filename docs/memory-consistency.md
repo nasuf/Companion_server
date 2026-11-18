@@ -110,7 +110,7 @@ AI 自述和日常总结不得据此创建新的永久人设。原来的 Web 提
 召回到组装之间还有回复前停顿和矛盾检测，所以缓存只是第一道防线。`prepare_reply`
 在分级 prompt、主 prompt 和记忆使用登记之前调用 `keep_live_memories`：按库重查一次，
 只保留仍存在、未归档、且属于当前用户和工作区的条目。查询失败时去掉所有带 ID 的条目，
-本轮回复不带记忆。结果写入回复诊断 `memory_live_check`（status / checked / dropped）。
+本轮回复不带记忆。结果写入回复诊断 `memory_live_check`（status / checked / dropped）；status 为 checked、failed_closed、no_candidates（本轮没有召回）或 no_ids（只有旧格式条目）。
 没有 ID 的旧格式缓存条目无法核对，原样保留，最多存活一个 5 分钟的缓存周期。
 
 ### 派生数据随来源失效（M02.04.03 部分）

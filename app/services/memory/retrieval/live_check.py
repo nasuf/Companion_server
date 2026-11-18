@@ -25,8 +25,17 @@ async def keep_live_memories(memories, *, user_id: str, workspace_id: str | None
     Items without an id predate structured caching and have no row to check;
     they are kept as is.
     """
+    def _note(status: str, checked: int = 0, dropped: int = 0) -> None:
+        if diagnostics is not None:
+            diagnostics["memory_live_check"] = {
+                "status": status, "checked": checked, "dropped": dropped,
+            }
+
     if not memories:
+        # Distinguish "nothing recalled" from "check never ran" in Trace.
+        _note("no_candidates")
         return memories
+
     def _key(m) -> tuple[str, str]:
         return ("ai" if getattr(m, "source", "user") == "ai" else "user", getattr(m, "id", "") or "")
 
@@ -36,6 +45,7 @@ async def keep_live_memories(memories, *, user_id: str, workspace_id: str | None
         if mid:
             wanted.setdefault(side, set()).add(mid)
     if not wanted:
+        _note("no_ids")
         return memories
     live: set[tuple[str, str]] = set()
     try:
@@ -51,10 +61,5 @@ async def keep_live_memories(memories, *, user_id: str, workspace_id: str | None
         logger.warning("Memory live check failed: %s", type(exc).__name__)
         status = "failed_closed"
     kept = [m for m in memories if not _key(m)[1] or _key(m) in live]
-    if diagnostics is not None:
-        diagnostics["memory_live_check"] = {
-            "status": status,
-            "checked": sum(len(ids) for ids in wanted.values()),
-            "dropped": len(memories) - len(kept),
-        }
+    _note(status, sum(len(ids) for ids in wanted.values()), len(memories) - len(kept))
     return kept
