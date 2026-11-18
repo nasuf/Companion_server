@@ -394,9 +394,17 @@ async def test_receipt_survives_digest_deletion_and_cannot_recreate_it(compressi
     inputs = await f.prepare()
     digest = await f.commit(inputs)
     await f.db.aimemory.delete(where={"id": digest})
+    # Deleting a digest forgets its originals and drops their vectors; simulate
+    # an external full restore (rows and vectors) before trying to recreate.
     await f.db.execute_raw(
         "UPDATE memories_ai SET is_archived=false WHERE id=ANY($1::text[])", ids
     )
+    for mid in ids:
+        await f.db.execute_raw(
+            "INSERT INTO memory_embeddings(memory_id,embedding) VALUES($1,$2::extensions.vector)",
+            mid,
+            "[" + ",".join(map(str, VECTOR)) + "]",
+        )
     # Even if the original archive audit was removed externally, the immutable
     # scoped receipt blocks the same version set from recreating a deleted digest.
     await f.db.memorychangelog.delete_many(
