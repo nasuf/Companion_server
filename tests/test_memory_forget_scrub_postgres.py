@@ -146,7 +146,8 @@ async def test_short_text_is_only_removed_where_the_id_identifies_it(memory_flow
                                 "note": "今天去跑步了"}, ensure_ascii=False)})
     await f.db.execute_raw(
         """INSERT INTO trace_runs(run_id,trace_id,name,run_type,status,started_at,inputs_json)
-        VALUES($1,$1,'chain','chain','success',CURRENT_TIMESTAMP,'{"m":"我也爱跑步"}'::jsonb)""", trace)
+        VALUES($1,$1,'chain','chain','success',CURRENT_TIMESTAMP,$2::jsonb)""",
+        trace, json.dumps({"m": "我也爱跑步", "ids": [gone.id]}, ensure_ascii=False))
     ids_only = await f.db.message.create(data={
         "conversationId": f.ids["conversation"], "role": "assistant", "content": "回复",
         "metadata": json.dumps({"used_memory_ids": [gone.id]})})
@@ -226,9 +227,9 @@ async def test_concurrent_metadata_write_wins_and_edge_paths(memory_flow, monkey
         assert row["last_error"] == "RuntimeError"
         # 没有会话的工作区 / 没有可替换的正文: 直接返回
         assert await forget_scrub._scrub_workspace(str(uuid4()), []) == {
-            "messages": 0, "trace_runs": 0, "mirrors": 0, "pending": 0}
+            "messages": 0, "trace_runs": 0, "mirrors": 0, "feedback": 0, "pending": 0}
         assert await forget_scrub._scrub_json_rows(
-            "trace_runs", "run_id", ("inputs_json",), "trace_id=ANY($1::text[])", [trace], {gone.id}, []) == 0
+            "trace_runs", "run_id", ("inputs_json",), "trace_id=ANY($1::text[])", [], {gone.id}, [SECRET]) == 0
     finally:
         await _cleanup(f, trace)
 
@@ -250,3 +251,54 @@ async def test_text_still_held_by_a_live_memory_is_not_replaced(memory_flow, mon
         assert all(SECRET in r["t"] for r in runs)
     finally:
         await _cleanup(f, trace)
+
+
+async def test_forgetting_a_digest_forgets_its_originals_and_receipts(memory_flow, monkeypatch):
+    f = memory_flow
+    originals = [await memory(f, content=f"原文{i}: {SECRET}", isArchived=True, level=3) for i in range(2)]
+    digest = await memory(f, content="摘要: 用户养猫", provenance="consolidated", level=3)
+    for o in originals:
+        await f.db.memorychangelog.create(data={"userId": f.ids["owner"], "workspaceId": f.ids["workspace"],
+            "memoryId": o.id, "operation": "consolidated_into", "newValue": digest.id})
+        await f.db.execute_raw("INSERT INTO memory_embeddings(memory_id, embedding) VALUES($1, array_fill(0.1, ARRAY[1024])::extensions.vector)", o.id)
+    msg = await f.db.message.create(data={"conversationId": f.ids["conversation"], "role": "assistant",
+        "content": "回复", "metadata": json.dumps({"x": 1})})
+    for mid in (digest.id, originals[0].id):
+        await f.db.execute_raw(
+            "INSERT INTO memory_usage_receipts(event_id,memory_side,memory_id,contributed,reward) VALUES($1,'user',$2,true,0.1)",
+            msg.id, mid)
+    keeper = await memory(f, content="用户喜欢爬山")
+    await f.db.execute_raw(
+        "INSERT INTO memory_usage_receipts(event_id,memory_side,memory_id,contributed,reward) VALUES($1,'user',$2,true,0.1)",
+        msg.id, keeper.id)
+    event = str(uuid4())
+    await f.db.execute_raw(
+        """INSERT INTO memory_visible_use_events(id,conversation_id,workspace_id,user_id,memory_ids,payload)
+        VALUES($1,$2,$3,$4,$5::text[],$6::jsonb)""",
+        event, f.ids["conversation"], f.ids["workspace"], f.ids["owner"], [originals[0].id, keeper.id],
+        json.dumps({"items": [{"id": originals[0].id, "text": "原"}, {"id": keeper.id, "text": KEEP}]},
+                   ensure_ascii=False))
+    _wire(f, monkeypatch)
+    try:
+        await _forget(f, digest.id)
+        queued = {r["memory_id"] for r in await _queue(f)}
+        assert queued == {digest.id, *(o.id for o in originals)}
+        left = await f.db.query_raw("SELECT memory_id FROM memory_usage_receipts WHERE event_id=$1", msg.id)
+        assert [r["memory_id"] for r in left] == [keeper.id]
+        vectors = await f.db.query_raw("SELECT count(*)::int n FROM memory_embeddings WHERE memory_id=ANY($1::text[])",
+                                       [o.id for o in originals])
+        assert vectors[0]["n"] == 0
+        # 原文仍以归档状态保留
+        rows = [await f.db.usermemory.find_unique(where={"id": o.id}) for o in originals]
+        assert all(r.isArchived for r in rows)
+        await _age(f)
+        stats = await forget_scrub.scrub_forgotten_text()
+        assert stats["scrubbed"] == 3 and stats["feedback"] == 1
+        payload = json.loads((await f.db.query_raw(
+            "SELECT payload::text AS p FROM memory_visible_use_events WHERE id=$1", event))[0]["p"])
+        assert payload["items"] == [{"id": originals[0].id, "text": forget_scrub.PLACEHOLDER},
+                                    {"id": keeper.id, "text": KEEP}]
+    finally:
+        await f.db.execute_raw("DELETE FROM memory_visible_use_events WHERE id=$1", event)
+        await f.db.execute_raw("DELETE FROM memory_usage_receipts WHERE event_id=$1", msg.id)
+        await _cleanup(f)

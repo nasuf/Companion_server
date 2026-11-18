@@ -7,6 +7,7 @@ workspace and replaces it with a placeholder:
 - `messages.metadata`: recall diagnostics keyed by memory id lose their text;
   any other string holding the text is replaced;
 - `trace_runs` inputs/outputs/extra/events and the `message_traces` mirror;
+- `memory_visible_use_events.payload` (per-turn visible-use feedback);
 - Redis pending deletion / contradiction tickets that mention the memory.
 
 Rows wait `SCRUB_DELAY_MINUTES` first, so a turn that was mid-flight when the user
@@ -120,13 +121,15 @@ async def _scrub_messages(workspace_id: str, conversation_ids: list[str], memory
 
 async def _scrub_json_rows(table: str, key: str, columns: tuple[str, ...], scope_sql: str,
                            scope_arg: list[str], memory_ids: set[str], texts: list[str]) -> int:
-    """Rewrite JSON (and the plain `root_message`) columns of rows holding any text."""
-    if not texts or not scope_arg:
+    """Rewrite JSON (and the plain `root_message`) columns of rows holding the
+    forgotten ids or text; returns the number of rows actually changed."""
+    if not scope_arg:
         return 0
     match = " OR ".join(
         f"EXISTS (SELECT 1 FROM unnest($2::text[]) t WHERE strpos(coalesce({c}::text,''), t) > 0)"
         for c in columns
     )
+    needles = sorted(memory_ids) + _escaped(texts)
     changed = 0
     done: list[str] = []
     while True:
@@ -134,19 +137,26 @@ async def _scrub_json_rows(table: str, key: str, columns: tuple[str, ...], scope
             f"""SELECT {key} AS key, {', '.join(f'{c}::text AS {c}' for c in columns)} FROM {table}
             WHERE {scope_sql} AND ({match}) AND NOT ({key}=ANY($3::text[]))
             ORDER BY {key} LIMIT {_PAGE}""",
-            scope_arg, _escaped(texts), done,
+            scope_arg, needles, done,
         )
         if not rows:
             return changed
         for row in rows:
             done.append(row["key"])
-            values = []
+            values, dirty = [], False
             for c in columns:
                 raw = row[c]
                 if raw is None or c == "root_message":
-                    values.append(_scrub_value(raw, memory_ids, texts))
+                    after = _scrub_value(raw, memory_ids, texts)
+                    dirty |= after != raw
+                    values.append(after)
                     continue
-                values.append(json.dumps(_scrub_value(_load(raw), memory_ids, texts), ensure_ascii=False))
+                before = _load(raw)
+                after = _scrub_value(before, memory_ids, texts)
+                dirty |= after != before
+                values.append(json.dumps(after, ensure_ascii=False))
+            if not dirty:
+                continue
             sets = ", ".join(
                 f"{c}=${i + 2}{'' if c == 'root_message' else '::jsonb'}" for i, c in enumerate(columns)
             )
@@ -189,7 +199,7 @@ async def _scrub_workspace(workspace_id: str, rows: list[dict]) -> dict[str, int
     )
     conversation_ids = [c["id"] for c in conversations]
     if not conversation_ids:
-        return {"messages": 0, "trace_runs": 0, "mirrors": 0, "pending": 0}
+        return {"messages": 0, "trace_runs": 0, "mirrors": 0, "feedback": 0, "pending": 0}
     memory_ids = {r["memory_id"] for r in rows}
     messages, texts = await _scrub_messages(workspace_id, conversation_ids, memory_ids,
                                             _ordered({r["content"] for r in rows}))
@@ -208,8 +218,13 @@ async def _scrub_workspace(workspace_id: str, rows: list[dict]) -> dict[str, int
         "message_traces", "trace_id", ("steps_json", "summary_json", "root_message"),
         "conversation_id=ANY($1::text[])", conversation_ids, memory_ids, texts,
     )
+    feedback = await _scrub_json_rows(
+        "memory_visible_use_events", "id", ("payload",),
+        "conversation_id=ANY($1::text[])", conversation_ids, memory_ids, texts,
+    )
     pending = await _scrub_pending(conversation_ids, memory_ids, texts)
-    return {"messages": messages, "trace_runs": runs, "mirrors": mirrors, "pending": pending}
+    return {"messages": messages, "trace_runs": runs, "mirrors": mirrors,
+            "feedback": feedback, "pending": pending}
 
 
 async def scrub_forgotten_text(*, limit: int = SCRUB_BATCH) -> dict[str, int]:
@@ -224,7 +239,7 @@ async def scrub_forgotten_text(*, limit: int = SCRUB_BATCH) -> dict[str, int]:
     for row in rows:
         groups.setdefault(row["workspace_id"], []).append(row)
     stats = {"due": len(rows), "scrubbed": 0, "failed": 0,
-             "messages": 0, "trace_runs": 0, "mirrors": 0, "pending": 0}
+             "messages": 0, "trace_runs": 0, "mirrors": 0, "feedback": 0, "pending": 0}
     for workspace_id, group in groups.items():
         ids = [r["id"] for r in group]
         try:

@@ -99,7 +99,8 @@ AI 自述和日常总结不得据此创建新的永久人设。原来的 Web 提
 `restore_consolidated_digest` 只在摘要仍为有效状态时执行。用户删除、批量删除或清空摘要
 后撤销返回 0 条。已压缩原文本身已归档：App 批量删除跳过已归档行，聊天删除的向量检索
 也排除已归档行，所以用户无法单独遗忘某条原文，撤销也不会把用户遗忘过的原文带回。
-已知缺口：摘要被遗忘后，其原文仍以归档状态保留文本和向量；级联失效属于 M02.04.03。
+摘要被遗忘时，`fence_forgotten_memories` 沿 `consolidated_into` 递归找出压进它的原文，一并登记来源屏障、
+删除向量并进入正文清理队列；原文行仍以归档状态保留，和 App 删除一致。
 
 ### 召回缓存与组装前校验（M02.04.04）
 
@@ -120,7 +121,9 @@ AI 自述和日常总结不得据此创建新的永久人设。原来的 Web 提
 | 画像标签 `user_profile_tags` | `source_memory_ids` | 任一来源被删除或归档，读取时即不再返回该标签；下次画像刷新重建。无来源标签照旧返回 |
 | 实体关系召回 | `memory_mentions` 关联记忆行 | 查询本就过滤已归档记忆，被删记忆的关联随行删除 |
 | 用户画像文本 `user_portraits` | 无逐句来源 | 每周日 03:45 周更（近 7 天活跃的 agent）。用户遗忘（`delete` / `user_bulk_delete` / `workspace_wipe`）晚于最新画像时，每天 04:40 的 `portrait_forget_rebuild` 只按未归档记忆整份重建；已无 L1/L2 记忆时写入空版本。周更遇到遗忘也整份重建，变化段不含遗忘记录的原文 |
-| 压缩摘要原文 | `consolidated_into` | 摘要被遗忘后原文仍以归档状态保留文本（已知缺口） |
+| 压缩摘要原文 | `consolidated_into` | 摘要被遗忘时原文一并遗忘：来源屏障、删除向量、清除 Trace 中的正文；归档行保留 |
+| 使用回执 `memory_usage_receipts` | `memory_id` | 遗忘时随屏障删除 |
+| 可见使用反馈 `memory_visible_use_events.payload` | 条目 `id` | 由正文清理任务把被遗忘条目的 text 换成 `[已遗忘]`；计数字段保留 |
 
 画像周更以前会删除该工作区 7 天前的全部变更日志，其中包括 `consolidated_into`
 等审计。生产上已有 8 条仍有效的压缩摘要因此失去撤销依据（只读核对，2026-11-18）。
@@ -142,6 +145,7 @@ AI 自述和日常总结不得据此创建新的永久人设。原来的 Web 提
 |---|---|
 | `messages.metadata`（`memory_retrievals` / `memory_retrieval_analysis` 等） | 按记忆 ID 把 text/content/summary 换成 `[已遗忘]`；其他字符串里的正文同样替换；比较交换写回，并发改动时下轮重试 |
 | `trace_runs` inputs/outputs/extra/events | 正文替换为 `[已遗忘]` |
+| `memory_visible_use_events.payload` | 按记忆 ID 替换 text |
 | `message_traces` steps/summary/root_message | 同上 |
 | Redis `deletion:pending:*` / `contradiction:pending:*` | 提到该记忆 ID 或正文的待确认票据直接删除 |
 
