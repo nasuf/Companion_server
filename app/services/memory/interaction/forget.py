@@ -33,17 +33,17 @@ async def archive_forgotten(user_id: str, records: list[MemoryRecord], *, operat
             rows = await tx.query_raw(
                 f"""UPDATE {_TABLES[side]} SET is_archived=true,updated_at=CURRENT_TIMESTAMP
                 WHERE id=ANY($1::text[]) AND user_id=$2 AND workspace_id IS NOT DISTINCT FROM $3
-                  AND NOT is_archived RETURNING id,content""",
+                  AND NOT is_archived RETURNING id""",
                 ids, user_id, workspace_id,
             )
             if not rows:
                 continue
             done = [r["id"] for r in rows]
             await tx.execute_raw(
-                """INSERT INTO memory_changelogs(id,user_id,workspace_id,memory_id,operation,old_value)
-                SELECT unnest($1::text[]),$2,$3,unnest($4::text[]),$5,unnest($6::text[])""",
+                # The archived row keeps the text; the audit records only the act.
+                """INSERT INTO memory_changelogs(id,user_id,workspace_id,memory_id,operation)
+                SELECT unnest($1::text[]),$2,$3,unnest($4::text[]),$5""",
                 [str(uuid.uuid4()) for _ in done], user_id, workspace_id, done, operation,
-                [r["content"] for r in rows],
             )
             await tx.query_raw(
                 "SELECT 1 AS ok FROM (SELECT fence_forgotten_memories($1,$2,$3::text[])) f",

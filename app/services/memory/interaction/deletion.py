@@ -380,10 +380,8 @@ async def delete_memories_by_description(
         # Audit log BEFORE delete (once deleted, memory row & content are gone)
         memory = await memory_repo.find_unique(memory_id)
         if memory:
-            await log_memory_changelog(
-                user_id, memory_id, "delete",
-                old_value=memory.content,
-            )
+            # Forget audit keeps no text (M02.04.05); undo uses the Redis snapshot.
+            await log_memory_changelog(user_id, memory_id, "delete")
 
         # memory_repo.delete handles embedding cascade in the safe order
         # (memory row first → embedding row). Retrieval is guaranteed to
@@ -391,7 +389,7 @@ async def delete_memories_by_description(
         try:
             await memory_repo.delete(memory_id)
             deleted += 1
-            logger.info(f"Deleted memory {memory_id}: {r.get('content', '')[:50]}")
+            logger.info(f"Deleted memory {memory_id} (content_len={len(r.get('content') or '')})")
         except Exception as e:
             logger.warning(f"Failed to delete memory {memory_id}: {e}")
 
@@ -714,12 +712,12 @@ async def restore_deleted_memories(snapshots: list[dict]) -> int:
             if new_id:
                 restored += 1
                 logger.info(
-                    f"[DELETE-UNDO] restored memory '{snap['content'][:40]}' "
-                    f"as new_id={new_id[:8]} (was {snap.get('id', '?')[:8]})"
+                    f"[DELETE-UNDO] restored memory as new_id={new_id[:8]} "
+                    f"(was {snap.get('id', '?')[:8]})"
                 )
         except Exception as e:
             logger.warning(
-                f"[DELETE-UNDO] restore failed for '{snap.get('content', '')[:40]}': {e}"
+                f"[DELETE-UNDO] restore failed for {snap.get('id', '?')[:8]}: {type(e).__name__}"
             )
     return restored
 
@@ -746,10 +744,8 @@ async def execute_confirmed_deletion(
         if memory:
             # snapshot 在 delete 前抓 — delete 后 record 已 gone
             snapshots.append(_snapshot_memory(memory))
-            await log_memory_changelog(
-                user_id, memory_id, "delete",
-                old_value=memory.content,
-            )
+            # Forget audit keeps no text (M02.04.05); undo uses the Redis snapshot.
+            await log_memory_changelog(user_id, memory_id, "delete")
         try:
             await memory_repo.delete(memory_id)
             deleted += 1

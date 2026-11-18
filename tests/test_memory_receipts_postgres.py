@@ -836,7 +836,7 @@ async def test_archive_forgetting_fences_sources_like_physical_erasure(ledger, m
     audit = await db.memorychangelog.find_many(
         where={"memoryId": ids[0], "operation": "user_bulk_delete"}
     )
-    assert len(audit) == 1 and audit[0].oldValue == "用户今天参观了合成展览"
+    assert len(audit) == 1 and audit[0].oldValue is None
     # Replay must not bring the forgotten fact back as a new live row.
     assert await pipeline.process_memory_pipeline(**args) == [ids[1]]
     live = await db.usermemory.find_many(
