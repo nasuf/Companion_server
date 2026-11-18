@@ -104,3 +104,31 @@ async def test_weekly_update_rebuilds_after_forget_and_keeps_the_audit(memory_fl
         assert await f.db.memorychangelog.find_unique(where={"id": old.id}) is not None
     finally:
         await _cleanup(f)
+
+
+async def test_rebuild_counts_model_failures_and_errors(memory_flow, monkeypatch):
+    f = memory_flow
+    _wire(f, monkeypatch)
+    now = datetime.now(UTC)
+    try:
+        await memory(f, content="用户喜欢爬山")
+        await _portrait(f, "旧画像", now - timedelta(days=2))
+        await _forget_log(f, now - timedelta(days=1))
+        monkeypatch.setattr(portrait, "generate_portrait", AsyncMock(return_value=None))
+        assert (await portrait.rebuild_portraits_after_forget())["failed"] == 1
+        monkeypatch.setattr(portrait, "generate_portrait", AsyncMock(side_effect=RuntimeError("x")))
+        assert (await portrait.rebuild_portraits_after_forget())["failed"] == 1
+        assert (await _latest(f)).version == 1  # 留给下一轮
+    finally:
+        await _cleanup(f)
+
+
+async def test_weekly_update_rebuilds_an_emptied_portrait(memory_flow, monkeypatch):
+    f = memory_flow
+    _wire(f, monkeypatch)
+    try:
+        await memory(f, content="用户喜欢爬山")
+        await _portrait(f, "", datetime.now(UTC) - timedelta(days=1))
+        assert await portrait.update_portrait_weekly(f.ids["owner"], f.ids["agent"]) == "新画像"
+    finally:
+        await _cleanup(f)
