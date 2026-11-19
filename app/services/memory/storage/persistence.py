@@ -676,5 +676,5 @@ async def store_memory(
     await after_memory_changelog(user_id=user_id, memory_id=memory.id,
         operation="insert", workspace_id=workspace_id)
 
-    logger.info(f"Stored memory L{level} (importance={importance:.2f}): {content[:50]}")
+    logger.info(f"Stored memory {memory.id} L{level} (importance={importance:.2f}, content_len={len(content)})")
     return memory.id

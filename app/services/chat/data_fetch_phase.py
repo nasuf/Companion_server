@@ -413,7 +413,7 @@ def _post_process_retrieval(
         f"[DEBUG-MEM] after post-process, {len(classified_memories)} injected into prompt:"
     )
     for m in classified_memories[:5]:
-        logger.info(f"[DEBUG-MEM]   ds={m.display_score:.3f} text='{m.text[:60]}'")
+        logger.info(f"[DEBUG-MEM]   ds={m.display_score:.3f} id={getattr(m, 'id', '')}")
     return classified_memories, memory_strings, graph_context
 
 

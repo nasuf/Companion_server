@@ -54,3 +54,17 @@ async def test_undo_logs_ids_not_text(caplog):
                AsyncMock(side_effect=["new-id-1", RuntimeError(SECRET)])):
         assert await deletion.restore_deleted_memories([snap, snap]) == 1
     assert SECRET not in caplog.text and "new-id-1"[:8] in caplog.text
+
+
+def test_memory_write_and_recall_logs_carry_no_text():
+    """记忆写入与召回路径的普通日志只记 ID / 长度, 不截取正文或用户消息。"""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "app"
+    files = [*sorted((root / "services" / "memory").rglob("*.py")), root / "services" / "chat" / "data_fetch_phase.py"]
+    pattern = re.compile(
+        r"logger\.\w+\(.*\b(content|text|summary|message|query|cache_key)\b(\.get\([^)]*\))?\s*\[:\d+\]")
+    offenders = [f"{p.relative_to(root)}:{i}" for p in files
+                 for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+                 if pattern.search(line) or re.search(r"logger\.\w+\(.*get\('content'[^)]*\)\[:", line)]
+    assert offenders == []

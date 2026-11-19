@@ -438,7 +438,7 @@ async def _process_memory_pipeline(
             content = mem.get("content", "")
             if source_channel == CALL_CHANNEL and (noise := call_noise(side, content)):
                 # VOICE01.04: 通话本身的状态、提问和此刻状态不是事实
-                logger.info(f"[MEM-{side}] skipped call noise ({noise}): {content[:40]}")
+                logger.info(f"[MEM-{side}] skipped call noise ({noise}), content_len={len(content)}")
                 await skip_fact()
                 continue
             from app.services.persona_grounding import generated_stable_self_claim
@@ -523,7 +523,7 @@ async def _process_memory_pipeline(
             # score (0-100), not whatever level the LLM may have guessed:
             #   ≥ 0.85 → L1   |   0.50-0.84 → L2   |   0.10-0.49 → L3   |   < 0.10 → drop
             if importance < 0.10:
-                logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10): {content[:40]}")
+                logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10), content_len={len(content)}")
                 await skip_fact()
                 continue
             else:

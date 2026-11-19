@@ -133,7 +133,7 @@ async def normalize_memory_category(
             # Use the hint's sub_category. Prefer the LLM's main_category if the
             # hinted sub exists there; otherwise use the hint's main_category.
             if hint_sub in allowed_sub_categories(res.main_category, source):
-                logger.info(f"Keyword hint: '{summary[:30]}' -> {res.main_category}/{hint_sub}")
+                logger.info(f"Keyword hint (len={len(summary)}) -> {res.main_category}/{hint_sub}")
                 return resolve_taxonomy(
                     main_category=res.main_category,
                     sub_category=hint_sub,
@@ -141,7 +141,7 @@ async def normalize_memory_category(
                     source=source,
                 )
             elif hint_sub in allowed_sub_categories(hint_main, source):
-                logger.info(f"Keyword hint (cross-category): '{summary[:30]}' -> {hint_main}/{hint_sub}")
+                logger.info(f"Keyword hint (cross-category, len={len(summary)}) -> {hint_main}/{hint_sub}")
                 return resolve_taxonomy(
                     main_category=hint_main,
                     sub_category=hint_sub,

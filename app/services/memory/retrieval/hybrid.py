@@ -229,7 +229,7 @@ async def hybrid_retrieve(
     """
     # 快速跳过无意义短消息（避免向量搜索的开销）
     if _is_trivial_message(message):
-        logger.debug("Skipping retrieval for trivial message: %s", message[:20])
+        logger.debug("Skipping retrieval for trivial message (len=%d)", len(message))
         return _EMPTY_RESULT
 
     # Phase 2.4: cache key 用 effective_query (含 enhanced) 避免不同指代复用同 cache
@@ -243,7 +243,7 @@ async def hybrid_retrieve(
     cached = await cache_retrieval(cache_key, user_id, workspace_id=workspace_id,
                                    version=cache_version)
     if cached:
-        logger.debug("Hybrid retrieval cache hit (key=%s)", cache_key[:30])
+        logger.debug("Hybrid retrieval cache hit")
         cached = _rehydrate_cached_memories(cached)
         cached_memories = cached.get("memories") if isinstance(cached, dict) else None
         record_retrieval_session(
@@ -313,10 +313,10 @@ async def hybrid_retrieve(
         logger.info(f"[DEBUG-VEC] vector search EXCEPTION: {vector_results}")
     else:
         total = len(vector_results) if vector_results else 0
-        logger.info(f"[DEBUG-VEC] vector search returned {total} raw results for '{message[:50]}'")
+        logger.info(f"[DEBUG-VEC] vector search returned {total} raw results (query_len={len(message)})")
         if vector_results:
             for r in sorted(vector_results, key=lambda x: float(x.get("similarity", 0)), reverse=True)[:5]:
-                logger.info(f"[DEBUG-VEC]   sim={float(r.get('similarity',0)):.3f} '{r.get('content','')[:60]}'")
+                logger.info(f"[DEBUG-VEC]   sim={float(r.get('similarity',0)):.3f} id={r.get('id','')}")
 
     # Merge vector + entity + time results (union by id), applying semantic
     # threshold only to vector results. Entity/time matches are explicit user
