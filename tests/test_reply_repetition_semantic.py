@@ -110,7 +110,7 @@ async def test_continuation_lead_line_is_never_judged():
 
 async def test_slow_embeddings_never_hold_the_reply(monkeypatch):
     async def slow(text):
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.2)
         return [1.0, 0.0, 0.0]
 
     monkeypatch.setattr(semantic, "_embed", slow)
@@ -118,6 +118,10 @@ async def test_slow_embeddings_never_hold_the_reply(monkeypatch):
     ctx = _ctx(["今天真是累坏你了呀", "面也挺好的"])
     record = await _run(ctx)
     assert record["status"] == "timeout" and len(ctx.replies) == 2 and "elapsed_ms" in record
+    # 超时只是不等它: 向量继续算完进缓存, 下一轮上一轮的句子不用再算
+    task = ctx.semantic_repetition_task
+    await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    assert task.done() and not task.cancelled()
 
 
 async def test_embedding_errors_let_the_reply_through(monkeypatch):

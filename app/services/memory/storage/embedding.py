@@ -75,7 +75,6 @@ async def generate_embedding(text: str) -> list[float]:
                     "attempts": _EMBEDDING_MAX_ATTEMPTS,
                     "error_type": type(e).__name__,
                     "text_len": len(text),
-                    "text_preview": text[:40],
                 },
             )
             raise

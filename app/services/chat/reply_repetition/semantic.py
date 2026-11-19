@@ -153,7 +153,10 @@ async def apply(ctx, policy: Policy | None = None) -> None:
     try:
         vectors = await asyncio.wait_for(asyncio.shield(task), timeout=_WAIT_S)
     except TimeoutError:
-        task.cancel()
+        # Let it finish in the background: the vectors land in the embedding
+        # cache, so next turn's "previous bubbles" are free. Cancelling here
+        # meant every turn re-embedded the last turn from scratch.
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
         record["status"] = "timeout"
         record["elapsed_ms"] = round((loop.time() - ctx.semantic_repetition_started) * 1000)
         return
