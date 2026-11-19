@@ -37,7 +37,7 @@ SCRUB_DELAY_MINUTES = 10
 MIN_TEXT_LEN = 4
 _PAGE = 200
 _TEXT_KEYS = ("text", "content", "summary")
-_PENDING_PREFIXES = ("deletion:pending:", "contradiction:pending:")
+_PENDING_PREFIXES = ("deletion:pending:", "contradiction:pending:", "memory:delete_undo:")
 
 
 def _scrub_value(value: Any, memory_ids: set[str], texts: list[str]) -> Any:

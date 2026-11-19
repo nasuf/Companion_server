@@ -741,16 +741,21 @@ async def execute_confirmed_deletion(
         if not memory_id:
             continue
         memory = await memory_repo.find_unique(memory_id)
-        if memory:
-            # snapshot 在 delete 前抓 — delete 后 record 已 gone
-            snapshots.append(_snapshot_memory(memory))
-            # Forget audit keeps no text (M02.04.05); undo uses the Redis snapshot.
-            await log_memory_changelog(user_id, memory_id, "delete")
+        if not memory:
+            continue  # already gone (forgotten elsewhere): nothing to delete or undo
+        # snapshot 在 delete 前抓 — delete 后 record 已 gone
+        snapshot = _snapshot_memory(memory)
         try:
-            await memory_repo.delete(memory_id)
-            deleted += 1
+            removed = await memory_repo.delete(memory_id)
         except Exception as e:
             logger.warning(f"Confirmed deletion failed for {memory_id}: {e}")
+            continue
+        if not removed:
+            continue  # vanished before our delete (forgotten elsewhere): no count, no undo
+        snapshots.append(snapshot)
+        deleted += 1
+        # Forget audit keeps no text (M02.04.05); undo uses the Redis snapshot.
+        await log_memory_changelog(user_id, memory_id, "delete")
 
     # 存 undo state (即使部分 delete 失败, 成功的那部分仍可 undo)
     if conversation_id and snapshots:

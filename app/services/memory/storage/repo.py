@@ -371,7 +371,7 @@ async def _scopes_for_update_many(
     return scopes
 
 
-async def delete(id: str, source: Source | None = None) -> None:
+async def delete(id: str, source: Source | None = None) -> bool:
     """Delete a memory by ID, cascading to its embedding.
 
     Order is intentional: memory row is deleted first so that even if the
@@ -382,7 +382,7 @@ async def delete(id: str, source: Source | None = None) -> None:
     """
     rec = await find_unique(id)
     if not rec:
-        return
+        return False  # already gone: not removed by this call
     if source is None:
         source = rec.source
 
@@ -394,3 +394,4 @@ async def delete(id: str, source: Source | None = None) -> None:
     except Exception as e:
         logger.warning(f"Embedding cleanup failed for memory {id}: {e}")
     await _invalidate_caches(rec.userId, rec.workspaceId)
+    return True
