@@ -153,7 +153,14 @@ async def emit_proactive_message(
             if prepared_voice is not None:
                 from app.services.speech_output.delivery import discard_prepared_voice_output
                 await discard_prepared_voice_output(prepared_voice)
-            logger.info("[TOPIC-POLICY] optional proactive message suppressed trigger=%s", trigger_type)
+            # Name the real cause; callers otherwise assume the user replied.
+            reason = ("topic_preference_unavailable" if getattr(policy.topic_snapshot, "status", "") in {
+                "unavailable", "scope_unavailable", "capacity_exceeded", "source_unavailable"}
+                else "topic_preference_suppressed")
+            if skip_reasons is not None:
+                skip_reasons.append(reason)
+            logger.info("[TOPIC-POLICY] optional proactive message suppressed trigger=%s reason=%s",
+                        trigger_type, reason)
             return ""
 
     try:

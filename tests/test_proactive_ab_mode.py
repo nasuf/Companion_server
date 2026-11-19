@@ -467,6 +467,34 @@ async def test_emit_aborts_when_user_replied_during_generation(monkeypatch):
     assert params[5] == "2026-09-29T04:00:00"  # naive UTC, 与 messages.created_at 同口径
 
 
+@pytest.mark.parametrize("policy_kwargs, reason", [
+    ({"optional_questions_allowed": False}, "topic_preference_suppressed"),
+    ({"topic_snapshot": "unavailable"}, "topic_preference_unavailable"),
+])
+async def test_emit_reports_topic_preference_as_the_skip_reason(monkeypatch, policy_kwargs, reason):
+    """停问/话题偏好不可读拦下的主动消息要记真实原因, 不能落成"用户回来了"。"""
+    from app.services.proactive import emit
+    from app.services.time_domain.followup import FollowupPolicy
+    from app.services.time_domain.topic_store import TopicSnapshot
+
+    if policy_kwargs.get("topic_snapshot"):
+        policy_kwargs = {"topic_snapshot": TopicSnapshot(policy_kwargs["topic_snapshot"])}
+    monkeypatch.setattr(
+        "app.services.time_domain.topic_store.resolve_policy",
+        AsyncMock(return_value=FollowupPolicy(**policy_kwargs)),
+    )
+    query = AsyncMock()
+    monkeypatch.setattr(emit, "db", SimpleNamespace(query_raw=query))
+    reasons: list[str] = []
+    message_id = await emit.emit_proactive_message(
+        conversation_id="c-1", user_id="u-1", agent_id="a-1", workspace_id="ws-1",
+        message="对了，你更想去海边还是山里？", trigger_type="followup_unfinished",
+        voice_eligible=False, skip_reasons=reasons,
+    )
+    assert message_id == "" and reasons == [reason]
+    query.assert_not_awaited()
+
+
 async def test_sender_reports_user_came_back(monkeypatch):
     """A 模式生成期间用户回来 → 不算发送, 也不关会话/不记日限."""
     from app.services.proactive import sender
