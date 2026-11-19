@@ -492,6 +492,12 @@ async def test_emit_reports_topic_preference_as_the_skip_reason(monkeypatch, pol
         voice_eligible=False, skip_reasons=reasons,
     )
     assert message_id == "" and reasons == [reason]
+    # 不收集原因的调用方 (followup / special_date) 照样拦下
+    assert await emit.emit_proactive_message(
+        conversation_id="c-1", user_id="u-1", agent_id="a-1", workspace_id="ws-1",
+        message="对了，你更想去海边还是山里？", trigger_type="followup_unfinished",
+        voice_eligible=False,
+    ) == ""
     query.assert_not_awaited()
 
 
