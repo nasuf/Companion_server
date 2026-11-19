@@ -145,7 +145,7 @@ jobs:
           key: playwright-${{ runner.os }}-${{ runner.arch }}-ubuntu24-${{ steps.playwright-version.outputs.version }}
 
       - name: Install browser system dependencies
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: python -m playwright install-deps chromium
 
       - name: Ensure pinned browser for real API regression
