@@ -157,3 +157,41 @@ async def test_ordinary_guard_reads_through_the_default_database(flow):  # noqa:
         ["面试结果出来了吗？"], user_id=flow.user, workspace_id=None,
         now=datetime.now(timezone.utc), current_user_message="")
     assert replies == ["好，我听着。"] and decision["status"] == "scope_unavailable"
+
+
+async def _stop_said(flow, text, hours_ago):  # noqa: F811
+    from datetime import datetime, timedelta, timezone
+    from app.services.time_domain import topic_store
+
+    msg = await flow.db.message.create(data={
+        "conversationId": flow.conversation, "role": "user", "content": text,
+        "createdAt": datetime.now(timezone.utc) - timedelta(hours=hours_ago)})
+    await topic_store.record_commands(user_id=flow.user, conversation_id=flow.conversation,
+                                      message_ids={msg.id}, database=flow.db)
+
+
+async def _emit_reasons(flow, message):  # noqa: F811
+    from app.services.proactive import emit
+
+    reasons: list[str] = []
+    sent = await emit.emit_proactive_message(
+        conversation_id=flow.conversation, user_id=flow.user, agent_id=flow.agent,
+        workspace_id=flow.workspace, message=message, trigger_type="silence_wakeup",
+        voice_eligible=False, skip_reasons=reasons)
+    return sent, reasons
+
+
+@pytest.mark.parametrize("text, hours_ago, blocked", [
+    ("暂时别问面试了", 1, True),          # 暂停仍在有效期内
+    ("暂时别问面试了", 4, False),         # 3 小时暂停按说话时刻计, 已过期
+    ("以后别问面试了", 31 * 24, True),    # 长期停问快进一个月仍生效
+])
+async def test_topic_stop_blocks_proactive_asks_across_time_and_says_why(flow, text, hours_ago, blocked):  # noqa: F811
+    await _stop_said(flow, text, hours_ago)
+    sent, reasons = await _emit_reasons(flow, "面试那边最近怎么样了？")
+    if blocked:
+        assert sent == "" and reasons == ["topic_preference_suppressed"]
+        assert not await flow.db.query_raw(
+            "SELECT 1 FROM messages WHERE conversation_id=$1 AND role='assistant'", flow.conversation)
+    else:
+        assert sent and reasons == []  # 过期后照常发出, 不残留停问
