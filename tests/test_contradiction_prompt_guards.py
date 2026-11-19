@@ -184,6 +184,41 @@ async def test_contradiction_detector_discards_l1_to_l1_conflict_not_in_current_
 
 
 @pytest.mark.asyncio
+async def test_contradiction_detector_discards_conflict_on_an_unknown_memory_id():
+    """模型指向一条不在当前 L1 集合里的 id（幻觉或过期）时必须丢弃，不凭空定位。"""
+    from app.services.memory.interaction.contradiction import detect_l1_contradiction
+
+    memories = [_l1("m-city", "用户现在住北京", "现居地")]
+    llm_result = {
+        "has_conflict": True,
+        "conflicting_memory_id": "m-does-not-exist",
+        "old_content": "用户现在住北京",
+        "new_info": "用户现在住上海",
+        "conflict_description": "现居地从北京变为上海",
+    }
+
+    with (
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.find_many",
+            new=AsyncMock(return_value=memories),
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.get_prompt_text",
+            new=AsyncMock(return_value="{user_message}\n{existing_l1_memory}"),
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.invoke_json",
+            new=AsyncMock(return_value=llm_result),
+        ),
+    ):
+        result = await detect_l1_contradiction(
+            "我现在住上海了", "u1", workspace_id="w1",
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_contradiction_detector_keeps_conflict_grounded_in_current_message():
     """当前用户消息字面支撑 new_info 时, 不应误杀真实矛盾。"""
     from app.services.memory.interaction.contradiction import detect_l1_contradiction
