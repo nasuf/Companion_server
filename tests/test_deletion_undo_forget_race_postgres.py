@@ -75,3 +75,45 @@ async def test_scrub_drops_undo_snapshot_of_a_forgotten_memory(memory_flow, monk
         assert key not in redis.data
     finally:
         await f.db.execute_raw("DELETE FROM memory_forget_scrubs WHERE workspace_id=$1", f.ids["workspace"])
+
+
+async def _wired(f, monkeypatch):
+    redis = FakeRedis()
+
+    async def _get():
+        return redis
+    monkeypatch.setattr(deletion, "get_redis", _get)
+    monkeypatch.setattr(repo, "db", f.db)
+    monkeypatch.setattr(deletion, "log_memory_changelog", _noop)
+    monkeypatch.setattr(repo, "_invalidate_caches", _noop)
+    return redis
+
+
+async def test_confirmed_deletion_counts_and_snapshots_only_rows_it_removed(memory_flow, monkeypatch):
+    f = memory_flow
+    kept = await memory(f, content=SECRET)
+    await _wired(f, monkeypatch)
+    try:
+        deleted = await deletion.execute_confirmed_deletion(
+            f.ids["owner"], [{"id": kept.id}, {"id": "missing-id"}, {}],
+            conversation_id=f.ids["conversation"])
+        assert deleted == 1
+        undo = await deletion.load_delete_undo(f.ids["conversation"])
+        assert [s["id"] for s in undo["snapshots"]] == [kept.id]
+        assert await repo.find_unique(kept.id) is None
+    finally:
+        await f.db.execute_raw("DELETE FROM memory_forget_scrubs WHERE workspace_id=$1", f.ids["workspace"])
+
+
+async def test_a_failing_delete_is_neither_counted_nor_snapshotted(memory_flow, monkeypatch):
+    f = memory_flow
+    target = await memory(f, content=SECRET)
+    redis = await _wired(f, monkeypatch)
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("down")
+    monkeypatch.setattr(repo, "delete", boom)
+    deleted = await deletion.execute_confirmed_deletion(
+        f.ids["owner"], [{"id": target.id}], conversation_id=f.ids["conversation"])
+    assert deleted == 0 and redis.data == {}
+    assert await repo.find_unique(target.id) is not None
