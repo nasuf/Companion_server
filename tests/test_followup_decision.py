@@ -235,3 +235,80 @@ async def test_slow_history_read_only_drops_the_optional_question(monkeypatch):
         current_user_message="好冷", database=SlowDB())
     assert replies == ["今天降温了。"]
     assert decision["status"] == "unavailable" and decision["suppressed_count"] == 1
+
+
+# M02.20.04: ignored event questions, told results, shared-noun and 后来+result borrowing.
+
+def test_an_ignored_pre_event_question_cools_down_a_rephrased_outcome_ask():
+    history = h((1200, "user", "下周有个比赛"), (600, "assistant", "比赛准备得怎么样？"))
+    decision = decide_followup("比赛有进展吗？", history, now=NOW)
+    assert decision.reason == "unanswered_cooldown" and decision.evidence["ignored_event_questions"] == 1
+
+
+def test_an_answered_pre_event_question_never_counts():
+    history = h((1500, "user", "明天上午有个面试"), (1490, "assistant", "面试几点呀？"), (1488, "user", "十点"))
+    assert decide_followup("面试结果怎么样？", history, now=NOW).reason == "first_ask"
+
+
+def test_a_live_exchange_ending_on_a_question_is_not_ignoring_it():
+    history = h((600, "user", "下周要答辩"), (598, "assistant", "答辩是哪天？"), (597, "user", "周三"),
+                (596, "assistant", "答辩前紧张吗？"))
+    assert decide_followup("答辩顺利吗？", history, now=NOW + timedelta(days=1)).reason == "first_ask"
+
+
+def test_two_ignored_event_questions_go_quiet():
+    history = h((5760, "user", "下个月出差去上海"), (4320, "assistant", "出差的行程定了吗？"),
+                (2880, "assistant", "出差准备得怎么样啦？"))
+    assert decide_followup("上海的出差顺利吗？", history, now=NOW).reason == "silent_until_new_evidence"
+
+
+def test_a_result_the_user_already_told_ends_follow_ups_without_a_prior_ask():
+    history = h((300, "user", "今天去拔牙"), (240, "assistant", "拔牙疼不疼？"), (235, "user", "拔完了，搞定了"))
+    assert decide_followup("牙医那边怎么样了？", history, now=NOW).reason == "event_resolved_no_new_info"
+    pending = h((300, "user", "今天去拔牙"), (235, "user", "拔完了，搞定了"), (100, "user", "拔牙的地方还在等复查结果"))
+    assert decide_followup("牙医那边怎么样了？", pending, now=NOW).reason != "event_resolved_no_new_info"
+
+
+def test_a_shared_concrete_noun_borrows_the_named_event():
+    ref = outcome_event("奖学金批下来没？", ["在申请奖学金"])
+    assert ref is not None and ref.family == "application" and ref.resolved_from == "subject"
+    assert may_be_event_followup("奖学金批下来没？")
+    # A generic word, or a noun the event message does not share, borrows nothing.
+    assert outcome_event("工作批下来没？", ["工作上在申请调岗"]) is None
+    assert outcome_event("驾照批下来没？", ["在申请奖学金"]) is None
+    # Weak wording never borrows by noun alone.
+    assert outcome_event("奖学金怎么样？", ["在申请奖学金"]) is None
+
+
+def test_later_plus_a_result_noun_borrows_the_event():
+    history = h((600, "user", "上午去做了体检"), (480, "assistant", "体检还顺利吗？"))
+    assert decide_followup("后来报告怎么说？", history, now=NOW).reason == "unanswered_cooldown"
+
+
+def test_a_question_the_user_is_answering_right_now_is_not_ignored():
+    history = h((300, "user", "下周有个比赛"), (60, "assistant", "比赛准备得怎么样？"))
+    decision = decide_followup("比赛有结果了吗？", history, now=NOW, current_user_message="还行吧")
+    assert decision.reason == "first_ask"
+
+
+def test_a_just_told_result_still_allows_live_detail_questions():
+    history = h((2, "user", "面试通过了！"))
+    assert decide_followup("面试结果怎么通知你的？", history, now=NOW).reason == "user_discussing_event"
+
+
+async def test_unavailable_history_keeps_bare_strong_word_questions():
+    from app.services.time_domain.followup_decision import guard_reply_followups
+
+    replies, diag = await guard_reply_followups(
+        ["你吃好了吗？", "面试结果出来了吗？", "  原样，"], user_id="u", workspace_id=None,
+        now=NOW, current_user_message="")
+    assert replies == ["你吃好了吗？", "  原样，"] and diag["status"] == "scope_unavailable"
+
+
+def test_event_questions_outside_the_dense_page_are_never_ignored_touches():
+    # Dense page starts 2 days ago; the pre-event question 10 days ago sits only
+    # in the family ledger, where an unnamed answer would be invisible.
+    dense = h((2 * DAY, "user", "下周要答辩"))
+    ledger = h((10 * DAY, "assistant", "答辩紧张吗？"))
+    decision = decide_followup("答辩结束了吗？", dense, ledger=ledger, now=NOW)
+    assert decision.reason == "first_ask"

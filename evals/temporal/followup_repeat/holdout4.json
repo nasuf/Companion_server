@@ -1,0 +1,23 @@
+{
+ "version": 1,
+ "frozen": true,
+ "note": "M02.20.04 首跑集: 在改代码之前写定并记录 sha256, 未用于调参",
+ "cases": [
+  {"id": "q01", "template_family": "ignored_pre_event_then_outcome", "history": [[1300, "user", "后天要去复试了"], [1200, "assistant", "复试那天紧张吗？"]], "current_user_message": "", "question": "复试结果出来了吗？", "expected": "suppress", "note": "事前问题被冷落不到 36 小时, 换成问结果"},
+  {"id": "q02", "template_family": "answered_pre_event_then_outcome", "history": [[1500, "user", "明天上午有个面试"], [1490, "assistant", "面试几点呀？"], [1488, "user", "十点"]], "current_user_message": "", "question": "面试结果怎么样？", "expected": "allow", "note": "事前细节问题对方答了, 第二天问结果是正常关心"},
+  {"id": "q03", "template_family": "two_ignored_mixed", "history": [[7000, "user", "月底要搬家"], [5000, "assistant", "搬家的东西收拾得怎么样了？"], [3000, "assistant", "新家那边离公司远吗？"]], "current_user_message": "", "question": "搬完了吗？", "expected": "suppress", "note": "两次提问都没人理"},
+  {"id": "q04", "template_family": "subject_noun_borrow", "history": [[2000, "user", "我在等驾照的审核"], [1900, "assistant", "驾照审核有结果了吗？"]], "current_user_message": "", "question": "驾照批下来没？", "expected": "suppress", "note": "同一事物换说法, 未答 32 小时内"},
+  {"id": "q05", "template_family": "subject_noun_generic", "history": [[2000, "user", "今天公司团建去爬山了"], [1990, "assistant", "爬山累不累？"], [1985, "user", "还行"]], "current_user_message": "", "question": "公司那个项目定下来了吗？", "expected": "allow", "note": "只是同一个泛称名词, 不是同一件事"},
+  {"id": "q06", "template_family": "user_said_done_no_prior_ask", "history": [[400, "user", "下午去做了个小手术"], [390, "assistant", "疼不疼？"], [385, "user", "做完了，挺顺利的"]], "current_user_message": "", "question": "手术怎么样了？", "expected": "suppress", "note": "用户已经说了结果"},
+  {"id": "q07", "template_family": "later_result_noun", "history": [[700, "user", "早上去医院抽血了"], [600, "assistant", "抽血检查一切顺利吗？"]], "current_user_message": "", "question": "后来化验单怎么说？", "expected": "suppress", "note": "未答 10 小时内换说法"},
+  {"id": "q08", "template_family": "new_instance", "history": [[2000, "user", "上周面了一家公司"], [1900, "assistant", "那家公司面试有结果吗？"]], "current_user_message": "今天又去面了另一家", "question": "另一家面得怎么样？", "expected": "allow", "note": "用户正在说新的一场"},
+  {"id": "q09", "template_family": "user_reopen", "history": [[3000, "user", "在等考研成绩"], [2900, "assistant", "成绩出来了吗？"], [1500, "assistant", "考研成绩有消息了吗？"]], "current_user_message": "考研成绩今天晚上出", "question": "成绩出来了吗？", "expected": "allow", "note": "用户主动重提"},
+  {"id": "q10", "template_family": "unrelated_strong_word", "history": [[600, "user", "下周要去面试"], [590, "assistant", "加油呀"]], "current_user_message": "", "question": "你感冒好点了吗？", "expected": "allow", "note": "问的是另一件事, 且从未问过"},
+  {"id": "q11", "template_family": "answered_waiting_recent", "history": [[900, "user", "体检报告还没出"], [800, "assistant", "体检报告出来了吗？"], [790, "user", "还在等"]], "current_user_message": "", "question": "报告单拿到了没？", "expected": "suppress", "note": "答了还在等, 24 小时内不再问"},
+  {"id": "q12", "template_family": "answered_waiting_elapsed", "history": [[2000, "user", "体检报告还没出"], [1900, "assistant", "体检报告出来了吗？"], [1890, "user", "还在等"]], "current_user_message": "", "question": "体检报告拿到了没？", "expected": "allow", "note": "答了还在等, 已过 24 小时"},
+  {"id": "q13", "template_family": "live_detail", "history": [[20, "user", "我刚面完试"], [18, "assistant", "面得怎么样？"], [15, "user", "感觉还行"]], "current_user_message": "就是最后一题没答好", "question": "最后一题问的什么呀？", "expected": "allow", "note": "正在聊的细节"},
+  {"id": "q14", "template_family": "ignored_once_cooldown_elapsed", "history": [[2700, "user", "明天去参加比赛"], [2600, "assistant", "比赛结果出来了吗？"], [500, "user", "今天好累"]], "current_user_message": "", "question": "比赛最后怎么样？", "expected": "allow", "note": "一次未答且已过 36 小时, 用户近期提过该事件"},
+  {"id": "q15", "template_family": "subject_noun_new_thing", "history": [[1600, "user", "签证材料交上去了"], [1500, "assistant", "签证批下来了吗？"]], "current_user_message": "", "question": "签证有进展吗？", "expected": "suppress", "note": "同一事件换说法, 未答 25 小时"},
+  {"id": "q16", "template_family": "generic_story", "history": [[30, "user", "我同事今天被领导骂了"], [28, "assistant", "啊为什么呀"], [25, "user", "他报告写错了"]], "current_user_message": "后来他又去找领导了", "question": "后来领导怎么说？", "expected": "allow", "note": "故事里的后来, 不是追问用户的事"}
+ ]
+}

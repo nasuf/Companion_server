@@ -50,7 +50,7 @@ REPLY_READ_TIMEOUT_S = 1.5
 _FAMILIES: tuple[tuple[str, str], ...] = (
     ("interview", r"面试|笔试|复试|初试|终面|一面|二面|三面|群面|面谈|面了|去面|面完|录用|offer|Offer|OFFER|入职通知|录取通知"),
     ("exam", r"考试|考研|考公|考得|考完|考了|期末|期中|模考|成绩|分数|科目[一二三四]|驾考"),
-    ("medical", r"体检|复查|检查结果|化验|报告单|手术|住院|出院|看医生|看病|门诊|牙医|拔牙"),
+    ("medical", r"体检|复查|检查结果|化验|报告单|手术|住院|出院|看医生|看病|门诊|牙医|拔牙|拔完"),
     ("illness", r"感冒|发烧|退烧|烧退|生病|咳嗽|头疼|头痛|胃疼|肚子疼|过敏|病好|身体好点|身体怎么样"),
     ("move", r"搬家|新家|搬过去|搬完"),
     ("trip", r"出差|旅行|旅游|行程|航班|机票|签证|面签"),
@@ -63,7 +63,8 @@ _FAMILIES: tuple[tuple[str, str], ...] = (
 # themselves; weak ones only with a named event or an explicit reference.
 _STRONG = (r"结果|进展|通知|通过|过了没|过没|过了吗|成绩|分数|录用|有消息|消息了|批下来|批了|好点|好些|康复|出院|定了|落定|搞定"
            r"|出来了吗|出来了没|出来没|出了没|下来了吗|下来没|结束了吗|结束了没|完了吗|完了没|什么时候出|啥时候出"
-           r"|办好|弄好|好了吗|好了没|拿到了吗|拿到了没|拿到没|严重吗|好转|退了吗|退了没")
+           r"|办好|弄好|好了吗|好了没|拿到了吗|拿到了没|拿到没|严重吗|好转|退了吗|退了没"
+           r"|回复你|回复了|回音|答复")
 _WEAK = r"怎么样|咋样|如何|顺利|怎么说|聊得"
 _OUTCOME = re.compile(_STRONG + "|" + _WEAK)
 _STRONG_OUTCOME = re.compile(_STRONG)
@@ -80,6 +81,11 @@ _EVENT_RESULT = re.compile(r"结果|报告|成绩|分数|通知|出来|录用|of
 # Pure references only: "你说的那家火锅" names its own object and borrows nothing.
 _REFERENTIAL = re.compile(r"那件事|这件事|那个事|那事(?![\u4e00-\u9fff])|(?:上次|之前|你)(?:说|提)的(?:那件事|事)")
 _LATER = re.compile(r"后来|后续")
+# A shared concrete noun ("奖学金", "公司") ties a question to the event the user
+# named. Function characters and day/generic words never count; 工作 alone is
+# not identity.
+_STOP_CHARS = set("了吗呢吧啊呀的地得你我他她它们是在有没还就也都么那这个些哪什怎样去来过和跟")
+_GENERIC_SUBJECT = re.compile(r"工作|今天|明天|昨天|后天|前天|事情|东西|时候|一下")
 # Qualifiers that name a *different* instance of the same family.
 _NEW_INSTANCE = re.compile(
     r"新的?(?=(?:一)?(?:轮|个|家|场)?(?:面试|笔试|考试|比赛|体检|offer|申请))|另一个|另外一个|另一家|另外一家|又一|又有|再一次|第[二三四五六七八九十\d]+(?:轮|次|家|场|个)|下一(?:轮|次|家|场|个)|[一二三四]面(?!八方)|科目[一二三四]"
@@ -124,25 +130,44 @@ def named_event(text: str) -> EventRef | None:
     return EventRef(family, _qualifiers(text), "text") if family else None
 
 
+def shared_subject(question: str, text: str) -> str | None:
+    """Longest concrete noun (2-4 chars) the question shares with ``text``."""
+    for size in (4, 3, 2):
+        for start in range(len(question) - size + 1):
+            part = question[start:start + size]
+            if (all("\u4e00" <= ch <= "\u9fff" and ch not in _STOP_CHARS for ch in part)
+                    and part in text and not _GENERIC_SUBJECT.search(part)
+                    and not _OUTCOME.search(part) and not _PRE_EVENT.search(part)):
+                return part
+    return None
+
+
+def _borrows_context(question: str) -> bool:
+    """An explicit reference (那件事怎么样了) or 后来 + a result (后来报告怎么说)."""
+    return bool(_REFERENTIAL.search(question) or (_LATER.search(question) and (
+        _STRONG_OUTCOME.search(question) or _EVENT_RESULT.search(question))))
+
+
 def outcome_event(question: str, recent_user_texts: list[str]) -> EventRef | None:
     """Event an outcome follow-up asks about, or None if it is not one.
 
     A named event needs any outcome word. A question without one borrows the
-    event the user named most recently (``recent_user_texts`` newest first) only
-    with an explicit reference (那件事怎么样了) or 后来 + a strong result word.
+    event the user named most recently (``recent_user_texts`` newest first) with
+    an explicit reference, 后来 + a result, or a strong result word plus a
+    concrete noun shared with that user message (奖学金批下来没 after 在申请奖学金).
     """
     if not _OUTCOME.search(question) or _PRE_EVENT.search(question):
         return None
     ref = named_event(question)
     if ref:
         return ref
-    if not (_REFERENTIAL.search(question)
-            or (_LATER.search(question) and _STRONG_OUTCOME.search(question))):
+    explicit = _borrows_context(question)
+    if not (explicit or _STRONG_OUTCOME.search(question)):
         return None
     for text in recent_user_texts:
         family = event_family(text)
-        if family:
-            return EventRef(family, frozenset(), "context")
+        if family and (explicit or shared_subject(question, text)):
+            return EventRef(family, frozenset(), "context" if explicit else "subject")
     return None
 
 
@@ -258,11 +283,14 @@ def decide_followup(
     # the conversation, not a follow-up.
     if names_target(current_user_message):
         return FollowupDecision("allow", "user_discussing_event", evidence=evidence)
-    mentions = [stamp for stamp, r in rows if r.get("role") == "user"
-                and names_target(str(r.get("content") or ""))]
+    mention_rows = [(stamp, r) for stamp, r in rows if r.get("role") == "user"
+                    and names_target(str(r.get("content") or ""))]
+    mentions = [stamp for stamp, _ in mention_rows]
     # Outcome asks about this event. Detail questions ("几点的面试呀") are
-    # not outcome asks and never count.
+    # not outcome asks; they are kept apart as ``touches`` and only count once
+    # the user left them unanswered.
     asks: list[tuple[datetime, dict]] = []
+    touches: list[datetime] = []
     recent_users: list[str] = []
     for stamp, row in rows:
         text = str(row.get("content") or "")
@@ -283,30 +311,58 @@ def decide_followup(
             if ref is not None and same_event(ref, target):
                 asks.append((stamp, row))
                 break
+        else:
+            if any(_is_question(p.group(0)) and names_target(p.group(0)) for p in _sentence_spans(text)):
+                touches.append(stamp)
     if (mentions and reference - mentions[-1] <= SESSION_WINDOW
             and (not asks or mentions[-1] > asks[-1][0])):
         # The user brought the event up again after the last ask: live talk.
         return FollowupDecision("allow", "user_discussing_event", evidence=evidence)
-    if not asks:
+    if mention_rows:
+        # Outside live talk, the user's latest word on the event told the result.
+        told = str(mention_rows[-1][1].get("content") or "")
+        if _RESOLVED.search(told) and not _PENDING.search(told) and not _FUTURE.search(told):
+            return FollowupDecision("suppress", "event_resolved_no_new_info", evidence=evidence)
+    recent_mention = [m for m in mentions if reference - m <= timedelta(days=HISTORY_DAYS)]
+    since = recent_mention[-1] if recent_mention else None
+    user_stamps = [stamp for stamp, r in rows if r.get("role") == "user"]
+    # Only the dense page shows every user reply; the ledger keeps only rows
+    # naming the event, so silence there cannot be told from an unnamed answer.
+    dense_from = _oldest(history)
+
+    def ignored(at: datetime) -> bool:
+        if current_user_message and reference - at <= SESSION_WINDOW:
+            return False  # the user is answering right now
+        if since is not None and any(since < u < at for u in user_stamps):
+            return False  # a live exchange that simply ended on this question
+        return not any(at < u <= at + SESSION_WINDOW for u in user_stamps)
+
+    # Silence is the same signal whatever was asked: an event question the user
+    # never took up after mentioning the event counts like an unanswered ask.
+    ignored_touches = [t for t in touches
+                       if since is not None and t > since and t >= dense_from and ignored(t)]
+    if ignored_touches:
+        evidence["ignored_event_questions"] = len(ignored_touches)
+    if not asks and not ignored_touches:
         if ledger_truncated and _oldest(ledger) > reference - timedelta(days=HISTORY_DAYS):
             # A capped ledger that only reaches back a few days cannot prove the
             # event was never asked about; one reaching past a week can.
             return FollowupDecision("suppress", "history_truncated", None, evidence)
         return FollowupDecision("allow", "first_ask", evidence=evidence)
-    last_ask_at = asks[-1][0]
+    last_ask_at = max([a[0] for a in asks] + ignored_touches)
     evidence.update(last_ask_at=last_ask_at.isoformat(), same_event_asks=len(asks))
     # A response: a user message naming the event after the ask, or else the
     # user's first message within the session window after it.
     response = None
     for stamp, row in rows:
-        if stamp <= last_ask_at or row.get("role") != "user":
+        if not asks or stamp <= asks[-1][0] or row.get("role") != "user":
             continue
         if names_target(str(row.get("content") or "")):
             response = (stamp, row, True)
             break
-        if response is None and stamp - last_ask_at <= SESSION_WINDOW:
+        if response is None and stamp - asks[-1][0] <= SESSION_WINDOW:
             response = (stamp, row, False)
-    if response is not None:
+    if response is not None and not any(t > response[0] for t in ignored_touches):
         answered_at, answer, named = response
         evidence["answered_at"] = answered_at.isoformat()
         text = str(answer.get("content") or "")
@@ -318,9 +374,7 @@ def decide_followup(
         return FollowupDecision("allow", "answered_cooldown_elapsed", evidence=evidence)
     # Unanswered. Without the user's own recent mention, stay quiet: asks aging
     # out of a bounded read must never re-arm a question every few days.
-    recent_mention = [m for m in mentions if reference - m <= timedelta(days=HISTORY_DAYS)]
-    since = recent_mention[-1] if recent_mention else None
-    unanswered = [a for a in asks if since is None or a[0] > since]
+    unanswered = {a[0] for a in asks if since is None or a[0] > since} | set(ignored_touches)
     evidence["unanswered_asks"] = len(unanswered)
     if since is None or len(unanswered) >= MAX_UNANSWERED:
         return FollowupDecision("suppress", "silent_until_new_evidence", None, evidence)
@@ -340,13 +394,22 @@ def may_be_event_followup(text: str) -> bool:
 
 
 def _is_candidate(clause: str) -> bool:
-    """Could be an outcome follow-up: a named event, an explicit reference, or
-    后来 + a strong result word. 今天过得怎么样 is never one."""
+    """Could be an outcome follow-up: a named event, an explicit reference,
+    后来 + a result, or a strong result word that may borrow a shared noun.
+    今天过得怎么样 is never one."""
+    return bool(_names_or_references(clause) or (_is_outcome_question(clause) and _STRONG_OUTCOME.search(clause)))
+
+
+def _is_outcome_question(clause: str) -> bool:
     from app.services.time_domain.followup import _is_question
 
-    return bool(_is_question(clause) and _OUTCOME.search(clause) and not _PRE_EVENT.search(clause) and (
-        event_family(clause) or _REFERENTIAL.search(clause)
-        or (_LATER.search(clause) and _STRONG_OUTCOME.search(clause))))
+    return bool(_is_question(clause) and _OUTCOME.search(clause) and not _PRE_EVENT.search(clause))
+
+
+def _names_or_references(clause: str) -> bool:
+    """Outcome question that is about some event even without history. Only these
+    are dropped when history is unavailable; a bare strong word (吃好了吗) is kept."""
+    return _is_outcome_question(clause) and bool(event_family(clause) or _borrows_context(clause))
 
 
 _RECENT_SQL = """SELECT m.id,m.role,left(m.content,500) AS content,m.created_at
@@ -450,7 +513,9 @@ def summarize(decisions: list[FollowupDecision], *, status: str, **extra) -> dic
 def _strip_candidates(text: str) -> str:
     from app.services.time_domain.followup import _is_question
 
-    cuts = [m.span() for m in _sentence_spans(text) if _is_candidate(m.group(0))]
+    cuts = [m.span() for m in _sentence_spans(text) if _names_or_references(m.group(0))]
+    if not cuts:
+        return text
     kept, start = [], 0
     for begin, end in cuts:
         kept.append(text[start:begin])
@@ -497,8 +562,8 @@ async def guard_reply_followups(replies: list[str], *, user_id: str, workspace_i
         except Exception as exc:  # includes TimeoutError; CancelledError propagates
             logger.warning("[FOLLOWUP-DECISION] history unavailable error=%s", type(exc).__name__)
             status = "unavailable"
-    stripped = sum(1 for r in replies for m in _sentence_spans(r) if _is_candidate(m.group(0)))
-    kept = [t for t in (_strip_candidates(r) if may_be_event_followup(r) else r for r in replies) if t]
+    stripped = sum(1 for r in replies for m in _sentence_spans(r) if _names_or_references(m.group(0)))
+    kept = [t for t in (_strip_candidates(r) for r in replies) if t]
     return kept or [fallback], summarize([], status=status, suppressed_count=stripped)
 
 
