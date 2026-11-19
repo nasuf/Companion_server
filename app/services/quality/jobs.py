@@ -156,11 +156,16 @@ async def finish(job, status, report):
         )
         if status in {"failed", "budget_exhausted", "interrupted"}:
             await notify(tx, job["id"], status)
+        # 成功跑完但有不合格样本进评审队列时也要提醒，否则待评审样本无人处理地堆积。
+        elif (
+            status == "completed"
+            and job["kind"] == "daily"
+            and (report.get("review_pending_count") or 0) > 0
+        ):
+            await notify_review_pending(tx, job["id"], report["review_pending_count"])
 
 
-async def notify(tx, job_id, reason):
-    from app.services.notifications.service import enqueue_notification
-
+async def _alert_admins(tx):
     ids = list(
         dict.fromkeys(
             x.strip()
@@ -168,10 +173,39 @@ async def notify(tx, job_id, reason):
             if x.strip()
         )
     )[:20]
-    admins = await tx.query_raw(
+    return await tx.query_raw(
         "SELECT id FROM users WHERE id=ANY($1::text[]) AND role='admin' AND status='active' AND archived_at IS NULL",
         ids,
     )
+
+
+async def notify_review_pending(tx, job_id, pending):
+    from app.services.notifications.service import enqueue_notification
+
+    title = "质量抽检有待评审样本"
+    body = f"今日抽检有 {pending} 条样本判为不合格待人工评审，请到质量抽检中处理。"
+    for admin in await _alert_admins(tx):
+        await enqueue_notification(
+            user_id=admin["id"],
+            type="admin_service_health",
+            title=title,
+            body=body,
+            payload={
+                "type": "admin_service_health",
+                "route": "system",
+                "title": title,
+                "body": body,
+            },
+            dedupe_key=f"quality:{job_id}:review_pending",
+            dispatch_now=False,
+            database=tx,
+        )
+
+
+async def notify(tx, job_id, reason):
+    from app.services.notifications.service import enqueue_notification
+
+    admins = await _alert_admins(tx)
     title = "质量评测预算已用尽" if reason == "budget_exhausted" else "质量评测需要检查"
     body = (
         "后台质量评测已停止，请查看质量管理中的结果和未完成项；不会自动阻止发布或回滚。"

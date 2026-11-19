@@ -20,6 +20,7 @@ async def quality(world, monkeypatch):
     for module in (budget, jobs, daily, sampling, review):
         monkeypatch.setattr(module, "db", database)
     monkeypatch.setattr(jobs, "notify", AsyncMock())
+    monkeypatch.setattr(jobs, "notify_review_pending", AsyncMock())
     await database.execute_raw(
         "UPDATE quality_executor SET job_id=NULL,lease_token=NULL,lease_until=NULL"
     )

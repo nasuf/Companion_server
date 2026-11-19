@@ -33,6 +33,7 @@ from app.services.quality import (
 from app.config import settings
 
 REAL_NOTIFY = jobs.notify
+REAL_REVIEW_NOTIFY = jobs.notify_review_pending
 
 
 def verdict(*, failure=False):
@@ -136,6 +137,13 @@ async def test_daily_lifecycle_failure_states_and_no_business_writes(
     )
     if mode == "archived":
         fake.assert_not_awaited()
+    # 只有成功跑完且留下待评审样本时才提醒评审；失败态走既有的失败通知。
+    if mode == "ok":
+        jobs.notify_review_pending.assert_awaited_once_with(
+            __import__("unittest").mock.ANY, job["id"], 3
+        )
+    else:
+        jobs.notify_review_pending.assert_not_awaited()
 
 
 @pytest.mark.parametrize("mode", ["normal", "budget", "config", "renderer", "unknown"])
@@ -299,6 +307,19 @@ async def test_notifications_reuse_admin_channel_and_dedupe(quality, monkeypatch
         "SELECT user_id,type FROM notification_events WHERE dedupe_key='quality:synthetic-job:budget_exhausted'"
     )
     assert rows == [{"user_id": admin, "type": "admin_service_health"}]
+
+
+async def test_review_pending_notification_reaches_admins_once_per_job(quality, monkeypatch):
+    database, conv, space, user, admin = quality
+    monkeypatch.setattr(settings, "redis_memory_alert_user_ids", admin + "," + user)
+    async with database.tx() as tx:
+        await REAL_REVIEW_NOTIFY(tx, "synthetic-daily", 4)
+        await REAL_REVIEW_NOTIFY(tx, "synthetic-daily", 4)
+    rows = await database.query_raw(
+        "SELECT user_id,title,body FROM notification_events WHERE dedupe_key='quality:synthetic-daily:review_pending'"
+    )
+    assert [r["user_id"] for r in rows] == [admin]
+    assert rows[0]["title"] == "质量抽检有待评审样本" and "4 条" in rows[0]["body"]
 
 
 async def test_regression_has_no_future_turns_and_preserves_historical_clock(
