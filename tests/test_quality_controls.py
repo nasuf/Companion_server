@@ -347,3 +347,24 @@ def test_unqualified_provider_contracts_rejected_before_reservation(
             prices={provider + "/doubao-seed-character-260628": prices},
             operation=operation,
         )
+
+
+def test_critical_gate_compares_cases_by_majority_with_noise_allowance():
+    def run(fails, n=125):
+        return [dict(case_id=f"c{i}", repetition=r, critical=True, **{"pass": (i, r) not in fails})
+                for i in range(n) for r in range(3)]
+    base = run(set())
+    # 一个用例 3 次里错 1 次: 多数票仍通过, 不算退步
+    one_miss = gates.compare(run({(0, 0)}), base)
+    assert one_miss["status"] == "passed" and one_miss["critical_regressed_cases"] == 0
+    assert one_miss["critical_failure_delta"] == 1
+    # 历史噪声上限内 (floor(125*0.08)=10) 的多数票翻转放行, 超过即失败
+    ten = {(i, r) for i in range(10) for r in (0, 1)}
+    assert gates.compare(run(ten), base)["status"] == "passed"
+    eleven = {(i, r) for i in range(11) for r in (0, 1)}
+    result = gates.compare(run(eleven), base)
+    assert result["status"] == "failed" and result["critical_regressed_cases"] == 11
+    assert result["critical_regressed"][:2] == ["c0", "c1"] and result["critical_noise_cases"] == 10
+    # 变好的用例不抵消变差的
+    mixed = gates.compare(run(eleven), run({(i, r) for i in range(20, 40) for r in range(3)}))
+    assert mixed["status"] == "failed" and mixed["critical_improved_cases"] == 20

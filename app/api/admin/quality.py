@@ -295,7 +295,13 @@ async def regression_report(job_id: str):
             if gate and isinstance(gate.get("noise_rate"), (int, float))
             else settings.quality_noise_rate,
             noise_min_cases=settings.quality_noise_min_cases,
-            critical_rule="关键用例失败数比基线多 1 条即判失败",
+            # Reports before the majority gate carry no critical_regressed_cases.
+            critical_rule=(
+                f"关键用例按 {settings.quality_critical_repeats} 次重复多数票比较，"
+                f"由通过变为不通过的用例超过 {gate['critical_noise_cases']} 个即判失败"
+                if gate and isinstance(gate.get("critical_noise_cases"), int)
+                else "关键用例失败数比基线多 1 条即判失败"
+            ),
             small_sample=SMALL_SAMPLE,
             warning_only=report.get("warning_only"),
         ),

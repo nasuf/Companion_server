@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     quality_noise_rate: float = Field(default=1/92, ge=0, le=1)
     quality_noise_min_cases: int = Field(default=2, ge=0, le=50)
     quality_critical_repeats: int = Field(default=3, ge=1, le=5)
+    # Majority-vote regressions tolerated per critical case set; see quality/gates.py.
+    quality_critical_noise_rate: float = Field(default=0.08, ge=0, le=0.5)
     quality_judge_model: str = "qwen3.5-flash"
     quality_enabled: bool = True  # qualified admin-only worker; QUALITY_ENABLED=false stops dispatch
     quality_oidc_repository: str = "nasuf/Companion_server"
