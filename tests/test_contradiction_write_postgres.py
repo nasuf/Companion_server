@@ -539,14 +539,23 @@ async def test_real_preflight_never_reports_a_failed_write_as_success(
     assert calls[0][1]["extra_metadata"]["memory_confirmation_outcome"] == (
         "failed" if failed else "applied"
     )
+    repairs = await f.db.query_raw(
+        "SELECT source_type,severity,status,suggested_action FROM memory_repair_items "
+        "WHERE workspace_id=$1 AND source_type='contradiction_confirmation_failed'",
+        f.wid,
+    )
     if failed:
         generate.assert_not_awaited()
         assert "没能保存成功" in calls[0][0]
         assert not (
             await f.db.usermemory.find_unique(where={"id": f.old.id})
         ).isArchived
+        # A failed confirmation must leave a high-severity repair ticket to inspect.
+        assert len(repairs) == 1 and repairs[0]["severity"] == "high"
+        assert repairs[0]["suggested_action"] == "inspect_confirmation_scope_version_or_write_failure"
     else:
         generate.assert_awaited_once()
+        assert repairs == []
 
 
 @pytest.mark.parametrize("executor", ["langgraph"])
