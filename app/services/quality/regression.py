@@ -122,6 +122,7 @@ RETRY_DELAYS_SECONDS = (15, 45)
 TRANSIENT_CODES = frozenset({
     "evaluation_response_incomplete", "evaluation_usage_missing", "evaluation_search_incomplete",
     "missing_judge_categories", "inconsistent_critical_verdict",
+    "invalid_grounding_judgement",
 })
 _SAFE_CODE = re.compile(r"[a-z0-9_]{1,64}")
 
@@ -146,7 +147,9 @@ def is_transient(exc: BaseException) -> bool:
     status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
     if isinstance(status, int) and (status >= 500 or status == 429):
         return True
-    return isinstance(exc, ValueError) and error_code(exc) in TRANSIENT_CODES
+    # Renderer failures arrive as RendererError; its code says whether it was the
+    # model's output (retryable) or the renderer itself (not).
+    return isinstance(exc, (ValueError, replay.RendererError)) and error_code(exc) in TRANSIENT_CODES
 
 
 async def _with_retries(sink, case, repetition, attempt, errored, report):

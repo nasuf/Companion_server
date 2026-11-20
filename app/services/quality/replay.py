@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from app.services.quality import transport
@@ -15,9 +16,16 @@ from app.services.quality import transport
 MAX_FRAME = 2_000_000
 
 
+_SAFE_CODE = re.compile(r"[a-z0-9_]{1,64}")
+
+
 class RendererError(RuntimeError):
     def __init__(self, diagnostic):
-        self.diagnostic = diagnostic
+        code = diagnostic.get("code")
+        # Only the renderer's own identifier-shaped codes; never free text. The
+        # diagnostic is persisted into the job report, so it carries the same value.
+        self.code = code if isinstance(code, str) and _SAFE_CODE.fullmatch(code) else None
+        self.diagnostic = {**diagnostic, "code": self.code}
         super().__init__(diagnostic.get("error_type", "renderer_failed"))
 
 
@@ -76,6 +84,7 @@ async def replay_turn(job, case, prompts, route, *, key_overrides=None):
                     raise RendererError(
                         {
                             "error_type": frame.get("error_type"),
+                            "code": frame.get("code"),
                             "frames": frame.get("frames", []),
                         }
                     )

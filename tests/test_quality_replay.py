@@ -298,3 +298,59 @@ async def test_temporal_dialogue_replay_renders_statements_and_case_judge(monkey
     statement = case["memories"][0]["content"]
     assert any(not judged and statement in text for judged, text in seen)
     assert any(judged and TEMPORAL_DIALOGUE_JUDGING[:40] in text for judged, text in seen)
+
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [("invalid_grounding_judgement", "invalid_grounding_judgement"), ("free text 原文", None), (None, None)],
+)
+async def test_renderer_error_keeps_only_identifier_codes(monkeypatch, code, expected):
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.services.quality import replay
+
+    frame = json.dumps({"type": "error", "error_type": "ValueError", "code": code, "frames": []}).encode() + b"\n"
+
+    class Child:
+        returncode = None
+        stdin = SimpleNamespace(write=lambda _: None, drain=AsyncMock())
+        stdout = SimpleNamespace(readline=AsyncMock(return_value=frame))
+
+        def terminate(self):
+            self.returncode = -15
+
+        async def wait(self):
+            return self.returncode
+
+    async def spawn(*args, **kwargs):
+        return Child()
+
+    monkeypatch.setattr(replay.asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(replay.RendererError) as caught:
+        await replay.replay_turn({}, {"route": "main"}, [], ["ark", "approved"])
+    assert caught.value.code == expected
+    assert caught.value.diagnostic["code"] == expected
+
+
+@pytest.mark.parametrize("text", ['{"verdicts":"bad"}', '{"verdicts":[{"index":0}]}', "not json", "{}"])
+async def test_malformed_grounding_verdict_reaches_parent_as_retryable_code(monkeypatch, text):
+    """2026-11-20 nightly: one malformed judge reply left a critical case unjudged
+    and the whole gate incomplete. It must surface as the retryable code."""
+    from app.services.quality import regression, replay
+
+    async def fake(job, provider, model, messages, **kwargs):
+        return text, {"input": 10, "output": 10, "cached_input": 0, "cost_cny": 0.0001}
+
+    monkeypatch.setattr(transport, "complete", fake)
+    prompts = [
+        {"key": p.key, "content": p.default_text, "is_enabled": p.default_enabled}
+        for p in PROMPT_DEFINITIONS
+    ]
+    case = dict(id="grounding-malformed", now="2026-10-29T04:00:00Z", gap=120, history=[],
+                memory=False, route="persona_grounding", message="你在哪", criterion="c",
+                grounding={"city": "杭州", "text": "我在镇江", "allowed": False})
+    with pytest.raises(replay.RendererError) as caught:
+        await replay_turn({}, case, prompts, ["ark", "doubao-seed-2-0-lite-260228"])
+    assert caught.value.code == "invalid_grounding_judgement"
+    assert regression.is_transient(caught.value)

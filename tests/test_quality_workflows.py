@@ -709,6 +709,11 @@ def test_parallel_failure_priority_lease_then_budget_then_config():
         (asyncio.TimeoutError(), True),
         (ValueError("evaluation_usage_out_of_bounds"), False),
         (KeyError("judge"), False),
+        # A malformed judge verdict inside the renderer clears on a fresh attempt.
+        (regression.replay.RendererError({"error_type": "ValueError", "code": "invalid_grounding_judgement"}), True),
+        (regression.replay.RendererError({"error_type": "ValueError", "code": "memory_extraction_incomplete"}), False),
+        (regression.replay.RendererError({"error_type": "ValueError", "code": "Bad: 用户原文"}), False),
+        (regression.replay.RendererError({"error_type": "RuntimeError", "frames": []}), False),
     ],
 )
 def test_transient_classification(exc, transient):

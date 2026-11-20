@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -44,6 +45,12 @@ def call(
     if len(line) > 2_000_000 or not line:
         raise RuntimeError("replay_parent_unavailable")
     return json.loads(line)
+
+
+def _safe_code(exc):
+    # Our own identifier-shaped codes only; third-party messages are free text.
+    code = exc.args[0] if type(exc) in (ValueError, RuntimeError) and exc.args else None
+    return code if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,64}", code) else None
 
 
 def prohibit_io(event, args):
@@ -323,9 +330,14 @@ async def grounding(payload):
         [{"role": "user", "content": str(prompt)}],
         json_mode=True,
     )
-    verdict = json.loads(value["text"])["verdicts"]
+    try:
+        verdict = json.loads(value["text"])["verdicts"]
+    except (ValueError, KeyError, TypeError):
+        raise ValueError("invalid_grounding_judgement") from None
     if (
-        len(verdict) != len(items)
+        type(verdict) is not list
+        or any(type(v) is not dict or "index" not in v or "allowed" not in v for v in verdict)
+        or len(verdict) != len(items)
         or sorted(v["index"] for v in verdict) != list(range(len(items)))
         or any(type(v["allowed"]) is not bool for v in verdict)
     ):
@@ -419,6 +431,8 @@ def main():
                 {
                     "type": "error",
                     "error_type": type(exc).__name__,
+                    # The parent re-validates this before trusting it for retries.
+                    "code": _safe_code(exc),
                     "frames": [
                         {
                             "file": Path(f.filename).name,
