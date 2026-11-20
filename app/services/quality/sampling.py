@@ -87,6 +87,48 @@ async def initialize_samples(job: dict, now: datetime):
         )
 
 
+# Sections of the main reply prompt that say what the AI may state about itself
+# and what it knows about the user. Titles are the rendered "## " headings.
+PERSONA_SECTIONS = (
+    "你的身份",
+    "你的作息",
+    "你的隐性状态约束",
+    "你们各自在哪",
+    "当前线下活动",
+    "你记得的事情",
+    "用户画像",
+)
+SECTION_BYTES = 4500
+PERSONA_BYTES = 12000
+
+
+def persona_sections(inputs) -> dict:
+    messages = inputs.get("messages") if isinstance(inputs, dict) else None
+    if isinstance(messages, list) and len(messages) == 1 and isinstance(messages[0], list):
+        messages = messages[0]
+    if not isinstance(messages, list):
+        return {}
+    found, used = {}, 0
+    # Scan every message: the per-turn sections sit in a trailing system message
+    # after the full history (often 100+ messages). The query bounds the input.
+    for message in messages:
+        m = message.get("kwargs", message) if isinstance(message, dict) else {}
+        if m.get("type", m.get("role")) != "system" or not isinstance(m.get("content"), str):
+            continue
+        for part in ("\n" + m["content"]).split("\n## ")[1:]:
+            title, _, body = part.partition("\n")
+            title, body = title.strip(), body.strip()
+            if title not in PERSONA_SECTIONS or title in found or not body:
+                continue
+            # Whole sections only; a cut section could hide the fact being checked.
+            size = len(body.encode())
+            if size > SECTION_BYTES or used + size > PERSONA_BYTES:
+                continue
+            found[title] = body
+            used += size
+    return {t: found[t] for t in PERSONA_SECTIONS if t in found}
+
+
 async def context(sample_id: str, database=None) -> dict | None:
     database = database or db
     rows = await database.query_raw(
@@ -141,6 +183,24 @@ async def context(sample_id: str, database=None) -> dict | None:
     )
     from app.services.quality.recorded import reply_messages
 
+    # The main reply prompt is usually 45-60KB, above the evidence bound above, so
+    # the judge never saw the persona or schedule and flagged scheduled activities
+    # as invented. Only the sections that ground self-statements are kept.
+    main = (
+        await database.query_raw(
+            """SELECT inputs_json FROM trace_runs
+      WHERE trace_id=$1 AND run_type='llm' AND status='success'
+        AND started_at <= $2::timestamp AND octet_length(inputs_json::text)<=200000
+        AND strpos(inputs_json::text, '## 你的身份') > 0
+      ORDER BY started_at DESC LIMIT 1""",
+            row["trace_id"],
+            str(row["reply_at"]),
+        )
+        if row["trace_id"]
+        else []
+    )
+    persona = persona_sections(main[0]["inputs_json"]) if main else {}
+
     return dict(
         history=[
             dict(
@@ -154,6 +214,8 @@ async def context(sample_id: str, database=None) -> dict | None:
         prompt_evidence=[t["inputs_json"] for t in traces],
         recorded_messages=reply_messages(traces, answer[0]["content"]),
         evidence_status="available" if traces else "not_collected",
+        persona_evidence=persona,
+        persona_evidence_status="available" if persona else "not_collected",
         truncated=len(history) > 60
         or len(reply) > 30
         or len(groups) > 10

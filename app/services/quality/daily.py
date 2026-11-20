@@ -25,6 +25,12 @@ def bounded_context(value: dict, limit=24000) -> dict:
     while size() > limit and len(result["history"]) > 1:
         result["history"].pop(0)
         result["truncated"] = True
+    # Persona goes last: without it the judge cannot tell a scheduled activity
+    # from an invented one, so it is marked missing rather than silently absent.
+    if size() > limit and result.get("persona_evidence"):
+        result["persona_evidence"] = {}
+        result["persona_evidence_status"] = "not_collected"
+        result["truncated"] = True
     if not result["prompt_evidence"]:
         result["evidence_status"] = "not_collected"
     if size() > limit:

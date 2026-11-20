@@ -727,3 +727,89 @@ def test_error_codes_never_carry_free_text():
     assert regression.error_code(ValueError("missing_judge_categories")) == "missing_judge_categories"
     assert regression.error_code(ValueError("Bad Thing: 用户原文")) == "ValueError"
     assert regression.error_code(KeyError("judge")) == "KeyError"
+
+
+def _main_prompt(*sections, extra_system=()):
+    system = "## 回复要求\n像真人一样聊天\n" + "".join(f"## {t}\n{b}\n" for t, b in sections)
+    return {"messages": [[
+        {"kwargs": {"type": "system", "content": system}},
+        {"kwargs": {"type": "human", "content": "你在干嘛"}},
+        *({"kwargs": {"type": "system", "content": c}} for c in extra_system),
+    ]]}
+
+
+def test_persona_sections_keep_only_grounding_sections_whole_and_bounded():
+    inputs = _main_prompt(
+        ("你的身份", "你叫小伴，在杭州做陶艺"),
+        ("反幻觉硬约束", "不要编造"),
+        ("你记得的事情", "x" * (sampling.SECTION_BYTES + 1)),
+        extra_system=["## 你的作息\n15:00 开始整理日落数据\n## 情绪标记\n输出 EMO"],
+    )
+    assert sampling.persona_sections(inputs) == {
+        "你的身份": "你叫小伴，在杭州做陶艺",
+        "你的作息": "15:00 开始整理日落数据",
+    }
+    # The per-turn sections follow the whole history, often past 100 messages.
+    long = _main_prompt(("你的身份", "你叫小伴"))
+    long["messages"][0][1:1] = [{"kwargs": {"type": "human", "content": "嗯"}}] * 150
+    long["messages"][0].append({"kwargs": {"type": "system", "content": "## 你的作息\n15:00 上班"}})
+    assert sampling.persona_sections(long) == {"你的身份": "你叫小伴", "你的作息": "15:00 上班"}
+    # Whole sections only, within the aggregate bound.
+    big = _main_prompt(*[(t, "y" * 4000) for t in sampling.PERSONA_SECTIONS])
+    kept = sampling.persona_sections(big)
+    assert sum(len(v.encode()) for v in kept.values()) <= sampling.PERSONA_BYTES
+    assert all(v == "y" * 4000 for v in kept.values()) and len(kept) == 3
+    for bad in (None, {}, {"messages": "x"}, {"messages": [[None, {"kwargs": {"type": "system", "content": 3}}]]}):
+        assert sampling.persona_sections(bad) == {}
+
+
+def test_bounded_context_drops_persona_last_and_marks_it_missing():
+    value = {
+        "history": [{"role": "user", "content": "current"}],
+        "prompt_evidence": [],
+        "persona_evidence": {"你的身份": "z" * 3000},
+        "persona_evidence_status": "available",
+        "reply": "hi",
+    }
+    kept = daily.bounded_context(value, 4000)
+    assert kept["persona_evidence"] == value["persona_evidence"]
+    assert kept["persona_evidence_status"] == "available"
+    dropped = daily.bounded_context(value, 1000)
+    assert dropped["persona_evidence"] == {} and dropped["persona_evidence_status"] == "not_collected"
+    assert dropped["truncated"] and value["persona_evidence"]
+
+
+async def test_sample_context_carries_main_prompt_persona_even_when_the_prompt_is_large(quality):
+    database, conv, space, user, admin = quality
+    job = await running()
+    [sid] = await sample_rows(database, job, conv, user, n=1)
+    trace = "trace-" + uuid4().hex
+    await database.execute_raw("UPDATE quality_samples SET trace_id=$2 WHERE id=$1", sid, trace)
+    reply_at = (await database.query_raw(
+        "SELECT r.created_at FROM quality_samples s JOIN messages r ON r.id=s.reply_id WHERE s.id=$1", sid))[0]["created_at"]
+    padding = "填充" * 20000  # ~120KB: above the 40KB prompt-evidence bound
+    try:
+        await database.execute_raw(
+            """INSERT INTO trace_runs(run_id,trace_id,name,run_type,status,started_at)
+            VALUES($1,$1,'chat_request','chain','success',$2::timestamp - interval '20 seconds')""",
+            trace, str(reply_at),
+        )
+        for i, inputs in enumerate([
+            _main_prompt(("你的身份", "你叫小伴"), ("你的作息", "15:00 整理日落数据"), ("核心规则", padding)),
+            {"messages": [[{"kwargs": {"type": "human", "content": "判定"}}]]},
+        ]):
+            await database.execute_raw(
+                """INSERT INTO trace_runs(run_id,trace_id,name,run_type,status,started_at,inputs_json,outputs_json)
+                VALUES($1,$2,'ChatOpenAI','llm','success',$3::timestamp - make_interval(secs=>$4),$5::jsonb,'{}'::jsonb)""",
+                f"{trace}-{i}", trace, str(reply_at), 10 - i, json.dumps(inputs, ensure_ascii=False),
+            )
+        detail = await sampling.context(sid)
+        assert detail["persona_evidence"] == {"你的身份": "你叫小伴", "你的作息": "15:00 整理日落数据"}
+        assert detail["persona_evidence_status"] == "available"
+        assert all(padding not in json.dumps(e, ensure_ascii=False) for e in detail["prompt_evidence"])
+        await database.execute_raw("UPDATE quality_samples SET trace_id=NULL WHERE id=$1", sid)
+        missing = await sampling.context(sid)
+        assert missing["persona_evidence"] == {} and missing["persona_evidence_status"] == "not_collected"
+    finally:
+        await database.execute_raw("DELETE FROM trace_runs WHERE trace_id=$1 AND run_id<>$1", trace)
+        await database.execute_raw("DELETE FROM trace_runs WHERE run_id=$1", trace)
