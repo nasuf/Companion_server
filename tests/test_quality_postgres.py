@@ -350,6 +350,23 @@ async def test_regression_report_groups_baseline_not_run_and_filters(quality, mo
     assert body["gate"]["reason"] == "missing_scenarios"
     assert [(r["case_id"], r["repetition"]) for r in failing["items"]] == [("persona:a", 1), ("persona:a", 2)]
     assert other["items"] == []
+    # Unknown ids (and every production-confirmed case) carry no wording.
+    assert [r["case"] for r in failing["items"]] == [None, None]
+
+
+def test_case_briefs_cover_corpus_with_last_turn_wording_only():
+    from app.api.admin.quality import _case_briefs
+    from evals.quality.corpus import load
+
+    cases = load()
+    briefs = _case_briefs()
+    assert len(briefs) == len(cases)
+    multi = next(c for c in cases if len(c["turns"]) > 1)
+    assert briefs[multi["id"]] == dict(message=multi["turns"][-1]["message"][:200],
+                                      criterion=multi["turns"][-1]["criterion"][:200],
+                                      turns=len(multi["turns"]))
+    assert all(len(b["message"]) <= 200 and len(b["criterion"]) <= 200 for b in briefs.values())
+    assert not any(k.startswith("human_confirmed:") for k in briefs)
 
 
 def test_wilson_interval_bounds():

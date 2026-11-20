@@ -1,6 +1,7 @@
-"""Administrator-only quality workspace. Lists are bounded and omit dialogue text."""
+"""Administrator-only quality workspace. Lists are bounded and omit production dialogue text."""
 
 from datetime import UTC, date, datetime, timedelta
+from functools import cache
 from math import sqrt
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -154,12 +155,29 @@ async def results(
         critical,
         failed_only,
     )
+    briefs = _case_briefs()
     return dict(
-        items=rows[:limit],
+        items=[dict(r, case=briefs.get(r["case_id"])) for r in rows[:limit]],
         next_cursor=f"{rows[limit - 1]['case_id']}:{rows[limit - 1]['repetition']}"
         if len(rows) > limit
         else None,
     )
+
+
+@cache
+def _case_briefs():
+    """Synthetic corpus wording only, so a failed row says what was tested.
+    Production-confirmed cases come from real dialogue and stay absent."""
+    from evals.quality.corpus import load
+
+    return {
+        c["id"]: dict(
+            message=c["turns"][-1]["message"][:200],
+            criterion=c["turns"][-1]["criterion"][:200],
+            turns=len(c["turns"]),
+        )
+        for c in load()
+    }
 
 
 REGRESSION_KINDS = ("prompt", "nightly", "full")
