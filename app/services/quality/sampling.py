@@ -129,7 +129,7 @@ def persona_sections(inputs) -> dict:
     return {t: found[t] for t in PERSONA_SECTIONS if t in found}
 
 
-async def context(sample_id: str, database=None) -> dict | None:
+async def context(sample_id: str, database=None, *, replay_input=False) -> dict | None:
     database = database or db
     rows = await database.query_raw(
         """SELECT s.id,s.message_id,s.reply_id,s.trace_id,s.conversation_id,
@@ -200,6 +200,23 @@ async def context(sample_id: str, database=None) -> dict | None:
         else []
     )
     persona = persona_sections(main[0]["inputs_json"]) if main else {}
+    # Replay needs the call that produced this reply. Its input is the full main
+    # prompt, above the evidence bound and often not among the latest three calls,
+    # so 2026-11-20's first confirmed cases were stored without it. Only callers
+    # that store a regression case pay for these larger rows.
+    produced = (
+        await database.query_raw(
+            """SELECT inputs_json,outputs_json FROM trace_runs
+      WHERE trace_id=$1 AND run_type='llm' AND status='success'
+        AND started_at <= $2::timestamp AND octet_length(inputs_json::text)<=200000
+        AND octet_length(outputs_json::text)<=40000
+      ORDER BY started_at DESC LIMIT 20""",
+            row["trace_id"],
+            str(row["reply_at"]),
+        )
+        if row["trace_id"] and replay_input
+        else []
+    )
 
     return dict(
         history=[
@@ -212,7 +229,7 @@ async def context(sample_id: str, database=None) -> dict | None:
         ],
         reply="\n".join(m["content"] for m in answer),
         prompt_evidence=[t["inputs_json"] for t in traces],
-        recorded_messages=reply_messages(traces, answer[0]["content"]),
+        recorded_messages=reply_messages(produced, [m["content"] for m in answer]) if replay_input else None,
         evidence_status="available" if traces else "not_collected",
         persona_evidence=persona,
         persona_evidence_status="available" if persona else "not_collected",

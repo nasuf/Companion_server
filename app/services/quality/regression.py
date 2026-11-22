@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -10,6 +11,9 @@ from app.config import settings
 from app.db import db
 from app.services.quality import jobs, budget, transport, gates, replay
 from evals.quality.corpus import load, normalise, VERSION
+
+
+logger = logging.getLogger(__name__)
 
 
 def _expected_by_group(cases):
@@ -24,7 +28,7 @@ def _expected_by_group(cases):
 
 async def corpus(job):
     cases = load(quick=job["kind"] == "prompt")
-    rows = await db.query_raw("""SELECT c.id,c.case_data FROM quality_cases c JOIN quality_samples s ON s.id=c.sample_id
+    rows = await db.query_raw("""SELECT c.id,c.sample_id,c.case_data FROM quality_cases c JOIN quality_samples s ON s.id=c.sample_id
       JOIN users u ON u.id=s.user_id AND u.status<>'deleting' WHERE c.enabled
       ORDER BY c.created_at,c.id LIMIT 501""")
     if len(rows) > 500:
@@ -39,6 +43,13 @@ async def corpus(job):
         cases = cases[: 30 - len(rows)]
     for row in rows:
         c = row["case_data"]
+        if (
+            job["kind"] != "prompt"
+            and not c.get("recorded_messages")
+            and not c.get("recorded_input_unresolved")
+            and row.get("sample_id")
+        ):
+            await _backfill_recorded_input(row)
         history = c["history"]
         if not history or history[-1]["role"] != "user":
             raise ValueError("review_case_missing_latest_user_turn")
@@ -58,6 +69,38 @@ async def corpus(job):
             )
         )
     return cases
+
+
+async def _backfill_recorded_input(row):
+    """Cases confirmed before the sampler looked past the latest three calls were
+    stored without their exact input. Resolve it once while the Trace is retained;
+    a case that cannot be resolved is marked so later loads skip the lookup. Best
+    effort: the case still runs as unknown, and the manifest never fails here."""
+    from app.services.quality import sampling
+
+    try:
+        context = await sampling.context(row["sample_id"], replay_input=True)
+        if context is None:
+            return
+        messages = context.get("recorded_messages")
+        key, value = (
+            ("recorded_messages", messages)
+            if messages
+            else ("recorded_input_unresolved", True)
+        )
+        await db.execute_raw(
+            """UPDATE quality_cases SET case_data=jsonb_set(case_data,ARRAY[$3],$2::jsonb),
+          updated_at=NOW() WHERE id=$1 AND NOT (case_data ? 'recorded_messages'
+            AND jsonb_typeof(case_data->'recorded_messages')='array')""",
+            row["id"],
+            json.dumps(value, ensure_ascii=False),
+            key,
+        )
+        row["case_data"][key] = value
+    except Exception as exc:
+        logger.warning(
+            f"[QUALITY] recorded input backfill skipped for case {row['id']}: {type(exc).__name__}"
+        )
 
 
 class LocalSink:

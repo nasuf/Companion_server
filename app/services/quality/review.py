@@ -30,7 +30,7 @@ async def save(sample_id, admin_id, revision, decision, category, note):
         row = rows[0]
         if row["revision"] != revision:
             raise ReviewConflict("review_changed_refresh_first")
-        context = await sampling.context(sample_id, tx)
+        context = await sampling.context(sample_id, tx, replay_input=True)
         if context is None:
             raise LookupError("sample_unavailable")
         await tx.execute_raw(

@@ -437,19 +437,19 @@ def test_historical_prompt_requires_exact_unique_trace_and_valid_roles():
                 ]
             ]
         },
-        "outputs_json": {"generations": [[{"text": "第一句||第二句[EMO:中性/20]"}]]},
+        "outputs_json": {"generations": [[{"text": "合成第一句||第二句[EMO:中性/20]"}]]},
     }
-    found = reply_messages([trace], "第一句")
+    found = reply_messages([trace], "合成第一句")
     assert found == [
         {"role": "system", "content": "人设"},
         {"role": "user", "content": "你好"},
     ]
-    assert reply_messages([trace, trace], "第一句") is None
+    assert reply_messages([trace, trace], "合成第一句") is None
     assert reply_messages([trace], "别的回复") is None
     assert (
         reply_messages(
             [{}, {"inputs_json": {}}, {**trace, "outputs_json": {"generations": [{}]}}],
-            "第一句",
+            "合成第一句",
         )
         is None
     )
@@ -461,9 +461,115 @@ def test_historical_prompt_requires_exact_unique_trace_and_valid_roles():
         [{"role": "assistant", "content": "no-user"}],
     ):
         assert (
-            reply_messages([{**trace, "inputs_json": {"messages": messages}}], "第一句")
+            reply_messages([{**trace, "inputs_json": {"messages": messages}}], "合成第一句")
             is None
         )
+
+
+def test_historical_prompt_matches_delivered_reply_after_emoji_and_bubble_join():
+    """2026-11-20: both first confirmed cases were stored without their input
+    because delivery appends an emoji and joins split bubbles with a space."""
+    from app.services.quality.recorded import reply_messages
+
+    def call(content, text):
+        return {
+            "inputs_json": {"messages": [[{"kwargs": {"type": "human", "content": content}}]]},
+            "outputs_json": {"generations": [[{"text": text}]]},
+        }
+
+    main = call("主回复", "啊 会不会很着急呀||我也帮不上忙\n[EMO:中性/30]")
+    assert reply_messages([main], "啊 会不会很着急呀👌") == [{"role": "user", "content": "主回复"}]
+    assert reply_messages([main], "啊 会不会很着急呀 我也帮不上忙")
+    assert reply_messages([main], "会不会很开心呀") is None
+    assert reply_messages([main], "👌") is None
+    # Short bubbles are too common across helper outputs to identify a call.
+    assert reply_messages([main], "我也") is None
+
+    # A topic-continuation line comes first and has its own call; the longest
+    # bubble identifies the main reply instead.
+    bridge = call("承接", "对了 上次说的快递")
+    assert reply_messages([bridge, main], ["对了 上次说的快递", "啊 会不会很着急呀"]) == [
+        {"role": "user", "content": "主回复"}
+    ]
+    # A later bubble from another reply fragment means this call did not produce
+    # the reviewed reply; unknown is better than replaying the wrong input.
+    assert reply_messages([main], ["啊 会不会很着急呀", "原来是拼多多大老远寄过去呀"]) is None
+    long_history = call("x", "啊 会不会很着急呀")
+    long_history["inputs_json"]["messages"][0] *= 103
+    assert len(reply_messages([long_history], "啊 会不会很着急呀")) == 103
+    # Ambiguity counts calls whose input cannot be parsed, so a helper whose
+    # output repeats the text is never taken as the single match.
+    image = {**main, "inputs_json": {"messages": [[{"kwargs": {"type": "human", "content": [{"type": "image"}]}}]]}}
+    helper = call("分类", "回复是：啊 会不会很着急呀")
+    assert reply_messages([image, helper], "啊 会不会很着急呀") is None
+
+
+async def test_confirmed_case_keeps_large_reply_call_and_backfills_old_cases(quality, monkeypatch):
+    from app.services.quality import review
+
+    database, conv, space, user, admin = quality
+    job = await running()
+    [sid] = await sample_rows(database, job, conv, user, n=1)
+    trace = "trace-" + uuid4().hex
+    reply_id, reply_at = (await database.query_raw(
+        "SELECT r.id,r.created_at FROM quality_samples s JOIN messages r ON r.id=s.reply_id WHERE s.id=$1", sid))[0].values()
+    await database.execute_raw("UPDATE quality_samples SET trace_id=$2 WHERE id=$1", sid, trace)
+    await database.execute_raw("UPDATE messages SET content='合成回复第一句🙂' WHERE id=$1", reply_id)
+    main = _main_prompt(("你的身份", "你叫小伴"), ("核心规则", "填充" * 10000))  # ~60KB
+    calls = [(main, "合成回复第一句||第二句")] + [
+        ({"messages": [[{"kwargs": {"type": "human", "content": f"后处理{i}"}}]]}, "{}")
+        for i in range(4)  # four later small calls push it out of the latest three
+    ]
+    try:
+        await database.execute_raw(
+            """INSERT INTO trace_runs(run_id,trace_id,name,run_type,status,started_at)
+            VALUES($1,$1,'chat_request','chain','success',$2::timestamp - interval '20 seconds')""",
+            trace, str(reply_at),
+        )
+        for i, (inputs, text) in enumerate(calls):
+            await database.execute_raw(
+                """INSERT INTO trace_runs(run_id,trace_id,name,run_type,status,started_at,inputs_json,outputs_json)
+                VALUES($1,$2,'ChatOpenAI','llm','success',$3::timestamp - make_interval(secs=>$4),$5::jsonb,$6::jsonb)""",
+                f"{trace}-{i}", trace, str(reply_at), 10 - i, json.dumps(inputs, ensure_ascii=False),
+                json.dumps({"generations": [[{"text": text}]]}, ensure_ascii=False),
+            )
+        detail = await sampling.context(sid, replay_input=True)
+        assert detail["recorded_messages"][1] == {"role": "user", "content": "你在干嘛"}
+
+        await review.save(sid, admin, 0, "confirmed", "hallucination", "合成回复不应捏造事实")
+        stored = (await database.query_raw("SELECT case_data FROM quality_cases WHERE sample_id=$1", sid))[0]
+        assert stored["case_data"]["recorded_messages"] == detail["recorded_messages"]
+
+        # Cases saved before this fix carry null; the next corpus load resolves them once.
+        await database.execute_raw(
+            "UPDATE quality_cases SET case_data=jsonb_set(case_data,'{recorded_messages}','null') WHERE sample_id=$1", sid)
+        monkeypatch.setattr(regression, "db", database)
+        monkeypatch.setattr(sampling, "db", database)
+        human = lambda cases: next(c for c in cases if c["suite"] == "human_confirmed")
+        # The quick prompt gate stays read-only.
+        assert human(await regression.corpus({"kind": "prompt"}))["recorded_messages"] is None
+        assert human(await regression.corpus({"kind": "nightly"}))["recorded_messages"] == detail["recorded_messages"]
+        stored = (await database.query_raw("SELECT case_data FROM quality_cases WHERE sample_id=$1", sid))[0]
+        assert stored["case_data"]["recorded_messages"] == detail["recorded_messages"]
+
+        # Unresolvable input is marked once; a lookup failure never fails the manifest.
+        await database.execute_raw(
+            "UPDATE quality_cases SET case_data=jsonb_set(case_data,'{recorded_messages}','null') WHERE sample_id=$1", sid)
+        await database.execute_raw("DELETE FROM trace_runs WHERE trace_id=$1 AND run_id<>$1", trace)
+        assert human(await regression.corpus({"kind": "nightly"}))["recorded_messages"] is None
+        stored = (await database.query_raw("SELECT case_data FROM quality_cases WHERE sample_id=$1", sid))[0]
+        assert stored["case_data"]["recorded_input_unresolved"] is True
+        lookups = AsyncMock(side_effect=AssertionError("marked cases are not looked up again"))
+        monkeypatch.setattr(sampling, "context", lookups)
+        assert human(await regression.corpus({"kind": "nightly"}))["recorded_messages"] is None
+        await database.execute_raw(
+            "UPDATE quality_cases SET case_data=case_data-'recorded_input_unresolved' WHERE sample_id=$1", sid)
+        monkeypatch.setattr(sampling, "context", AsyncMock(side_effect=ConnectionError))
+        assert human(await regression.corpus({"kind": "nightly"}))["recorded_messages"] is None
+    finally:
+        await database.execute_raw("DELETE FROM quality_cases WHERE sample_id=$1", sid)
+        await database.execute_raw("DELETE FROM trace_runs WHERE trace_id=$1 AND run_id<>$1", trace)
+        await database.execute_raw("DELETE FROM trace_runs WHERE run_id=$1", trace)
 
 
 async def test_recorded_model_replay_retains_real_persona_not_synthetic(monkeypatch):
