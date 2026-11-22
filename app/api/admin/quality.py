@@ -73,9 +73,10 @@ async def samples(
     rows = await db.query_raw(
         """SELECT s.id,s.message_id,s.reply_id,s.trace_id,s.status,s.internal,
       s.verdict,s.review_queue,s.review_status,s.review_category,s.review_note,s.revision,s.reviewed_at,
-      reviewer.username AS reviewer_name FROM quality_samples s
+      reviewer.username AS reviewer_name,rep.label AS repetition_label FROM quality_samples s
       JOIN users owner ON owner.id=s.user_id AND owner.status<>'deleting'
       LEFT JOIN users reviewer ON reviewer.id=s.reviewed_by
+      LEFT JOIN reply_repetition_scores rep ON rep.turn_message_id=s.reply_id
       WHERE s.job_id=$1 AND (NOT $2::boolean OR (s.review_queue AND s.review_status='unreviewed')) AND s.id>$3
       ORDER BY s.id LIMIT $4""",
         job_id,

@@ -117,13 +117,21 @@ async def run(job):
                 sample["id"],
                 json.dumps({"error_type": type(exc).__name__}),
             )
-    # The queue is a capped view; all original judgements stay available.
+    # The queue is a capped view; all original judgements stay available. A
+    # repetition fail alone does not queue a reply the repetition metric
+    # (CHAT01.10.1, 44/44 with human review; scored at 04:10, before this job)
+    # cleared, so judge-only repetition flags do not crowd out other failures.
+    # Cleared means no earlier similar bubble (none) or judged not a repeat;
+    # failed/unjudgeable/unscored replies keep the judge's verdict.
     await write(
         """UPDATE quality_samples SET review_queue=true WHERE id IN (
-      SELECT id FROM quality_samples WHERE job_id=$1 AND status='judged'
-      AND EXISTS(SELECT 1 FROM jsonb_each_text(verdict->'categories') v WHERE v.value='fail')
-      ORDER BY (jsonb_array_length(verdict->'critical_kinds')>0) DESC,
-        (verdict->>'confidence')::float8 DESC,id LIMIT $2)""",
+      SELECT s.id FROM quality_samples s
+      LEFT JOIN reply_repetition_scores r ON r.turn_message_id=s.reply_id
+      WHERE s.job_id=$1 AND s.status='judged'
+      AND EXISTS(SELECT 1 FROM jsonb_each_text(s.verdict->'categories') v WHERE v.value='fail'
+        AND NOT (v.key='repetition' AND r.label IN ('none','not_repeat','legit') IS TRUE))
+      ORDER BY (jsonb_array_length(s.verdict->'critical_kinds')>0) DESC,
+        (s.verdict->>'confidence')::float8 DESC,s.id LIMIT $2)""",
         job["id"],
         settings.quality_review_limit,
     )

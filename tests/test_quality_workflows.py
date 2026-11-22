@@ -146,6 +146,86 @@ async def test_daily_lifecycle_failure_states_and_no_business_writes(
         jobs.notify_review_pending.assert_not_awaited()
 
 
+async def repetition_score(database, reply_id, user, conv, label):
+    await database.execute_raw(
+        """INSERT INTO reply_repetition_scores(turn_message_id,local_date,user_id,conversation_id,
+          occurred_at,situation,bubbles,candidate_bubbles,judged_bubbles,label,repeated,
+          scorer_version,computed_at) VALUES($1,CURRENT_DATE,$2,$3,NOW(),'normal',1,1,1,$4,$5,
+          'repetition-v1',NOW())""",
+        reply_id,
+        user,
+        conv,
+        label,
+        label in ("verbatim", "paraphrase"),
+    )
+
+
+async def test_review_queue_skips_repetition_fail_cleared_by_metric(
+    quality, monkeypatch
+):
+    database, conv, space, user, admin = quality
+    job = await running()
+    labels = ["not_repeat", "none", "legit", "paraphrase", "verbatim", "failed", "unjudgeable"]
+    ids = await sample_rows(database, job, conv, user, n=len(labels) + 1)
+    # Cleared samples sort first, so the cap would admit them if the metric
+    # were applied after LIMIT instead of before.
+    for i, sid in enumerate(ids[:3]):
+        ids[i] = f"0{i}{sid[2:]}"
+        await database.execute_raw(
+            "UPDATE quality_samples SET id=$2 WHERE id=$1", sid, ids[i]
+        )
+    replies = {
+        r["id"]: r["reply_id"]
+        for r in await database.query_raw(
+            "SELECT id,reply_id FROM quality_samples WHERE job_id=$1", job["id"]
+        )
+    }
+    # Metric verdict per sample; the last has no metric row at all.
+    for sid, label in zip(ids, labels):
+        await repetition_score(database, replies[sid], user, conv, label)
+    monkeypatch.setattr(settings, "quality_review_limit", 5)
+    repetition_only = json.dumps(
+        dict(
+            categories={
+                c: "fail" if c == "repetition" else "pass" for c in judge.CATEGORIES
+            },
+            critical_kinds=[],
+            confidence=0.8,
+            reason="合成判定：与上文表述相近",
+        )
+    )
+    monkeypatch.setattr(
+        transport, "complete", AsyncMock(return_value=(repetition_only, {}))
+    )
+    await daily.run(job)
+    queued = {
+        r["id"]
+        for r in await database.query_raw(
+            "SELECT id FROM quality_samples WHERE job_id=$1 AND review_queue", job["id"]
+        )
+    }
+    assert queued == set(ids[3:])
+
+    # A cleared reply with another failing category still enters the queue.
+    job = await running()
+    ids = await sample_rows(database, job, conv, user, n=1)
+    reply = (
+        await database.query_raw(
+            "SELECT reply_id FROM quality_samples WHERE id=$1", ids[0]
+        )
+    )[0]["reply_id"]
+    await repetition_score(database, reply, user, conv, "legit")
+    both = json.loads(repetition_only)
+    both["categories"]["hallucination"] = "fail"
+    transport.complete.return_value = (json.dumps(both), {})
+    await daily.run(job)
+    assert (
+        await database.query_raw(
+            "SELECT review_queue FROM quality_samples WHERE id=$1", ids[0]
+        )
+    )[0]["review_queue"]
+
+
 @pytest.mark.parametrize("mode", ["normal", "budget", "config", "renderer", "unknown"])
 async def test_regression_exact_baseline_and_incomplete_never_pass(
     quality, monkeypatch, mode
@@ -266,6 +346,11 @@ async def test_api_lists_results_and_review_conflict_use_real_database(
         base = "/admin-api/quality/jobs/" + job["id"]
         page = (await c.get(base + "/samples?limit=1")).json()
         assert len(page["items"]) == 1 and page["next_cursor"]
+        assert page["items"][0]["repetition_label"] is None
+        reply = page["items"][0]["reply_id"]
+        await repetition_score(database, reply, user, conv, "paraphrase")
+        page = (await c.get(base + "/samples?limit=1")).json()
+        assert page["items"][0]["repetition_label"] == "paraphrase"
         assert (await c.get(base + "/results")).json()["items"][0]["case_id"] == "test"
         sid = ids[0]
         assert (await c.get("/admin-api/quality/samples/" + sid)).json()["history"]
