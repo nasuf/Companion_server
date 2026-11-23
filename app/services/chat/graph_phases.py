@@ -1565,6 +1565,7 @@ async def normalize_reply(ctx):
             reply_is_fallback=ctx.reply_is_fallback,
             conversation_id=ctx.conversation_id,
             persona_checked=True,
+            covered_until_user_ts=ctx.covered_until_user_ts,
         ):
             yield evt
     yield ctx.completed("normalize_reply")

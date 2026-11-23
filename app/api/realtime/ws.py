@@ -763,8 +763,13 @@ async def _queue_reply(
         # Mark generation in-flight so a message arriving mid-reply coalesces
         # into the delayed queue instead of racing a duplicate parallel reply.
         await mark_reply_inflight(conversation_id)
+        from app.services.chat.reply_post_process import TurnSuperseded
+
         try:
             await stream_to_ws(gen, conversation_id)
+        except TurnSuperseded:
+            # 首气泡发出前发现更新的用户消息: 本轮不回复也不算失败, 由新消息那一轮合并生成.
+            logger.info("[SUPERSEDED] conv=%s fast path", conversation_id[:8])
         finally:
             await clear_reply_inflight(conversation_id)
         return

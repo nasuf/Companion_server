@@ -1887,7 +1887,14 @@ async def _deliver_locked_delayed_reply(conv_id: str, lock_token: str, claimed: 
         ui_delay_seconds=0.0,
     )
     _record_delayed_generation_start(conv_id, payloads, merged)
-    await stream_to_ws(gen, conv_id)
+    from app.services.chat.reply_post_process import TurnSuperseded
+
+    try:
+        await stream_to_ws(gen, conv_id)
+    except TurnSuperseded:
+        # 首气泡发出前发现更新的用户消息: 本轮不回复也不算失败, 新消息已在延迟队列里, 下一轮合并生成.
+        logger.info("[DELAY-SUPERSEDED] conv=%s message=%s", conv_id, merged.get("user_message_id"))
+        return
     logger.info("[DELAY-COMPLETE] conv=%s message=%s", conv_id, merged.get("user_message_id"))
 
 

@@ -171,6 +171,32 @@ def _should_explain_delay(elapsed_s: float) -> bool:
     return random.random() < p
 
 
+class TurnSuperseded(Exception):
+    """首个气泡发出前发现用户又发了新消息: 本轮中止, 由新消息那一轮合并生成."""
+
+
+async def has_newer_user_message(conversation_id: str | None, since: _dt | None) -> bool:
+    """本会话在 since 之后是否出现过用户消息. 查询失败按 False 放行 (宁可多回一次, 不吞回复)."""
+    if not conversation_id or since is None:
+        return False
+    try:
+        from datetime import timezone
+
+        from app.db import db
+
+        naive = since.astimezone(timezone.utc).replace(tzinfo=None) if since.tzinfo else since
+        rows = await db.query_raw(
+            "SELECT 1 FROM messages WHERE conversation_id = $1 AND role = 'user' "
+            "AND created_at > $2::timestamp LIMIT 1",
+            conversation_id,
+            naive,
+        )
+        return bool(rows)
+    except Exception as exc:
+        logger.warning("[SUPERSEDE-CHECK] failed type=%s", type(exc).__name__)
+        return False
+
+
 async def emit_replies(
     replies: list[str],
     *,
@@ -187,6 +213,7 @@ async def emit_replies(
     conversation_id: str | None = None,
     component_card: dict | None = None,
     persona_checked: bool = False,
+    covered_until_user_ts: _dt | None = None,
 ) -> AsyncGenerator[dict, None]:
     """spec §5/§6.4-§6.5：延迟解释 + emoji/sticker + reply SSE 事件流。
 
@@ -201,6 +228,14 @@ async def emit_replies(
         if corrected:
             replies[:] = [guarded]
             reply_emotion = {"emotion": "中性", "intensity": 0}
+    # 首个气泡发出前的唯一检查点: 本轮生成期间用户又发了新消息, 就中止本轮, 不 yield、
+    # 不写情绪/表情等副作用, 由新消息那一轮合并生成. reply_index_offset > 0 说明
+    # 首气泡已经发出 (子意图续发), 不再中止, 避免出现回复了一半又撤回.
+    if reply_index_offset == 0 and await has_newer_user_message(
+        conversation_id, covered_until_user_ts
+    ):
+        logger.info("[SUPERSEDE] conv=%s newer user message before first bubble", conversation_id)
+        raise TurnSuperseded()
     ai_primary_emotion, emotion_intensity = _reply_decoration_signal(reply_emotion)
     # W4 AI 情绪连续性: 记录本轮情绪 (Redis ~1ms), 下一轮衰减后作为"当下心情"
     await save_ai_mood(conversation_id, ai_primary_emotion, emotion_intensity)
