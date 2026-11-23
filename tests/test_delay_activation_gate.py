@@ -381,3 +381,35 @@ async def test_lock_error_before_dequeue_keeps_queue_without_false_failure(deliv
     assert not done_errors(delivery.manager)
     assert await q.has_pending_delayed_messages('conv')
     delivery.s._record_job_outcome.assert_awaited_once_with('delayed_reply', ok=False, detail='ConnectionError')
+
+
+async def test_superseded_turn_is_not_a_failure(delivery, isolated, monkeypatch):
+    from app.api.realtime import ws
+    from app.services.chat.reply_post_process import TurnSuperseded
+    monkeypatch.setattr(ws, 'stream_to_ws', AsyncMock(side_effect=TurnSuperseded()))
+    await q.enqueue_or_append_delayed('conv', payload(), 0)
+    await delivery.s._run_due_delayed_reply('conv')
+    assert not done_errors(delivery.manager)
+    assert not await isolated.exists(q._LOCK_KEY.format(cid='conv'))
+    assert not await q.is_reply_inflight('conv')
+    delivery.s._record_job_outcome.assert_not_awaited()
+
+
+async def test_fast_path_swallows_superseded_turn(monkeypatch):
+    from app.api.realtime import ws
+    from app.services.chat import orchestrator
+    from app.services.chat.reply_post_process import TurnSuperseded
+
+    async def generate(**kw):
+        yield {'event': 'done', 'data': '{}'}
+
+    mark, clear = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(orchestrator, 'stream_chat_response', generate)
+    monkeypatch.setattr(ws, 'stream_to_ws', AsyncMock(side_effect=TurnSuperseded()))
+    monkeypatch.setattr(ws, 'mark_reply_inflight', mark)
+    monkeypatch.setattr(ws, 'clear_reply_inflight', clear)
+    await ws._queue_reply(AsyncMock(), conversation_id='conv', agent=SimpleNamespace(id='agent'),
+                          user_id='user', user_message='hi', user_message_id='m',
+                          reply_context={'delay_seconds': 0})
+    mark.assert_awaited_once()
+    clear.assert_awaited_once()
