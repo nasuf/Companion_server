@@ -25,7 +25,7 @@ from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.memory.retrieval.context_selector import exceeds_injection_limit
 from app.services.offline import record_memory
 from app.services.offline.chat_emit import single_bubble_text
-from app.services.offline.gift_status import IN_TRANSIT_STATUSES, REVEALED_STATUS
+from app.services.offline.gift_status import IN_TRANSIT_STATUSES, REVEALED_STATUS, status_label
 from app.services.offline.record_memory import Kind
 from app.services.runtime.tasks import fire_background
 
@@ -112,9 +112,15 @@ def render(gift: dict[str, Any]) -> dict[str, Any] | None:
         }
     if status in IN_TRANSIT_STATUSES:
         # 在途：AI 记得自己寄了、在等签收揭晓；用户侧不记（礼物还没揭晓，用户也没确认收到）。
+        # 写上当前节点和 AI 看不到的部分：只写"寄了"时，用户问物流，AI 会说
+        # 自己去查快递后台、把单号发给用户（2026-11-21 抽检确认 3 例）。
         return {
             "user": None,
-            "ai": f"{sent_prefix}我给用户寄了一份礼物，想等用户签收时再揭晓，所以没提前说是什么",
+            "ai": _fit(
+                f"{sent_prefix}我给用户寄了一份礼物，物流现在是「{status_label(status)}」，"
+                "想等用户签收时再揭晓，所以没提前说是什么",
+                "；我这边看不到快递单号和物流详情，用户在「我的礼物」里能看到",
+            ),
             "level": _EVENT[0], "importance": _EVENT[1],
         }
     if status == "cancelled":

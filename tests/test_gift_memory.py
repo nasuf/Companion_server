@@ -26,7 +26,12 @@ def gift(**over):
 def test_in_transit_is_an_ai_memory_without_the_gift_name(status):
     texts = gift_memory.render(gift(status=status))
     assert texts["user"] is None
-    assert texts["ai"] == "2026-10-15 我给用户寄了一份礼物，想等用户签收时再揭晓，所以没提前说是什么"
+    label = {"ordered": "已下单", "shipping": "运输中", "out_for_delivery": "派送中"}[status]
+    assert texts["ai"] == (
+        f"2026-10-15 我给用户寄了一份礼物，物流现在是「{label}」，想等用户签收时再揭晓，所以没提前说是什么"
+        "；我这边看不到快递单号和物流详情，用户在「我的礼物」里能看到"
+    )
+    assert not gift_memory.exceeds_injection_limit(texts["ai"])
     assert "便签本" not in texts["ai"]  # 记忆会注入聊天，签收前不能出现礼物名
     assert "保密" not in texts["ai"]  # 写事实不写指令：指令进了长期记忆，揭晓后还会生效
     assert (texts["level"], texts["importance"]) == (2, gift_memory.EVENT_IMPORTANCE)
@@ -200,7 +205,9 @@ async def test_one_pair_follows_the_gift_from_sent_to_thanked(scene):
     first = (await database.query_raw("SELECT ai_memory_id FROM offline_gift_memories WHERE gift_id=$1", ident))[0]
 
     await set_state(ident, status="out_for_delivery")
-    assert await gift_memory.sync(ident, user) == "unchanged"  # 派送中: 记忆文字不变
+    assert await gift_memory.sync(ident, user) == "written"  # 派送中: 改写当前物流节点
+    assert "「派送中」" in (await memories(ident))["ai"]["content"]
+    assert await gift_memory.sync(ident, user) == "unchanged"
     await say(ident, "gift_received_reply", "其实是便签本||你总有小灵感")
     await set_state(ident, status="delivered", delivered_at=DELIVERED)
     assert await gift_memory.sync(ident, user) == "written"
@@ -218,7 +225,7 @@ async def test_one_pair_follows_the_gift_from_sent_to_thanked(scene):
     assert after["ai_memory_id"] == first["ai_memory_id"]  # 始终是同一条, 不追加
     ops = await database.query_raw(
         "SELECT operation FROM memory_changelogs WHERE memory_id=$1 ORDER BY created_at", after["ai_memory_id"])
-    assert [o["operation"] for o in ops] == ["insert", "gift_sync", "gift_sync"]
+    assert [o["operation"] for o in ops] == ["insert", "gift_sync", "gift_sync", "gift_sync"]
 
 
 async def test_a_cancelled_gift_rewrites_the_in_transit_memory(scene):
