@@ -5,9 +5,17 @@ detection.  It owns the combined state machine for:
 
 - direct crisis signals
 - semantic/ambiguous crisis signals
-- active crisis-care follow-up state
+- time-bounded crisis-care follow-up (aftercare)
 - release turns
 - boundary/patience interaction while crisis-care is active
+
+Aftercare policy (2026-11-23, after conversation f2cb492c kept asking
+"你现在还好吗" for 24 days): an episode lasts ``CRISIS_CARE_WINDOW`` from the
+latest crisis signal and follow-up turns never extend it.  One explicit release
+ends it.  The release classifier sees the real dialogue since the signal,
+including the AI's own safety questions, so "对呀" answering "你现在安全吗" is
+read as an answer.  Safety checks are spaced out and capped per episode, and
+stop once the user says the questions are unwelcome.
 """
 
 from __future__ import annotations
@@ -15,13 +23,16 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from app.observability.events import EVT_CHAT_CRISIS_DETECTED
 from app.services.chat.crisis_state import (
-    clear_crisis_care_state,
+    CRISIS_CARE_WINDOW,
     load_crisis_care_state,
     mark_crisis_care_active,
+    mark_crisis_care_released,
+    parse_state_time,
 )
 from app.services.chat.data_fetch_phase import format_recent_context
 from app.services.chat.intent_replies import (
@@ -33,7 +44,6 @@ from app.services.interaction.boundary import (
     restore_patience_for_crisis_care,
 )
 from app.services.rules.chat_keywords import (
-    CRISIS_CARE_ASSISTANT_MARKERS,
     CRISIS_CHECK_ANNOYED_TERMS,
     CRISIS_KEYWORDS,
     CRISIS_RELEASE_KEYWORDS,
@@ -48,7 +58,6 @@ CrisisGuardStatus = Literal[
     "direct_crisis",
     "semantic_crisis",
     "crisis_followup",
-    "release_pending",
     "released",
 ]
 
@@ -83,7 +92,13 @@ class CrisisGuardDecision:
         }
 
 
-_CRISIS_SOFT_CHECK_TURN_INTERVAL = 2
+# The crisis reply itself already asks; later checks come at most every few
+# user turns and at most twice per episode, like scheduled clinical follow-up
+# rather than a per-turn questionnaire.
+_SAFETY_CHECK_TURN_INTERVAL = 4
+_MAX_SAFETY_CHECKS_PER_EPISODE = 2
+_CONTEXT_MAX_LINES = 12
+_CONTEXT_LINE_CHARS = 220
 
 
 def _strip_release_phrases(text: str) -> str:
@@ -119,99 +134,107 @@ def should_semantic_crisis_check(text: str) -> bool:
     return any(phrase in candidate for phrase in CRISIS_SEMANTIC_DIRECT_PHRASES)
 
 
-def is_crisis_care_assistant_message(text: str) -> bool:
-    if not text:
-        return False
-    return any(marker in text for marker in CRISIS_CARE_ASSISTANT_MARKERS)
+def is_safety_check_unwelcome(text: str) -> bool:
+    return any(term in (text or "") for term in CRISIS_CHECK_ANNOYED_TERMS)
 
 
 def crisis_followup_safety_check_mode(
     *,
-    followup_status: str,
-    prior_release_count: int,
     turns_since_safety_check: int,
+    safety_check_count: int,
+    checks_suppressed: bool,
     user_message: str,
 ) -> str:
-    """Return none/soft/annoyed for deterministic aftercare safety check cadence."""
-    if followup_status != "guard":
+    """Return none/soft/annoyed for the aftercare safety-check cadence.
+
+    ``annoyed`` means: acknowledge the over-asking and stop; it is not another
+    check.  After it, the episode suppresses further scheduled checks.
+    """
+    if checks_suppressed:
         return "none"
-    due = (
-        prior_release_count > 0
-        or turns_since_safety_check >= _CRISIS_SOFT_CHECK_TURN_INTERVAL
-    )
-    if not due:
-        return "none"
-    if any(term in user_message for term in CRISIS_CHECK_ANNOYED_TERMS):
+    if is_safety_check_unwelcome(user_message):
         return "annoyed"
-    return "soft"
+    if safety_check_count >= _MAX_SAFETY_CHECKS_PER_EPISODE:
+        return "none"
+    if turns_since_safety_check >= _SAFETY_CHECK_TURN_INTERVAL:
+        return "soft"
+    return "none"
 
 
-def _format_crisis_context(items: list[tuple[str, str]], max_items: int = 10) -> str:
-    recent = items[-max_items:]
-    lines = []
-    for role, content in recent:
-        speaker = "用户" if role == "user" else "AI"
-        lines.append(f"{speaker}: {content[:220]}")
-    return "\n".join(lines)
+def _message_time(message: dict) -> datetime | None:
+    return parse_state_time(message.get("createdAt"))
 
 
-def recent_unresolved_crisis_message(
+def _excluded(message: dict, excluded: set[str]) -> bool:
+    return bool(message.get("id")) and message.get("id") in excluded
+
+
+def latest_crisis_signal_at(
     messages: list[dict],
     *,
-    exclude_id: str | None = None,
-    window: int = 8,
-) -> str | None:
-    """Return the latest recent crisis user message unless later user text released it."""
-    checked = 0
+    now: datetime,
+    exclude_ids: set[str] | None = None,
+) -> datetime | None:
+    """Fallback when Redis state is missing: latest unreleased crisis signal
+    inside the aftercare window.  Rows without timestamps count as recent so a
+    missing clock never drops an active episode."""
+    excluded = exclude_ids or set()
     for msg in reversed(messages):
-        if exclude_id and msg.get("id") == exclude_id:
-            continue
-        if msg.get("role") != "user":
+        if _excluded(msg, excluded) or msg.get("role") != "user":
             continue
         content = str(msg.get("content") or "")
-        if not content:
-            continue
-        checked += 1
-        if checked > window:
+        said_at = _message_time(msg)
+        if said_at is not None and now - said_at >= CRISIS_CARE_WINDOW:
             return None
-        if is_crisis_released(content):
+        if is_crisis_released(content) and not is_crisis_message(content):
             return None
         if is_crisis_message(content):
-            return content
+            return said_at or now
     return None
 
 
-def recent_unresolved_crisis_context(
+def crisis_episode_context(
     messages: list[dict],
     *,
-    exclude_id: str | None = None,
-    window: int = 24,
-) -> str | None:
-    """Infer unresolved crisis-care context from recent conversation history."""
-    checked = 0
-    seen_care_signal = False
-    collected_reversed: list[tuple[str, str]] = []
-    for msg in reversed(messages):
-        if exclude_id and msg.get("id") == exclude_id:
-            continue
+    started_at: datetime,
+    trigger: str = "",
+    exclude_ids: set[str] | None = None,
+) -> str:
+    """Dialogue since the crisis signal, both sides, anchored on the trigger.
+
+    The AI's lines matter: without them a release classifier cannot tell that
+    "对呀" answered "你现在安全吗"."""
+    excluded = exclude_ids or set()
+    lines: list[str] = []
+    for msg in messages:
         role = msg.get("role")
-        if role not in {"user", "assistant"}:
+        if role not in {"user", "assistant"} or _excluded(msg, excluded):
             continue
-        content = str(msg.get("content") or "").strip()
+        said_at = _message_time(msg)
+        if said_at is not None and said_at < started_at:
+            continue
+        content = " ".join(str(msg.get("content") or "").split())
         if not content:
             continue
-        checked += 1
-        if checked > window:
-            break
-        if role == "user" and is_crisis_message(content):
-            seen_care_signal = True
-        if role == "assistant" and is_crisis_care_assistant_message(content):
-            seen_care_signal = True
-        collected_reversed.append((role, content))
+        speaker = "用户" if role == "user" else "AI"
+        lines.append(f"{speaker}: {content[:_CONTEXT_LINE_CHARS]}")
+    head = f"用户: {trigger[:_CONTEXT_LINE_CHARS]}" if trigger else ""
+    if head and lines and lines[0] == head:
+        lines = lines[1:]
+    tail = lines[-_CONTEXT_MAX_LINES:]
+    if head:
+        marker = ["(中间省略)"] if len(lines) > len(tail) else []
+        return "\n".join([head, *marker, *tail])
+    return "\n".join(tail)
 
-    if not seen_care_signal:
-        return None
-    return _format_crisis_context(list(reversed(collected_reversed)))
+
+def _latest_user_crisis_text(messages: list[dict], exclude_ids: set[str]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == "user" and not _excluded(msg, exclude_ids):
+            content = str(msg.get("content") or "")
+            if is_crisis_message(content):
+                return content
+    return ""
 
 
 async def run_crisis_guard(
@@ -225,6 +248,7 @@ async def run_crisis_guard(
     messages_dicts: list[dict],
     user_message_id: str | None,
     exclude_message_ids: set[str] | None = None,
+    now: datetime | None = None,
     semantic_classify_fn: Callable[..., Awaitable[bool]] | None = None,
     followup_classify_fn: Callable[..., Awaitable[str]] | None = None,
 ) -> CrisisGuardDecision:
@@ -235,14 +259,18 @@ async def run_crisis_guard(
 
     semantic_classify_fn = semantic_classify_fn or crisis_message_classify
     followup_classify_fn = followup_classify_fn or crisis_followup_classify
+    now = now or datetime.now(UTC)
+    excluded = set(exclude_message_ids or ())
+    if user_message_id:
+        excluded.add(user_message_id)
+    scope = {"workspace_id": workspace_id, "agent_id": agent_id}
 
     recent_context_text = format_recent_context(
         messages_dicts, exclude_message_id=user_message_id,
         exclude_message_ids=exclude_message_ids, purpose="crisis",
     )
 
-    direct_keyword_hit = is_crisis_message(user_message)
-    if direct_keyword_hit:
+    if is_crisis_message(user_message):
         decision.status = "direct_crisis"
         decision.crisis_force_intent = True
         decision.reason = "keyword"
@@ -262,106 +290,32 @@ async def run_crisis_guard(
             decision.semantic_detected = True
             decision.reason = "semantic"
 
-    crisis_state_context: str | None = None
-    release_count = 0
-    aftercare_turn_count = 0
-    turns_since_safety_check = 0
-    if not decision.crisis_force_intent:
-        crisis_state = await load_crisis_care_state(
-            conversation_id,
-            user_id,
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-        )
-        if crisis_state is not None:
-            crisis_state_context = str(crisis_state.get("context") or "").strip()
-            release_count = int(crisis_state.get("release_count") or 0)
-            aftercare_turn_count = int(crisis_state.get("aftercare_turn_count") or 0)
-            turns_since_safety_check = int(
-                crisis_state.get("turns_since_safety_check") or 0
-            )
-        else:
-            crisis_state_context = recent_unresolved_crisis_context(
-                messages_dicts, exclude_id=user_message_id,
-            )
-
-    decision.recent_crisis_context = crisis_state_context
-    decision.crisis_care_turn = decision.crisis_force_intent or crisis_state_context is not None
-
-    if crisis_state_context is not None:
-        prior_release_count = release_count
-        next_aftercare_turn_count = aftercare_turn_count + 1
-        try:
-            followup_status = await followup_classify_fn(
-                message=user_message,
-                context=crisis_state_context,
-            )
-        except Exception as e:
-            logger.warning(f"Crisis followup classifier failed, guarding: {e}")
-            followup_status = "guard"
-
-        if followup_status == "release":
-            release_count += 1
-            decision.crisis_followup_active = release_count < 2
-            if decision.crisis_followup_active:
-                decision.status = "release_pending"
-                await mark_crisis_care_active(
-                    conversation_id,
-                    user_id,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    context=f"{crisis_state_context}\n用户: {user_message}",
-                    source="followup_release_pending",
-                    release_count=release_count,
-                    aftercare_turn_count=next_aftercare_turn_count,
-                    turns_since_safety_check=0,
-                )
-            else:
-                decision.status = "released"
-                await clear_crisis_care_state(
-                    conversation_id,
-                    user_id,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                )
-        else:
-            next_turns_since_safety_check = turns_since_safety_check + 1
-            decision.crisis_followup_check_mode = crisis_followup_safety_check_mode(
-                followup_status=followup_status,
-                prior_release_count=prior_release_count,
-                turns_since_safety_check=next_turns_since_safety_check,
-                user_message=user_message,
-            )
-            decision.crisis_followup_active = True
-            decision.status = "crisis_followup"
-            await mark_crisis_care_active(
-                conversation_id,
-                user_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                context=f"{crisis_state_context}\n用户: {user_message}",
-                source="followup_guard",
-                release_count=0,
-                aftercare_turn_count=next_aftercare_turn_count,
-                turns_since_safety_check=(
-                    0 if decision.crisis_followup_check_mode != "none"
-                    else next_turns_since_safety_check
-                ),
-            )
-
     if decision.crisis_force_intent:
+        # A new signal always starts a fresh episode and window.
         await mark_crisis_care_active(
-            conversation_id,
-            user_id,
-            workspace_id=workspace_id,
-            agent_id=agent_id,
+            conversation_id, user_id, **scope,
             context=f"用户: {user_message}",
+            trigger=user_message,
             source=decision.status,
-            release_count=0,
-            aftercare_turn_count=0,
-            turns_since_safety_check=0,
+            started_at=now,
+            now=now,
+        )
+    else:
+        await _run_aftercare(
+            decision,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            scope=scope,
+            user_message=user_message,
+            messages_dicts=messages_dicts,
+            excluded=excluded,
+            now=now,
+            followup_classify_fn=followup_classify_fn,
         )
 
+    decision.crisis_care_turn = (
+        decision.crisis_force_intent or decision.recent_crisis_context is not None
+    )
     decision.skip_boundary = decision.crisis_care_turn
     decision.boundary_attack_present = bool(check_banned_keywords(user_message))
     decision.should_restore_patience = (
@@ -389,7 +343,7 @@ async def run_crisis_guard(
         )
     elif decision.crisis_followup_active:
         logger.warning(
-            "[CRISIS-FOLLOWUP] recent unresolved crisis detected, guarding reply",
+            "[CRISIS-FOLLOWUP] crisis aftercare window active, guarding reply",
             extra={
                 "event": EVT_CHAT_CRISIS_DETECTED,
                 "user_message_len": len(user_message),
@@ -401,13 +355,88 @@ async def run_crisis_guard(
     return decision
 
 
+async def _run_aftercare(
+    decision: CrisisGuardDecision,
+    *,
+    conversation_id: str,
+    user_id: str,
+    scope: dict[str, str | None],
+    user_message: str,
+    messages_dicts: list[dict],
+    excluded: set[str],
+    now: datetime,
+    followup_classify_fn: Callable[..., Awaitable[str]],
+) -> None:
+    state = await load_crisis_care_state(conversation_id, user_id, **scope, now=now)
+    if state is not None and state["status"] == "released":
+        return
+    if state is not None and state["started_at"] is not None:
+        started_at = state["started_at"]
+        trigger = state["trigger"]
+    else:
+        # Redis missing/legacy: recover from history, bounded by time.
+        signal_at = latest_crisis_signal_at(messages_dicts, now=now, exclude_ids=excluded)
+        if signal_at is None:
+            return
+        state = state or {}
+        started_at = signal_at
+        trigger = _latest_user_crisis_text(messages_dicts, excluded)
+
+    context = crisis_episode_context(
+        messages_dicts, started_at=started_at, trigger=trigger, exclude_ids=excluded,
+    )
+    decision.recent_crisis_context = context or f"用户: {trigger}"
+    try:
+        followup_status = await followup_classify_fn(
+            message=user_message,
+            context=decision.recent_crisis_context,
+        )
+    except Exception as e:
+        logger.warning(f"Crisis followup classifier failed, guarding: {e}")
+        followup_status = "guard"
+
+    if followup_status == "release":
+        decision.status = "released"
+        decision.reason = "classifier_release"
+        await mark_crisis_care_released(
+            conversation_id, user_id, **scope, started_at=started_at, now=now,
+        )
+        return
+
+    turns_since_check = int(state.get("turns_since_safety_check") or 0) + 1
+    check_count = int(state.get("safety_check_count") or 0)
+    suppressed = bool(state.get("checks_suppressed"))
+    mode = crisis_followup_safety_check_mode(
+        turns_since_safety_check=turns_since_check,
+        safety_check_count=check_count,
+        checks_suppressed=suppressed,
+        user_message=user_message,
+    )
+    decision.crisis_followup_check_mode = mode
+    decision.crisis_followup_active = True
+    decision.status = "crisis_followup"
+    await mark_crisis_care_active(
+        conversation_id, user_id, **scope,
+        context=decision.recent_crisis_context,
+        trigger=trigger,
+        source="followup_guard",
+        started_at=started_at,
+        aftercare_turn_count=int(state.get("aftercare_turn_count") or 0) + 1,
+        turns_since_safety_check=0 if mode == "soft" else turns_since_check,
+        safety_check_count=check_count + (1 if mode == "soft" else 0),
+        checks_suppressed=suppressed or mode == "annoyed",
+        now=now,
+    )
+
+
 __all__ = [
     "CrisisGuardDecision",
+    "crisis_episode_context",
     "crisis_followup_safety_check_mode",
     "is_crisis_message",
     "is_crisis_released",
-    "recent_unresolved_crisis_context",
-    "recent_unresolved_crisis_message",
+    "is_safety_check_unwelcome",
+    "latest_crisis_signal_at",
     "run_crisis_guard",
     "should_semantic_crisis_check",
 ]

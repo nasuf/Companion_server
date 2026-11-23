@@ -847,15 +847,15 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "intent.crisis_followup_reply", "危机后续跟进回复", "聊天热路径", "聊天",
-        "【工程主导】危机后的下一段对话仍需安全优先。用户不再重复危机关键词、"
-        "但最近上下文存在未解除危机时, intent_handlers.handle_crisis_followup "
-        "调用本 prompt, 避免 current_state/schedule 等普通短路把话题带偏。",
+        "【工程主导】危机后 24 小时陪伴窗口内, 用户不再重复危机关键词时, "
+        "intent_handlers.handle_crisis_followup 调用本 prompt: 认真接住当前话题, "
+        "安全复核由代码按节奏下发 (每episode最多 2 次), 未下发时不追问安全。",
         CRISIS_FOLLOWUP_REPLY_PROMPT,
     ),
     PromptDefinition(
         "intent.crisis_followup_classify", "危机后续状态判定", "聊天热路径", "聊天",
-        "【工程主导】近期存在未解除危机时, 用小模型判断当前消息是否明确解除危机。"
-        "默认 guard, 仅高置信 explicit release 才解除, 避免普通问候/问 AI 状态误回普通路径。",
+        "【工程主导】危机后 24 小时陪伴窗口内, 用小模型结合危机后的双方对话判断是否解除。"
+        "用户明确安全/好转, 或肯定回答 AI 的安全问句即解除 (一次即可); 含糊/仍有风险判 guard。",
         CRISIS_FOLLOWUP_CLASSIFY_PROMPT,
     ),
 

@@ -110,6 +110,7 @@ async def guard(ctx):
         messages_dicts=ctx.messages_dicts,
         user_message_id=ctx.user_message_id,
         exclude_message_ids=ctx.current_turn_ids,
+        now=ctx.turn_clock.now,
     )
     ctx.crisis_force_intent = ctx.crisis_decision.crisis_force_intent
     ctx.crisis_followup_active = ctx.crisis_decision.crisis_followup_active

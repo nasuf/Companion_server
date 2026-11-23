@@ -905,16 +905,19 @@ def _crisis_followup_safety_check_instruction(mode: str) -> str:
     """Instruction string rendered into the crisis follow-up prompt."""
     if mode == "soft":
         return (
-            "本轮需要做一次轻量安全复核。先自然回应用户当前话题, "
-            "再用一句不审问的方式确认 Ta 现在是否安全、是否还有伤害自己的冲动。"
+            "本轮可以做一次轻量安全关心。先认真回应用户当前话题, "
+            "再用一句贴合当下话题、不审问的话关心 Ta 现在怎么样; "
+            "不要复用【最近对话】里你问过的安全问句。"
         )
     if mode == "annoyed":
         return (
-            "本轮需要做一次安全复核, 但用户可能已经嫌问题烦。"
-            "先承认这些确认会烦, 简短说明只是因为刚才的风险需要确认安全, "
-            "然后只请 Ta 用一句话确认现在是否安全。"
+            "用户在提醒你问得太多了。本轮不再确认安全: 用一句自然的话承认是你问多了、"
+            "说明只是在意 Ta, 然后认真接住 Ta 当前的话题; 之后也不要再主动追问安全。"
         )
-    return "本轮不主动复核安全状态; 除非用户主动提到风险, 不要追问安全。"
+    return (
+        "本轮不做安全复核; 除非用户主动提到风险, 不要问\"还好吗/安全吗/念头还在吗\"一类问题, "
+        "把关心放在认真回应 Ta 说的内容里。"
+    )
 
 
 def _extract_memory_preference_topics(message: str) -> list[str]:
@@ -959,9 +962,9 @@ def _crisis_followup_memory_absence_reply(
 
     reply = f"我这里没有看到你跟我说过{fact_label}，不能乱猜。你愿意的话再告诉我一次。"
     if safety_check_mode == "soft":
-        reply += " 也跟我确认一下，你现在是安全的吗？"
+        reply += " 对了，你今天整体感觉怎么样？"
     elif safety_check_mode == "annoyed":
-        reply += " 我知道一直确认会烦，但刚才那种风险我还是得问一句：你现在安全吗？"
+        reply = "是我问太多了，就是有点放心不下你。" + reply
     return reply
 
 

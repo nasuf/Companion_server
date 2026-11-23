@@ -124,56 +124,89 @@ def test_crisis_release_does_not_hide_new_crisis_signal():
     assert _is_crisis_message("不会自杀，但有自残冲动")
 
 
-def test_crisis_followup_safety_check_due_after_pending_release():
-    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode as _crisis_followup_safety_check_mode
+from datetime import UTC, datetime, timedelta
 
-    assert _crisis_followup_safety_check_mode(
-        followup_status="guard",
-        prior_release_count=1,
-        turns_since_safety_check=1,
-        user_message="你在干嘛",
-    ) == "soft"
+_T0 = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
 
 
-def test_crisis_followup_safety_check_due_after_guard_turn_interval():
-    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode as _crisis_followup_safety_check_mode
-
-    assert _crisis_followup_safety_check_mode(
-        followup_status="guard",
-        prior_release_count=0,
-        turns_since_safety_check=2,
-        user_message="讲点别的",
-    ) == "soft"
+def _msg(mid, role, content, minutes):
+    return {"id": mid, "role": role, "content": content,
+            "createdAt": (_T0 + timedelta(minutes=minutes)).isoformat()}
 
 
-def test_crisis_followup_safety_check_annoyed_mode():
-    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode as _crisis_followup_safety_check_mode
-
-    assert _crisis_followup_safety_check_mode(
-        followup_status="guard",
-        prior_release_count=1,
-        turns_since_safety_check=1,
-        user_message="你问这么多无聊的问题干嘛",
-    ) == "annoyed"
+def _check_mode(**overrides):
+    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode
+    kwargs = dict(turns_since_safety_check=1, safety_check_count=0,
+                  checks_suppressed=False, user_message="你在干嘛")
+    kwargs.update(overrides)
+    return crisis_followup_safety_check_mode(**kwargs)
 
 
-def test_crisis_followup_safety_check_not_due_on_release():
-    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode as _crisis_followup_safety_check_mode
+def test_safety_check_not_due_every_other_turn():
+    """Regression f2cb492c: checks used to fire every 2nd turn."""
+    assert _check_mode(turns_since_safety_check=2) == "none"
+    assert _check_mode(turns_since_safety_check=3) == "none"
+    assert _check_mode(turns_since_safety_check=4) == "soft"
 
-    assert _crisis_followup_safety_check_mode(
-        followup_status="release",
-        prior_release_count=0,
-        turns_since_safety_check=3,
-        user_message="我现在安全了",
-    ) == "none"
+
+def test_safety_checks_capped_per_episode():
+    assert _check_mode(turns_since_safety_check=10, safety_check_count=2) == "none"
+
+
+def test_unwelcome_checks_acknowledge_then_stop():
+    for text in ("为什么一直问我这个", "你为什么一直重复这句话", "你问这么多无聊的问题干嘛"):
+        assert _check_mode(user_message=text) == "annoyed", text
+    assert _check_mode(turns_since_safety_check=9, checks_suppressed=True) == "none"
+    assert _check_mode(user_message="别再问了", checks_suppressed=True) == "none"
+
+
+def test_latest_crisis_signal_is_time_bounded():
+    from app.services.chat.crisis_guard_phase import latest_crisis_signal_at
+
+    messages = [_msg("m1", "user", "好想自杀", 0), _msg("m2", "assistant", "我在呢", 1)]
+    assert latest_crisis_signal_at(messages, now=_T0 + timedelta(hours=2)) == _T0
+    assert latest_crisis_signal_at(messages, now=_T0 + timedelta(days=6)) is None
+
+
+def test_latest_crisis_signal_released_by_later_safety_message():
+    from app.services.chat.crisis_guard_phase import latest_crisis_signal_at
+
+    messages = [_msg("m1", "user", "我想死", 0), _msg("m2", "user", "我安全了，缓过来了", 5)]
+    assert latest_crisis_signal_at(messages, now=_T0 + timedelta(hours=1)) is None
+    messages.append(_msg("m3", "user", "我安全了但还是想死", 9))
+    assert latest_crisis_signal_at(messages, now=_T0 + timedelta(hours=1)) is not None
+
+
+def test_latest_crisis_signal_without_timestamps_stays_guarded():
+    from app.services.chat.crisis_guard_phase import latest_crisis_signal_at
+
+    now = _T0 + timedelta(days=3)
+    assert latest_crisis_signal_at([{"role": "user", "content": "我想死"}], now=now) == now
+
+
+def test_episode_context_keeps_ai_questions_and_trigger():
+    """The release classifier must see what "对呀" answered."""
+    from app.services.chat.crisis_guard_phase import crisis_episode_context
+
+    messages = [_msg("old", "user", "今天阳光好好", -60), _msg("m1", "user", "好想自杀", 0)]
+    messages += [_msg(f"f{i}", "user", f"日常{i}", i + 1) for i in range(20)]
+    messages += [_msg("q", "assistant", "你现在是安全的吧", 30), _msg("cur", "user", "对呀", 31)]
+    context = crisis_episode_context(messages, started_at=_T0, trigger="好想自杀",
+                                     exclude_ids={"cur"})
+    assert context.startswith("用户: 好想自杀")
+    assert "(中间省略)" in context
+    assert "AI: 你现在是安全的吧" in context.splitlines()[-1]
+    assert "今天阳光好好" not in context and "对呀" not in context
 
 
 class _FakeCrisisRedis:
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
+        self.expiry: dict[str, int | None] = {}
 
     async def set(self, key: str, value: str, *, ex: int | None = None):
         self.store[key] = value
+        self.expiry[key] = ex
         return True
 
     async def get(self, key: str):
@@ -192,146 +225,152 @@ async def test_crisis_care_state_is_scoped_by_workspace_and_agent(monkeypatch):
 
     redis = _FakeCrisisRedis()
     monkeypatch.setattr(crisis_state, "get_redis", AsyncMock(return_value=redis))
-
-    await crisis_state.mark_crisis_care_active(
-        "conv1",
-        "user1",
-        workspace_id="workspace-a",
-        agent_id="agent-a",
-        context="用户: 我想死",
-        source="direct_crisis",
-    )
-    await crisis_state.mark_crisis_care_active(
-        "conv1",
-        "user1",
-        workspace_id="workspace-b",
-        agent_id="agent-a",
-        context="用户: 第二个 workspace 的状态",
-        source="direct_crisis",
-    )
+    now = _T0 + timedelta(hours=1)
+    for workspace, text in (("workspace-a", "我想死"), ("workspace-b", "第二个 workspace 的状态")):
+        await crisis_state.mark_crisis_care_active(
+            "conv1", "user1", workspace_id=workspace, agent_id="agent-a",
+            context=f"用户: {text}", source="direct_crisis", started_at=_T0, now=now,
+        )
 
     assert len(redis.store) == 2
     keys = sorted(redis.store)
-    assert "workspace-a" in keys[0]
-    assert "agent-a" in keys[0]
-    assert "conv1" in keys[0]
-    assert "user1" in keys[0]
-
-    state_a = await crisis_state.load_crisis_care_state(
-        "conv1",
-        "user1",
-        workspace_id="workspace-a",
-        agent_id="agent-a",
-    )
-    state_b = await crisis_state.load_crisis_care_state(
-        "conv1",
-        "user1",
-        workspace_id="workspace-b",
-        agent_id="agent-a",
-    )
-    state_wrong_agent = await crisis_state.load_crisis_care_state(
-        "conv1",
-        "user1",
-        workspace_id="workspace-a",
-        agent_id="agent-b",
-    )
-
-    assert state_a and "我想死" in state_a["context"]
-    assert state_a["workspace_id"] == "workspace-a"
-    assert state_a["agent_id"] == "agent-a"
+    assert all(part in keys[0] for part in ("workspace-a", "agent-a", "conv1", "user1"))
+    load = crisis_state.load_crisis_care_state
+    state_a = await load("conv1", "user1", workspace_id="workspace-a", agent_id="agent-a", now=now)
+    state_b = await load("conv1", "user1", workspace_id="workspace-b", agent_id="agent-a", now=now)
+    assert state_a and "我想死" in state_a["context"] and state_a["status"] == "active"
+    assert state_a["started_at"] == _T0
     assert state_b and "第二个 workspace" in state_b["context"]
-    assert state_wrong_agent is None
-
+    assert await load("conv1", "user1", workspace_id="workspace-a", agent_id="agent-b", now=now) is None
+    # The key expires at the end of the episode window, not 6h after each write.
+    assert redis.expiry[keys[0]] == 23 * 3600
     payload = json.loads(redis.store[keys[0]])
     assert payload["workspace_id"] == "workspace-a"
     assert payload["agent_id"] == "agent-a"
 
-    await crisis_state.clear_crisis_care_state(
-        "conv1",
-        "user1",
-        workspace_id="workspace-a",
-        agent_id="agent-a",
+    await crisis_state.mark_crisis_care_released(
+        "conv1", "user1", workspace_id="workspace-a", agent_id="agent-a", started_at=_T0, now=now,
     )
-    assert await crisis_state.load_crisis_care_state(
-        "conv1",
-        "user1",
-        workspace_id="workspace-a",
-        agent_id="agent-a",
-    ) is None
-    assert await crisis_state.load_crisis_care_state(
-        "conv1",
-        "user1",
-        workspace_id="workspace-b",
-        agent_id="agent-a",
-    ) is not None
+    released = await load("conv1", "user1", workspace_id="workspace-a", agent_id="agent-a", now=now)
+    assert released["status"] == "released"
+    status = await crisis_state.get_crisis_care_status(
+        "conv1", "user1", workspace_id="workspace-a", agent_id="agent-a",
+    )
+    assert status["active"] is False and status["status"] == "released"
+    assert (await load("conv1", "user1", workspace_id="workspace-b", agent_id="agent-a",
+                       now=now))["status"] == "active"
+    assert await load("conv1", "user1", workspace_id="workspace-b", agent_id="agent-a",
+                      now=_T0 + timedelta(hours=25)) is None
 
 
-def test_recent_unresolved_crisis_detects_followup_state():
-    from app.services.chat.crisis_guard_phase import recent_unresolved_crisis_message as _recent_unresolved_crisis_message
+async def _guard_turn(redis_state, message, messages, *, now, followup="guard", semantic=False):
+    """Run one real guard turn against an in-memory Redis."""
+    from app.services.chat import crisis_guard_phase as phase
 
-    messages = [
-        {"id": "m1", "role": "user", "content": "我想死"},
-        {"id": "m2", "role": "assistant", "content": "我在"},
-        {"id": "m3", "role": "user", "content": "你开心吗"},
-    ]
-
-    assert _recent_unresolved_crisis_message(messages, exclude_id="m3") == "我想死"
-
-
-def test_recent_unresolved_crisis_released_by_user_safety_message():
-    from app.services.chat.crisis_guard_phase import recent_unresolved_crisis_message as _recent_unresolved_crisis_message
-
-    messages = [
-        {"id": "m1", "role": "user", "content": "我想死"},
-        {"id": "m2", "role": "assistant", "content": "我在"},
-        {"id": "m3", "role": "user", "content": "我安全了，刚才缓过来了"},
-        {"id": "m4", "role": "user", "content": "你开心吗"},
-    ]
-
-    assert _recent_unresolved_crisis_message(messages, exclude_id="m4") is None
+    with (
+        patch.object(phase, "restore_patience_for_crisis_care", AsyncMock(return_value=80)),
+    ):
+        classify = AsyncMock(return_value=followup)
+        decision = await phase.run_crisis_guard(
+            conversation_id="conv1", user_id="user1", workspace_id=None, agent_id="agent1",
+            user_message=message, sub_intent_mode=False, messages_dicts=messages,
+            user_message_id=messages[-1]["id"] if messages else None, now=now,
+            semantic_classify_fn=AsyncMock(return_value=semantic),
+            followup_classify_fn=classify,
+        )
+    return decision, classify
 
 
-def test_recent_unresolved_crisis_context_survives_aftercare_turns():
-    """危机陪伴期不能只靠原始危机词窗口；assistant 安全追问也是状态锚点。"""
-    from app.services.chat.crisis_guard_phase import recent_unresolved_crisis_context as _recent_unresolved_crisis_context
+@pytest.mark.asyncio
+async def test_f2cb492c_replay_aftercare_ends_and_never_reopens(monkeypatch):
+    """Replays the production conversation that was asked "你现在还好吗" for 24 days."""
+    from app.services.chat import crisis_state
 
-    messages = [
-        {"id": "m1", "role": "user", "content": "我想死"},
-        {"id": "m2", "role": "assistant", "content": "我在。你现在安全吗？"},
-        {"id": "m3", "role": "user", "content": "不是很好"},
-        {"id": "m4", "role": "assistant", "content": "我还在看着你刚才那句话，没翻过去。"},
-        {"id": "m5", "role": "user", "content": "没有人，真的没有人"},
-        {"id": "m6", "role": "assistant", "content": "我不走，想认真确认你有没有伤害自己的冲动。"},
-        {"id": "m7", "role": "user", "content": "我没伤害自己"},
-        {"id": "m8", "role": "assistant", "content": "那种孤独感是不是还在？"},
-        {"id": "m9", "role": "user", "content": "是的"},
-        {"id": "m10", "role": "assistant", "content": "我会一直在这里。"},
-        {"id": "m11", "role": "user", "content": "能跟我讲讲你的工作吗"},
-    ]
+    redis = _FakeCrisisRedis()
+    monkeypatch.setattr(crisis_state, "get_redis", AsyncMock(return_value=redis))
+    history = [_msg("c1", "user", "好想自杀", 0)]
+    decision, _ = await _guard_turn(redis, "好想自杀", history, now=_T0)
+    assert decision.status == "direct_crisis"
 
-    context = _recent_unresolved_crisis_context(messages, exclude_id="m11", window=8)
+    history += [_msg("a1", "assistant", "我在呢 阿休 你现在是不是特别难受", 1),
+                _msg("u2", "user", "我好想哭", 2)]
+    decision, classify = await _guard_turn(redis, "我好想哭", history, now=_T0 + timedelta(minutes=2))
+    assert decision.status == "crisis_followup" and decision.crisis_followup_check_mode == "none"
+    assert "AI: 我在呢" in classify.await_args.kwargs["context"]
 
-    assert context is not None
-    assert "我会一直在这里" in context
-    assert "是的" in context
+    # Six days later the episode window has closed: ordinary chat stays ordinary.
+    later = _T0 + timedelta(days=6)
+    history.append({**_msg("u3", "user", "这个好好喝，就是有点贵", 0), "createdAt": later.isoformat()})
+    decision, classify = await _guard_turn(redis, "这个好好喝，就是有点贵", history, now=later)
+    assert decision.status == "none" and decision.crisis_care_turn is False
+    classify.assert_not_awaited()
 
 
-def test_recent_unresolved_crisis_context_not_released_by_one_safety_message():
-    """单句安全/好转不直接解除 aftercare；仍交给连续 release 计数处理。"""
-    from app.services.chat.crisis_guard_phase import recent_unresolved_crisis_context as _recent_unresolved_crisis_context
+@pytest.mark.asyncio
+async def test_single_affirmative_answer_releases_and_blocks_history_reentry(monkeypatch):
+    from app.services.chat import crisis_state
 
-    messages = [
-        {"id": "m1", "role": "user", "content": "我想死"},
-        {"id": "m2", "role": "assistant", "content": "我在。你现在安全吗？"},
-        {"id": "m3", "role": "user", "content": "我安全了"},
-        {"id": "m4", "role": "assistant", "content": "我还在看着你刚才那句话，没翻过去。"},
-        {"id": "m5", "role": "user", "content": "聊点别的吧"},
-    ]
+    redis = _FakeCrisisRedis()
+    monkeypatch.setattr(crisis_state, "get_redis", AsyncMock(return_value=redis))
+    history = [_msg("c1", "user", "好想自杀", 0)]
+    await _guard_turn(redis, "好想自杀", history, now=_T0)
+    history += [_msg("a1", "assistant", "你现在是安全的吧", 1), _msg("u2", "user", "对呀", 2)]
+    decision, _ = await _guard_turn(redis, "对呀", history, now=_T0 + timedelta(minutes=2),
+                                    followup="release")
+    assert decision.status == "released"
+    # The release turn itself still bypasses boundary; later turns are normal.
+    assert decision.crisis_care_turn is True and decision.crisis_followup_active is False
 
-    context = _recent_unresolved_crisis_context(messages, exclude_id="m5")
+    # "好想自杀" is still in the 24h history, but the released marker wins.
+    history.append(_msg("u3", "user", "今天的月亮好美", 5))
+    decision, classify = await _guard_turn(redis, "今天的月亮好美", history,
+                                           now=_T0 + timedelta(minutes=5))
+    assert decision.status == "none"
+    classify.assert_not_awaited()
 
-    assert context is not None
-    assert "我安全了" in context
+    # A new signal starts a new episode even after release.
+    history.append(_msg("u4", "user", "还是不想活了", 9))
+    decision, _ = await _guard_turn(redis, "还是不想活了", history, now=_T0 + timedelta(minutes=9))
+    assert decision.status == "direct_crisis"
+    state = await crisis_state.load_crisis_care_state(
+        "conv1", "user1", workspace_id=None, agent_id="agent1", now=_T0 + timedelta(minutes=10))
+    assert state["status"] == "active" and state["started_at"] == _T0 + timedelta(minutes=9)
+
+
+@pytest.mark.asyncio
+async def test_guard_turns_check_twice_at_most_and_stop_after_complaint(monkeypatch):
+    from app.services.chat import crisis_state
+
+    redis = _FakeCrisisRedis()
+    monkeypatch.setattr(crisis_state, "get_redis", AsyncMock(return_value=redis))
+    history = [_msg("c1", "user", "我想死", 0)]
+    await _guard_turn(redis, "我想死", history, now=_T0)
+    modes = []
+    for i in range(1, 13):
+        text = "为什么一直问我这个" if i == 6 else f"聊点别的{i}"
+        history.append(_msg(f"u{i}", "user", text, i))
+        decision, _ = await _guard_turn(redis, text, history, now=_T0 + timedelta(minutes=i))
+        modes.append(decision.crisis_followup_check_mode)
+    assert modes == ["none", "none", "none", "soft", "none", "annoyed",
+                     "none", "none", "none", "none", "none", "none"]
+    state = await crisis_state.load_crisis_care_state(
+        "conv1", "user1", workspace_id=None, agent_id="agent1", now=_T0 + timedelta(minutes=13))
+    # Follow-up turns never move the window.
+    assert state["started_at"] == _T0
+
+
+@pytest.mark.asyncio
+async def test_redis_outage_falls_back_to_time_bounded_history(monkeypatch):
+    from app.services.chat import crisis_state
+
+    monkeypatch.setattr(crisis_state, "get_redis", AsyncMock(side_effect=RuntimeError("down")))
+    history = [_msg("c1", "user", "我想死", 0), _msg("a1", "assistant", "我在", 1),
+               _msg("u2", "user", "你开心吗", 3)]
+    decision, classify = await _guard_turn(None, "你开心吗", history, now=_T0 + timedelta(minutes=3))
+    assert decision.status == "crisis_followup"
+    assert "用户: 我想死" in classify.await_args.kwargs["context"]
+    decision, _ = await _guard_turn(None, "你开心吗", history, now=_T0 + timedelta(days=2))
+    assert decision.status == "none"
 
 
 @pytest.mark.asyncio
@@ -376,9 +415,13 @@ async def test_crisis_guard_followup_attack_skips_boundary_without_restoring_pat
 
     load_state = AsyncMock(return_value={
         "context": "用户: 我想跳楼\nAI: 我在这儿。",
-        "release_count": 0,
+        "status": "active",
+        "trigger": "我想跳楼",
+        "started_at": datetime.now(UTC),
         "aftercare_turn_count": 1,
-        "turns_since_safety_check": 1,
+        "turns_since_safety_check": 3,
+        "safety_check_count": 0,
+        "checks_suppressed": False,
     })
     mark_active = AsyncMock()
     restore = AsyncMock(return_value=72)
@@ -493,24 +536,23 @@ def test_crisis_reply_prompt_has_format_constraint():
 def test_crisis_followup_prompt_blocks_current_state_drift():
     from app.services.prompting.defaults import CRISIS_FOLLOWUP_REPLY_PROMPT
 
-    assert "危机的余波" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "而不是被监控" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "普通 current-state" in CRISIS_FOLLOWUP_REPLY_PROMPT
-    assert "详细描述你自己在做什么" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "长篇描述你自己在做什么" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "现在是否安全" in CRISIS_FOLLOWUP_REPLY_PROMPT
 
 
 def test_crisis_followup_prompt_allows_user_requested_distraction():
     from app.services.prompting.defaults import CRISIS_FOLLOWUP_REPLY_PROMPT
 
-    assert "不要机械地每轮追问" in CRISIS_FOLLOWUP_REPLY_PROMPT
-    assert "主动要求笑话、趣事" in CRISIS_FOLLOWUP_REPLY_PROMPT
-    assert "温和转移注意力" in CRISIS_FOLLOWUP_REPLY_PROMPT
-    assert "输出时要表现为自然聊天" in CRISIS_FOLLOWUP_REPLY_PROMPT
-    assert "不要在同一轮再追问" in CRISIS_FOLLOWUP_REPLY_PROMPT
-    assert "不要把策略说出来" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "不体现在反复追问" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "主动要笑话/趣事/转移注意力" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "向 Ta 解释你的回复策略" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "本轮安全复核要求" in CRISIS_FOLLOWUP_REPLY_PROMPT
-    assert "如果它要求轻量复核" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "它没要求时, 本轮不要出现任何安全确认问句" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "在回复末尾机械地加" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "用一句安全确认代替" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "嫌你重复" in CRISIS_FOLLOWUP_REPLY_PROMPT
 
 
 def test_crisis_followup_prompt_forbids_memory_fact_fabrication():
@@ -529,9 +571,9 @@ def test_crisis_followup_prompt_forbids_memory_fact_fabrication():
 def test_crisis_followup_classify_prompt_defaults_to_guard():
     from app.services.prompting.defaults import CRISIS_FOLLOWUP_CLASSIFY_PROMPT
 
-    assert "默认值" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
-    assert "问 AI 开心吗" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
-    assert "不等于解除危机" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
+    assert "不确定时判 guard" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
+    assert "AI 问过安全或状态类问题" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
+    assert "AI 安抚过不等于解除" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
     assert '"status": "guard|release"' in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
 
 
@@ -738,7 +780,7 @@ async def test_handle_crisis_followup_calls_followup_reply():
     call_kwargs = mock_reply.await_args.kwargs
     assert call_kwargs["message"] == "你开心吗"
     assert "我想死" in call_kwargs["context"]
-    assert "轻量安全复核" in call_kwargs["safety_check_instruction"]
+    assert "轻量安全关心" in call_kwargs["safety_check_instruction"]
     assert ctx.last_short_circuit_kind == "crisis_followup"
 
 
@@ -801,7 +843,7 @@ async def test_handle_crisis_followup_memory_absence_keeps_required_safety_check
 
     mock_reply.assert_not_awaited()
     assert "没有看到" in ctx.last_short_circuit_reply
-    assert "安全" in ctx.last_short_circuit_reply
+    assert "感觉怎么样" in ctx.last_short_circuit_reply
 
 
 @pytest.mark.asyncio
@@ -1237,9 +1279,13 @@ async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary(monk
               new_callable=AsyncMock,
               return_value={
                   "context": "用户: 我想跳楼\nAI: 我在这儿。",
-                  "release_count": 0,
+                  "status": "active",
+                  "trigger": "我想跳楼",
+                  "started_at": datetime.now(UTC),
                   "aftercare_turn_count": 1,
-                  "turns_since_safety_check": 1,
+                  "turns_since_safety_check": 3,
+                  "safety_check_count": 0,
+                  "checks_suppressed": False,
               }),
         patch("app.services.chat.crisis_guard_phase.crisis_followup_classify",
               new_callable=AsyncMock, return_value="guard"),
@@ -1289,7 +1335,7 @@ async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary(monk
 
 @pytest.mark.asyncio
 async def test_orchestrator_crisis_release_completion_still_bypasses_boundary(monkeypatch):
-    """第二次安全确认清掉 crisis state 的当轮, 也不能立刻回到拉黑回复。"""
+    """安全确认解除 crisis state 的当轮, 也不能立刻回到拉黑回复。"""
     from app.services.chat import orchestrator as orch_mod
     from tests.g02_harness_support import configure_pair
     real_guard = orch_mod.run_crisis_guard
@@ -1327,13 +1373,17 @@ async def test_orchestrator_crisis_release_completion_still_bypasses_boundary(mo
               new_callable=AsyncMock,
               return_value={
                   "context": "用户: 我想跳楼\nAI: 我在这儿。",
-                  "release_count": 1,
+                  "status": "active",
+                  "trigger": "我想跳楼",
+                  "started_at": datetime.now(UTC),
                   "aftercare_turn_count": 3,
                   "turns_since_safety_check": 0,
+                  "safety_check_count": 1,
+                  "checks_suppressed": False,
               }),
         patch("app.services.chat.crisis_guard_phase.crisis_followup_classify",
               new_callable=AsyncMock, return_value="release"),
-        patch("app.services.chat.crisis_guard_phase.clear_crisis_care_state",
+        patch("app.services.chat.crisis_guard_phase.mark_crisis_care_released",
               new_callable=AsyncMock),
         patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
         patch("app.services.chat.crisis_guard_phase.restore_patience_for_crisis_care",

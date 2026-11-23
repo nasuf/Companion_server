@@ -153,17 +153,15 @@ CRISIS_SEMANTIC_DIRECT_PHRASES = (
     "说再见", "最后一次发泄", "最后一次告别", "让我走",
     "不想继续了", "不想撑了", "撑不下去了",
 )
-CRISIS_CARE_ASSISTANT_MARKERS = (
-    "你现在安全吗",
-    "有没有伤害自己",
-    "伤害自己的冲动",
-    "我还在看着你刚才",
-    "没翻过去",
-    "我不会跳过",
-)
+# User signals that repeated safety questions are unwelcome. Matched as
+# substrings, so keep entries specific to being asked/repeated.
 CRISIS_CHECK_ANNOYED_TERMS = (
-    "无聊的问题", "问这么多", "别问", "不要问", "烦不烦",
+    "无聊的问题", "问这么多", "别问", "不要问", "别再问", "烦不烦",
     "烦死", "审问", "查户口",
+    "一直问", "老是问", "总是问", "总问", "老问", "又问", "怎么又问",
+    "为什么一直", "为什么总", "为什么老",
+    "一直重复", "老是重复", "重复这句", "重复这个", "重复同一句",
+    "问了好多遍", "问好几遍", "问过了",
 )
 
 MEMORY_FACT_RECALL_CUES = (
