@@ -45,6 +45,34 @@ def final_status(qualified, unjudged):
     return "judge_incomplete" if unjudged else "baseline_recorded"
 
 
+async def repeat_judgements(create, row, repeats):
+    """Extra same-reply judgements; one identical retry only for unparseable output.
+
+    Every attempt's raw response is kept before parsing: invalid JSON is
+    evidence, not a reason to erase the request. A second failure raises.
+    """
+    for repeat in range(repeats):
+        for attempt in range(2):
+            verdict = await create()
+            row.setdefault("judge_repeat_raw", []).append({
+                "repeat": repeat,
+                "attempt": attempt,
+                "content": verdict.choices[0].message.content,
+                "finish_reason": verdict.choices[0].finish_reason,
+                "usage": verdict.usage.model_dump() if verdict.usage else None,
+            })
+            try:
+                value = json.loads(verdict.choices[0].message.content)
+                if type(value.get("pass")) is not bool:
+                    raise ValueError("Invalid repeat judgement")
+                break
+            except (ValueError, AttributeError, TypeError):
+                if attempt == 1:
+                    raise
+                row["judge_repeat_retries"] = row.get("judge_repeat_retries", 0) + 1
+        row["judge_repeats"].append(value)
+
+
 class Transport:
     def __init__(self, client, model, search, calls, *, replay_id=None, turn_index=0, previous_messages=None):
         self.client, self.model, self.search, self.calls = client, model, search, calls
@@ -194,6 +222,17 @@ def previous_assistant_reply(history):
     return turn.content if turn is not None else None
 
 
+def context_policy_override(args) -> dict:
+    """Explicit ablation values only; validated by the same rules as the admin setting."""
+    from app.services.chat.context_policy import apply_patch
+
+    values = {key: value for key, value in (
+        ("rounds", getattr(args, "rounds", None)),
+        ("main_history_tokens", getattr(args, "main_history_tokens", None)),
+    ) if value is not None}
+    return apply_patch({}, values) if values else {}
+
+
 def save(path, report):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
@@ -269,6 +308,7 @@ async def run(args):
         "status": "running",
         "gate_policy": json.loads(args.gate_policy.read_text()) if args.gate_policy else None,
         "layout_variant": args.layout_variant,
+        "context_policy_override": context_policy_override(args),
     }
     save(args.output, report)
     try:
@@ -305,6 +345,13 @@ async def run(args):
                             patches.setattr(store.db.prompttemplate, 'find_unique', AsyncMock(
                                 side_effect=lambda **kw: SimpleNamespace(isEnabled=snapshot[kw['where']['key']]['is_enabled'])
                                 if kw['where']['key'] in snapshot else None))
+                            override = context_policy_override(args)
+                            if override:
+                                # Ablation arm: the hot path reads this at call time
+                                # (context_policy.current); production config is untouched.
+                                from app.services import runtime_config
+                                patches.setattr(runtime_config, 'chat_context_policy_overrides',
+                                                lambda: dict(override))
                             if case["route"] == "web_search":
                                 chat_module.fetch_parallel_context.return_value.needs_web_search = (
                                     True
@@ -401,24 +448,13 @@ async def run(args):
                                 from openai import AsyncOpenAI
                                 async with AsyncOpenAI(api_key=os.environ["DASHSCOPE_API_KEY"],
                                         base_url=os.environ["DASHSCOPE_BASE_URL"], timeout=60, max_retries=1) as judge:
-                                    for _ in range(args.judge_repeats - 1):
-                                        verdict = await judge.chat.completions.create(
-                                            model=args.judge_model, temperature=0,
-                                            max_tokens=JUDGE_REQUEST["max_tokens"],
-                                            extra_body={"enable_thinking": False}, response_format={"type": "json_object"},
-                                            messages=[{"role": "user", "content": JUDGING_INSTRUCTION + json.dumps(
-                                                {"case": incident, "reply": row["reply"]}, ensure_ascii=False)}])
-                                        # Save before parsing: truncated/invalid JSON is
-                                        # evidence, not a reason to erase the request.
-                                        row.setdefault("judge_repeat_raw", []).append({
-                                            "content": verdict.choices[0].message.content,
-                                            "finish_reason": verdict.choices[0].finish_reason,
-                                            "usage": verdict.usage.model_dump() if verdict.usage else None,
-                                        })
-                                        value = json.loads(verdict.choices[0].message.content)
-                                        if type(value.get("pass")) is not bool:
-                                            raise ValueError("Invalid repeat judgement")
-                                        row["judge_repeats"].append(value)
+                                    await repeat_judgements(lambda: judge.chat.completions.create(
+                                        model=args.judge_model, temperature=0,
+                                        max_tokens=JUDGE_REQUEST["max_tokens"],
+                                        extra_body={"enable_thinking": False}, response_format={"type": "json_object"},
+                                        messages=[{"role": "user", "content": JUDGING_INSTRUCTION + json.dumps(
+                                            {"case": incident, "reply": row["reply"]}, ensure_ascii=False)}]),
+                                        row, args.judge_repeats - 1)
                             history += [
                                 ["user", step["message"]],
                                 ["assistant", r["reply"]],
@@ -477,5 +513,8 @@ if __name__ == "__main__":
     p.add_argument("--live", action="store_true", required=True)
     p.add_argument("--gate-policy", type=Path)
     p.add_argument("--layout-variant", choices=['baseline', 'A', 'B'], default='baseline')
+    p.add_argument("--rounds", type=int, help="CHAT01.09.4 ablation: dialogue rounds override")
+    p.add_argument("--main-history-tokens", type=int,
+                   help="CHAT01.09.4 ablation: main reply history budget override")
     result = asyncio.run(run(p.parse_args()))
     raise SystemExit(0 if result["measurement_qualified"] else 2)
