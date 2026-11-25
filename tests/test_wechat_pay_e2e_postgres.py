@@ -371,7 +371,10 @@ async def world(monkeypatch, tmp_path):
             monkeypatch.setattr(module, "db", database)
     monkeypatch.setattr(app_db, "db", database)
 
-    await redis_client.close_redis()
+    # 别的用例留下的全局客户端可能绑在已关闭的事件循环上，去关它会直接抛错：
+    # 只把全局清空，让本用例在当前循环上新建；结束时关自己建的那个。
+    monkeypatch.setattr(redis_client, "_client", None)
+    monkeypatch.setattr(redis_client, "_pool", None)
     monkeypatch.setattr(settings, "redis_url", redis_url)
 
     merchant_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
