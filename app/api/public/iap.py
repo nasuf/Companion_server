@@ -9,7 +9,7 @@ from app.api.jwt_auth import require_user
 from app.observability import bind_context
 from app.observability.events import EVT_PAYMENT_VERIFY_FAIL, EVT_PAYMENT_VERIFY_OK
 from app.models.payment_settings import PaymentSettings
-from app.services.payments.availability import get_payment_settings, require_real_money_payments
+from app.services.payments.availability import get_apple_purchase_settings, require_real_money_payments
 from app.models.iap import IapVerifyRequest, IapVerifyResponse
 from app.services.payments import grant, notifications
 from app.services.payments.errors import (
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/iap/apple", tags=["iap"])
 @router.get("/availability", response_model=PaymentSettings)
 async def purchase_availability(response: Response, payload: dict = Depends(require_user)):
     response.headers["Cache-Control"] = "no-store"
-    return await get_payment_settings()
+    return await get_apple_purchase_settings()
 
 
 @router.post("/purchase-permission", response_model=PaymentSettings)

@@ -404,11 +404,14 @@ async def world(monkeypatch, tmp_path):
     monkeypatch.setattr(pay_route, "exchange_wechat_h5_code", _fake_oauth("oa"))
 
     gate = await database.systemconfig.find_unique(where={"id": 1})
-    previous_gate = bool(getattr(gate, "realMoneyPaymentsEnabled", False))
+    previous_gates = {
+        field: bool(getattr(gate, field, False))
+        for field in ("realMoneyPaymentsEnabled", "wechatPayPurchasesEnabled")
+    }
+    # 只开微信支付、Apple 内购保持关闭：整套用例同时证明两个开关互不牵连。
+    gates = {"realMoneyPaymentsEnabled": False, "wechatPayPurchasesEnabled": True}
     await database.systemconfig.upsert(
-        where={"id": 1},
-        data={"create": {"id": 1, "realMoneyPaymentsEnabled": True},
-              "update": {"realMoneyPaymentsEnabled": True}},
+        where={"id": 1}, data={"create": {"id": 1, **gates}, "update": gates}
     )
 
     app = FastAPI()
@@ -432,9 +435,7 @@ async def world(monkeypatch, tmp_path):
                     "DELETE FROM wallet_ledger WHERE user_id = ANY($1::text[])", users
                 )
                 await database.execute_raw("DELETE FROM users WHERE id = ANY($1::text[])", users)
-            await database.systemconfig.update(
-                where={"id": 1}, data={"realMoneyPaymentsEnabled": previous_gate}
-            )
+            await database.systemconfig.update(where={"id": 1}, data=previous_gates)
             await redis_client.close_redis()
             transport.reset_key_cache()
             await database.disconnect()
@@ -479,6 +480,10 @@ async def test_app_wechat_account_buys_in_service_account_and_refunds(world: Wor
     assert resp.status_code == 200 and resp.json() == {"code": "SUCCESS"}
     polled = await world.status(app_user, vip["out_trade_no"])
     assert polled["status"] == "granted" and polled["vip_is_active"]
+    order_row = await world.row(
+        "SELECT notify_id FROM wechat_pay_orders WHERE out_trade_no = $1", vip["out_trade_no"]
+    )
+    assert order_row["notify_id"] == json.loads(body)["id"]  # 订单回链到发货的那条回调
     vip_until = datetime.fromisoformat(polled["vip_until"].replace("Z", "+00:00"))
     assert timedelta(days=30) < vip_until - datetime.now(timezone.utc) <= timedelta(days=31)
 
@@ -754,3 +759,43 @@ async def test_platform_refund_while_our_refund_submit_was_lost(world: World):
         "SELECT status FROM wechat_pay_refunds WHERE out_refund_no = $1", ours["out_refund_no"]
     )
     assert superseded["status"] == "closed"
+
+
+async def test_wechat_switch_is_independent_of_apple_switch(world: World):
+    """微信开关关掉：H5 不能下单；Apple 开关打开也救不回来。反过来见夹具（只开微信）。"""
+    user = await world.wechat_login("/auth/wechat/h5", "oa:dora")
+    await world.db.systemconfig.update(
+        where={"id": 1},
+        data={"realMoneyPaymentsEnabled": True, "wechatPayPurchasesEnabled": False},
+    )
+    catalog = (await world.http.get("/pay/wechat/catalog", headers=world.auth(user))).json()
+    assert catalog["enabled"] is False
+    resp = await world.http.post(
+        "/pay/wechat/orders", json={"product_id": "wx.ticket.10"}, headers=world.auth(user)
+    )
+    assert resp.status_code == 403 and resp.json()["detail"] == "real_money_payments_disabled"
+    assert world.wechat.orders == {}  # 一个请求都没发到微信
+
+
+async def test_catalog_shows_closed_when_switch_unreadable(world: World, monkeypatch):
+    """开关读失败时商城按"未开放"展示，不能当成开启；下单接口同样拒绝。"""
+    from fastapi import HTTPException
+
+    from app.api.public import wechat_pay as route
+
+    async def unavailable():
+        raise HTTPException(503, "payment_settings_unavailable")
+
+    async def require_unavailable():
+        raise HTTPException(503, "payment_settings_unavailable")
+
+    monkeypatch.setattr(route, "wechat_pay_purchases_enabled", unavailable)
+    monkeypatch.setattr(route, "require_wechat_pay_purchases", require_unavailable)
+    user = await world.wechat_login("/auth/wechat/h5", "oa:erin")
+    catalog = (await world.http.get("/pay/wechat/catalog", headers=world.auth(user))).json()
+    assert catalog["enabled"] is False
+    resp = await world.http.post(
+        "/pay/wechat/orders", json={"product_id": "wx.ticket.10"}, headers=world.auth(user)
+    )
+    assert resp.status_code == 503
+    assert world.wechat.orders == {}

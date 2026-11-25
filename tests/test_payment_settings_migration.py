@@ -63,20 +63,37 @@ async def test_payment_gate_upgrade_defaults_closed_and_preserves_wallet(tmp_pat
             'SELECT real_money_payments_enabled FROM system_config WHERE id=1'
         ))[0]['real_money_payments_enabled'] is False
         assert await client.query_raw('SELECT * FROM user_wallets WHERE user_id=$1', user.id) == before
+        # The WeChat Pay switch splits off later and starts from the shared
+        # switch's value, so deploying it does not change what is purchasable.
+        split = Path('prisma/migrations/20261125120000_wechat_pay_purchase_gate')
+        await client.execute_raw('UPDATE system_config SET real_money_payments_enabled=TRUE WHERE id=1')
+        for source in sorted(Path('prisma/migrations').glob('*/migration.sql')):
+            if candidate.name < source.parent.name <= split.name:
+                shutil.copytree(source.parent, migrations / source.parent.name)
+        await deploy(); await deploy()
+        assert (await client.query_raw(
+            'SELECT real_money_payments_enabled, wechat_pay_purchases_enabled FROM system_config WHERE id=1'
+        ))[0] == {'real_money_payments_enabled': True, 'wechat_pay_purchases_enabled': True}
+        await client.execute_raw('UPDATE system_config SET real_money_payments_enabled=FALSE, wechat_pay_purchases_enabled=FALSE WHERE id=1')
         # Current application compatibility must use the complete schema.
         for source in sorted(Path('prisma/migrations').glob('*/migration.sql')):
-            if source.parent.name > candidate.name:
+            if source.parent.name > split.name:
                 shutil.copytree(source.parent, migrations / source.parent.name)
         await deploy(); await deploy()
         from app.services.payments import availability
         monkeypatch.setattr(availability, 'db', client)
-        assert await availability.get_payment_settings() == {'real_money_payments_enabled': False}
-        for enabled in (True, False):
-            assert (await availability.set_payment_settings(enabled=enabled, actor_id='synthetic-admin'))['real_money_payments_enabled'] is enabled
-            assert (await client.systemconfig.find_unique(where={'id': 1})).offlineGiftEnabled is True
-            assert (await client.systemconfig.find_unique(where={'id': 1})).offlineActivityEnabled is True
+        assert await availability.get_payment_settings() == {
+            'real_money_payments_enabled': False, 'wechat_pay_purchases_enabled': False}
+        for key in ('real_money_payments_enabled', 'wechat_pay_purchases_enabled'):
+            for enabled in (True, False):
+                settings = await availability.set_payment_settings(actor_id='synthetic-admin', **{key: enabled})
+                assert settings[key] is enabled
+                assert all(value is False for name, value in settings.items() if name != key)
+                assert (await client.systemconfig.find_unique(where={'id': 1})).offlineGiftEnabled is True
+                assert (await client.systemconfig.find_unique(where={'id': 1})).offlineActivityEnabled is True
         assert await client.query_raw('SELECT * FROM user_wallets WHERE user_id=$1', user.id) == before
-        assert (await client.systemconfig.find_unique(where={'id': 1})).realMoneyPaymentsEnabled is False
+        row = await client.systemconfig.find_unique(where={'id': 1})
+        assert row.realMoneyPaymentsEnabled is False and row.wechatPayPurchasesEnabled is False
     finally:
         if client is not None: await client.disconnect()
         await admin.execute_raw(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')

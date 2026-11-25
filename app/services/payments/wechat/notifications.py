@@ -119,7 +119,7 @@ async def handle_notification(envelope: dict[str, Any]) -> dict[str, Any]:
         # 上次收到了但没处理完（进程中途挂）：继续往下处理，业务层仍是幂等的。
 
     try:
-        result = await _dispatch(event_type, decrypted)
+        result = await _dispatch(event_type, decrypted, notify_id=notify_id)
     except Exception as exc:
         await db.execute_raw(
             """
@@ -161,16 +161,20 @@ async def handle_notification(envelope: dict[str, Any]) -> dict[str, Any]:
     return {"event_type": event_type, **result}
 
 
-async def _dispatch(event_type: str, decrypted: dict[str, Any]) -> dict[str, Any]:
+async def _dispatch(
+    event_type: str, decrypted: dict[str, Any], *, notify_id: str | None = None
+) -> dict[str, Any]:
     if event_type == EVENT_TRANSACTION_SUCCESS:
-        return await _handle_transaction_success(decrypted)
+        return await _handle_transaction_success(decrypted, notify_id=notify_id)
     if event_type in _REFUND_EVENTS:
         return await refunds.apply_refund_notification(event_type, decrypted)
     # 未知事件类型：落了审计就算处理完，不让微信无限重推。
     return {"status": "ignored"}
 
 
-async def _handle_transaction_success(decrypted: dict[str, Any]) -> dict[str, Any]:
+async def _handle_transaction_success(
+    decrypted: dict[str, Any], *, notify_id: str | None = None
+) -> dict[str, Any]:
     out_trade_no = decrypted.get("out_trade_no")
     if not isinstance(out_trade_no, str) or not out_trade_no:
         return {"status": "ignored"}
@@ -197,6 +201,7 @@ async def _handle_transaction_success(decrypted: dict[str, Any]) -> dict[str, An
         paid_amount_fen=paid,
         success_time=_parse_rfc3339(decrypted.get("success_time")),
         payload=decrypted,
+        notify_id=notify_id or None,
     )
 
 

@@ -4,7 +4,7 @@
 
 两道开关都要过才能下单：
 * `WECHATPAY_ENABLED`（部署级，密钥齐备才打开）
-* `system_config.real_money_payments_enabled`（运营级，与 Apple 共用，审核期能一键关）
+* `system_config.wechat_pay_purchases_enabled`（运营级，与 Apple 内购的开关分开）
 """
 
 from __future__ import annotations
@@ -38,7 +38,10 @@ from app.services.auth_security import (
     enforce_login_rate_limit,
     record_login_failure,
 )
-from app.services.payments.availability import require_real_money_payments
+from app.services.payments.availability import (
+    require_wechat_pay_purchases,
+    wechat_pay_purchases_enabled,
+)
 from app.services.payments.wechat import accounts, catalog, notifications, orders
 from app.services.payments.wechat.catalog import WechatProduct
 from app.services.payments.wechat.errors import (
@@ -129,8 +132,8 @@ async def wechat_pay_catalog(response: Response, payload: dict = Depends(require
     enabled = settings.wechatpay_enabled
     if enabled:
         try:
-            await require_real_money_payments()
-        except HTTPException:
+            enabled = await wechat_pay_purchases_enabled()
+        except HTTPException:  # 开关读不到时按"未开放"展示，下单接口会再实时检查
             enabled = False
 
     snapshot = await wallet.full_wallet(user_id)
@@ -239,7 +242,7 @@ async def create_wechat_pay_order(
 ):
     """创建订单并返回 H5 调起支付所需参数。价格一律由服务端目录决定。"""
     _require_enabled()
-    await require_real_money_payments()
+    await require_wechat_pay_purchases()
     user_id = str(payload["sub"])
     app_id = settings.wechat_h5_app_id.strip()
     await _enforce_order_rate_limit(user_id)

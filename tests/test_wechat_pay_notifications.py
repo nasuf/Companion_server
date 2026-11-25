@@ -192,3 +192,18 @@ def test_wechat_notifications_module_does_not_touch_apple_tables():
         # 注释里提到 iap_transactions 是允许的，SQL 语句里出现则不行。
         for keyword in ("FROM iap_", "INTO iap_", "UPDATE iap_"):
             assert keyword not in text, f"{path.name} 碰了 Apple 的表: {keyword}"
+
+
+async def test_settlement_records_notify_id_on_order(monkeypatch):
+    """订单行要回链到触发发货的那条回调（后台排查按 notify_id 对账）。"""
+    fake = _FakeDb(query_rows=[[{"id": "row-1"}]])
+    monkeypatch.setattr(notifications, "db", fake)
+    seen = {}
+
+    async def fake_settle(**kwargs):
+        seen.update(kwargs)
+        return {"status": "granted", "replay": False}
+
+    monkeypatch.setattr(notifications.orders, "settle_paid_order", fake_settle)
+    await notifications.handle_notification(_envelope())
+    assert seen["notify_id"] == "notify-1"

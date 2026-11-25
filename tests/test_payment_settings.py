@@ -8,9 +8,10 @@ from app.services.payments import availability
 
 @pytest.fixture
 def gate_db(monkeypatch):
-    row = SimpleNamespace(realMoneyPaymentsEnabled=False, offlineGiftEnabled=True)
+    row = SimpleNamespace(realMoneyPaymentsEnabled=False, wechatPayPurchasesEnabled=False, offlineGiftEnabled=True)
     async def save(*, where, data):
-        row.realMoneyPaymentsEnabled = data['update']['realMoneyPaymentsEnabled']
+        for field, value in data['update'].items():
+            setattr(row, field, value)
     model = SimpleNamespace(find_unique=AsyncMock(side_effect=lambda **_: row), upsert=AsyncMock(side_effect=save))
     monkeypatch.setattr(availability, 'db', SimpleNamespace(systemconfig=model))
     return row, model
@@ -91,3 +92,54 @@ def test_closed_gate_does_not_block_paid_transaction_settlement(api_client, auth
             apply.assert_awaited_once()
     finally:
         app.dependency_overrides.pop(require_redis, None)
+
+
+def test_apple_and_wechat_switches_are_independent(api_client, auth_header, gate_db):
+    """只开微信支付：Apple 内购的 availability / purchase-permission 仍然关着。"""
+    row, db = gate_db
+    admin = auth_header('operator', role='admin')
+    user = auth_header('shopper')
+    r = api_client.put('/admin-api/payment-settings', headers=admin, json={'wechat_pay_purchases_enabled': True})
+    assert r.status_code == 200
+    assert r.json() == {'real_money_payments_enabled': False, 'wechat_pay_purchases_enabled': True}
+    assert db.upsert.await_args.kwargs['data']['update'] == {'wechatPayPurchasesEnabled': True}
+    assert row.realMoneyPaymentsEnabled is False
+    # App 读的接口只有 Apple 的字段，形状和旧版一致。
+    assert api_client.get('/iap/apple/availability', headers=user).json() == {'real_money_payments_enabled': False}
+    assert api_client.post('/iap/apple/purchase-permission', headers=user).status_code == 403
+    # 旧版后台只发 Apple 字段：不能顺带把微信开关改掉。
+    api_client.put('/admin-api/payment-settings', headers=admin, json={'real_money_payments_enabled': True})
+    assert row.wechatPayPurchasesEnabled is True
+    assert api_client.post('/iap/apple/purchase-permission', headers=user).status_code == 200
+    api_client.put('/admin-api/payment-settings', headers=admin, json={'wechat_pay_purchases_enabled': False})
+    assert row.realMoneyPaymentsEnabled is True
+
+
+@pytest.mark.parametrize('body', [{'wechat_pay_purchases_enabled': None}, {'wechat_pay_purchases_enabled': 'true'},
+                                  {'wechat_pay_purchases_enabled': True, 'real_money_payments_enabled': None}])
+def test_wechat_switch_payload_is_strict(api_client, auth_header, gate_db, body):
+    _, db = gate_db
+    assert api_client.put('/admin-api/payment-settings', headers=auth_header('operator', role='admin'), json=body).status_code == 422
+    db.upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wechat_gate_reads_its_own_column(gate_db):
+    row, _ = gate_db
+    row.realMoneyPaymentsEnabled = True
+    with pytest.raises(HTTPException) as error:
+        await availability.require_wechat_pay_purchases()
+    assert error.value.status_code == 403
+    row.wechatPayPurchasesEnabled, row.realMoneyPaymentsEnabled = True, False
+    await availability.require_wechat_pay_purchases()
+    with pytest.raises(HTTPException):
+        await availability.require_real_money_payments()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('changes', [{}, {'unknown_switch': True}])
+async def test_service_rejects_unknown_or_empty_changes(gate_db, changes):
+    _, db = gate_db
+    with pytest.raises(ValueError):
+        await availability.set_payment_settings(actor_id='a', **changes)
+    db.upsert.assert_not_awaited()
