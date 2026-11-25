@@ -168,6 +168,9 @@ TRANSIENT_CODES = frozenset({
     "invalid_grounding_judgement",
 })
 _SAFE_CODE = re.compile(r"[a-z0-9_]{1,64}")
+# A recorded input that the transport refuses before any call is a property of
+# the case, not of the run: it is reported as unknown instead of errored.
+UNREPLAYABLE_CODES = frozenset({"invalid_eval_messages", "price_unknown_above_32k_bound"})
 
 
 def error_code(exc: BaseException) -> str:
@@ -210,8 +213,12 @@ async def _with_retries(sink, case, repetition, attempt, errored, report):
                 await asyncio.sleep(RETRY_DELAYS_SECONDS[tries - 1])
                 await sink.renew()
                 continue
+            code = error_code(exc)
+            if case["route"] == "recorded_prompt" and code in UNREPLAYABLE_CODES:
+                return dict(case_id=case["id"], repetition=repetition, critical=case["critical"],
+                            suite=case["suite"], **{"pass": None}, turns=0, unknown=code)
             errored.append(dict(case_id=case["id"], repetition=repetition,
-                                error=error_code(exc), attempts=tries))
+                                error=code, attempts=tries))
             # First persistent failure keeps the fields earlier reports used.
             if "error_type" not in report:
                 report["error_type"] = type(exc).__name__
@@ -265,7 +272,7 @@ async def run(job, *, cases=None, key_overrides=None, sink=None, concurrency=1):
         quick_selection="提示词快速集共30个场景，最多10个最新人工确认问题（关键问题优先）；完整回放保留全部已启用问题。"
         if job["kind"] == "prompt"
         else None,
-        human_cases_scope="原始完整输入重放，仅验模型；不声称重建历史业务状态或验证新模板渲染。缺少精确来源记未知。",
+        human_cases_scope="原始完整输入重放，仅验模型；不声称重建历史业务状态或验证新模板渲染。缺少精确来源或无法计价记未知，单独列出、不计入门槛。",
     )
     await sink.prepare(report)
     results = []
@@ -292,6 +299,7 @@ async def run(job, *, cases=None, key_overrides=None, sink=None, concurrency=1):
                 for i, (role, text) in enumerate(history)
             ]
         passes = []
+        unknown = None
         for turn, step in enumerate(case["turns"]):
             await sink.renew()
             at = (
@@ -340,6 +348,7 @@ async def run(job, *, cases=None, key_overrides=None, sink=None, concurrency=1):
                 )
                 metric["search_calls"] += call.get("web_search_calls", 0)
             passes.append(result["judge"]["pass"])
+            unknown = unknown or result["judge"].get("unknown")
             history += [
                 ["user", step["message"]],
                 ["assistant", result["reply"]],
@@ -365,6 +374,8 @@ async def run(job, *, cases=None, key_overrides=None, sink=None, concurrency=1):
             **{"pass": None if any(p is None for p in passes) else all(passes)},
             turns=len(passes),
         )
+        if unknown:
+            row["unknown"] = unknown
         if case.get("transcript_scorer") == "long_companion_sim":
             from evals.long_companion_sim import score_transcript
 
@@ -451,6 +462,11 @@ async def run(job, *, cases=None, key_overrides=None, sink=None, concurrency=1):
         expected=expected,
         route_usage=route_usage,
         errored_scenarios=errored,
+        unknown_scenarios=sorted(
+            (dict(case_id=r["case_id"], repetition=r["repetition"], reason=r["unknown"])
+             for r in results if r.get("unknown")),
+            key=lambda r: (r["case_id"], r["repetition"]),
+        ),
         search_scope="联网评测限定每次一轮、一个关键词、10条结果、公开网页；生产搜索设置不变。超过32k输入不通过。",
     )
     if gate["status"] in {"failed", "incomplete"} and terminal == "completed":

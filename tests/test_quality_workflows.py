@@ -778,6 +778,33 @@ async def test_regression_persistent_scenario_error_does_not_abort_run(
     assert "模型原文" not in json.dumps(report, ensure_ascii=False)
 
 
+async def test_regression_unreplayable_recorded_cases_are_unknown_not_errored(
+    quality, monkeypatch
+):
+    database, *_ = quality
+    monkeypatch.setattr(regression, "db", database)
+    monkeypatch.setattr(regression, "RETRY_DELAYS_SECONDS", (0, 0))
+
+    async def scripted(job, current, *args, **kwargs):
+        if current["id"] == "long":
+            raise ValueError("invalid_eval_messages")
+        if current["id"] == "gone":
+            return {"judge": {"pass": None, "unknown": "exact_source_input_missing"}, "reply": ""}
+        return {"judge": {"pass": True}, "reply": "你好"}
+
+    monkeypatch.setattr(regression.replay, "replay_turn", scripted)
+    recorded = [dict(_regression_case(c), route="recorded_prompt") for c in ("long", "gone")]
+    cases = recorded + [_regression_case(f"ok{i}") for i in range(40)]
+    report = (await _run_regression(database, cases))["report"]
+    assert report["errored_scenarios"] == []
+    assert report["unknown_scenarios"] == [
+        dict(case_id="gone", repetition=0, reason="exact_source_input_missing"),
+        dict(case_id="long", repetition=0, reason="invalid_eval_messages"),
+    ]
+    assert report["gate_status"] == "baseline_recorded"
+    assert report["gate"]["unknown_samples"] == 2
+
+
 async def test_regression_boundary_history_usage_and_transcript_scoring(
     quality, monkeypatch
 ):

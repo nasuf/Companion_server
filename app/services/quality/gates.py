@@ -6,6 +6,10 @@ current majority does not. Identical code re-run night to night flips 5-9 of
 125 critical cases (2026-11-14..18), so up to floor(n x critical_noise_rate)
 regressed cases are tolerated; a real break usually takes out several cases
 of one suite and still exceeds it. Small case sets keep zero tolerance.
+
+A sample marked `unknown` (a confirmed case whose exact source input is gone
+or cannot be priced) is listed apart and left out of both sides; more than
+quality_max_unknown_rate of them still makes the run incomplete.
 """
 
 from collections import defaultdict
@@ -27,10 +31,19 @@ def compare(current, baseline, noise_rate=None):
         return {(r["case_id"], r["repetition"]): r for r in rows}
 
     c, b = keyed(current), keyed(baseline)
+    unknown = {k for k, r in c.items() if r.get("unknown")}
+    unknown_cases = sorted({k[0] for k in unknown})
+    if c and len(unknown) > len(c) * settings.quality_max_unknown_rate:
+        return dict(status="incomplete", reason="too_many_unknown_samples",
+                    unknown_samples=len(unknown), unknown_cases=unknown_cases[:50])
+    unknown |= {k for k, r in b.items() if r.get("unknown")}
+    c = {k: r for k, r in c.items() if k not in unknown}
+    b = {k: r for k, r in b.items() if k not in unknown}
     if not c or any(r["pass"] is None for r in c.values()):
         return dict(status="incomplete", reason="missing_or_unjudged_samples")
     if not b:
-        return dict(status="baseline_recorded", reason="no_matching_baseline")
+        return dict(status="baseline_recorded", reason="no_matching_baseline",
+                    unknown_samples=len(unknown), unknown_cases=unknown_cases[:50])
     if set(c) != set(b) or any(r["pass"] is None for r in b.values()):
         return dict(status="incomplete", reason="baseline_case_coverage_mismatch")
     critical = [k for k in c if c[k]["critical"]]
@@ -58,4 +71,6 @@ def compare(current, baseline, noise_rate=None):
         critical_n=len(critical),
         other_n=len(other),
         noise_rate=noise_rate,
+        unknown_samples=len(unknown),
+        unknown_cases=unknown_cases[:50],
     )

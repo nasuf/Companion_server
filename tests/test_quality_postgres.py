@@ -308,7 +308,9 @@ async def test_regression_report_groups_baseline_not_run_and_filters(quality, mo
              gate={"status": "incomplete", "reason": "missing_scenarios"},
              expected_by_group={"persona|critical": 3, "reply|other": 1, "human_confirmed|other": 1,
                                 "never|other": 2},
-             errored_scenarios=[{"case_id": "persona:a", "repetition": 2}]))
+             errored_scenarios=[{"case_id": "persona:a", "repetition": 2}],
+             unknown_scenarios=[{"case_id": "human_confirmed:d", "repetition": 0,
+                                 "reason": "exact_source_input_missing"}, "bad"]))
     daily_job = await jobs.enqueue("daily", "test-" + uuid4().hex, uuid4().hex, {})
 
     app = FastAPI()
@@ -334,8 +336,10 @@ async def test_regression_report_groups_baseline_not_run_and_filters(quality, mo
     assert body["versions"]["code"] and body["versions"]["prompt_version"] is None
     assert body["versions"] == dict(body["versions"], prompt_snapshot="snap-digest", prompt_count=1,
                                     route=["ark", "model-x"], corpus_version="v9", corpus_hash="corpus-a", repeats=3)
-    assert body["totals"] == dict(expected=7, evaluated=5, not_run=2, unjudged=1, errored=1,
+    assert body["totals"] == dict(expected=7, evaluated=5, not_run=2, unjudged=1, errored=1, unknown=1,
                                   expected_by_group="recorded")
+    assert body["unknown_scenarios"] == [dict(case_id="human_confirmed:d", repetition=0,
+                                              reason="exact_source_input_missing")]
     groups = {g["key"]: g for g in body["groups"]}
     persona = groups["persona|critical"]
     assert (persona["passed"], persona["failed"], persona["unjudged"], persona["judged"]) == (1, 1, 1, 2)
@@ -416,6 +420,7 @@ async def test_regression_report_tolerates_legacy_and_malformed_reports(quality,
     assert body["versions"]["prompt_count"] is None and body["versions"]["route"] is None
     assert body["totals"]["expected"] is None and body["totals"]["not_run"] is None
     assert body["totals"]["evaluated"] == 1 and body["totals"]["errored"] == 0
+    assert body["totals"]["unknown"] == 0 and body["unknown_scenarios"] == []
     assert body["thresholds"]["noise_rate"] == api.settings.quality_noise_rate
     assert body["error"] == {"type": "LostLease", "case_id": None}
     assert [g["key"] for g in body["groups"]] == ["x|other"] and body["groups"][0]["not_run"] is None

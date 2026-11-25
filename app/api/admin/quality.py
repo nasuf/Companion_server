@@ -301,6 +301,11 @@ async def regression_report(job_id: str):
                 },
             )
     evaluated, planned = report.get("evaluated"), report.get("expected")
+    unknown = [
+        dict(case_id=u["case_id"], repetition=u.get("repetition"), reason=u.get("reason"))
+        for u in (report.get("unknown_scenarios") if isinstance(report.get("unknown_scenarios"), list) else [])
+        if isinstance(u, dict) and isinstance(u.get("case_id"), str)
+    ]
     gate = report.get("gate") if isinstance(report.get("gate"), dict) else None
     return dict(
         sampled_at=now.isoformat(),
@@ -331,10 +336,14 @@ async def regression_report(job_id: str):
             unjudged=sum(g["unjudged"] for g in groups),
             errored=len(report["errored_scenarios"])
             if isinstance(report.get("errored_scenarios"), list) else 0,
+            unknown=len(unknown),
             expected_by_group="recorded" if isinstance(expected, dict) else "not_collected",
         ),
         error=dict(type=report.get("error_type"), case_id=report.get("error_case_id"))
         if report.get("error_type") else None,
+        # Confirmed cases that cannot be replayed exactly; outside the gate and
+        # listed so a reviewer can re-confirm or disable them.
+        unknown_scenarios=unknown[:50],
         groups=groups,
         baseline=baseline,
     )

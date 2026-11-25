@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import re
 import time
 from decimal import Decimal, ROUND_CEILING
 
@@ -50,6 +51,27 @@ def price_cost(price, inputs, outputs, cached=0):
     )
 
 
+# Recorded production inputs reach 131 messages (2026-11-24); the cap only
+# guards against a malformed frame, the token bound below does the pricing.
+MAX_MESSAGES = 256
+_ONE_TOKEN_MAX = re.compile(r"[\x00-\x7f\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]")
+
+
+def input_bound(messages):
+    """Upper bound on billed chat input tokens. ASCII, common CJK and CJK
+    punctuation count one token per character, anything rarer its UTF-8 bytes.
+    Calibrated 2026-11-25 on 14 days of production chat.completions calls:
+    billed prompt tokens never exceeded 0.8x (doubao) / 0.825x (qwen3.5-flash)
+    of the character count. The old UTF-8 byte bound tripled CJK and put every
+    long recorded input above 32k. Web search bills its results on top and is
+    bounded by search.MAX_INPUT instead; complete() still rejects any reply
+    whose billed input exceeds this bound."""
+    return sum(
+        sum(1 if _ONE_TOKEN_MAX.match(c) else len(c.encode()) for c in m["content"]) + 16
+        for m in messages
+    ) + 64
+
+
 def price_bound(
     provider, model, messages, max_tokens, *, prices=None, operation="chat"
 ):
@@ -61,7 +83,7 @@ def price_bound(
         raise ValueError("evaluation_route_not_allowed")
     if (
         not messages
-        or len(messages) > 80
+        or len(messages) > MAX_MESSAGES
         or any(
             m.get("role") not in {"system", "user", "assistant"}
             or not isinstance(m.get("content"), str)
@@ -69,8 +91,7 @@ def price_bound(
         )
     ):
         raise ValueError("invalid_eval_messages")
-    # UTF-8 bytes conservatively dominate text tokens; overhead is per-message.
-    bound = sum(len(m["content"].encode()) + 64 for m in messages) + 128
+    bound = input_bound(messages)
     if bound > 32768:
         raise ValueError("price_unknown_above_32k_bound")
     key = provider + "/" + model

@@ -140,7 +140,8 @@ async def recorded_turn(job, case, route, *, key_overrides=None):
     if not messages:
         return dict(
             reply="",
-            judge={"pass": None, "reason": "exact_source_input_missing"},
+            judge={"pass": None, "reason": "exact_source_input_missing",
+                   "unknown": "exact_source_input_missing"},
             calls=[],
         )
     reply, used = await transport.complete(

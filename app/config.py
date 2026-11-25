@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     quality_critical_repeats: int = Field(default=3, ge=1, le=5)
     # Majority-vote regressions tolerated per critical case set; see quality/gates.py.
     quality_critical_noise_rate: float = Field(default=0.08, ge=0, le=0.5)
+    # Samples whose exact input can no longer be replayed are reported apart
+    # from the gate; above this share of all samples the run is incomplete.
+    quality_max_unknown_rate: float = Field(default=0.05, ge=0, le=0.5)
     quality_judge_model: str = "qwen3.5-flash"
     quality_enabled: bool = True  # qualified admin-only worker; QUALITY_ENABLED=false stops dispatch
     quality_oidc_repository: str = "nasuf/Companion_server"

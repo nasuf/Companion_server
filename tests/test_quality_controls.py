@@ -164,7 +164,7 @@ def test_price_unknown_and_judge_unknown_not_success(monkeypatch):
         transport.price_bound("ark", "x", [{"role": "user", "content": "hello"}], 900)
     with pytest.raises(ValueError, match="32k"):
         transport.price_bound(
-            "ark", "x", [{"role": "user", "content": "中" * 12000}], 900
+            "ark", "x", [{"role": "user", "content": "中" * 32700}], 900
         )
     with pytest.raises(ValueError):
         judge.parse('{"categories": {"hallucination":"pass"}}')
@@ -347,6 +347,41 @@ def test_unqualified_provider_contracts_rejected_before_reservation(
             prices={provider + "/doubao-seed-character-260628": prices},
             operation=operation,
         )
+
+
+def test_input_bound_counts_characters_not_utf8_bytes():
+    # A 131-message recorded input of ~15k CJK characters used to bound at
+    # ~45k bytes and was refused; billed tokens never exceed the char count.
+    long_input = [{"role": "user" if i % 2 else "assistant", "content": "今天天气怎么样？" * 14}
+                  for i in range(131)]
+    assert transport.input_bound(long_input) == 131 * (8 * 14 + 16) + 64
+    bound, _ = transport.price_bound(
+        "ark", "x", long_input, 900, prices={"ark/x": {"input": 0.8, "output": 2}})
+    assert bound == transport.input_bound(long_input) < 32768
+    # Characters outside ASCII/CJK/full-width count their UTF-8 bytes.
+    assert transport.input_bound([{"role": "user", "content": "😀é"}]) == 4 + 2 + 16 + 64
+    with pytest.raises(ValueError, match="invalid_eval_messages"):
+        transport.price_bound("ark", "x", [{"role": "user", "content": "x"}] * 257, 900,
+                              prices={"ark/x": {"input": 0.8, "output": 2}})
+
+
+def test_gate_reports_unknown_samples_apart_up_to_a_bound():
+    rows = [dict(case_id=f"c{i}", repetition=0, critical=False, **{"pass": True})
+            for i in range(40)]
+    unknown = dict(case_id="human_confirmed:x", repetition=0, critical=True,
+                   unknown="exact_source_input_missing", **{"pass": None})
+    first = gates.compare(rows + [unknown], [])
+    assert first["status"] == "baseline_recorded"
+    assert first["unknown_samples"] == 1 and first["unknown_cases"] == ["human_confirmed:x"]
+    # Unknown on either side is left out of the matched comparison.
+    assert gates.compare(rows + [unknown], rows)["status"] == "passed"
+    assert gates.compare(rows, rows + [unknown])["status"] == "passed"
+    # An unjudged sample without the marker still makes the run incomplete.
+    plain = {**unknown, "unknown": None}
+    assert gates.compare(rows + [plain], rows)["reason"] == "missing_or_unjudged_samples"
+    many = [{**unknown, "case_id": f"u{i}"} for i in range(3)]
+    result = gates.compare(rows + many, rows)
+    assert result["status"] == "incomplete" and result["reason"] == "too_many_unknown_samples"
 
 
 def test_critical_gate_compares_cases_by_majority_with_noise_allowance():
