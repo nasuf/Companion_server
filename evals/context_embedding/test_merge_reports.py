@@ -25,7 +25,8 @@ def test_merge_keeps_every_row_and_spans_both_chunks():
     assert merged["status"] == "baseline_recorded" and len(merged["chunks"]) == 2
 
 
-@pytest.mark.parametrize("field", ["prompt_snapshot_sha256", "judge_protocol", "layout_variant", "gate_policy"])
+@pytest.mark.parametrize("field", ["prompt_snapshot_sha256", "judge_protocol", "layout_variant", "gate_policy",
+                                   "context_policy_override"])
 def test_chunks_with_different_protocols_are_refused(field):
     left, right = chunks()
     right[field] = "changed"

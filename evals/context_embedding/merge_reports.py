@@ -14,7 +14,7 @@ from evals.context_embedding.measurement import quality_by_path, report_routes
 
 SHARED = ("schema_version", "model", "model_options", "judge_protocol", "repeats", "state_repeats",
           "cases_sha256", "prompt_snapshot_sha256", "source_files_sha256", "gate_policy",
-          "cache_protocol", "prefix_protocol", "layout_variant")
+          "cache_protocol", "prefix_protocol", "layout_variant", "context_policy_override")
 _RANK = {"baseline_recorded": 0, "judge_incomplete": 1, "measurement_not_qualified": 2}
 
 

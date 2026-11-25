@@ -94,6 +94,16 @@ Calibration reports noise and supplies a **pre-registered** allowance for other
 categories; it never deletes failures or itself authorizes release. Preserve
 malformed judge responses and any recovery replays separately rather than
 silently rerunning until a pass appears.
+A repeat judgement that is not valid JSON with a boolean `pass` is retried
+once with the identical request; both raw responses stay in
+`judge_repeat_raw` and `judge_repeat_retries` counts the retries. A second
+failure aborts the run. This is a bounded format retry, not a re-roll of a
+valid verdict.
+
+`--rounds` / `--main-history-tokens` override the admin context policy inside
+the harness only (validated by the same rules) and are recorded as
+`context_policy_override`; arms that differ only in this field are an ablation,
+and chunks with different overrides are never merged.
 
 Before new baseline/A/B replays, freeze `build_gate_policy(calibration)` and copy
 that exact object into each report's `gate_policy`. The policy fingerprints the
