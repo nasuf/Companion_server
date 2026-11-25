@@ -45,7 +45,7 @@ def wechatpay_keys(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(settings, "wechatpay_private_key_path", str(private_path))
     monkeypatch.setattr(settings, "wechatpay_public_key_path", str(public_path))
-    monkeypatch.setattr(settings, "wechatpay_mch_id", "1007054057")
+    monkeypatch.setattr(settings, "wechatpay_mch_id", "1900000109")
     monkeypatch.setattr(settings, "wechatpay_cert_serial_no", "ABC123")
     monkeypatch.setattr(settings, "wechatpay_api_v3_key", API_V3_KEY)
     monkeypatch.setattr(settings, "wechat_h5_app_id", "wxtestappid")
@@ -84,7 +84,7 @@ def test_authorization_header_carries_mchid_and_serial(wechatpay_keys):
         method="POST", url_path="/v3/pay/transactions/jsapi", body="{}"
     )
     assert header.startswith("WECHATPAY2-SHA256-RSA2048 ")
-    assert 'mchid="1007054057"' in header
+    assert 'mchid="1900000109"' in header
     assert 'serial_no="ABC123"' in header
 
 
@@ -254,3 +254,155 @@ def test_unexpected_serial_is_rejected(monkeypatch, serial):
 def test_expected_serial_passes(monkeypatch):
     monkeypatch.setattr(settings, "wechatpay_public_key_id", "PUB_KEY_ID_EXPECTED")
     transport.assert_expected_serial("PUB_KEY_ID_EXPECTED")
+
+
+# ── request()：应答处理（假的微信服务器，真实签名） ────────────────
+
+
+class _HttpxProxy:
+    """只替换 transport 模块里的 httpx.AsyncClient。"""
+
+    def __init__(self, handler):
+        import httpx
+
+        self._httpx = httpx
+        self._transport = httpx.MockTransport(handler)
+
+    def __getattr__(self, name):
+        return getattr(self._httpx, name)
+
+    def AsyncClient(self, **kwargs):  # noqa: N802 (与 httpx 同名)
+        return self._httpx.AsyncClient(transport=self._transport, **kwargs)
+
+
+def _serve(monkeypatch, private_key, *, status=200, text="", signed=True):
+    import httpx
+
+    monkeypatch.setattr(settings, "wechatpay_public_key_id", "PUB_KEY_ID_E2E")
+
+    def handler(request):
+        headers = {}
+        if signed:
+            timestamp, nonce = str(int(time.time())), "NONCE"
+            headers = {
+                "Wechatpay-Timestamp": timestamp,
+                "Wechatpay-Nonce": nonce,
+                "Wechatpay-Serial": "PUB_KEY_ID_E2E",
+                "Wechatpay-Signature": _sign(private_key, f"{timestamp}\n{nonce}\n{text}\n"),
+            }
+        return httpx.Response(status, text=text, headers=headers)
+
+    monkeypatch.setattr(transport, "httpx", _HttpxProxy(handler))
+
+
+async def test_request_returns_verified_json(wechatpay_keys, monkeypatch):
+    _serve(monkeypatch, wechatpay_keys, text='{"prepay_id":"wx1"}')
+    assert await transport.request("POST", "/v3/x", body={"a": 1}) == {"prepay_id": "wx1"}
+
+
+async def test_request_empty_204_returns_empty_dict(wechatpay_keys, monkeypatch):
+    _serve(monkeypatch, wechatpay_keys, status=204)
+    assert await transport.request("POST", "/v3/close") == {}
+
+
+@pytest.mark.parametrize("text,code,message", [
+    ('{"code":"ORDER_NOT_EXIST","message":"订单不存在"}', "ORDER_NOT_EXIST", "订单不存在"),
+    ('{"code":1,"message":null}', None, None),
+    ("[1]", None, None),
+    ("not json", None, None),
+    ("", None, None),
+])
+async def test_upstream_error_carries_wechat_code(wechatpay_keys, monkeypatch, text, code, message):
+    from app.services.payments.wechat.errors import WechatPayUpstreamError
+
+    _serve(monkeypatch, wechatpay_keys, status=404, text=text, signed=False)
+    with pytest.raises(WechatPayUpstreamError) as caught:
+        await transport.request("GET", "/v3/q")
+    assert caught.value.status_code == 404
+    assert (caught.value.code, caught.value.message) == (code, message)
+
+
+@pytest.mark.parametrize("text", ["not json", "[1, 2]"])
+async def test_non_object_response_rejected(wechatpay_keys, monkeypatch, text):
+    from app.services.payments.wechat.errors import WechatPayUpstreamError
+
+    _serve(monkeypatch, wechatpay_keys, text=text)
+    with pytest.raises(WechatPayUpstreamError):
+        await transport.request("GET", "/v3/q")
+
+
+async def test_unsigned_success_response_rejected(wechatpay_keys, monkeypatch):
+    """2xx 应答没带验签头：可能是被劫持的应答，不能当成功。"""
+    _serve(monkeypatch, wechatpay_keys, text='{"a":1}', signed=False)
+    with pytest.raises(WechatPaySignatureError, match="验签头"):
+        await transport.request("GET", "/v3/q")
+
+
+async def test_network_error_is_upstream_error(wechatpay_keys, monkeypatch):
+    import httpx
+
+    from app.services.payments.wechat.errors import WechatPayUpstreamError
+
+    def handler(request):
+        raise httpx.ConnectTimeout("boom")
+
+    monkeypatch.setattr(transport, "httpx", _HttpxProxy(handler))
+    with pytest.raises(WechatPayUpstreamError, match="ConnectTimeout"):
+        await transport.request("GET", "/v3/q")
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda r: r.pop("nonce"),
+    lambda r: r.__setitem__("associated_data", 1),
+    lambda r: r.__setitem__("ciphertext", "!!not-base64!!"),
+])
+def test_decrypt_rejects_malformed_resource(wechatpay_keys, mutate):
+    resource = _encrypt({"a": 1})
+    mutate(resource)
+    with pytest.raises(WechatPayDecryptError):
+        transport.decrypt_resource(resource)
+
+
+@pytest.mark.parametrize("plaintext", [b"\xff\xfe", b"not json", b"[1]"])
+def test_decrypt_rejects_non_object_plaintext(wechatpay_keys, plaintext):
+    nonce = "abcdefghijkl"
+    ciphertext = AESGCM(API_V3_KEY.encode()).encrypt(nonce.encode(), plaintext, b"transaction")
+    resource = {"algorithm": "AEAD_AES_256_GCM", "nonce": nonce, "associated_data": "transaction",
+                "ciphertext": base64.b64encode(ciphertext).decode()}
+    with pytest.raises(WechatPayDecryptError):
+        transport.decrypt_resource(resource)
+
+
+def test_missing_merchant_identity_rejected(wechatpay_keys, monkeypatch):
+    monkeypatch.setattr(settings, "wechatpay_cert_serial_no", "")
+    with pytest.raises(WechatPayConfigError, match="WECHATPAY_MCH_ID"):
+        transport.build_authorization(method="GET", url_path="/v3/q", body="")
+
+
+def test_missing_h5_app_id_rejected(wechatpay_keys, monkeypatch):
+    monkeypatch.setattr(settings, "wechat_h5_app_id", "")
+    with pytest.raises(WechatPayConfigError, match="WECHAT_H5_APP_ID"):
+        transport.jsapi_pay_params("wx-prepay")
+
+
+def test_non_rsa_keys_rejected(tmp_path, monkeypatch):
+    """误把 EC 密钥放进去：明确报配置错，而不是签名时才崩。"""
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    private_path, public_path = tmp_path / "k.pem", tmp_path / "p.pem"
+    private_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    public_path.write_bytes(key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    monkeypatch.setattr(settings, "wechatpay_private_key_path", str(private_path))
+    monkeypatch.setattr(settings, "wechatpay_public_key_path", str(public_path))
+    transport.reset_key_cache()
+    try:
+        with pytest.raises(WechatPayConfigError, match="RSA 私钥"):
+            transport.build_signature(method="GET", url_path="/v3/q", timestamp="1", nonce="n", body="")
+        with pytest.raises(WechatPayConfigError, match="RSA 公钥"):
+            transport.verify_signature(timestamp="1", nonce="n", body="", signature="AA==")
+    finally:
+        transport.reset_key_cache()

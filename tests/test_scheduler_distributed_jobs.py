@@ -63,3 +63,46 @@ async def test_iap_notification_retry_reports_only_when_still_failing(result, re
          patch.object(scheduler_mod, '_job_failed') as failed:
         await scheduler_mod._run_iap_notification_retry()
     assert failed.called is reported
+
+
+async def _passthrough_wechat_job(name, ttl, fn, **kwargs):
+    assert name == 'wechat_pay_reconcile'
+    await fn()
+
+
+@pytest.mark.asyncio
+async def test_wechat_pay_reconcile_is_noop_when_disabled(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, 'wechatpay_enabled', False)
+    with patch.object(scheduler_mod, '_run_distributed_job', new=AsyncMock()) as run:
+        await scheduler_mod._run_wechat_pay_reconcile()
+    run.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('order_failed,notify_failed,refund_failed,reported', [
+    (0, 0, 0, False), (1, 0, 0, True), (0, 2, 0, True), (0, 0, 1, True),
+])
+async def test_wechat_pay_reconcile_reports_only_when_still_failing(
+        monkeypatch, order_failed, notify_failed, refund_failed, reported):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, 'wechatpay_enabled', True)
+    counts = {'scanned': 3, 'settled': 1, 'closed': 1, 'pending': 0, 'failed': order_failed}
+    refunds = {'scanned': 1, 'settled': 0, 'pending': 1, 'failed': refund_failed}
+    with patch.object(scheduler_mod, '_run_distributed_job', new=_passthrough_wechat_job), \
+         patch('app.services.payments.wechat.reconcile.reconcile_pending_orders',
+               new=AsyncMock(return_value=counts)), \
+         patch('app.services.payments.wechat.reconcile.retry_failed_notifications',
+               new=AsyncMock(return_value=(1, notify_failed))), \
+         patch('app.services.payments.wechat.refunds.reconcile_pending_refunds',
+               new=AsyncMock(return_value=refunds)), \
+         patch.object(scheduler_mod, '_job_failed') as failed:
+        await scheduler_mod._run_wechat_pay_reconcile()
+    assert failed.called is reported
+
+
+def test_wechat_pay_reconcile_is_registered():
+    jobs = {job.id: job for job in scheduler_mod.scheduler_job_definitions()}
+    assert jobs['wechat_pay_reconcile'].func is scheduler_mod._run_wechat_pay_reconcile

@@ -52,7 +52,7 @@ class _FakeDb:
 @pytest.fixture(autouse=True)
 def pay_settings(monkeypatch):
     monkeypatch.setattr(settings, "wechatpay_notify_url", "https://example.test/notify")
-    monkeypatch.setattr(settings, "wechatpay_mch_id", "1007054057")
+    monkeypatch.setattr(settings, "wechatpay_mch_id", "1900000109")
 
 
 def _order(status="granted", amount=3900):
@@ -417,3 +417,119 @@ async def test_refunding_failed_order_does_not_touch_entitlements(monkeypatch):
     )
     assert result["status"] == "success"
     assert recomputed == []
+
+
+# ── 退款对账（cron 兜底） ─────────────────────────────────────
+
+
+_PENDING_ROW = {"out_refund_no": "RF001", "out_trade_no": "BS001",
+                "actor_id": "admin-1", "reason": "用户申请"}
+
+
+async def _reconcile_with(monkeypatch, query_outcome, resubmit_outcome=None):
+    fake = _FakeDb(rows=[[dict(_PENDING_ROW)]])
+    monkeypatch.setattr(refunds, "db", fake)
+
+    async def fake_query(out_refund_no):
+        if isinstance(query_outcome, Exception):
+            raise query_outcome
+        return query_outcome
+
+    resubmits = []
+
+    async def fake_create(**kwargs):
+        resubmits.append(kwargs)
+        if isinstance(resubmit_outcome, Exception):
+            raise resubmit_outcome
+        return {"out_refund_no": "RF001", "status": "pending", "replay": False}
+
+    monkeypatch.setattr(refunds, "query_and_settle_refund", fake_query)
+    monkeypatch.setattr(refunds, "create_refund", fake_create)
+    counts = await refunds.reconcile_pending_refunds(limit=10)
+    return counts, resubmits, fake
+
+
+@pytest.mark.parametrize("outcome,key", [
+    ({"status": "pending"}, "pending"),
+    ({"status": "success", "replay": False}, "settled"),
+])
+async def test_reconcile_counts_query_result(monkeypatch, outcome, key):
+    counts, resubmits, fake = await _reconcile_with(monkeypatch, outcome)
+    assert counts[key] == 1 and counts["failed"] == 0
+    assert resubmits == []
+    # 无论结果都推后 updated_at，避免同一批卡住扫描窗口。
+    assert any("SET updated_at" in sql for sql, _ in fake.executes)
+
+
+async def test_reconcile_resubmits_same_refund_when_wechat_never_saw_it(monkeypatch):
+    """查单 404 = 提交时没送达：经 create_refund 用原单号重提，不另开新单号。"""
+    from app.services.payments.wechat.errors import WechatPayUpstreamError
+
+    counts, resubmits, _ = await _reconcile_with(
+        monkeypatch, WechatPayUpstreamError("not found", status_code=404, code="RESOURCE_NOT_EXISTS"))
+    assert counts == {"scanned": 1, "settled": 0, "pending": 1, "failed": 0}
+    assert resubmits == [{"out_trade_no": "BS001", "actor_id": "admin-1", "reason": "用户申请"}]
+
+
+async def test_reconcile_counts_failed_resubmit(monkeypatch):
+    from app.services.payments.wechat.errors import WechatPayUpstreamError
+
+    counts, resubmits, _ = await _reconcile_with(
+        monkeypatch, WechatPayUpstreamError("not found", status_code=404),
+        resubmit_outcome=WechatPayUpstreamError("rejected", status_code=403))
+    assert counts["failed"] == 1 and len(resubmits) == 1
+
+
+@pytest.mark.parametrize("error", ["upstream", "other"])
+async def test_reconcile_other_errors_never_resubmit(monkeypatch, error):
+    """5xx/超时时微信可能已受理：只记失败等下一轮，绝不重提。"""
+    from app.services.payments.wechat.errors import WechatPayUpstreamError
+
+    exc = WechatPayUpstreamError("timeout") if error == "upstream" else RuntimeError("db")
+    counts, resubmits, _ = await _reconcile_with(monkeypatch, exc)
+    assert counts["failed"] == 1
+    assert resubmits == []
+
+
+async def test_reconcile_touch_failure_does_not_abort_batch(monkeypatch):
+    fake = _FakeDb(rows=[[dict(_PENDING_ROW), {**_PENDING_ROW, "out_refund_no": "RF002"}]])
+
+    async def boom(sql, *args):
+        raise RuntimeError("db down")
+
+    fake.execute_raw = boom
+    monkeypatch.setattr(refunds, "db", fake)
+
+    async def fake_query(out_refund_no):
+        return {"status": "pending"}
+
+    monkeypatch.setattr(refunds, "query_and_settle_refund", fake_query)
+    counts = await refunds.reconcile_pending_refunds(limit=10)
+    assert counts["pending"] == 2
+
+
+async def test_refund_rejects_fully_refunded_order(monkeypatch):
+    from app.services.payments.wechat.errors import WechatPayOrderStateError
+
+    fake, _ = _refund_db([{**_order(), "refunded_fen": 3900}])
+    monkeypatch.setattr(refunds, "db", fake)
+    with pytest.raises(WechatPayOrderStateError, match="全额退款"):
+        await refunds.create_refund(out_trade_no="BS001", actor_id="admin-1")
+
+
+async def test_refund_synchronous_success_settles_immediately(monkeypatch):
+    fake, _ = _refund_db([_order()], [])
+    monkeypatch.setattr(refunds, "db", fake)
+    settled = []
+
+    async def fake_request(method, path, *, body=None, verify_response=True):
+        return {"refund_id": "wxrf-1", "status": "SUCCESS", "success_time": "bad-time"}
+
+    async def fake_settle(**kwargs):
+        settled.append(kwargs)
+
+    monkeypatch.setattr(refunds.transport, "request", fake_request)
+    monkeypatch.setattr(refunds, "_settle_refund_success", fake_settle)
+    result = await refunds.create_refund(out_trade_no="BS001", actor_id="admin-1")
+    assert result["status"] == "success"
+    assert settled[0]["success_time"] is None  # 时间格式坏了不阻断回收

@@ -29,7 +29,7 @@ class _FakeDb:
 
 @pytest.fixture(autouse=True)
 def pay_settings(monkeypatch):
-    monkeypatch.setattr(settings, "wechatpay_mch_id", "1007054057")
+    monkeypatch.setattr(settings, "wechatpay_mch_id", "1900000109")
 
 
 @pytest.mark.parametrize(

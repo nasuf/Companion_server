@@ -119,14 +119,14 @@ def _production_settings(**overrides):
         # 且本地 .env 可能把它打开，会先抛 APPLE_IAP 的错盖住要测的分支。
         "apple_iap_enabled": False,
         "wechatpay_enabled": True,
-        "wechatpay_mch_id": "1007054057",
+        "wechatpay_mch_id": "1900000109",
         "wechatpay_cert_serial_no": "ABC123",
         "wechatpay_public_key_id": "PUB_KEY_ID_0117533412802026112500291836001403",
         "wechatpay_private_key_path": "/app/companion-secrets/wechatpay/apiclient_key.pem",
         "wechatpay_public_key_path": "/app/companion-secrets/wechatpay/pub_key.pem",
         "wechatpay_api_v3_key": "0" * 32,
         "wechatpay_notify_url": "https://banshengcomp.com/api/pay/wechat/notifications",
-        "wechat_h5_app_id": "wxfe66dc37ba1bc621",
+        "wechat_h5_app_id": "wx-test-service-account",
     }
     base.update(overrides)
     return Settings, base

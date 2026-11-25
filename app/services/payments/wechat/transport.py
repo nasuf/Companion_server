@@ -145,8 +145,10 @@ def verify_signature(
     except (ValueError, TypeError) as exc:
         raise WechatPaySignatureError("签名不是合法 base64") from exc
     message = f"{timestamp}\n{nonce}\n{body}\n".encode("utf-8")
+    # 公钥配错要报配置错误，不能被下面的 except 吞成"验签未通过"误导排查。
+    public_key = _load_public_key()
     try:
-        _load_public_key().verify(
+        public_key.verify(
             signature_bytes, message, padding.PKCS1v15(), hashes.SHA256()
         )
     except Exception as exc:  # InvalidSignature 及其它 crypto 异常

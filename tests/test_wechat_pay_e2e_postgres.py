@@ -7,7 +7,7 @@ unionid）也换成固定映射，其余（建号、绑定、下单、结算、�
 全部走生产代码和真实 SQL。
 
 需要隔离库：PROACTIVE_E2E_DATABASE_URL（/companion_proactive_e2e，已跑迁移）与
-WECHATPAY_E2E_REDIS_URL（本机）。
+PROACTIVE_E2E_REDIS_URL（本机）。
 """
 
 from __future__ import annotations
@@ -346,7 +346,7 @@ def _fake_oauth(prefix: str):
 @pytest.fixture
 async def world(monkeypatch, tmp_path):
     url = os.environ.get("PROACTIVE_E2E_DATABASE_URL", "")
-    redis_url = os.environ.get("WECHATPAY_E2E_REDIS_URL", "")
+    redis_url = os.environ.get("PROACTIVE_E2E_REDIS_URL", "")
     if not url or not redis_url:
         pytest.skip("WeChat Pay e2e requires isolated PostgreSQL + Redis")
     assert urlsplit(url).hostname in {"localhost", "127.0.0.1"}

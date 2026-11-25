@@ -423,23 +423,7 @@ jobs:
               fi
             fi
 
-            WECHATPAY_ENABLED_VALUE="$(grep -E '^WECHATPAY_ENABLED=' .env | cut -d= -f2-)"
-            if [ "$WECHATPAY_ENABLED_VALUE" = "true" ]; then
-              for key in WECHATPAY_MCH_ID WECHATPAY_CERT_SERIAL_NO WECHATPAY_PUBLIC_KEY_ID WECHATPAY_API_V3_KEY WECHATPAY_NOTIFY_URL WECHAT_H5_APP_ID; do
-                value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
-                if [ -z "$value" ]; then
-                  echo "$key is required when WECHATPAY_ENABLED=true"
-                  exit 1
-                fi
-              done
-              for key in WECHATPAY_PRIVATE_KEY_PATH WECHATPAY_PUBLIC_KEY_PATH; do
-                path_value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
-                if ! sudo test -r "$path_value"; then
-                  echo "$key must point to a readable PEM file on the VPS when WECHATPAY_ENABLED=true"
-                  exit 1
-                fi
-              done
-            fi
+            bash scripts/deploy_wechatpay_preflight.sh
 
             source scripts/deploy_apns_preflight.sh
 

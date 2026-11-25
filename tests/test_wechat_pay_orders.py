@@ -297,7 +297,7 @@ async def test_create_order_passes_time_expire(monkeypatch, no_side_effects):
     fake_db = _FakeDb(_FakeTx([]), rows=[[{"vip_trial_used": False, "vip_until": None}]])
     monkeypatch.setattr(orders, "db", fake_db)
     monkeypatch.setattr(settings, "wechat_h5_app_id", "wxtest")
-    monkeypatch.setattr(settings, "wechatpay_mch_id", "1007054057")
+    monkeypatch.setattr(settings, "wechatpay_mch_id", "1900000109")
     captured = {}
 
     async def fake_request(method, path, *, body=None, verify_response=True):
@@ -365,7 +365,7 @@ async def test_create_order_uses_server_price(monkeypatch, no_side_effects):
     fake_db = _FakeDb(_FakeTx([]), rows=[[{"vip_trial_used": False}]])
     monkeypatch.setattr(orders, "db", fake_db)
     monkeypatch.setattr(settings, "wechat_h5_app_id", "wxtest")
-    monkeypatch.setattr(settings, "wechatpay_mch_id", "1007054057")
+    monkeypatch.setattr(settings, "wechatpay_mch_id", "1900000109")
     monkeypatch.setattr(settings, "wechatpay_notify_url", "https://example.test/notify")
 
     captured = {}
@@ -399,7 +399,7 @@ async def test_create_order_marks_failure_when_prepay_rejected(
     fake_db = _FakeDb(_FakeTx([]), rows=[[{"vip_trial_used": False}]])
     monkeypatch.setattr(orders, "db", fake_db)
     monkeypatch.setattr(settings, "wechat_h5_app_id", "wxtest")
-    monkeypatch.setattr(settings, "wechatpay_mch_id", "1007054057")
+    monkeypatch.setattr(settings, "wechatpay_mch_id", "1900000109")
 
     from app.services.payments.wechat.errors import WechatPayUpstreamError
 
@@ -419,7 +419,7 @@ async def test_missing_prepay_id_is_not_treated_as_success(monkeypatch, no_side_
     fake_db = _FakeDb(_FakeTx([]), rows=[[{"vip_trial_used": False}]])
     monkeypatch.setattr(orders, "db", fake_db)
     monkeypatch.setattr(settings, "wechat_h5_app_id", "wxtest")
-    monkeypatch.setattr(settings, "wechatpay_mch_id", "1007054057")
+    monkeypatch.setattr(settings, "wechatpay_mch_id", "1900000109")
 
     async def fake_request(method, path, *, body=None, verify_response=True):
         return {}
