@@ -467,6 +467,15 @@ def register_scheduler_jobs(scheduler):
         replace_existing=True,
         max_instances=1,
     )
+    # 微信支付回调可能迟到或丢失；主动查单是权威真相，兼顾超时未付订单关单。
+    scheduler.add_job(
+        _run_wechat_pay_reconcile,
+        "interval",
+        minutes=5,
+        id="wechat_pay_reconcile",
+        replace_existing=True,
+        max_instances=1,
+    )
     scheduler.add_job(
         _run_expire_consumable_batches,
         "cron",
@@ -1374,6 +1383,56 @@ async def _run_iap_notification_retry():
         )
 
     await _run_distributed_job("iap_notification_retry", 600, _body)
+
+
+async def _run_wechat_pay_reconcile():
+    """微信支付兜底: 主动查单结算丢失回调 + 关掉超时未付订单 + 重放失败回调."""
+    from app.config import settings
+
+    if not settings.wechatpay_enabled:
+        return
+
+    from app.services.payments.wechat.reconcile import (
+        reconcile_pending_orders,
+        retry_failed_notifications,
+    )
+    from app.services.payments.wechat.refunds import reconcile_pending_refunds
+
+    async def _body():
+        counts = await reconcile_pending_orders(limit=100)
+        retried_ok, retried_failed = await retry_failed_notifications(limit=50)
+        refund_counts = await reconcile_pending_refunds(limit=50)
+        if counts["failed"] or retried_failed or refund_counts["failed"]:
+            _job_failed(
+                "WeChat pay reconcile",
+                RuntimeError(
+                    f"{counts['failed']} order(s), {retried_failed} notification(s) and "
+                    f"{refund_counts['failed']} refund(s) still failing"
+                ),
+            )
+        logger.info(
+            "[CRON] wechat_pay_reconcile ok: settled=%s closed=%s pending=%s "
+            "failed=%s retried_ok=%s retried_failed=%s",
+            counts["settled"],
+            counts["closed"],
+            counts["pending"],
+            counts["failed"],
+            retried_ok,
+            retried_failed,
+            extra={
+                "event": EVT_SCHEDULER_JOB,
+                "task_name": "wechat_pay_reconcile",
+                "phase": "ok",
+                **counts,
+                "retried_ok": retried_ok,
+                "retried_failed": retried_failed,
+                "refunds_settled": refund_counts["settled"],
+                "refunds_pending": refund_counts["pending"],
+                "refunds_failed": refund_counts["failed"],
+            },
+        )
+
+    await _run_distributed_job("wechat_pay_reconcile", 280, _body)
 
 
 async def _run_expire_consumable_batches():

@@ -319,6 +319,14 @@ jobs:
             APPLE_IAP_PRIVATE_KEY=
             APPLE_IAP_APP_APPLE_ID=${{ vars.APPLE_IAP_APP_APPLE_ID || '6779167374' }}
             APPLE_IAP_ENVIRONMENT=${{ vars.APPLE_IAP_ENVIRONMENT || 'auto' }}
+            WECHATPAY_ENABLED=${{ vars.WECHATPAY_ENABLED || 'false' }}
+            WECHATPAY_MCH_ID=${{ vars.WECHATPAY_MCH_ID }}
+            WECHATPAY_CERT_SERIAL_NO=${{ vars.WECHATPAY_CERT_SERIAL_NO }}
+            WECHATPAY_PRIVATE_KEY_PATH=${{ vars.WECHATPAY_PRIVATE_KEY_PATH || '/app/companion-secrets/wechatpay/apiclient_key.pem' }}
+            WECHATPAY_PUBLIC_KEY_ID=${{ vars.WECHATPAY_PUBLIC_KEY_ID }}
+            WECHATPAY_PUBLIC_KEY_PATH=${{ vars.WECHATPAY_PUBLIC_KEY_PATH || '/app/companion-secrets/wechatpay/pub_key.pem' }}
+            WECHATPAY_API_V3_KEY=${{ secrets.WECHATPAY_API_V3_KEY }}
+            WECHATPAY_NOTIFY_URL=${{ vars.WECHATPAY_NOTIFY_URL }}
             NOTIFICATION_MAX_ATTEMPTS=${{ vars.NOTIFICATION_MAX_ATTEMPTS || '3' }}
             NOTIFICATION_DISPATCH_BATCH_SIZE=${{ vars.NOTIFICATION_DISPATCH_BATCH_SIZE || '50' }}
             EOF
@@ -413,6 +421,24 @@ jobs:
                 echo "APPLE_IAP_PRIVATE_KEY_PATH does not point to a valid .p8 private key file"
                 exit 1
               fi
+            fi
+
+            WECHATPAY_ENABLED_VALUE="$(grep -E '^WECHATPAY_ENABLED=' .env | cut -d= -f2-)"
+            if [ "$WECHATPAY_ENABLED_VALUE" = "true" ]; then
+              for key in WECHATPAY_MCH_ID WECHATPAY_CERT_SERIAL_NO WECHATPAY_PUBLIC_KEY_ID WECHATPAY_API_V3_KEY WECHATPAY_NOTIFY_URL WECHAT_H5_APP_ID; do
+                value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
+                if [ -z "$value" ]; then
+                  echo "$key is required when WECHATPAY_ENABLED=true"
+                  exit 1
+                fi
+              done
+              for key in WECHATPAY_PRIVATE_KEY_PATH WECHATPAY_PUBLIC_KEY_PATH; do
+                path_value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
+                if ! sudo test -r "$path_value"; then
+                  echo "$key must point to a readable PEM file on the VPS when WECHATPAY_ENABLED=true"
+                  exit 1
+                fi
+              done
             fi
 
             source scripts/deploy_apns_preflight.sh

@@ -1,6 +1,12 @@
 from typing import Literal
+from urllib.parse import urlparse
+
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
+
+# 微信支付回调路由（app/api/public/wechat_pay.py 挂在 /pay/wechat 下）。定义在这里
+# 是为了让启动自检能校验 WECHATPAY_NOTIFY_URL，又不让配置模块反向依赖路由。
+WECHATPAY_NOTIFY_ROUTE_PATH = "/pay/wechat/notifications"
 
 
 class Settings(BaseSettings):
@@ -400,6 +406,20 @@ class Settings(BaseSettings):
     apple_iap_root_ca_path: str = "app/services/payments/certs/AppleRootCA-G3.cer"
     apple_iap_environment: str = "auto"        # auto | production | sandbox
 
+    # 服务号 H5 微信支付（JSAPI，APIv3）。与 Apple IAP 完全独立：各自的商品目录、
+    # 各自的交易表，只在 vip_until / 钞票余额上汇合。appid 复用 WECHAT_H5_APP_ID
+    # （服务号），因为 JSAPI 的 openid 是服务号 appid 下的。
+    # 私钥/公钥按 APNs 的惯例走服务器文件路径，密钥文件不进仓库也不进 .env。
+    wechatpay_enabled: bool = False
+    wechatpay_mch_id: str = ""                   # 商户号
+    wechatpay_cert_serial_no: str = ""           # 商户 API 证书序列号（请求签名用）
+    wechatpay_private_key_path: str = ""         # apiclient_key.pem 路径
+    wechatpay_public_key_id: str = ""            # 微信支付公钥 ID（PUB_KEY_ID_…）
+    wechatpay_public_key_path: str = ""          # pub_key.pem 路径（应答/回调验签）
+    wechatpay_api_v3_key: str = ""               # APIv3 密钥（32 字节，回调解密）
+    wechatpay_notify_url: str = ""               # 支付/退款回调地址（必须 https）
+    wechatpay_timeout_s: float = 8.0
+
     # Jamendo music integration. The client id is configured on the server;
     # Flutter receives normalized metadata plus Jamendo file endpoint URLs.
     jamendo_client_id: str = ""
@@ -664,6 +684,40 @@ class Settings(BaseSettings):
             if missing:
                 raise RuntimeError(
                     "Unsafe production config: APPLE_IAP_ENABLED=true requires "
+                    + ", ".join(missing)
+                    + "."
+                )
+
+        if self.wechatpay_enabled:
+            missing = [
+                name
+                for name, value in (
+                    ("WECHATPAY_MCH_ID", self.wechatpay_mch_id.strip()),
+                    ("WECHATPAY_CERT_SERIAL_NO", self.wechatpay_cert_serial_no.strip()),
+                    ("WECHATPAY_PRIVATE_KEY_PATH", self.wechatpay_private_key_path.strip()),
+                    ("WECHATPAY_PUBLIC_KEY_PATH", self.wechatpay_public_key_path.strip()),
+                    # 32 字节是 AES-256-GCM 的硬要求；长度不对时回调一律解不开，
+                    # 等于每笔支付都丢，必须在启动时就拦住。
+                    ("WECHATPAY_API_V3_KEY", len(self.wechatpay_api_v3_key.strip()) == 32),
+                    # JSAPI 的 openid 属于服务号 appid，缺它无法下单。
+                    ("WECHAT_H5_APP_ID", self.wechat_h5_app_id.strip()),
+                )
+                if not value
+            ]
+            notify_url = self.wechatpay_notify_url.strip()
+            if not notify_url.startswith("https://"):
+                missing.append("WECHATPAY_NOTIFY_URL(https)")
+            # 必须指向回调路由（app/api/public/wechat_pay.py 的 NOTIFY_ROUTE_PATH），
+            # 写错 path 时微信回调全部 404，只能靠查单兜底。
+            elif not urlparse(notify_url).path.rstrip("/").endswith(
+                WECHATPAY_NOTIFY_ROUTE_PATH
+            ):
+                missing.append(f"WECHATPAY_NOTIFY_URL(path *{WECHATPAY_NOTIFY_ROUTE_PATH})")
+            if not self.wechatpay_public_key_id.strip().startswith("PUB_KEY_ID_"):
+                missing.append("WECHATPAY_PUBLIC_KEY_ID(PUB_KEY_ID_…)")
+            if missing:
+                raise RuntimeError(
+                    "Unsafe production config: WECHATPAY_ENABLED=true requires "
                     + ", ".join(missing)
                     + "."
                 )

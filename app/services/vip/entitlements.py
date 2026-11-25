@@ -203,9 +203,20 @@ async def _subscription_vip_end(user_id: str, *, client: Any | None = None) -> d
     return max(candidates) if candidates else None
 
 
-async def _consumable_vip_floor(user_id: str, *, client: Any | None = None) -> datetime | None:
+async def _consumable_vip_segments(
+    user_id: str, *, client: Any | None = None
+) -> list[tuple[datetime, int]]:
+    """所有渠道的一次性 VIP 购买 → (购买时间, 天数) 列表，按时间升序。
+
+    两个渠道各查自己的表（Apple 的 `iap_transactions`、微信的
+    `wechat_pay_orders`），在内存里按时间归并。天数在这里**不是**从目录现查的：
+    微信订单把 `vip_days` 快照在订单行上，所以后续改价或下架商品不会改写历史
+    权益；Apple 侧沿用原有的"按 product_id 查目录"方式不动。
+    """
     executor = client or db
-    rows = await executor.query_raw(
+    segments: list[tuple[datetime, int]] = []
+
+    apple_rows = await executor.query_raw(
         """
         SELECT product_id, quantity, purchase_date
         FROM iap_transactions
@@ -215,15 +226,40 @@ async def _consumable_vip_floor(user_id: str, *, client: Any | None = None) -> d
         user_id,
         catalog.KIND_CONSUMABLE,
     )
-    running: datetime | None = None
-    for row in rows:
+    for row in apple_rows:
         product = catalog.product_for(_field(row, "product_id") or "")
         if product is None or product.vip_days <= 0:
             continue
-        qty = int(_field(row, "quantity") or 1)
         purchased = as_utc(_field(row, "purchase_date"))
         if purchased is None:
             continue
+        qty = int(_field(row, "quantity") or 1)
+        segments.append((purchased, product.vip_days * qty))
+
+    wechat_rows = await executor.query_raw(
+        """
+        SELECT vip_days, COALESCE(success_time, granted_at, created_at) AS paid_at
+        FROM wechat_pay_orders
+        WHERE user_id = $1 AND status = 'granted' AND vip_days > 0
+        ORDER BY COALESCE(success_time, granted_at, created_at) ASC, created_at ASC
+        """,
+        user_id,
+    )
+    for row in wechat_rows:
+        days = int(_field(row, "vip_days") or 0)
+        paid_at = as_utc(_field(row, "paid_at"))
+        if days <= 0 or paid_at is None:
+            continue
+        segments.append((paid_at, days))
+
+    segments.sort(key=lambda item: item[0])
+    return segments
+
+
+async def _consumable_vip_floor(user_id: str, *, client: Any | None = None) -> datetime | None:
+    """按购买时间顺序叠加天数：后买的从"当前剩余到期"往后接，不覆盖也不重叠。"""
+    running: datetime | None = None
+    for purchased, days in await _consumable_vip_segments(user_id, client=client):
         base = max(purchased, running) if running is not None else purchased
-        running = base + timedelta(days=product.vip_days * qty)
+        running = base + timedelta(days=days)
     return running

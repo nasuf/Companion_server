@@ -22,7 +22,9 @@ from app.models.auth import (
     WeChatMobileLoginRequest,
     WeChatProfileUpdate,
 )
+from app.config import settings
 from app.services.auth import hash_password, verify_password, create_jwt
+from app.services.payments.wechat import accounts as wechat_pay_accounts
 from app.services.auth_security import (
     audit_auth_request_event,
     clear_login_failures,
@@ -538,6 +540,16 @@ async def wechat_h5_bind(data: WeChatH5BindRequest, request: Request, payload: d
         user_id=user.id,
         outcome="success",
     )
+    # 手机号账号绑定微信后也要能在服务号里付款，所以同样登记 openid。
+    try:
+        await wechat_pay_accounts.bind_openid(
+            user_id=user.id,
+            openid=token_payload.openid,
+            app_id=settings.wechat_h5_app_id.strip(),
+            unionid=token_payload.unionid,
+        )
+    except Exception:
+        logger.exception("wechat pay openid bind failed user=%s", user.id[:8])
     token = create_jwt(user.id, user.role)
     return await _build_auth_response(user, token)
 
@@ -548,7 +560,6 @@ async def wechat_h5_config():
 
     appid 本身是公开信息 (会出现在 OAuth 跳转 URL 里), 无需鉴权.
     """
-    from app.config import settings
     from app.services.sms.service import sms_login_available
 
     enabled = _wechat_h5_configured()
@@ -605,6 +616,17 @@ async def wechat_h5_login(data: WeChatH5LoginRequest, request: Request):
         extra={"event": "auth_wechat_h5_login", "user_id": user.id},
     )
     await _record_auth_activity(user.id, source="wechat_h5_login")
+    # 顺带登记服务号 openid 供 JSAPI 下单用。独立表、独立失败处理：绑定失败不能
+    # 让登录失败（用户还能看会员状态，只是购买前需要再授权一次）。
+    try:
+        await wechat_pay_accounts.bind_openid(
+            user_id=user.id,
+            openid=token_payload.openid,
+            app_id=settings.wechat_h5_app_id.strip(),
+            unionid=token_payload.unionid,
+        )
+    except Exception:
+        logger.exception("wechat pay openid bind failed user=%s", user.id[:8])
     return await _build_auth_response(user, token)
 
 

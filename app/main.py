@@ -277,6 +277,7 @@ from app.api.public.offerings import gift_router, router as offerings_router
 from app.api.public.notifications import router as notifications_router
 from app.api.public.offline import router as offline_router
 from app.api.public.iap import router as iap_router
+from app.api.public.wechat_pay import router as wechat_pay_router
 from app.api.public.iap_membership import router as iap_membership_router
 from app.api.realtime.ws import router as ws_router
 from app.api.realtime.voice import router as voice_ws_router
@@ -309,6 +310,7 @@ from app.api.admin.game_configs import router as admin_game_configs_router
 from app.api.admin.game_points import router as admin_game_points_router
 from app.api.admin.wallet import router as admin_wallet_router
 from app.api.admin.payments import router as admin_payments_router
+from app.api.admin.wechat_pay import router as admin_wechat_pay_router
 from app.api.admin.payment_settings import router as admin_payment_settings_router
 from app.api.public.vip_activation import router as vip_activation_router
 from app.api.admin.vip_activation import router as admin_vip_activation_router
@@ -354,6 +356,7 @@ app.include_router(vip_activation_router)
 app.include_router(notifications_router)
 app.include_router(offline_router)
 app.include_router(iap_router)
+app.include_router(wechat_pay_router)
 app.include_router(iap_membership_router)
 app.include_router(ws_router)
 app.include_router(voice_ws_router)
@@ -386,6 +389,7 @@ app.include_router(admin_game_configs_router)
 app.include_router(admin_game_points_router)
 app.include_router(admin_wallet_router)
 app.include_router(admin_payments_router)
+app.include_router(admin_wechat_pay_router)
 app.include_router(admin_payment_settings_router)
 app.include_router(admin_vip_activation_router)
 app.include_router(admin_chat_quota_router)
