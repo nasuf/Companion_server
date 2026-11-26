@@ -82,9 +82,11 @@ async def test_payment_gate_upgrade_defaults_closed_and_preserves_wallet(tmp_pat
         await deploy(); await deploy()
         from app.services.payments import availability
         monkeypatch.setattr(availability, 'db', client)
+        # 安卓连续包月开关是之后新增的列，升级后默认关闭。
         assert await availability.get_payment_settings() == {
-            'real_money_payments_enabled': False, 'wechat_pay_purchases_enabled': False}
-        for key in ('real_money_payments_enabled', 'wechat_pay_purchases_enabled'):
+            'real_money_payments_enabled': False, 'wechat_pay_purchases_enabled': False,
+            'android_auto_renew_enabled': False}
+        for key in ('real_money_payments_enabled', 'wechat_pay_purchases_enabled', 'android_auto_renew_enabled'):
             for enabled in (True, False):
                 settings = await availability.set_payment_settings(actor_id='synthetic-admin', **{key: enabled})
                 assert settings[key] is enabled
@@ -94,6 +96,7 @@ async def test_payment_gate_upgrade_defaults_closed_and_preserves_wallet(tmp_pat
         assert await client.query_raw('SELECT * FROM user_wallets WHERE user_id=$1', user.id) == before
         row = await client.systemconfig.find_unique(where={'id': 1})
         assert row.realMoneyPaymentsEnabled is False and row.wechatPayPurchasesEnabled is False
+        assert row.androidAutoRenewEnabled is False
     finally:
         if client is not None: await client.disconnect()
         await admin.execute_raw(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
