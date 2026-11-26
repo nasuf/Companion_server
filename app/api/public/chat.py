@@ -29,6 +29,15 @@ from app.services.runtime.chat_ingress_activation import sql_chat_ingress_enable
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
+@router.get("/features")
+async def chat_features(response: Response, _: dict = Depends(require_user)) -> dict:
+    """聊天界面的功能开关。语音通话 iOS 与安卓同时生效，读不到按关闭处理。"""
+    from app.services.realtime_voice.feature_gate import is_voice_call_enabled
+
+    response.headers["Cache-Control"] = "no-store"
+    return {"voice_call_enabled": await is_voice_call_enabled()}
+
+
 async def _empty_stream() -> AsyncGenerator[dict, None]:
     """空SSE流：用户消息已进入聚合窗口，暂无AI回复。"""
     yield {"event": "pending", "data": json.dumps({"status": "aggregating"})}

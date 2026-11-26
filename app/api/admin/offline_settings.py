@@ -14,6 +14,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.api.jwt_auth import require_admin_jwt
+from app.services.realtime_voice.feature_gate import (
+    is_voice_call_enabled,
+    set_voice_call_enabled,
+)
 from app.services.offline.module_settings import (
     get_offline_module_flags,
     set_offline_module_flags,
@@ -29,25 +33,39 @@ router = APIRouter(
 class OfflineSettingsResponse(BaseModel):
     activity_enabled: bool
     gift_enabled: bool
+    voice_call_enabled: bool
 
 
 class OfflineSettingsUpdateRequest(BaseModel):
     # Each field is optional so a single toggle can be updated in isolation.
     activity_enabled: bool | None = None
     gift_enabled: bool | None = None
+    voice_call_enabled: bool | None = None
 
 
 @router.get("", response_model=OfflineSettingsResponse)
 async def get_offline_settings() -> OfflineSettingsResponse:
-    return OfflineSettingsResponse(**await get_offline_module_flags())
+    return OfflineSettingsResponse(
+        **await get_offline_module_flags(),
+        voice_call_enabled=await is_voice_call_enabled(),
+    )
 
 
 @router.put("", response_model=OfflineSettingsResponse)
 async def update_offline_settings(
     payload: OfflineSettingsUpdateRequest,
+    admin: dict = Depends(require_admin_jwt),
 ) -> OfflineSettingsResponse:
     flags = await set_offline_module_flags(
         activity_enabled=payload.activity_enabled,
         gift_enabled=payload.gift_enabled,
     )
-    return OfflineSettingsResponse(**flags)
+    # 语音通话与线下模块互不影响：只在传了它时才写。
+    voice_enabled = (
+        await set_voice_call_enabled(
+            enabled=payload.voice_call_enabled, actor_id=str(admin["sub"])
+        )
+        if payload.voice_call_enabled is not None
+        else await is_voice_call_enabled()
+    )
+    return OfflineSettingsResponse(**flags, voice_call_enabled=voice_enabled)

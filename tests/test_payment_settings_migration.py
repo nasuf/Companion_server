@@ -97,6 +97,16 @@ async def test_payment_gate_upgrade_defaults_closed_and_preserves_wallet(tmp_pat
         row = await client.systemconfig.find_unique(where={'id': 1})
         assert row.realMoneyPaymentsEnabled is False and row.wechatPayPurchasesEnabled is False
         assert row.androidAutoRenewEnabled is False
+        # 语音通话全局开关同样是之后新增的列：升级后默认关闭，切换只写它自己。
+        from app.services.realtime_voice import feature_gate
+        monkeypatch.setattr(feature_gate, 'db', client)
+        assert await feature_gate.is_voice_call_enabled() is False
+        await feature_gate.set_voice_call_enabled(enabled=True, actor_id='synthetic-admin')
+        assert await feature_gate.is_voice_call_enabled() is True
+        assert all(value is False for value in (await availability.get_payment_settings()).values())
+        assert (await client.systemconfig.find_unique(where={'id': 1})).offlineGiftEnabled is True
+        await feature_gate.set_voice_call_enabled(enabled=False, actor_id='synthetic-admin')
+        assert await feature_gate.is_voice_call_enabled() is False
     finally:
         if client is not None: await client.disconnect()
         await admin.execute_raw(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')

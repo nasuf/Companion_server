@@ -656,6 +656,7 @@ def _endpoint_fixtures(monkeypatch, endpoint, conv):
 
     monkeypatch.setattr(endpoint, "is_redis_healthy", lambda: True)
     monkeypatch.setattr(endpoint, "offered_ticket", lambda _: "ticket")
+    monkeypatch.setattr(endpoint, "is_voice_call_enabled", ok)
     monkeypatch.setattr(endpoint, "origin_allowed", lambda _: True)
     monkeypatch.setattr(endpoint, "consume_ticket", principal_for)
     monkeypatch.setattr(endpoint.db, "conversation", SimpleNamespace(find_unique=find_unique), raising=False)
@@ -713,6 +714,23 @@ async def test_call_dials_the_agent_voice_or_reports_an_empty_library(monkeypatc
         assert ws.sent == [{"type": "error", "code": "provider_unavailable", "message": "实时语音暂时连不上"}]
     assert ws.closed_with == 1011
     assert released == [("conv-1", "lock-token")]
+
+
+async def test_call_is_refused_before_accept_when_the_global_switch_is_off(monkeypatch):
+    """The admin switch is enforced server-side: old clients still show the button."""
+    from app.api.realtime import voice as endpoint
+
+    agent = SimpleNamespace(id="agent-1", userId="user-1", status="active", gender="female")
+    conv = SimpleNamespace(id="conv-1", userId="user-1", isDeleted=False, agent=agent, workspaceId=None)
+    _endpoint_fixtures(monkeypatch, endpoint, conv)
+    monkeypatch.setattr(endpoint, "is_voice_call_enabled", AsyncMock(return_value=False))
+    lock = AsyncMock(return_value="lock-token")
+    monkeypatch.setattr(endpoint, "acquire_call", lock)
+    ws = _FakeVoiceSocket()
+    await endpoint.voice_websocket(ws, "conv-1")
+    assert not ws.accepted
+    assert ws.closed_with == 4403
+    lock.assert_not_awaited()
 
 
 async def test_call_without_a_key_is_not_configured(monkeypatch):
@@ -1052,3 +1070,4 @@ async def test_effective_realtime_model_reads_runtime_config(monkeypatch):
     monkeypatch.setattr(runtime_config, "_AGENT_CACHE", {})
     monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {"realtimeModel": "qwen3.9-omni-flash-realtime"})
     assert await runtime_config.get_effective_realtime_model() == "qwen3.9-omni-flash-realtime"
+

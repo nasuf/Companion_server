@@ -31,6 +31,7 @@ from app.redis_client import is_redis_healthy
 from app.services.interaction.boundary import get_patience, get_patience_zone
 from app.services.realtime_voice.bridge import VoiceBridge
 from app.services.realtime_voice.context import load_call_context
+from app.services.realtime_voice.feature_gate import is_voice_call_enabled
 from app.services.realtime_voice.instructions import clock_line, memory_lines, turn_voice_hint
 from app.services.realtime_voice.lock import acquire_call, refresh_call, release_call
 from app.services.realtime_voice.persist import (
@@ -120,6 +121,10 @@ async def voice_websocket(websocket: WebSocket, conversation_id: str):
     from app.services.identity import realname
     if await realname.chat_block_reason(principal.user_id, role=principal.role):
         await websocket.close(code=4403, reason="realname_required")
+        return
+    # 全局开关关闭时不建立新通话：旧版客户端仍可能有入口，服务端是最后一道闸。
+    if not await is_voice_call_enabled():
+        await websocket.close(code=4403, reason="voice_call_disabled")
         return
 
     # --- Accept ---
