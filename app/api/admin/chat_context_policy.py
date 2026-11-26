@@ -88,6 +88,38 @@ async def put_policy(payload: PolicyPatch, admin: dict = Depends(require_admin_j
     return await _payload(updated)
 
 
+
+@router.get('/token-calibration')
+async def token_calibration(days: int = Query(7, ge=1, le=30)):
+    """Main-reply calibrated/heuristic estimates against billed prompt tokens.
+
+    Bounded: the newest 2000 root traces with a measured main window in the
+    window; more than that is reported as truncated, not silently cut.
+    """
+    from app.services.effect.token_calibration import summarize as summarize_calibration
+
+    now = datetime.now(UTC)
+    start = now - timedelta(days=days)
+    rows = await db.query_raw('''WITH roots AS (
+          SELECT trace_id, extra_json->'metadata'->'chat_context_policy'->'windows'->'main' AS w
+          FROM trace_runs WHERE parent_id IS NULL AND created_at >= $1::timestamp AND created_at < $2::timestamp
+            AND extra_json->'metadata'->'chat_context_policy'->'windows'->'main' ? 'measured'
+          ORDER BY created_at DESC LIMIT 2001
+        )
+        SELECT r.w->'measured' AS measured, r.w->'search_cap' AS search_cap,
+               l.name AS llm_name, l.model_name, l.prompt_tokens
+        FROM roots r LEFT JOIN LATERAL (
+          SELECT l.name, l.model_name, l.prompt_tokens FROM trace_runs g
+          JOIN trace_runs l ON l.trace_id=g.trace_id AND l.parent_id=g.run_id
+            AND l.run_type='llm' AND l.status='success'
+          WHERE g.trace_id=r.trace_id AND g.name='generate_reply'
+          ORDER BY l.prompt_tokens DESC NULLS LAST LIMIT 1
+        ) l ON true''', start.replace(tzinfo=None).isoformat(), now.replace(tzinfo=None).isoformat())
+    truncated = len(rows) > 2000
+    return {**summarize_calibration(rows[:2000]), 'rows': min(len(rows), 2000), 'max_rows': 2000,
+            'truncated': truncated, 'window_start': _utc_iso(start), 'window_end': _utc_iso(now),
+            'sampled_at': now.isoformat()}
+
 CACHE_QUALIFIED_MODEL_PREFIXES = ('ark/',)
 
 

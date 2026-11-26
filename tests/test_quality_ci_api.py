@@ -121,6 +121,13 @@ async def test_ci_complete_cycle_no_business_access_and_idempotent_begin(control
     assert (
         await action("result", {**result, "secret": "not allowed"})
     ).status_code == 400
+    # Unreplayable cases are reported with a reason code and no verdict (11-25 nightly 400).
+    unknown = {**result, "case_id": "human_confirmed:x", "pass": None, "turns": 0,
+               "unknown": "exact_source_input_missing"}
+    assert (await action("result", unknown)).status_code == 200
+    for bad in ({**unknown, "unknown": "x" * 65},
+                {**unknown, "unknown": "Not A Code"}, {**unknown, "unknown": 1}):
+        assert (await action("result", bad)).status_code == 400
     assert (await action("baseline", {"corpus_hash": "h"})).json() == {
         "id": None,
         "results": [],

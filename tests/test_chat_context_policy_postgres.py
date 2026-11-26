@@ -139,7 +139,7 @@ async def test_permissions_readonly_main_and_history_bound(policy_env):
         assert (await put(io, 8 if n % 2 else 12)).status_code == 200
     assert len((await get(io))['changes']) == 30
     await io.db.user.update(where={'id': io.admin.id}, data={'role': 'user'})
-    for path in ('', '/usage'):
+    for path in ('', '/usage', '/token-calibration'):
         assert (await io.client.get('/admin-api/chat-context-policy' + path, headers=io.headers)).status_code == 403
     assert (await put(io, 5, 'synthetic')).status_code == 403
 
@@ -200,3 +200,34 @@ async def test_usage_groups_actual_trace_rounds_unknown_cache_and_scope(policy_e
         for ident in ids:
             await io.db.execute_raw('DELETE FROM llm_usage WHERE id=$1', ident)
         await io.db.execute_raw('DELETE FROM trace_runs WHERE run_id=$1', run)
+
+
+async def test_token_calibration_joins_main_reply_billing(policy_env):
+    from uuid import uuid4
+    io = policy_env
+    root, gen, llm, helper = (str(uuid4()) for _ in range(4))
+    main = {'measured': {'model': 'doubao-seed-character-260628', 'calibrated': True,
+                         'input_tokens': 10400, 'heuristic_input_tokens': 15000}}
+    rows = [(root, root, None, 'chat_request', 'chain', None, None,
+             json.dumps({'metadata': {'chat_context_policy': {'windows': {'main': main}}}})),
+            (gen, root, root, 'generate_reply', 'chain', None, None, None),
+            (llm, root, gen, 'ChatOpenAI', 'llm', 'doubao-seed-character-260628', 10000, None),
+            # The reply's emotion call sits under the same parent; the largest run is the reply.
+            (helper, root, gen, 'ChatOpenAI', 'llm', 'qwen3.5-flash', 96, None)]
+    try:
+        for rid, trace, parent, name, kind, model, prompt, extra in rows:
+            await io.db.execute_raw(
+                "INSERT INTO trace_runs(run_id,trace_id,parent_id,name,run_type,status,started_at,model_name,prompt_tokens,extra_json) "
+                "VALUES ($1,$2,$3,$4,$5,'success',CURRENT_TIMESTAMP,$6,$7,$8::jsonb)", rid, trace, parent, name, kind, model, prompt, extra)
+        r = await io.client.get('/admin-api/chat-context-policy/token-calibration?days=1', headers=io.headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['rows'] == 1 and body['truncated'] is False
+        [doubao] = body['models']
+        assert doubao['turns_1000_plus'] == 1
+        assert doubao['calibrated_error']['p50'] == 0.04 and doubao['heuristic_error']['p50'] == 0.5
+        assert (await io.client.get('/admin-api/chat-context-policy/token-calibration?days=31',
+                                    headers=io.headers)).status_code == 422
+    finally:
+        for rid in (helper, llm, gen, root):
+            await io.db.execute_raw('DELETE FROM trace_runs WHERE run_id=$1', rid)

@@ -142,10 +142,14 @@ async def action(job_id: str, body: Action, identity=Depends(oidc.NIGHTLY)):
             return {"ok": True}
         if body.operation == "result":
             allowed = {"case_id", "repetition", "critical", "suite", "pass", "turns"}
+            # An unreplayable case carries a reason code instead of a verdict.
+            unknown = data.get("unknown")
             if (
-                set(data) != allowed
+                set(data) - {"unknown"} != allowed
                 or type(data["pass"]) not in (bool, type(None))
                 or not 0 <= data["repetition"] < 5
+                or (unknown is not None and not (
+                    isinstance(unknown, str) and re.fullmatch("[a-z0-9_]{1,64}", unknown)))
             ):
                 raise ValueError("invalid_quality_result")
             await sink.result(data)
