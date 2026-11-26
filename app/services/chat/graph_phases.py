@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from app.services.chat.memory_usage import submit_memory_usage
 from app.services.memory.retrieval.live_check import keep_live_memories
-from app.services.chat import reply_repetition
+from app.services.chat import reply_repetition, token_budget
 from app.services.chat.reply_repetition import review as repetition_review
 from app.services.chat.reply_repetition import semantic as semantic_repetition
 from app.services.time_domain.query import resolve_temporal_query
@@ -843,6 +843,18 @@ async def special_route(ctx):
     yield ctx.completed("special_route")
 
 
+def _main_reply_model(web_search: bool) -> str | None:
+    """Model the main reply goes to, for calibrated counting only."""
+    try:
+        if web_search:
+            from app.services.runtime_config import resolve_for_current
+            return resolve_for_current().remote_chat_model
+        from app.services.llm.models import _chat_model_name
+        return _chat_model_name()
+    except Exception:  # noqa: BLE001 - unknown model counts with the uncalibrated bound
+        return None
+
+
 def _finish_main_messages(ctx, services, system_prompt, reply_messages):
     """Main reply history at the configured length; the window goes to the Trace."""
     from app.services.chat import context_policy
@@ -854,13 +866,32 @@ def _finish_main_messages(ctx, services, system_prompt, reply_messages):
         else None
     )
     window: dict = {}
-    chat_messages = services.build_chat_messages(
-        system_prompt, reply_messages, drop_older_than_seconds=drop_older,
-        token_budget=context_policy.main_history_budget(
-            context_policy.current(), web_search=bool(ctx.needs_web_search)
-        ),
-        metrics=window,
+    budget = context_policy.main_history_budget(
+        context_policy.current(), web_search=bool(ctx.needs_web_search)
     )
+
+    def build(history_budget):
+        window.clear()
+        return services.build_chat_messages(
+            system_prompt, reply_messages, drop_older_than_seconds=drop_older,
+            token_budget=history_budget, metrics=window,
+        )
+
+    model = _main_reply_model(bool(ctx.needs_web_search))
+    chat_messages, search_cap = None, None
+    if ctx.needs_web_search:
+        try:
+            chat_messages, search_cap = token_budget.fit_search_cap(build, budget, model)
+        except Exception as exc:  # the cap is a cost guard; never block the reply
+            services.logger.warning(f"[token-budget] search cap failed: {type(exc).__name__}")
+    if chat_messages is None:
+        chat_messages = build(budget)
+    try:
+        window["measured"] = token_budget.measure(chat_messages, model)
+        if search_cap is not None:
+            window["search_cap"] = search_cap
+    except Exception as exc:  # measurement must never take the reply down
+        services.logger.warning(f"[token-budget] measure failed: {type(exc).__name__}")
     # The row limit was the bound only when every fetched row fit, none were
     # dropped by the gap boundary and older rows may still exist.
     window["fetch_limited"] = (
