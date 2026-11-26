@@ -8,7 +8,8 @@ from app.services.payments import availability
 
 @pytest.fixture
 def gate_db(monkeypatch):
-    row = SimpleNamespace(realMoneyPaymentsEnabled=False, wechatPayPurchasesEnabled=False, offlineGiftEnabled=True)
+    row = SimpleNamespace(realMoneyPaymentsEnabled=False, wechatPayPurchasesEnabled=False,
+                          androidAutoRenewEnabled=False, offlineGiftEnabled=True)
     async def save(*, where, data):
         for field, value in data['update'].items():
             setattr(row, field, value)
@@ -101,7 +102,8 @@ def test_apple_and_wechat_switches_are_independent(api_client, auth_header, gate
     user = auth_header('shopper')
     r = api_client.put('/admin-api/payment-settings', headers=admin, json={'wechat_pay_purchases_enabled': True})
     assert r.status_code == 200
-    assert r.json() == {'real_money_payments_enabled': False, 'wechat_pay_purchases_enabled': True}
+    assert r.json() == {'real_money_payments_enabled': False, 'wechat_pay_purchases_enabled': True,
+                        'android_auto_renew_enabled': False}
     assert db.upsert.await_args.kwargs['data']['update'] == {'wechatPayPurchasesEnabled': True}
     assert row.realMoneyPaymentsEnabled is False
     # App 读的接口只有 Apple 的字段，形状和旧版一致。
@@ -143,3 +145,22 @@ async def test_service_rejects_unknown_or_empty_changes(gate_db, changes):
     with pytest.raises(ValueError):
         await availability.set_payment_settings(actor_id='a', **changes)
     db.upsert.assert_not_awaited()
+
+
+def test_android_store_settings_expose_both_android_flags(api_client, auth_header, gate_db):
+    """安卓商城一次读两个开关；Apple 的开关不出现在里面。"""
+    row, _ = gate_db
+    admin = auth_header('operator', role='admin')
+    user = auth_header('shopper')
+    assert api_client.get('/store/android-settings', headers=user).json() == {
+        'wechat_pay_purchases_enabled': False, 'android_auto_renew_enabled': False}
+    api_client.put('/admin-api/payment-settings', headers=admin,
+                   json={'android_auto_renew_enabled': True})
+    assert row.androidAutoRenewEnabled is True
+    # 只改安卓档位开关，微信支付与 Apple 开关都不动。
+    assert row.wechatPayPurchasesEnabled is False
+    assert row.realMoneyPaymentsEnabled is False
+    r = api_client.get('/store/android-settings', headers=user)
+    assert r.headers['Cache-Control'] == 'no-store'
+    assert r.json() == {'wechat_pay_purchases_enabled': False, 'android_auto_renew_enabled': True}
+    assert api_client.get('/store/android-settings').status_code == 401

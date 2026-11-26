@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.api.jwt_auth import require_user
 from app.models.store_inventory import (
@@ -11,9 +11,20 @@ from app.models.store_inventory import (
     StoreExchangeResponse,
     StoreInventoryResponse,
 )
+from app.models.payment_settings import AndroidStoreSettings
 from app.services import store_bundles, store_inventory
+from app.services.payments.availability import get_android_store_settings
 
 router = APIRouter(prefix="/store", tags=["store"])
+
+
+@router.get("/android-settings", response_model=AndroidStoreSettings)
+async def get_android_store_flags(
+    response: Response, payload: dict = Depends(require_user)
+):
+    """安卓商城开关：服务号 H5 付款入口 + 连续包月档位。iOS 不读这个接口。"""
+    response.headers["Cache-Control"] = "no-store"
+    return await get_android_store_settings()
 
 
 @router.get("/inventory", response_model=StoreInventoryResponse)

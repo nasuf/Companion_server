@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _FIELDS = {
     "real_money_payments_enabled": "realMoneyPaymentsEnabled",
     "wechat_pay_purchases_enabled": "wechatPayPurchasesEnabled",
+    "android_auto_renew_enabled": "androidAutoRenewEnabled",
 }
 
 
@@ -33,6 +34,15 @@ async def get_payment_settings() -> dict[str, bool]:
 async def get_apple_purchase_settings() -> dict[str, bool]:
     settings = await get_payment_settings()
     return {"real_money_payments_enabled": settings["real_money_payments_enabled"]}
+
+
+async def get_android_store_settings() -> dict[str, bool]:
+    """安卓商城要的两个开关，一次读完：能否走服务号 H5 付款、是否展示连续包月。"""
+    settings = await get_payment_settings()
+    return {
+        "wechat_pay_purchases_enabled": settings["wechat_pay_purchases_enabled"],
+        "android_auto_renew_enabled": settings["android_auto_renew_enabled"],
+    }
 
 
 async def require_real_money_payments() -> dict[str, bool]:

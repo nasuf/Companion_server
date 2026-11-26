@@ -10,11 +10,20 @@ class PaymentSettings(BaseModel):
     real_money_payments_enabled: StrictBool
 
 
+class AndroidStoreSettings(BaseModel):
+    """安卓商城开关，由 Android 客户端读取（``/store/android-settings``）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    wechat_pay_purchases_enabled: StrictBool
+    android_auto_renew_enabled: StrictBool
+
+
 class AdminPaymentSettings(BaseModel):
-    """Both purchase gates, as shown in the admin console."""
+    """All purchase gates, as shown in the admin console."""
 
     real_money_payments_enabled: StrictBool  # Apple 内购
     wechat_pay_purchases_enabled: StrictBool  # 服务号 H5 微信支付
+    android_auto_renew_enabled: StrictBool  # 安卓是否展示连续包月
 
 
 class AdminPaymentSettingsUpdate(BaseModel):
@@ -27,6 +36,7 @@ class AdminPaymentSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     real_money_payments_enabled: StrictBool | None = None
     wechat_pay_purchases_enabled: StrictBool | None = None
+    android_auto_renew_enabled: StrictBool | None = None
 
     @model_validator(mode="before")
     @classmethod
