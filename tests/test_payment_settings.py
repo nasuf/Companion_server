@@ -164,3 +164,27 @@ def test_android_store_settings_expose_both_android_flags(api_client, auth_heade
     assert r.headers['Cache-Control'] == 'no-store'
     assert r.json() == {'wechat_pay_purchases_enabled': False, 'android_auto_renew_enabled': True}
     assert api_client.get('/store/android-settings').status_code == 401
+
+
+def test_trial_purchase_permission_rejects_used_or_vip_accounts(api_client, auth_header, gate_db, monkeypatch):
+    """¥1 体验在拉起 StoreKit 前就拦下：Apple 扣款后服务端没法替用户退款。"""
+    row, _ = gate_db
+    row.realMoneyPaymentsEnabled = True
+    from app.api.public import iap
+    snapshot = {'vip_trial_available': False}
+    monkeypatch.setattr(iap.wallet, 'full_wallet', AsyncMock(side_effect=lambda _: snapshot))
+    user = auth_header('shopper')
+    trial = {'product_id': 'com.bansheng.vip.trial'}
+    r = api_client.post('/iap/apple/purchase-permission', headers=user, json=trial)
+    assert r.status_code == 409 and r.json()['detail'] == 'trial_already_used'
+    snapshot['vip_trial_available'] = True
+    assert api_client.post('/iap/apple/purchase-permission', headers=user, json=trial).status_code == 200
+    # 其它商品和旧客户端（不带请求体）不查体验资格。
+    snapshot['vip_trial_available'] = False
+    assert api_client.post('/iap/apple/purchase-permission', headers=user,
+                           json={'product_id': 'com.bansheng.vip.month'}).status_code == 200
+    assert api_client.post('/iap/apple/purchase-permission', headers=user).status_code == 200
+    # 开关关闭时先按开关拒绝，不泄露体验资格。
+    row.realMoneyPaymentsEnabled = False
+    r = api_client.post('/iap/apple/purchase-permission', headers=user, json=trial)
+    assert r.status_code == 403

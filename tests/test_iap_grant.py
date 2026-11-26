@@ -34,8 +34,9 @@ class _FakeTx:
 
 
 class _FakeDb:
-    def __init__(self, *, existing=None, insert_returns=None, locked_status="granted"):
+    def __init__(self, *, existing=None, insert_returns=None, locked_status="granted", trial_used=False):
         self.existing = existing  # _find_transaction 结果行 or None
+        self.trial_used = trial_used
         self.insert_returns = [{"id": "row1"}] if insert_returns is None else insert_returns
         self.locked_status = locked_status
         self.vip_until_written = "unset"
@@ -90,6 +91,8 @@ class _FakeDb:
                 if row["status"] == "granted" and row["kind"] == grant.catalog.KIND_SUBSCRIPTION
             ]
             return [{"max_expires": max(expires) if expires else None}]
+        if "SELECT vip_trial_used FROM user_wallets" in query:
+            return [{"vip_trial_used": self.trial_used}]
         if "SELECT vip_until FROM user_wallets" in query:
             return [{"vip_until": self.vip_until}]
         return []
@@ -569,3 +572,37 @@ def test_require_owner_rejects_malformed_uuid():
 
 def test_require_owner_allows_missing_token():
     grant._require_owner('u1', None)
+
+
+@pytest.mark.asyncio
+async def test_repeat_trial_is_not_granted_and_marked_failed(monkeypatch):
+    # 已在任一渠道体验过（vip_trial_used=TRUE）再买 Apple 体验：不发 VIP、落 failed，
+    # 客户端据此不当作成功。
+    fake = _FakeDb(existing=None, trial_used=True)
+    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.vip.trial", txn="txn-t2"))
+    recompute = AsyncMock()
+    monkeypatch.setattr(grant, "recompute_vip_entitlements", recompute)
+
+    result = await grant.verify_and_grant("u1", "txn-t2")
+
+    assert result["status"] == "failed"
+    recompute.assert_not_awaited()
+    executed = [q for kind, q in fake.calls if kind == "e"]
+    assert any("status = 'failed'" in q for q in executed)
+    assert not any("status = 'granted'" in q for q in executed)
+    assert not any("vip_trial_used = TRUE" in q for q in executed)
+    grant.vip_grants.grant_monthly.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_first_trial_is_granted_and_marks_the_flag(monkeypatch):
+    fake = _FakeDb(existing=None, trial_used=False)
+    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.vip.trial", txn="txn-t1"))
+    monkeypatch.setattr(grant, "recompute_vip_entitlements", AsyncMock())
+
+    result = await grant.verify_and_grant("u1", "txn-t1")
+
+    assert result["status"] == "granted"
+    executed = [q for kind, q in fake.calls if kind == "e"]
+    assert any("vip_trial_used = TRUE" in q for q in executed)
+    assert any("status = 'granted'" in q for q in executed)

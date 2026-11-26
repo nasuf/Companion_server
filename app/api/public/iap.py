@@ -8,10 +8,11 @@ from app.api.deps import require_redis
 from app.api.jwt_auth import require_user
 from app.observability import bind_context
 from app.observability.events import EVT_PAYMENT_VERIFY_FAIL, EVT_PAYMENT_VERIFY_OK
-from app.models.payment_settings import PaymentSettings
+from app.models.payment_settings import ApplePurchasePermissionRequest, PaymentSettings
 from app.services.payments.availability import get_apple_purchase_settings, require_real_money_payments
 from app.models.iap import IapVerifyRequest, IapVerifyResponse
-from app.services.payments import grant, notifications
+from app.services import wallet
+from app.services.payments import catalog, grant, notifications
 from app.services.payments.errors import (
     AppleVerificationError,
     PaymentError,
@@ -31,10 +32,20 @@ async def purchase_availability(response: Response, payload: dict = Depends(requ
 
 
 @router.post("/purchase-permission", response_model=PaymentSettings)
-async def authorize_new_purchase(payload: dict = Depends(require_user)):
+async def authorize_new_purchase(
+    data: ApplePurchasePermissionRequest | None = None,
+    payload: dict = Depends(require_user),
+):
     # A fresh database read immediately before calling StoreKit. Verification,
     # restoration and notifications below must still honour paid transactions.
-    return await require_real_money_payments()
+    settings = await require_real_money_payments()
+    # ¥1 体验账号终身限购 1 次（两个渠道共用一个标记），会员期内也不卖。必须在
+    # 拉起 StoreKit 之前拦下：Apple 扣款后服务端没法替用户退款。
+    if data is not None and data.product_id == catalog.TRIAL_PRODUCT_ID:
+        snapshot = await wallet.full_wallet(str(payload["sub"]))
+        if not snapshot.get("vip_trial_available"):
+            raise HTTPException(status_code=409, detail="trial_already_used")
+    return settings
 
 
 @router.post(

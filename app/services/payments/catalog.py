@@ -64,5 +64,9 @@ APPLE_PRODUCTS: dict[str, IapProduct] = {
 }
 
 
+# ¥1 体验：账号终身限购 1 次，与微信渠道的 wx.vip.trial 共用 vip_trial_used。
+TRIAL_PRODUCT_ID = f"{_PREFIX}.vip.trial"
+
+
 def product_for(product_id: str) -> IapProduct | None:
     return APPLE_PRODUCTS.get(product_id)

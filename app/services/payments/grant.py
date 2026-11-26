@@ -253,37 +253,68 @@ async def record_and_grant(
                     **await _snapshot(user_id),
                 }
 
-        if product.grants_tickets:
-            await wallet.credit_tickets(
-                user_id,
-                product.ticket_amount * quantity,
-                source=catalog.SOURCE_APPLE_IAP,
-                source_id=transaction_id,
-                metadata={
-                    "product_id": product.product_id,
-                    "environment": environment,
-                    "kind": product.kind,
-                },
-                client=tx,
-            )
-        elif product.grants_vip:
-            await _apply_vip_metadata(
-                tx, user_id, product, expires_dt, environment, original_txn_id, transaction_id
-            )
-
-        await tx.execute_raw(
-            """
-            UPDATE iap_transactions
-            SET status = 'granted', wallet_ledger_source_id = $2,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE provider = $1 AND transaction_id = $2
-            """,
-            PROVIDER_APPLE,
-            transaction_id,
+        duplicate_trial = product.product_id == catalog.TRIAL_PRODUCT_ID and (
+            await _trial_already_used(tx, user_id)
         )
-        if product.grants_vip:
-            await recompute_vip_entitlements(user_id, client=tx, clear_lapse=False)
-        granted_now = True
+        if duplicate_trial:
+            # 购买前预检挡不住旧客户端、并发下单和「另一个渠道刚用掉体验」。这里在
+            # 钱包行锁内复核（微信渠道到账时锁同一行），第二笔不发放、落 failed。
+            # 用户已被 Apple 扣款，退款只能由用户向 Apple 申请。
+            await tx.execute_raw(
+                """
+                UPDATE iap_transactions
+                SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                WHERE provider = $1 AND transaction_id = $2
+                """,
+                PROVIDER_APPLE,
+                transaction_id,
+            )
+            logger.warning(
+                "iap duplicate trial user=%s txn=%s",
+                user_id[:8],
+                transaction_id,
+                extra={
+                    "event": "iap_duplicate_trial",
+                    "user_id": user_id,
+                    "transaction_id": transaction_id,
+                    "environment": environment,
+                },
+            )
+        else:
+            if product.grants_tickets:
+                await wallet.credit_tickets(
+                    user_id,
+                    product.ticket_amount * quantity,
+                    source=catalog.SOURCE_APPLE_IAP,
+                    source_id=transaction_id,
+                    metadata={
+                        "product_id": product.product_id,
+                        "environment": environment,
+                        "kind": product.kind,
+                    },
+                    client=tx,
+                )
+            elif product.grants_vip:
+                await _apply_vip_metadata(
+                    tx, user_id, product, expires_dt, environment, original_txn_id, transaction_id
+                )
+            await tx.execute_raw(
+                """
+                UPDATE iap_transactions
+                SET status = 'granted', wallet_ledger_source_id = $2,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE provider = $1 AND transaction_id = $2
+                """,
+                PROVIDER_APPLE,
+                transaction_id,
+            )
+            if product.grants_vip:
+                await recompute_vip_entitlements(user_id, client=tx, clear_lapse=False)
+            granted_now = True
+
+    # 快照在事务提交后再取：事务里还锁着钱包行，_snapshot 会另借一个连接。
+    if duplicate_trial:
+        return {"status": "failed", "kind": product.kind, "replay": False, **await _snapshot(user_id)}
 
     # VIP 到账后立即发当月权益（限时钞票/音乐券/补签卡），不必等夜间 cron；
     # 后台执行以缩短 verify 热路径；失败不影响已生效 VIP（cron 会补发）。
@@ -305,6 +336,14 @@ async def record_and_grant(
         },
     )
     return {"status": "granted", "kind": product.kind, "replay": False, **await _snapshot(user_id)}
+
+
+async def _trial_already_used(tx: Any, user_id: str) -> bool:
+    rows = await tx.query_raw(
+        "SELECT vip_trial_used FROM user_wallets WHERE user_id = $1 FOR UPDATE",
+        user_id,
+    )
+    return bool(rows) and bool(_field(rows[0], "vip_trial_used"))
 
 
 async def _grant_vip_monthly_safe(user_id: str) -> None:

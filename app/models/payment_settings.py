@@ -10,6 +10,13 @@ class PaymentSettings(BaseModel):
     real_money_payments_enabled: StrictBool
 
 
+class ApplePurchasePermissionRequest(BaseModel):
+    """购买前预检的可选请求体。旧客户端不带请求体，只做开关检查。"""
+
+    model_config = ConfigDict(extra="forbid")
+    product_id: str | None = None
+
+
 class AndroidStoreSettings(BaseModel):
     """安卓商城开关，由 Android 客户端读取（``/store/android-settings``）。"""
 
