@@ -95,6 +95,7 @@ async def run(job):
                 judge.request(bounded_context(context)),
                 max_tokens=900,
                 json_mode=True,
+                temperature=judge.TEMPERATURE,
             )
             verdict = judge.parse(text)
             await write(

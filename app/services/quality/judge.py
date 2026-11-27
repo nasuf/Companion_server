@@ -14,7 +14,14 @@ persona_evidence 是生成这条回复时主提示词里的角色身份、作息
 输出 JSON：{"categories":{"hallucination":"pass|fail|unknown","irrelevance":"pass|fail|unknown","temporal":"pass|fail|unknown","persona_tone":"pass|fail|unknown","repetition":"pass|fail|unknown"},"critical_kinds":[],"confidence":0到1,"reason":"最多240字，引用实际回复和对应证据；未知则说明缺什么"}。
 critical_kinds 不是所有失败类别的列表，只允许三个值：hallucination（明确编造具体事实）、speaker_confusion（把用户与AI的事实归错主体）、fabricated_action（没有执行却声称已完成）。只有 hallucination 类判 fail 才可填写，否则必须是 []。重复、答非所问、语气不佳本身都不是这三个严重错误，不能把 repetition、irrelevance、temporal 或 persona_tone 填入 critical_kinds。
 例如仅重复上一条：categories.repetition=fail，critical_kinds=[]；把已知用户住址当作AI住址：categories.hallucination=fail，critical_kinds=["speaker_confusion"]。"""
-SIGNATURE = hashlib.sha256(INSTRUCTION.encode()).hexdigest()
+# Sampling is part of the judgement protocol: at the default temperature the
+# same sample and category flipped between repeats 29% of the time, 15% at 0
+# (2026-11-27, 81 human-reviewed samples x3). It joins the signature so a
+# stored verdict says which protocol produced it.
+TEMPERATURE = 0.0
+SIGNATURE = hashlib.sha256(
+    (INSTRUCTION + f"\n#temperature={TEMPERATURE}").encode()
+).hexdigest()
 
 
 class Verdict(BaseModel):

@@ -5,6 +5,7 @@ lease ownership and repeatable regression baselines rather than implementation.
 """
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -1045,3 +1046,22 @@ def test_bounded_context_gives_the_judge_beijing_times():
     assert bounded["history"][0]["at"] == "2026-11-09 10:52 CST"
     assert bounded["occurred_at"] == "2026-11-09 10:52 CST"
     assert value["history"][0]["at"].endswith("+00:00")  # the source context is untouched
+
+
+async def test_daily_judge_pins_temperature_and_records_it_in_the_signature(
+    quality, monkeypatch
+):
+    database, conv, space, user, admin = quality
+    job = await running()
+    await sample_rows(database, job, conv, user)
+    sent = {}
+
+    async def complete(job_row, provider, model, messages, **kwargs):
+        sent.update(kwargs)
+        return verdict(), {"input": 10, "output": 5}
+
+    monkeypatch.setattr(transport, "complete", complete)
+    await daily.run(job)
+    assert sent["temperature"] == judge.TEMPERATURE == 0.0
+    # A verdict judged at another temperature belongs to a different protocol.
+    assert judge.SIGNATURE != hashlib.sha256(judge.INSTRUCTION.encode()).hexdigest()

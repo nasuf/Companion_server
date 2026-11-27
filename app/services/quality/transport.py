@@ -119,6 +119,7 @@ async def complete(
     key_override=None,
     operation="chat",
     location=None,
+    temperature=None,
 ):
     price = pinned_price(provider + "/" + model, job.get("snapshot", {}).get("prices"))
     bound, ceiling = price_bound(
@@ -157,6 +158,8 @@ async def complete(
             body.update(enable_thinking=False)
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        if temperature is not None:
+            body["temperature"] = temperature
         if search_body:
             body = search_body
         started = time.monotonic()
