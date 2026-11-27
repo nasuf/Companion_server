@@ -1031,3 +1031,17 @@ async def test_sample_context_carries_main_prompt_persona_even_when_the_prompt_i
     finally:
         await database.execute_raw("DELETE FROM trace_runs WHERE trace_id=$1 AND run_id<>$1", trace)
         await database.execute_raw("DELETE FROM trace_runs WHERE run_id=$1", trace)
+
+
+def test_bounded_context_gives_the_judge_beijing_times():
+    value = {
+        "history": [{"role": "user", "content": "早", "at": "2026-11-09T02:52:00+00:00"}],
+        "prompt_evidence": [],
+        "persona_evidence": {"你的作息": "现在10:52，正在上班"},
+        "reply": "刚忙完歇会",
+        "occurred_at": "2026-11-09T02:52:00+00:00",
+    }
+    bounded = daily.bounded_context(value)
+    assert bounded["history"][0]["at"] == "2026-11-09 10:52 CST"
+    assert bounded["occurred_at"] == "2026-11-09 10:52 CST"
+    assert value["history"][0]["at"].endswith("+00:00")  # the source context is untouched

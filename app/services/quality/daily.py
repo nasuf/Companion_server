@@ -6,13 +6,20 @@ import json
 from app.config import settings
 from app.db import db
 from app.services.quality import budget, judge, jobs, sampling, transport
+from app.services.time_domain.timestamps import local_clock
 
 
 def bounded_context(value: dict, limit=24000) -> dict:
     result = dict(value)
     # Replay input duplicates prompt_evidence and is not extra judge evidence.
     result.pop("recorded_messages", None)
-    result["history"] = list(value["history"])
+    # The prompt evidence states "现在12:59" in Beijing time; UTC message times
+    # made the judge read daytime self-statements as 3 a.m. ones (2026-11-27:
+    # 8 of 21 such fails passed once the times were local).
+    result["history"] = [{**h, "at": local_clock(h["at"])} if h.get("at") else h
+                         for h in value["history"]]
+    if value.get("occurred_at"):
+        result["occurred_at"] = local_clock(value["occurred_at"])
     result["prompt_evidence"] = list(value["prompt_evidence"])
 
     def size():
