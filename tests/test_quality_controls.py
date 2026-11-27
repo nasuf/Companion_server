@@ -193,6 +193,7 @@ async def test_transport_reserves_before_http_and_overrides_output_limit(monkeyp
 
         assert reserve.await_count == 1
         assert json.loads(request.content)["max_tokens"] == 900
+        assert json.loads(request.content)["temperature"] == 0.0
         return httpx.Response(
             200,
             json={
@@ -209,6 +210,7 @@ async def test_transport_reserves_before_http_and_overrides_output_limit(monkeyp
         "qwen3.5-flash",
         [{"role": "user", "content": "你好"}],
         key_override="synthetic-only",
+        temperature=0.0,
     )
     assert (
         text == "ok"
