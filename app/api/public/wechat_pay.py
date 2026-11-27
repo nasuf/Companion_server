@@ -89,6 +89,9 @@ async def _enforce_order_rate_limit(user_id: str) -> None:
         raise HTTPException(status_code=429, detail="too_many_orders")
 
 
+_TRIAL_VIP_ACTIVE_REASON = "会员有效期内不能购买体验，会员到期后可以购买。"
+
+
 def _item(product: WechatProduct, *, purchasable: bool = True, reason: str | None = None):
     return WechatPayProductItem(
         product_id=product.product_id,
@@ -137,7 +140,9 @@ async def wechat_pay_catalog(response: Response, payload: dict = Depends(require
             enabled = False
 
     snapshot = await wallet.full_wallet(user_id)
+    # 与 App 一致：会员期内显示但不可买（到期后可买）；体验过就不再出现。
     trial_available = bool(snapshot.get("vip_trial_available"))
+    trial_used = bool(snapshot.get("vip_trial_used"))
 
     openid_bound = True
     try:
@@ -150,10 +155,12 @@ async def wechat_pay_catalog(response: Response, payload: dict = Depends(require
         enabled=enabled,
         openid_bound=openid_bound,
         vip_plans=[_item(product) for product in catalog.VIP_PRODUCTS],
-        trial=_item(
+        trial=None
+        if trial_used
+        else _item(
             catalog.TRIAL_PRODUCT,
             purchasable=trial_available,
-            reason=None if trial_available else "体验价每个账号仅限一次",
+            reason=None if trial_available else _TRIAL_VIP_ACTIVE_REASON,
         ),
         ticket_packs=[_item(product) for product in catalog.TICKET_PRODUCTS],
         account_label=account_label,

@@ -388,6 +388,7 @@ async def full_wallet(user_id: str, *, client: Any | None = None) -> dict[str, A
         "is_vip": is_vip_from_row(row),
         "vip_until": _iso(_field(row, "vip_until")) or None,
         "vip_trial_available": vip_trial_available_from_row(row),
+        "vip_trial_used": bool(_field(row, "vip_trial_used", False)),
         "vip_last_grant_at": _iso(_field(row, "vip_last_grant_at")) or None,
     }
 

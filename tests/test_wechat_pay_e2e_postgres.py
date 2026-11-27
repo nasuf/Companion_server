@@ -651,6 +651,8 @@ async def test_reconcile_recovers_lost_callbacks_and_closes_unpaid(world: World)
 
 async def test_trial_is_granted_once_even_if_two_orders_are_paid(world: World):
     user = await world.wechat_login("/auth/wechat/h5", "oa:frank")
+    catalog = (await world.http.get("/pay/wechat/catalog", headers=world.auth(user))).json()
+    assert catalog["trial"]["product_id"] == "wx.vip.trial" and catalog["trial"]["purchasable"]
     first = await world.order(user, "wx.vip.trial")
     second = await world.order(user, "wx.vip.trial")  # 都没付时允许两单
     for order in (first, second):
@@ -667,6 +669,31 @@ async def test_trial_is_granted_once_even_if_two_orders_are_paid(world: World):
         "/pay/wechat/orders", json={"product_id": "wx.vip.trial"}, headers=world.auth(user)
     )
     assert resp.status_code == 409 and resp.json()["detail"] == "trial_already_used"
+    # 体验过就不再出现在 H5 会员 tab 里。
+    catalog = (await world.http.get("/pay/wechat/catalog", headers=world.auth(user))).json()
+    assert catalog["trial"] is None
+
+
+async def test_trial_shows_locked_while_vip_and_opens_after_expiry(world: World):
+    """与 App 一致：会员期内显示但不可买，会员到期后（没体验过）可以买。"""
+    user = await world.wechat_login("/auth/wechat/h5", "oa:grace")
+    await world.http.get("/pay/wechat/catalog", headers=world.auth(user))  # 建钱包行
+    await world.db.execute_raw(
+        "UPDATE user_wallets SET vip_until = NOW() + INTERVAL '5 days' WHERE user_id = $1", user
+    )
+    catalog = (await world.http.get("/pay/wechat/catalog", headers=world.auth(user))).json()
+    assert catalog["trial"]["purchasable"] is False
+    assert catalog["trial"]["unavailable_reason"] == "会员有效期内不能购买体验，会员到期后可以购买。"
+    resp = await world.http.post(
+        "/pay/wechat/orders", json={"product_id": "wx.vip.trial"}, headers=world.auth(user)
+    )
+    assert resp.status_code == 409 and resp.json()["detail"] == "trial_already_used"
+
+    await world.db.execute_raw(
+        "UPDATE user_wallets SET vip_until = NOW() - INTERVAL '1 day' WHERE user_id = $1", user
+    )
+    catalog = (await world.http.get("/pay/wechat/catalog", headers=world.auth(user))).json()
+    assert catalog["trial"]["purchasable"] is True
 
 
 async def test_wechat_vip_stacks_after_apple_vip(world: World):
